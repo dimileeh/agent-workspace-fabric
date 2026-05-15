@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import concurrent.futures
+import functools
+import socket
+import subprocess
+import sys
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.api.schemas import CallbackSubscriptionCreateRequest
+from awf.common.config import Settings
 from awf.db.enums import CallbackDeliveryStatus, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import CallbackDelivery, MergeCandidate, WorkspaceEvent
 from awf.db.repositories import (
@@ -31,10 +39,23 @@ from awf.service.callbacks import (
     CallbackService,
 )
 
+_ORIGINAL_RESOLVE_CALLBACK_TARGET_IP_ADDRESSES = (
+    callback_service_module._resolve_callback_target_ip_addresses
+)
+
 
 @pytest.fixture
 async def factory(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
+
+
+@pytest.fixture(autouse=True)
+def _stub_callback_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("1.1.1.1",),
+    )
 
 
 @dataclass
@@ -43,6 +64,7 @@ class _PostCall:
     json: dict[str, Any]
     headers: dict[str, str]
     timeout: float
+    connect_ip_address: str | None = None
 
 
 @dataclass
@@ -58,11 +80,99 @@ class _RecordingPoster:
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
+        connect_ip_address: str | None = None,
     ) -> CallbackPostResult:
-        self.calls.append(_PostCall(url=url, json=json, headers=headers, timeout=timeout))
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
         if self.exc is not None:
             raise self.exc
         return CallbackPostResult(status_code=self.status_code)
+
+
+@dataclass
+class _AddressFallbackPoster:
+    failing_addresses: set[str]
+    status_code: int = 204
+    calls: list[_PostCall] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address in self.failing_addresses:
+            raise RuntimeError(f"connection failed for {connect_ip_address}")
+        return CallbackPostResult(status_code=self.status_code)
+
+
+@dataclass
+class _AddressFailurePoster:
+    failures: dict[str, Exception]
+    calls: list[_PostCall] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address in self.failures:
+            raise self.failures[connect_ip_address]
+        return CallbackPostResult(status_code=204)
+
+
+class _InlineExecutor:
+    def __init__(self) -> None:
+        self.submissions: list[
+            tuple[Callable[..., object], tuple[object, ...], dict[str, object]]
+        ] = []
+
+    def submit(
+        self,
+        function: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> concurrent.futures.Future[object]:
+        self.submissions.append((function, args, kwargs))
+        future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except Exception as exc:  # noqa: BLE001 - mirrors executor result propagation.
+            future.set_exception(exc)
+        return future
 
 
 @dataclass
@@ -71,6 +181,8 @@ class _FakeHttpxPost:
     json: dict[str, Any]
     headers: dict[str, str]
     timeout: float
+    extensions: dict[str, Any] | None = None
+    extensions_supplied: bool = False
 
 
 @dataclass
@@ -81,7 +193,7 @@ class _FakeHttpxResponse:
 class _FakeAsyncClient:
     instances: list[_FakeAsyncClient] = []
 
-    def __init__(self) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.posts: list[_FakeHttpxPost] = []
         self.exited = False
         self.instances.append(self)
@@ -104,6 +216,7 @@ class _FakeAsyncClient:
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
+        **kwargs: Any,
     ) -> _FakeHttpxResponse:
         self.posts.append(
             _FakeHttpxPost(
@@ -111,6 +224,8 @@ class _FakeAsyncClient:
                 json=json,
                 headers=headers,
                 timeout=timeout,
+                extensions=kwargs.get("extensions"),
+                extensions_supplied="extensions" in kwargs,
             )
         )
         return _FakeHttpxResponse(status_code=207)
@@ -123,13 +238,15 @@ async def _register_subscription(
     enabled: bool = True,
     idempotency_key: str = "callback-service-subscription",
     max_attempts: int = 3,
+    target_url: str = "https://operator.example.com/events",
+    timeout_seconds: int = 10,
 ):
     subscription, _created = await CallbackSubscriptionRepository(session).create_idempotent(
         name="service-test",
-        target_url="https://operator.example.com/events",
+        target_url=target_url,
         event_types=event_types,
         enabled=enabled,
-        timeout_seconds=10,
+        timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
         initial_backoff_seconds=5,
         idempotency_key=idempotency_key,
@@ -385,8 +502,277 @@ async def test_default_httpx_poster_posts_json_with_timeout(
             json={"event": {"type": "workspace.state_changed"}},
             headers={"Idempotency-Key": "callback-delivery:test"},
             timeout=3.5,
+            extensions=None,
         )
     ]
+
+
+@pytest.mark.unit
+async def test_default_httpx_poster_pins_connection_to_validated_callback_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.instances = []
+    monkeypatch.setattr(callback_service_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await callback_service_module._httpx_post_json(
+        "https://operator.example.com:8443/events?attempt=1",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=3.5,
+        connect_ip_address="1.1.1.1",
+    )
+
+    assert result == CallbackPostResult(status_code=207)
+    assert len(_FakeAsyncClient.instances) == 1
+    client = _FakeAsyncClient.instances[0]
+    assert client.exited
+    assert client.posts == [
+        _FakeHttpxPost(
+            url="https://1.1.1.1:8443/events?attempt=1",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={
+                "Idempotency-Key": "callback-delivery:test",
+                "Host": "operator.example.com:8443",
+            },
+            timeout=3.5,
+            extensions={"sni_hostname": "operator.example.com"},
+            extensions_supplied=True,
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_default_httpx_poster_uses_no_extensions_for_pinned_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.instances = []
+    monkeypatch.setattr(callback_service_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await callback_service_module._httpx_post_json(
+        "http://operator.example.com:8080/events?attempt=1",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=3.5,
+        connect_ip_address="1.1.1.1",
+    )
+
+    assert result == CallbackPostResult(status_code=207)
+    assert len(_FakeAsyncClient.instances) == 1
+    client = _FakeAsyncClient.instances[0]
+    assert client.exited
+    assert client.posts == [
+        _FakeHttpxPost(
+            url="http://1.1.1.1:8080/events?attempt=1",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={
+                "Idempotency-Key": "callback-delivery:test",
+                "Host": "operator.example.com:8080",
+            },
+            timeout=3.5,
+            extensions=None,
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_drain_due_records_budget_exceeded_when_validation_consumes_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            timeout_seconds=0,
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _RecordingPoster(status_code=202)
+
+    async def validation_that_consumes_budget(
+        _target_url: str,
+        *,
+        settings: Settings,
+        timeout: float,
+    ) -> callback_service_module.ValidatedCallbackTarget:
+        assert isinstance(settings, Settings)
+        assert timeout == 0.0
+        return callback_service_module.ValidatedCallbackTarget(
+            connect_ip_addresses=("1.1.1.1",),
+        )
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_validate_callback_target_with_timeout",
+        validation_that_consumes_budget,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_budget_exceeded"
+    )
+    assert log_entry["delivery_id"] == delivery.id
+    assert log_entry["error_code"] == "CALLBACK_DELIVERY_BUDGET_EXCEEDED"
+    assert "timeout expired after target validation" in log_entry["error_message"]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_DELIVERY_BUDGET_EXCEEDED"
+    assert "timeout expired after target validation" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("target_url", "message"),
+    [
+        ("ftp://operator.example.com/events", "target_url must use http or https"),
+        ("https:///events", "target_url must include a host"),
+        (
+            "https://user:pass@operator.example.com/events",
+            "target_url must not include userinfo credentials",
+        ),
+        ("https://operator.example.com/events#secret", "target_url must not include a fragment"),
+        ("https://operator.example.com:abc/events", "target_url must include a valid port"),
+        ("https://operator.example.com:99999/events", "target_url must include a valid port"),
+        ("https://localhost/events", "target_url must use a public host"),
+    ],
+)
+def test_validate_callback_target_rejects_unsafe_stored_url_invariants(
+    target_url: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        callback_service_module._validate_callback_target(
+            target_url,
+            settings=Settings(_env_file=None),
+        )
+
+
+@pytest.mark.unit
+async def test_validate_callback_target_with_timeout_rejects_exhausted_budget() -> None:
+    with pytest.raises(
+        callback_service_module.CallbackTargetValidationTimeoutError,
+        match="before it started",
+    ):
+        await callback_service_module._validate_callback_target_with_timeout(
+            "https://operator.example.com/events",
+            settings=Settings(_env_file=None),
+            timeout=0.0,
+        )
+
+
+@pytest.mark.unit
+def test_validate_callback_target_dns_rejects_empty_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: (),
+    )
+
+    with pytest.raises(ValueError, match="target_url host could not be resolved"):
+        callback_service_module._validate_callback_target_dns(
+            hostname="operator.example.com",
+        )
+
+
+@pytest.mark.unit
+def test_resolve_callback_target_ip_addresses_deduplicates_string_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_getaddrinfo(
+        hostname: str,
+        port: int | None,
+        *,
+        type: socket.SocketKind,
+    ) -> list[tuple[int, int, int, str, tuple[object, ...]]]:
+        assert hostname == "operator.example.com"
+        assert port is None
+        assert type == callback_service_module.socket.SOCK_STREAM
+        return [
+            (0, 0, 0, "", ("1.1.1.1", 443)),
+            (0, 0, 0, "", ("1.1.1.1", 443)),
+            (0, 0, 0, "", (b"not-a-string-address", 443)),
+            (0, 0, 0, "", ("2606:4700:4700::1111", 443)),
+        ]
+
+    monkeypatch.setattr(callback_service_module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    assert _ORIGINAL_RESOLVE_CALLBACK_TARGET_IP_ADDRESSES("operator.example.com") == (
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    )
+
+
+@pytest.mark.unit
+def test_resolve_callback_target_ip_addresses_wraps_os_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_getaddrinfo(
+        _hostname: str,
+        _port: int | None,
+        *,
+        type: socket.SocketKind,
+    ) -> list[tuple[int, int, int, str, tuple[object, ...]]]:
+        assert type == callback_service_module.socket.SOCK_STREAM
+        raise OSError("resolver unavailable")
+
+    monkeypatch.setattr(callback_service_module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="target_url host resolution failed") as exc_info:
+        _ORIGINAL_RESOLVE_CALLBACK_TARGET_IP_ADDRESSES("operator.example.com")
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
+@pytest.mark.unit
+async def test_validated_address_delivery_with_no_addresses_raises_runtime_error() -> None:
+    with pytest.raises(RuntimeError, match="no connect IP addresses"):
+        await callback_service_module._post_to_validated_callback_addresses(
+            _RecordingPoster(status_code=202),
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=(),
+        )
+
+
+@pytest.mark.unit
+def test_callback_url_helpers_handle_ipv6_and_default_ports() -> None:
+    assert (
+        callback_service_module._callback_url_with_connect_ip(
+            target_url="https://operator.example.com/events",
+            connect_ip_address="1.1.1.1",
+        )
+        == "https://1.1.1.1/events"
+    )
+    assert (
+        callback_service_module._callback_url_with_connect_ip(
+            target_url="https://operator.example.com:8443/events?attempt=1",
+            connect_ip_address="2606:4700:4700::1111",
+        )
+        == "https://[2606:4700:4700::1111]:8443/events?attempt=1"
+    )
+    assert (
+        callback_service_module._callback_host_header("https://[2606:4700:4700::1111]:443/events")
+        == "[2606:4700:4700::1111]"
+    )
+    assert (
+        callback_service_module._callback_host_header("http://operator.example.com:80/events")
+        == "operator.example.com"
+    )
+    assert callback_service_module._default_callback_port("ftp") is None
+
+
+@pytest.mark.unit
+def test_callback_host_header_rejects_urls_without_hosts() -> None:
+    with pytest.raises(ValueError, match="target_url must include a host"):
+        callback_service_module._callback_host_header("https:///events")
 
 
 @pytest.mark.unit
@@ -518,6 +904,8 @@ async def test_operation_event_envelope_excludes_raw_payload_result_and_api_idem
     assert "raw-payload-secret" not in serialized
     assert "raw-result-secret" not in serialized
     assert "api-idempotency-key-must-not-leak" not in serialized
+    assert "payload" not in serialized
+    assert "log_stream_refs" not in serialized
 
 
 @pytest.mark.unit
@@ -574,6 +962,7 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert len(poster.calls) == 1
     call = poster.calls[0]
     assert call.url == "https://operator.example.com/events"
+    assert call.connect_ip_address == "1.1.1.1"
     assert call.headers == {
         "Content-Type": "application/json",
         "User-Agent": "AWF-Callback-Delivery/1.0",
@@ -592,6 +981,574 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
     assert stored.delivered_at is not None
+
+
+@pytest.mark.unit
+async def test_successful_delivery_prefers_ipv4_then_falls_back_across_validated_callback_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("2606:4700:4700::1111", "1.1.1.1"),
+    )
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _AddressFallbackPoster(
+        failing_addresses={"1.1.1.1"},
+        status_code=202,
+    )
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert [call.connect_ip_address for call in poster.calls] == [
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    ]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
+    assert stored.attempt_count == 1
+    assert stored.response_status_code == 202
+
+
+@pytest.mark.unit
+async def test_validated_address_fallback_reuses_one_delivery_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address == "1.1.1.1":
+            loop.now += 6.25
+            raise TimeoutError("connect timed out")
+        return CallbackPostResult(status_code=202)
+
+    result = await callback_service_module._post_to_validated_callback_addresses(
+        poster,
+        "https://operator.example.com/events",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=10.0,
+        connect_ip_addresses=("1.1.1.1", "2606:4700:4700::1111"),
+    )
+
+    assert result == CallbackPostResult(status_code=202)
+    assert [call.connect_ip_address for call in calls] == [
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    ]
+    assert [call.timeout for call in calls] == [10.0, 3.75]
+
+
+@pytest.mark.unit
+async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    wait_for_timeouts: list[float | None] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def fake_wait_for(awaitable: Any, timeout: float | None) -> object:
+        wait_for_timeouts.append(timeout)
+        awaitable.close()
+        loop.now += float(timeout or 0.0)
+        raise TimeoutError("callback POST exceeded wall clock timeout")
+
+    async def poster(
+        _url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        return CallbackPostResult(status_code=202)
+
+    monkeypatch.setattr(callback_service_module.asyncio, "wait_for", fake_wait_for)
+
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="timeout expired while posting to validated target address",
+    ) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1",),
+        )
+
+    assert wait_for_timeouts == [10.0]
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_is_lazy_at_import() -> None:
+    script = "\n".join(
+        [
+            "from awf.service import callbacks",
+            "print(callbacks._CALLBACK_TARGET_VALIDATION_EXECUTOR is None)",
+            "callbacks.shutdown_callback_target_validation_executor()",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "True"
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_shutdown_does_not_keep_process_alive() -> None:
+    script = "\n".join(
+        [
+            "import threading",
+            "import time",
+            "from awf.service import callbacks",
+            "started = threading.Event()",
+            "def block():",
+            "    started.set()",
+            "    time.sleep(60)",
+            "executor = callbacks._new_callback_target_validation_executor()",
+            "executor.submit(block)",
+            "if not started.wait(timeout=2):",
+            "    raise SystemExit('callback DNS worker did not start')",
+            "callbacks._CALLBACK_TARGET_VALIDATION_EXECUTOR = executor",
+            "callbacks.shutdown_callback_target_validation_executor(wait=False)",
+            "print('shutdown-returned')",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.stdout.strip() == "shutdown-returned"
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_shutdown_closes_and_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeExecutor:
+        def __init__(self) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+
+        def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    executor = _FakeExecutor()
+    monkeypatch.setattr(
+        callback_service_module,
+        "_CALLBACK_TARGET_VALIDATION_EXECUTOR",
+        executor,
+        raising=False,
+    )
+
+    callback_service_module.shutdown_callback_target_validation_executor()
+
+    assert executor.shutdown_calls == [(False, True)]
+    assert callback_service_module._CALLBACK_TARGET_VALIDATION_EXECUTOR is None
+
+
+@pytest.mark.unit
+async def test_validated_address_delivery_timeout_before_first_attempt_raises_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    poster = _RecordingPoster(status_code=202)
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="before any validated target address",
+    ):
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=0.0,
+            connect_ip_addresses=("1.1.1.1",),
+        )
+
+    assert poster.calls == []
+
+
+@pytest.mark.unit
+async def test_validated_address_timeout_after_failure_raises_timeout_with_prior_failure_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        loop.now += 10.0
+        raise ConnectionRefusedError("first address refused")
+
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="remaining validated target address",
+    ) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2"),
+        )
+
+    assert [call.connect_ip_address for call in calls] == ["1.1.1.1"]
+    assert [call.timeout for call in calls] == [10.0]
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ExceptionGroup)
+    assert "1.1.1.1 (ConnectionRefusedError)" in str(cause)
+    assert "2.2.2.2" not in str(cause)
+
+
+@pytest.mark.unit
+async def test_delivery_budget_log_includes_prior_validated_address_failure_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    @dataclass
+    class _FakeDelivery:
+        id: str = "delivery-prior-failure"
+        event_kind: str = "workspace"
+        event_type: str = "workspace.state_changed"
+        source_id: str = "event-prior-failure"
+        workspace_id: str = "workspace-prior-failure"
+        operation_id: str | None = None
+        merge_candidate_id: str | None = None
+
+    @dataclass
+    class _FakeSubscription:
+        id: str = "subscription-prior-failure"
+        initial_backoff_seconds: int = 1
+
+    class _FakeRepo:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def mark_failed_or_retry(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append({"args": args, "kwargs": kwargs})
+
+    loop = _FakeLoop()
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        del url, json, headers, timeout, connect_ip_address
+        loop.now += 10.0
+        raise ConnectionRefusedError("first address refused")
+
+    with pytest.raises(callback_service_module.CallbackDeliveryBudgetExceededError) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2"),
+        )
+
+    repo = _FakeRepo()
+    with structlog.testing.capture_logs() as captured:
+        await callback_service_module._record_callback_delivery_budget_exceeded(
+            repo,
+            _FakeDelivery(),  # type: ignore[arg-type]
+            _FakeSubscription(),  # type: ignore[arg-type]
+            exc_info.value,
+            now=lambda: datetime(2026, 5, 15, tzinfo=UTC),
+        )
+
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_budget_exceeded"
+    )
+    assert log_entry["prior_failure_summary"] == "1.1.1.1 (ConnectionRefusedError)"
+    assert repo.calls
+
+
+@pytest.mark.unit
+async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address == "1.1.1.1":
+            loop.now += 4.0
+            raise TimeoutError("first address timed out")
+        if connect_ip_address == "2.2.2.2":
+            loop.now += 6.0
+            raise TimeoutError("second address timed out")
+        return CallbackPostResult(status_code=202)
+
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="remaining validated target address",
+    ) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2", "3.3.3.3"),
+        )
+
+    assert [call.connect_ip_address for call in calls] == ["1.1.1.1", "2.2.2.2"]
+    assert [call.timeout for call in calls] == [10.0, 6.0]
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ExceptionGroup)
+    assert "1.1.1.1 (TimeoutError)" in str(cause)
+    assert "2.2.2.2 (TimeoutError)" in str(cause)
+    assert "3.3.3.3" not in str(cause)
+
+
+@pytest.mark.unit
+async def test_drain_due_offloads_callback_target_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    settings = Settings(_env_file=None)
+    poster = _RecordingPoster(status_code=202)
+    executor = _InlineExecutor()
+
+    async def unexpected_to_thread(
+        _function: Callable[..., object],
+        /,
+        *_args: object,
+        **_kwargs: object,
+    ) -> object:
+        raise AssertionError("callback target validation should use its dedicated executor")
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_CALLBACK_TARGET_VALIDATION_EXECUTOR",
+        executor,
+        raising=False,
+    )
+    monkeypatch.setattr("asyncio.to_thread", unexpected_to_thread)
+
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=settings,
+    ).drain_due(limit=10)
+
+    assert len(executor.submissions) == 1
+    function, args, kwargs = executor.submissions[0]
+    assert isinstance(function, functools.partial)
+    assert function.func is callback_service_module._validate_callback_target
+    assert function.args == ("https://operator.example.com/events",)
+    assert function.keywords == {"settings": settings}
+    assert args == ()
+    assert kwargs == {}
+    assert [call.connect_ip_address for call in poster.calls] == ["1.1.1.1"]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_drain_due_marks_callback_target_validation_timeout_with_dedicated_code(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _RecordingPoster(status_code=202)
+    wait_for_timeouts: list[float | None] = []
+
+    async def fake_wait_for(awaitable: object, timeout: float | None) -> object:
+        wait_for_timeouts.append(timeout)
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError("callback target validation timed out")
+
+    monkeypatch.setattr("asyncio.wait_for", fake_wait_for)
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert wait_for_timeouts == [10.0]
+    assert poster.calls == []
+    log_entry = next(
+        event
+        for event in captured
+        if event.get("event") == "callback.delivery_target_validation_timeout"
+    )
+    assert log_entry["error_code"] == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
+    assert "validation timed out" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+async def test_drain_due_counts_callback_target_validation_against_delivery_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            timeout_seconds=1,
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    settings = Settings(_env_file=None)
+    poster = _RecordingPoster(status_code=202)
+
+    async def delayed_validation(
+        target_url: str,
+        *,
+        settings: Settings,
+    ) -> callback_service_module.ValidatedCallbackTarget:
+        await asyncio.sleep(0.05)
+        return callback_service_module._validate_callback_target(target_url, settings=settings)
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_run_callback_target_validation",
+        delayed_validation,
+        raising=False,
+    )
+
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=settings,
+    ).drain_due(limit=10)
+
+    assert len(poster.calls) == 1
+    assert 0.0 < poster.calls[0].timeout <= 0.98
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
 
 
 @pytest.mark.unit
@@ -727,3 +1684,307 @@ async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_stat
         assert operation.status == OperationStatus.failed.value
         assert candidate_snapshot_after == candidate_snapshot_before
         assert event_snapshots_after == event_snapshots_before
+
+
+@pytest.mark.unit
+async def test_callback_request_failures_log_redacted_traceback(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    secret = "ghp_callbacktracebacksecret123456"
+    poster = _RecordingPoster(exc=RuntimeError(f"transport failed Authorization: Bearer {secret}"))
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    )
+    assert log_entry["delivery_id"] == delivery.id
+    assert log_entry["subscription_id"] == delivery.subscription_id
+    assert log_entry["event_type"] == "workspace.state_changed"
+    assert log_entry["error_code"] == "CALLBACK_REQUEST_FAILED"
+    assert "exc_info" not in log_entry
+    redacted_traceback = log_entry["redacted_traceback"]
+    assert "Traceback" in redacted_traceback
+    assert "RuntimeError: transport failed Authorization: Bearer [redacted]" in (redacted_traceback)
+    assert secret not in redacted_traceback
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+
+
+@pytest.mark.unit
+async def test_callback_request_failures_log_all_validated_address_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("2606:4700:4700::1111", "1.1.1.1"),
+    )
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _AddressFailurePoster(
+        failures={
+            "1.1.1.1": TimeoutError("connect timed out"),
+            "2606:4700:4700::1111": ConnectionRefusedError("connection refused"),
+        },
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert [call.connect_ip_address for call in poster.calls] == [
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    ]
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    )
+    assert log_entry["delivery_id"] == delivery.id
+    assert log_entry["error_code"] == "CALLBACK_REQUEST_FAILED"
+    redacted_traceback = log_entry["redacted_traceback"]
+    assert "TimeoutError: connect timed out" in redacted_traceback
+    assert "ConnectionRefusedError: connection refused" in redacted_traceback
+    assert "callback connect_ip_address=1.1.1.1" in redacted_traceback
+    assert "callback connect_ip_address=2606:4700:4700::1111" in redacted_traceback
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+
+
+@pytest.mark.unit
+async def test_callback_poster_value_error_is_request_failure(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _RecordingPoster(exc=ValueError("poster rejected request payload"))
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert len(poster.calls) == 1
+    assert [
+        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+    ] == []
+    log_entries = [
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    ]
+    assert len(log_entries) == 1
+    assert log_entries[0]["delivery_id"] == delivery.id
+    assert log_entries[0]["error_code"] == "CALLBACK_REQUEST_FAILED"
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+    assert "poster rejected request payload" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+async def test_drain_due_rejects_callbacks_with_private_delivery_target_includes_rejected_ip(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        workspace_id, event_id = await _seed_workspace_event(session)
+        event_snapshots_before = await _workspace_event_snapshots(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("1.1.1.1", "127.0.0.1"),
+    )
+    poster = _RecordingPoster()
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+    )
+    assert log_entry["delivery_id"] == deliveries[0].id
+    assert log_entry["subscription_id"] == deliveries[0].subscription_id
+    assert log_entry["event_kind"] == "workspace"
+    assert log_entry["event_type"] == "workspace.state_changed"
+    assert log_entry["source_id"] == deliveries[0].source_id
+    assert log_entry["workspace_id"] == workspace_id
+    assert log_entry["operation_id"] is None
+    assert log_entry["merge_candidate_id"] is None
+    assert log_entry["error_code"] == "CALLBACK_TARGET_INVALID"
+    assert log_entry["error_message"] == "target_url resolved host is not public: 127.0.0.1"
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.response_status_code is None
+    assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
+    assert "target_url resolved host is not public: 127.0.0.1" in (stored.error_message or "")
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        event_snapshots_after = await _workspace_event_snapshots(session)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.provisioning.value
+        assert event_snapshots_after == event_snapshots_before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "translated_private_ip",
+    [
+        "::ffff:0:169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b:1:a00:0:100:808:808",
+        "64:ff9b:1:c001::c0a8:0101",
+    ],
+)
+async def test_drain_due_rejects_translated_delivery_target_that_embeds_private_ipv4(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    translated_private_ip: str,
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: (translated_private_ip,),
+    )
+    poster = _RecordingPoster()
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.response_status_code is None
+    assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
+    assert f"target_url resolved host is not public: {translated_private_ip}" in (
+        stored.error_message or ""
+    )
+
+
+@pytest.mark.unit
+async def test_drain_due_rejects_6to4_delivery_target(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    six_to_four_ip = "2002:c0a8:0101::1"
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: (six_to_four_ip,),
+    )
+    poster = _RecordingPoster()
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.response_status_code is None
+    assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
+    assert f"target_url resolved host is not public: {six_to_four_ip}" in (
+        stored.error_message or ""
+    )
+
+
+@pytest.mark.unit
+async def test_drain_due_enforces_https_only_callback_target_policy(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            target_url="http://operator.example.com/events",
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    poster = _RecordingPoster()
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=Settings(_env_file=None, callbacks_require_https=True),
+    ).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_POLICY_VIOLATION"
+    assert "target_url must use https" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+async def test_drain_due_enforces_callback_target_allowlist_policy(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            target_url="https://callback-disallowed.example.com/events",
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    poster = _RecordingPoster()
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=Settings(
+            _env_file=None,
+            callbacks_allowed_hosts=("operator.example.com",),
+        ),
+    ).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_POLICY_VIOLATION"
+    assert "host is not allowlisted" in (stored.error_message or "")
