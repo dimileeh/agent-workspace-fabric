@@ -102,6 +102,20 @@ def test_production_guardrails_reject_default_local_database_url() -> None:
 
 
 @pytest.mark.unit
+def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url="postgresql+asyncpg://awf:awf_dev@db.internal:not-a-port/awf",
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=False,
+    )
+
+    with pytest.raises(ValueError, match="Port could not be cast"):
+        validate_production_settings(settings)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "api_token",
     [None, "", " ", "local-dev-token", "changeme", "default", "short"],
