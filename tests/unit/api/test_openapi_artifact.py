@@ -17,6 +17,7 @@ from collections import Counter
 
 import pytest
 
+import awf.api.app as app_module
 from awf.api.app import create_app
 
 
@@ -113,6 +114,35 @@ def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec:
         assert all(param.get("required") is True for param in authorization_params), (
             f"{method.upper()} /v1/callbacks Authorization header must be required"
         )
+
+
+@pytest.mark.unit
+def test_openapi_auth_contract_patch_runs_once_after_schema_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = app_module.create_app(use_lifespan=False)
+    marker_calls = 0
+    original_marker = app_module._mark_authorization_header_parameters_required
+
+    def recording_marker(
+        openapi_schema: dict,
+        auth_required_operations: set[tuple[str, str]],
+    ) -> None:
+        nonlocal marker_calls
+        marker_calls += 1
+        original_marker(openapi_schema, auth_required_operations)
+
+    monkeypatch.setattr(
+        app_module,
+        "_mark_authorization_header_parameters_required",
+        recording_marker,
+    )
+
+    first_schema = app.openapi()
+    second_schema = app.openapi()
+
+    assert first_schema is second_schema
+    assert marker_calls == 1
 
 
 @pytest.mark.unit

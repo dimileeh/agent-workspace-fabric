@@ -498,6 +498,8 @@ def _isoformat(value: datetime | None) -> str | None:
 
 def _validate_callback_target(target_url: str, *, settings: Settings) -> ValidatedCallbackTarget:
     parsed = urlsplit(target_url)
+    # Registration validates these too, but delivery may encounter legacy or
+    # manually edited rows; keep them as defense-in-depth invariants before DNS.
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("target_url must use http or https")
     if not parsed.hostname:

@@ -130,6 +130,8 @@ def _install_openapi_auth_contract(app: FastAPI) -> None:
     auth_required_operations = _auth_required_operations(app)
 
     def openapi_with_auth_contract() -> dict[str, Any]:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
         openapi_schema = default_openapi()
         _mark_authorization_header_parameters_required(
             openapi_schema,
