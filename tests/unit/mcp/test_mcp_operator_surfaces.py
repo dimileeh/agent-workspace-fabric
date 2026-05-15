@@ -672,6 +672,7 @@ class TestMcpOperatorSurfaceParity:
         rest_response = await operator_stack.client.get(
             "/release-readiness",
             params={"failure_window_hours": 12, "slo_window_hours": 168},
+            headers=operator_stack.auth_headers,
         )
         assert rest_response.status_code == 200
 
@@ -1325,6 +1326,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/merge-queue",
             params={"repo_url": "git@github.com:example/merge.git", "limit": 10},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1565,6 +1567,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/metrics/failures/summary",
             params={"since_hours": 2, "limit": 5},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1672,10 +1675,12 @@ class TestMcpOperatorSurfaceParity:
         reliability_response = await operator_stack.client.get(
             "/v1/metrics/workspaces/summary",
             params={"since_hours": 2},
+            headers=operator_stack.auth_headers,
         )
         slo_response = await operator_stack.client.get(
             "/v1/metrics/slo",
             params={"since_hours": 2},
+            headers=operator_stack.auth_headers,
         )
         assert reliability_response.status_code == 200
         assert slo_response.status_code == 200
@@ -1713,7 +1718,10 @@ class TestMcpOperatorSurfaceParity:
             updated_at=now - timedelta(minutes=2),
         )
 
-        response = await resource_stack.client.get("/v1/metrics/resources/saturation")
+        response = await resource_stack.client.get(
+            "/v1/metrics/resources/saturation",
+            headers=resource_stack.auth_headers,
+        )
         assert response.status_code == 200
         rest = response.json()
         mcp = await _call(
@@ -1761,6 +1769,7 @@ class TestMcpOperatorSurfaceParity:
                 "queue_state": "all",
                 "limit": 10,
             },
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()

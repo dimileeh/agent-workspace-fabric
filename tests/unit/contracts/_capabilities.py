@@ -950,7 +950,7 @@ _CAPABILITIES += (
         parity_backlog_slice="—",
         supports_idempotency_key=False,
         supports_if_match=False,
-        rest_response_model="dict[str, object]",
+        rest_response_model="ReleaseReadinessResponse",
         rest_query_fields=frozenset(
             {
                 "provider",
