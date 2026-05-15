@@ -94,6 +94,7 @@ SETUP_DEPENDENCY_NETWORK_METADATA_KEY = "setup_dependency_network"
 DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
+_SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_SCAN_LIMIT = 4 * _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
 _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
 _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS = 6
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
@@ -761,28 +762,22 @@ def _combined_setup_dependency_output(*, stdout: str, stderr: str) -> str:
 def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
     compound_command = _has_shell_compound_control_operator(command)
-    specific_output_has_dependency_context = _setup_dependency_output_has_specific_context(output)
-    compound_output_has_dependency_failure_context = (
-        _setup_dependency_output_has_specific_transient_context(output)
-        if compound_command
-        else specific_output_has_dependency_context
-    )
     dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
     if dependency_command_match is not None:
         if dependency_command_match and compound_command:
-            return compound_output_has_dependency_failure_context
+            return _setup_dependency_output_has_specific_transient_context(output)
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
-        return compound_output_has_dependency_failure_context if compound_command else True
+        return (
+            _setup_dependency_output_has_specific_transient_context(output)
+            if compound_command
+            else True
+        )
     # Unknown setup wrappers still get the bounded dependency-network retry only
-    # when their output names package or package-index evidence. This keeps
-    # profile-specific bootstrap scripts covered without expanding retries to
-    # every transient setup failure.
-    return (
-        compound_output_has_dependency_failure_context
-        if compound_command
-        else specific_output_has_dependency_context
-    )
+    # when package or package-index evidence is co-located with the transient
+    # failure. This keeps profile-specific bootstrap scripts covered without
+    # retrying unrelated API calls made later by the same wrapper.
+    return _setup_dependency_output_has_specific_transient_context(output)
 
 
 def _setup_dependency_output_has_specific_context(output: str) -> bool:
@@ -1095,7 +1090,8 @@ def _extract_setup_dependency_host(text: str) -> str | None:
 
 def _setup_dependency_network_diagnostic(*, stdout: str, stderr: str) -> str:
     output = _combined_setup_dependency_output(stdout=stdout, stderr=stderr)
-    normalized = re.sub(r"\s+", " ", output).strip()
+    diagnostic_input = output[:_SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_SCAN_LIMIT]
+    normalized = re.sub(r"\s+", " ", diagnostic_input).strip()
     return redact_audit_text(
         normalized,
         limit=_SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT,

@@ -407,6 +407,27 @@ def test_setup_dependency_network_classifier_skips_standalone_bootstrap_fetch_fa
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_unknown_wrapper_after_successful_package_output() -> (
+    None
+):
+    classification = _classify_setup_dependency_network_failure(
+        command="./setup.sh",
+        returncode=1,
+        stdout=(
+            "Collecting docker==7.1.0\n"
+            "Installing collected packages: docker\n"
+            "Successfully installed docker-7.1.0\n"
+        ),
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_skips_assignment_like_fetch_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="./bootstrap",
@@ -1131,6 +1152,39 @@ async def test_setup_dependency_retry_preserves_metadata_when_later_failure_recl
     assert retry_metadata["host"] == "files.pythonhosted.org"
     assert retry_metadata["attempts"][0]["attempt"] == 1
     assert retry_metadata["attempts"][0]["retry_number"] == 1
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_diagnostic_normalization_uses_bounded_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized_lengths: list[int] = []
+    original_sub = validation_module.re.sub
+
+    def record_normalized_input(
+        pattern: str,
+        repl: str,
+        string: str,
+        count: int = 0,
+        flags: int = 0,
+    ) -> str:
+        normalized_lengths.append(len(string))
+        return original_sub(pattern, repl, string, count=count, flags=flags)
+
+    monkeypatch.setattr(validation_module.re, "sub", record_normalized_input)
+
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="progress line\n" * 1000,
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert normalized_lengths
+    assert max(normalized_lengths) <= (
+        4 * validation_module._SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
+    )
 
 
 @pytest.mark.unit
