@@ -57,6 +57,7 @@ class RequestAdmissionLimiter:
     def __init__(self, *, clock: Clock | None = None) -> None:
         self._clock = clock or time.monotonic
         self._buckets: dict[tuple[str, str, str, int, int], int] = {}
+        self._last_pruned_windows: dict[int, int] = {}
 
     def admit(
         self,
@@ -122,11 +123,16 @@ class RequestAdmissionLimiter:
         )
 
     def _prune(self, *, window_seconds: int, current_window: int) -> None:
+        last_pruned_window = self._last_pruned_windows.get(window_seconds)
+        if last_pruned_window is not None and current_window <= last_pruned_window:
+            return
+
         stale_keys = [
             key for key in self._buckets if key[3] == window_seconds and key[4] < current_window
         ]
         for key in stale_keys:
             del self._buckets[key]
+        self._last_pruned_windows[window_seconds] = current_window
 
 
 def extract_request_identity(

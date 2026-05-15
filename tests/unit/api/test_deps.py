@@ -21,6 +21,17 @@ from awf.api.request_admission import (
 from awf.common.config import Settings
 
 
+class _CountingAdmissionBuckets(dict[tuple[str, str, str, int, int], int]):
+    def __init__(self, seed: dict[tuple[str, str, str, int, int], int]) -> None:
+        super().__init__(seed)
+        self.iterated_keys = 0
+
+    def __iter__(self):
+        for key in super().__iter__():
+            self.iterated_keys += 1
+            yield key
+
+
 def _bearer_credentials(token: str, *, scheme: str = "Bearer") -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
 
@@ -162,6 +173,62 @@ def test_request_admission_limiter_separates_endpoint_families() -> None:
         window_seconds=60,
         reason_code="CALLBACK_REGISTER_RATE_LIMITED",
     ).allowed
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_prunes_once_per_window() -> None:
+    now = 60.0
+
+    def clock() -> float:
+        return now
+
+    limiter = RequestAdmissionLimiter(clock=clock)
+    limiter._buckets = _CountingAdmissionBuckets(
+        {
+            (
+                WORKSPACE_CREATE_ENDPOINT_FAMILY,
+                "client_host",
+                f"digest-{index}",
+                60,
+                1,
+            ): 1
+            for index in range(25)
+        }
+    )
+    identity = extract_request_identity(
+        _request(authorization="Bearer active-token"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+
+    limiter._buckets.iterated_keys = 0
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert limiter._buckets.iterated_keys == 0
+
+    now = 120.0
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert all(key[4] == 2 for key in limiter._buckets)
 
 
 @pytest.mark.unit
