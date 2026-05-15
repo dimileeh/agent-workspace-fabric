@@ -56,10 +56,9 @@ def _new_callback_target_validation_executor() -> concurrent.futures.Executor:
 
 # `getaddrinfo` cannot be interrupted portably once running. Keep callback DNS
 # work out of asyncio's shared default executor so timed-out resolutions can
-# only occupy this callback-specific pool.
-_CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor | None = (
-    _new_callback_target_validation_executor()
-)
+# only occupy this callback-specific pool. Create it lazily so import-only
+# scripts do not start callback DNS workers without a lifespan to stop them.
+_CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor | None = None
 _CALLBACK_TARGET_VALIDATION_EXECUTOR_LOCK = threading.Lock()
 _log = get_logger(__name__)
 
@@ -100,6 +99,12 @@ class CallbackHttpPoster(Protocol):
         timeout: float,
         connect_ip_address: str | None = None,
     ) -> CallbackPostResult: ...
+
+
+class _CallbackPosterAttemptError(Exception):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(str(exc))
+        self.exc = exc
 
 
 Clock = Callable[[], datetime]
@@ -567,7 +572,8 @@ async def _post_to_validated_callback_addresses(
             break
         try:
             return await asyncio.wait_for(
-                poster(
+                _run_callback_post_attempt(
+                    poster,
                     url,
                     json=json,
                     headers=headers,
@@ -576,6 +582,17 @@ async def _post_to_validated_callback_addresses(
                 ),
                 timeout=remaining_timeout + 1,
             )
+        except _CallbackPosterAttemptError as wrapped:
+            exc = wrapped.exc
+            exc.add_note(f"callback connect_ip_address={connect_ip_address}")
+            failures.append(exc)
+            failed_addresses.append(connect_ip_address)
+        except TimeoutError as exc:
+            exc.add_note(f"callback connect_ip_address={connect_ip_address}")
+            raise CallbackDeliveryBudgetExceededError(
+                "Callback delivery timeout expired while posting to validated "
+                f"target address {connect_ip_address}."
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
             exc.add_note(f"callback connect_ip_address={connect_ip_address}")
             failures.append(exc)
@@ -587,15 +604,16 @@ async def _post_to_validated_callback_addresses(
                 failed_addresses=failed_addresses,
                 failures=failures,
             )
-            raise TimeoutError(
-                "callback request timed out before remaining validated target "
+            raise CallbackDeliveryBudgetExceededError(
+                "Callback delivery timeout expired before remaining validated target "
                 "addresses could be attempted"
             ) from ExceptionGroup(
                 f"callback request had prior validated target address failures: {failure_summary}",
                 failures,
             )
-        raise TimeoutError(
-            "callback request timed out before any validated target address could be attempted"
+        raise CallbackDeliveryBudgetExceededError(
+            "Callback delivery timeout expired before any validated target address could be "
+            "attempted"
         )
     if len(failures) == 1:
         raise failures[0]
@@ -609,6 +627,27 @@ async def _post_to_validated_callback_addresses(
             failures,
         )
     raise RuntimeError("validated callback target has no connect IP addresses")
+
+
+async def _run_callback_post_attempt(
+    poster: CallbackHttpPoster,
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+    connect_ip_address: str | None,
+) -> CallbackPostResult:
+    try:
+        return await poster(
+            url,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+            connect_ip_address=connect_ip_address,
+        )
+    except Exception as exc:
+        raise _CallbackPosterAttemptError(exc) from exc
 
 
 def _callback_address_failure_summary(
@@ -784,6 +823,8 @@ def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
     addresses = tuple(_resolve_callback_target_ip_addresses(hostname))
     if not addresses:
         raise ValueError("target_url host could not be resolved")
+    # All resolved addresses must be public. Filtering to only the public
+    # answers would reopen DNS-rebinding ambiguity for mixed-answer hostnames.
     for address in addresses:
         if not _is_public_ip(address):
             raise ValueError(f"target_url resolved host is not public: {address}")

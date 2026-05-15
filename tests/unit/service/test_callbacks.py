@@ -6,6 +6,8 @@ import asyncio
 import concurrent.futures
 import functools
 import socket
+import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1098,7 +1100,10 @@ async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
 
     monkeypatch.setattr(callback_service_module.asyncio, "wait_for", fake_wait_for)
 
-    with pytest.raises(TimeoutError, match="callback POST exceeded wall clock timeout"):
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="timeout expired while posting to validated target address",
+    ) as exc_info:
         await callback_service_module._post_to_validated_callback_addresses(
             poster,
             "https://operator.example.com/events",
@@ -1109,6 +1114,26 @@ async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
         )
 
     assert wait_for_timeouts == [11.0]
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_is_lazy_at_import() -> None:
+    script = "\n".join(
+        [
+            "from awf.service import callbacks",
+            "print(callbacks._CALLBACK_TARGET_VALIDATION_EXECUTOR is None)",
+            "callbacks.shutdown_callback_target_validation_executor()",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "True"
 
 
 @pytest.mark.unit
@@ -1151,7 +1176,10 @@ async def test_validated_address_delivery_timeout_before_first_attempt_raises_ti
     poster = _RecordingPoster(status_code=202)
     monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
 
-    with pytest.raises(TimeoutError, match="before any validated target address"):
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="before any validated target address",
+    ):
         await callback_service_module._post_to_validated_callback_addresses(
             poster,
             "https://operator.example.com/events",
@@ -1199,7 +1227,10 @@ async def test_validated_address_timeout_after_failure_raises_timeout_with_prior
         loop.now += 10.0
         raise ConnectionRefusedError("first address refused")
 
-    with pytest.raises(TimeoutError, match="remaining validated target address") as exc_info:
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="remaining validated target address",
+    ) as exc_info:
         await callback_service_module._post_to_validated_callback_addresses(
             poster,
             "https://operator.example.com/events",
@@ -1257,7 +1288,10 @@ async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted
             raise TimeoutError("second address timed out")
         return CallbackPostResult(status_code=202)
 
-    with pytest.raises(TimeoutError, match="remaining validated target address") as exc_info:
+    with pytest.raises(
+        callback_service_module.CallbackDeliveryBudgetExceededError,
+        match="remaining validated target address",
+    ) as exc_info:
         await callback_service_module._post_to_validated_callback_addresses(
             poster,
             "https://operator.example.com/events",
