@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import Request
 
 import awf.api.routes.workspaces as workspaces_route
 import awf.db.resilience as db_resilience
@@ -471,6 +472,18 @@ def _request_with_disk_check() -> SimpleNamespace:
                 )
             )
         )
+    )
+
+
+def _workspace_request_without_app_state() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/workspaces",
+            "headers": [],
+            "client": ("198.51.100.52", 42100),
+        }
     )
 
 
@@ -930,6 +943,43 @@ class TestCreateWorkspace:
         assert body["status_url"] == f"/v1/workspaces/{body['workspace_id']}"
         assert body["events_url"] == f"/v1/workspaces/{body['workspace_id']}/events"
         assert "accepted_at" in body
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_without_app_state_is_request_local(self) -> None:
+        request = SimpleNamespace()
+
+        cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+
+        assert (
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                request
+            )
+            is cache
+        )
+        assert (
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                SimpleNamespace()
+            )
+            is not cache
+        )
+        assert workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            None
+        ) is not workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            None
+        )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_real_request_without_app_state_fails_loudly(
+        self,
+    ) -> None:
+        request = _workspace_request_without_app_state()
+
+        with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                request
+            )
 
     @pytest.mark.unit
     async def test_rejects_empty_task_prompt(self, client: AsyncClient) -> None:

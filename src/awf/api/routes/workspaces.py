@@ -869,6 +869,11 @@ def _workspace_create_idempotency_replay_key_cache(
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
     state = request_app_state(request)
     if state is None:
+        if isinstance(request, Request):
+            raise RuntimeError(
+                "workspace create idempotency replay key cache requires request.app.state; "
+                "direct callers must pass None or a non-Starlette test object."
+            )
         return _direct_workspace_create_idempotency_replay_key_cache(request)
 
     existing = getattr(state, _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY, None)

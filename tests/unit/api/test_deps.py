@@ -374,6 +374,92 @@ def test_request_admission_limiter_prunes_once_per_window() -> None:
 
 
 @pytest.mark.unit
+def test_request_admission_limiter_prunes_stale_buckets_across_window_sizes() -> None:
+    now = 120.0
+
+    def clock() -> float:
+        return now
+
+    limiter = RequestAdmissionLimiter(clock=clock)
+    stale_thirty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "stale-30-second-window",
+        30,
+        1,
+    )
+    stale_sixty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "stale-60-second-window",
+        60,
+        1,
+    )
+    limiter._buckets = {
+        stale_thirty_second_bucket: 1,
+        stale_sixty_second_bucket: 1,
+    }
+    identity = extract_request_identity(
+        _request(authorization="Bearer active-token"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+
+    assert stale_thirty_second_bucket not in limiter._buckets
+    assert stale_sixty_second_bucket not in limiter._buckets
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_keeps_live_buckets_for_other_window_sizes() -> None:
+    now = 120.0
+
+    def clock() -> float:
+        return now
+
+    limiter = RequestAdmissionLimiter(clock=clock)
+    live_sixty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "live-60-second-window",
+        60,
+        2,
+    )
+    stale_thirty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "stale-30-second-window",
+        30,
+        3,
+    )
+    limiter._buckets = {
+        live_sixty_second_bucket: 1,
+        stale_thirty_second_bucket: 1,
+    }
+    identity = extract_request_identity(
+        _request(authorization="Bearer active-token"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=30,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+
+    assert live_sixty_second_bucket in limiter._buckets
+    assert stale_thirty_second_bucket not in limiter._buckets
+
+
+@pytest.mark.unit
 def test_request_admission_reuses_limiter_without_app_state() -> None:
     request = SimpleNamespace(
         headers=Headers({}),
