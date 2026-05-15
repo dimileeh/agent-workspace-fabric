@@ -438,6 +438,29 @@ def test_codex_default_capacity_does_not_fallback_to_itself() -> None:
     assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
 
 
+def test_codex_implicit_default_capacity_does_not_fallback_to_itself() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = {
+        "retryable": True,
+        "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        "failure_type": "capacity",
+    }
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="codex",
+        current_model=None,
+        now=now,
+    )
+
+    assert decision.action == "retry"
+    assert decision.target_agent == "codex"
+    assert decision.target_provider == "openai"
+    assert decision.target_model is None
+    assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
+
+
 def test_non_retryable_provider_failure_is_terminal() -> None:
     decision = decide_provider_recovery(
         {

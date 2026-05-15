@@ -782,6 +782,36 @@ def test_ci_transient_rerun_attempt_treats_corrupt_count_as_zero() -> None:
     assert state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] == "1"
 
 
+@pytest.mark.unit
+def test_ci_transient_rerun_attempt_carries_legacy_rollup_count_forward() -> None:
+    failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330295",
+    )
+    rollup_failure = CheckFailure(
+        name="ci-required",
+        conclusion="FAILURE",
+        log_excerpt="A required CI job did not pass.",
+        run_id="25655330295",
+    )
+    state = MonitorState()
+    state.threads_addressed_ids[
+        _ci_transient_rerun_state_key("head", (failure, rollup_failure))
+    ] = "1"
+
+    attempt = _ci_transient_rerun_attempt(
+        state,
+        head_sha="head",
+        failures=(failure,),
+        legacy_failures=(failure, rollup_failure),
+    )
+
+    assert attempt == 2
+    assert state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] == "2"
+
+
 def _provider_recovery_policy(
     *,
     fallback_agent: str = "codex",

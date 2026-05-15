@@ -1590,6 +1590,7 @@ class PullRequestMonitorRunner:
                     state,
                     head_sha=status.head_sha,
                     failures=action.failures,
+                    legacy_failures=status.ci_failures,
                 )
                 + 1
             )
@@ -1646,6 +1647,7 @@ class PullRequestMonitorRunner:
                 state,
                 head_sha=status.head_sha,
                 failures=action.failures,
+                legacy_failures=status.ci_failures,
             )
             event_payload["attempt"] = recorded_attempt
             await self._persist_state(workspace_id, state)
@@ -6573,13 +6575,15 @@ def _ci_transient_rerun_attempt(
     *,
     head_sha: str,
     failures: tuple[CheckFailure, ...],
+    legacy_failures: tuple[CheckFailure, ...] | None = None,
 ) -> int:
     key = _ci_transient_rerun_state_key(head_sha, failures)
-    raw_count = state.threads_addressed_ids.get(key, "0")
-    try:
-        current = int(raw_count)
-    except ValueError:
-        current = 0
+    current = _ci_transient_rerun_count(
+        state,
+        head_sha=head_sha,
+        failures=failures,
+        legacy_failures=legacy_failures,
+    )
     attempt = current + 1
     state.threads_addressed_ids[key] = str(attempt)
     return attempt

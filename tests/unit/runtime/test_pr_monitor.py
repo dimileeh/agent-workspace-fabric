@@ -645,6 +645,34 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_transient_rerun_budget_reads_legacy_rollup_signature(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (502 Bad Gateway)",
+            run_id="25655330295",
+        )
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="A required CI job did not pass.",
+            run_id="25655330295",
+        )
+        status = _status(
+            check_state=CheckState.FAILURE,
+            ci_failures=(failure, rollup_failure),
+        )
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "2"
+
+        action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == status.ci_failures
+
+    @pytest.mark.unit
     def test_transient_failure_with_disabled_rerun_budget_dispatches_agent_repair(self) -> None:
         failure = CheckFailure(
             name="CI",

@@ -259,7 +259,7 @@ def _default_capacity_fallback_target(
         return None
     defaults = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex]
     default_model = defaults.model
-    if default_model is None or current_model == default_model:
+    if default_model is None or current_model is None or current_model == default_model:
         return None
     return FallbackTarget(
         agent=AgentRuntime.codex.value,

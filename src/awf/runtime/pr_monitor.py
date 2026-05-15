@@ -614,11 +614,16 @@ def _ci_transient_rerun_count(
     *,
     head_sha: str,
     failures: tuple[CheckFailure, ...],
+    legacy_failures: tuple[CheckFailure, ...] | None = None,
 ) -> int:
-    raw_count = state.threads_addressed_ids.get(
-        _ci_transient_rerun_state_key(head_sha, failures),
-        "0",
-    )
+    keys = [_ci_transient_rerun_state_key(head_sha, failures)]
+    if legacy_failures is not None and legacy_failures != failures:
+        keys.append(_ci_transient_rerun_state_key(head_sha, legacy_failures))
+    return max(_ci_transient_rerun_count_for_key(state, key) for key in keys)
+
+
+def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
+    raw_count = state.threads_addressed_ids.get(key, "0")
     try:
         return int(raw_count)
     except ValueError:
@@ -691,6 +696,7 @@ def _should_rerun_transient_ci(
             state,
             head_sha=status.head_sha,
             failures=rerun_failures,
+            legacy_failures=status.ci_failures,
         )
         < config.ci_transient_rerun_max_attempts
     )
