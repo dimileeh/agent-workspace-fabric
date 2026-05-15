@@ -828,11 +828,13 @@ class TestCreateWorkspace:
             first = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
             replay = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
             conflict = await workspaces_route.create_workspace(
@@ -840,6 +842,7 @@ class TestCreateWorkspace:
                     {**_MINIMAL_BODY, "task_title": "Changed direct replay"}
                 ),
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
 

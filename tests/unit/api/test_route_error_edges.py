@@ -16,6 +16,7 @@ import awf.api.routes.artifacts as artifact_routes
 import awf.api.routes.validation as validation_routes
 import awf.api.routes.workspaces as workspace_routes
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.common.config import Settings, get_settings
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import workspaces as workspaces_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
@@ -48,6 +49,15 @@ def test_workspace_v1_direct_request_default_is_type_visible_optional() -> None:
     assert get_origin(annotation) is Annotated
     request_type = get_args(annotation)[0]
     assert set(get_args(request_type)) == {Request, type(None)}
+
+
+def test_workspace_create_routes_use_typed_settings_dependency() -> None:
+    for route in (workspace_routes.create_workspace, workspace_routes.create_workspace_v2):
+        parameter = inspect.signature(route).parameters["settings"]
+        annotation = get_type_hints(route, include_extras=True)["settings"]
+
+        assert annotation is Settings
+        assert parameter.default.dependency is get_settings
 
 
 @pytest.mark.unit
@@ -87,6 +97,7 @@ async def test_workspace_v1_create_acquires_idempotency_lock_before_lookup(
             task_prompt="exercise lock ordering",
         ),
         idempotency_key="route-v1-key",
+        settings=Settings(_env_file=None),
         session=object(),  # type: ignore[arg-type]
     )
 
@@ -141,7 +152,7 @@ async def test_workspace_v2_create_acquires_idempotency_lock_before_lookup(
         ),
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key="route-v2-key",
-        settings=SimpleNamespace(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None),
         session=object(),  # type: ignore[arg-type]
     )
 
@@ -279,7 +290,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
         payload,
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key=None,
-        settings=SimpleNamespace(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None),
         session=object(),  # type: ignore[arg-type]
     )
 

@@ -24,7 +24,6 @@ from awf.api.deps import (
     get_db_session,
     get_db_session_factory,
     require_api_token,
-    resolve_settings_dependency,
 )
 from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
@@ -148,10 +147,9 @@ async def create_workspace(
     payload: WorkspaceCreateRequest,
     request: Annotated[Request | None, Depends(_current_request)] = None,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    settings: object = Depends(get_settings),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
-    route_settings = resolve_settings_dependency(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
@@ -174,8 +172,8 @@ async def create_workspace(
     admission = admit_request(
         request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-        limit=route_settings.workspace_create_rate_limit_count,
-        window_seconds=route_settings.request_admission_window_seconds,
+        limit=settings.workspace_create_rate_limit_count,
+        window_seconds=settings.request_admission_window_seconds,
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
@@ -211,17 +209,16 @@ async def create_workspace_v2(
     payload: WorkspaceCreateV2Request,
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    settings: object = Depends(get_settings),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
-    route_settings = resolve_settings_dependency(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
         await repo.acquire_idempotency_key_lock(idempotency_key)
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            if not _payloads_match_v2(existing, payload, settings=route_settings):
+            if not _payloads_match_v2(existing, payload, settings=settings):
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
                     content=ErrorResponse(
@@ -244,14 +241,14 @@ async def create_workspace_v2(
     admission = admit_request(
         request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-        limit=route_settings.workspace_create_rate_limit_count,
-        window_seconds=route_settings.request_admission_window_seconds,
+        limit=settings.workspace_create_rate_limit_count,
+        window_seconds=settings.request_admission_window_seconds,
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
         return _workspace_create_rate_limited_response(admission)
 
-    disk_check = await _workspace_admission_disk_check(request, route_settings)
+    disk_check = await _workspace_admission_disk_check(request, settings)
     if not disk_check.ok:
         return _insufficient_disk_response(disk_check)
 
@@ -260,7 +257,7 @@ async def create_workspace_v2(
             session,
             payload,
             idempotency_key=idempotency_key,
-            settings=route_settings,
+            settings=settings,
             disk_check=disk_check,
         )
     except ProfileResolutionError as exc:
