@@ -1637,6 +1637,7 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target_includes
     [
         "64:ff9b::a9fe:a9fe",
         "64:ff9b:1:a00:0:100:808:808",
+        "64:ff9b:1:c001::c0a8:0101",
     ],
 )
 async def test_drain_due_rejects_nat64_delivery_target_that_embeds_private_ipv4(
