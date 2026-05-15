@@ -106,7 +106,6 @@ def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture
 async def client(
     engine: AsyncEngine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
