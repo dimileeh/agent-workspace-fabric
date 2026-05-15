@@ -16,10 +16,61 @@ import json
 from collections import Counter
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI
+from httpx import ASGITransport, AsyncClient
 
-import awf.api.app as app_module
 from awf.api.app import create_app
+from awf.common.config import get_settings
+
+_WWW_AUTHENTICATE_HEADER = {
+    "description": "Bearer challenge for the API token.",
+    "schema": {"type": "string"},
+}
+_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorResponse"
+_CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HTTPExceptionErrorResponse"
+_ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
+_RELEASE_READINESS_RESPONSE_REF = "#/components/schemas/ReleaseReadinessResponse"
+
+_API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
+    {
+        ("get", "/release-readiness"),
+        ("get", "/v1/events"),
+        ("get", "/v1/locks"),
+        ("get", "/v1/locks/overlap-graph"),
+        ("get", "/v1/merge-queue"),
+        ("get", "/v1/metrics/failures/summary"),
+        ("get", "/v1/metrics/resources/saturation"),
+        ("get", "/v1/metrics/slo"),
+        ("get", "/v1/metrics/workspaces/summary"),
+        ("get", "/v1/operations"),
+        ("get", "/v1/operations/{operation_id}"),
+        ("get", "/v1/tasks"),
+        ("get", "/v1/tasks/{task_ref}/attempts"),
+        ("get", "/v1/workspaces"),
+        ("post", "/v1/workspaces"),
+        ("post", "/v1/workspaces/adopt-pr"),
+        ("get", "/v1/workspaces/overview"),
+        ("delete", "/v1/workspaces/{workspace_id}"),
+        ("get", "/v1/workspaces/{workspace_id}"),
+        ("get", "/v1/workspaces/{workspace_id}/artifacts"),
+        ("get", "/v1/workspaces/{workspace_id}/artifacts/download"),
+        ("post", "/v1/workspaces/{workspace_id}/cancel"),
+        ("get", "/v1/workspaces/{workspace_id}/events"),
+        ("get", "/v1/workspaces/{workspace_id}/logs"),
+        ("get", "/v1/workspaces/{workspace_id}/logs/{stream_id}"),
+        ("get", "/v1/workspaces/{workspace_id}/operations"),
+        ("post", "/v1/workspaces/{workspace_id}/rebase"),
+        ("post", "/v1/workspaces/{workspace_id}/refresh"),
+        ("post", "/v1/workspaces/{workspace_id}/remonitor"),
+        ("post", "/v1/workspaces/{workspace_id}/retry"),
+        ("get", "/v1/workspaces/{workspace_id}/runtime"),
+        ("get", "/v1/workspaces/{workspace_id}/secret-leases"),
+        ("get", "/v1/workspaces/{workspace_id}/stale-reasons"),
+        ("post", "/v1/workspaces/{workspace_id}/stop"),
+        ("post", "/v1/workspaces/{workspace_id}/validate"),
+        ("get", "/v1/workspaces/{workspace_id}/validation"),
+        ("post", "/v2/workspaces"),
+    }
+)
 
 
 @pytest.fixture(scope="module")
@@ -99,136 +150,17 @@ def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
 
 
 @pytest.mark.unit
-def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec: dict) -> None:
+def test_callback_endpoints_advertise_bearer_auth_in_openapi(openapi_spec: dict) -> None:
     path = openapi_spec["paths"]["/v1/callbacks"]
     for method in ("get", "post"):
         operation = path[method]
-        parameters = operation["parameters"]
+        assert operation.get("security") == [{"bearerAuth": []}]
         authorization_params = [
             param
-            for param in parameters
-            if param.get("in") == "header" and param.get("name") == "authorization"
+            for param in operation.get("parameters", [])
+            if param.get("in") == "header" and str(param.get("name", "")).lower() == "authorization"
         ]
-        assert authorization_params, (
-            f"{method.upper()} /v1/callbacks is expected to expose Authorization header"
-        )
-        assert all(param.get("required") is True for param in authorization_params), (
-            f"{method.upper()} /v1/callbacks Authorization header must be required"
-        )
-
-
-@pytest.mark.unit
-def test_openapi_auth_contract_detects_resolved_router_level_auth_dependencies() -> None:
-    app = FastAPI()
-
-    def nested_router_auth_guard(_: None = Depends(app_module.require_api_token)) -> None:
-        return None
-
-    router = APIRouter(
-        prefix="/router-auth",
-        dependencies=[Depends(nested_router_auth_guard)],
-    )
-
-    @router.get("")
-    async def router_protected_endpoint() -> dict[str, bool]:
-        return {"ok": True}
-
-    app.include_router(router)
-    app_module._install_openapi_auth_contract(app)
-
-    operation = app.openapi()["paths"]["/router-auth"]["get"]
-    authorization_params = [
-        param
-        for param in operation["parameters"]
-        if param.get("in") == "header" and param.get("name") == "authorization"
-    ]
-
-    assert authorization_params
-    assert authorization_params[0]["required"] is True
-    assert authorization_params[0]["schema"] == {
-        "minLength": 1,
-        "title": "Authorization",
-        "type": "string",
-    }
-
-
-@pytest.mark.unit
-def test_openapi_auth_contract_patch_runs_once_after_schema_is_cached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = app_module.create_app(use_lifespan=False)
-    marker_calls = 0
-    original_marker = app_module._mark_authorization_header_parameters_required
-
-    def recording_marker(
-        openapi_schema: dict,
-        auth_required_operations: set[tuple[str, str]],
-    ) -> None:
-        nonlocal marker_calls
-        marker_calls += 1
-        original_marker(openapi_schema, auth_required_operations)
-
-    monkeypatch.setattr(
-        app_module,
-        "_mark_authorization_header_parameters_required",
-        recording_marker,
-    )
-
-    first_schema = app.openapi()
-    second_schema = app.openapi()
-
-    assert first_schema is second_schema
-    assert marker_calls == 1
-
-
-@pytest.mark.unit
-def test_openapi_auth_contract_patch_ignores_malformed_path_entries() -> None:
-    schema = {
-        "paths": {
-            123: {"get": {"parameters": []}},
-            "/not-a-dict": None,
-            "/not-auth-required": {"get": {"parameters": []}},
-            "/bad-operation": {"post": []},
-            "/bad-parameters": {"post": {"parameters": None}},
-            "/auth-required": {
-                "post": {
-                    "parameters": [
-                        {
-                            "in": "header",
-                            "name": "authorization",
-                            "required": False,
-                            "schema": {"title": "Authorization"},
-                        }
-                    ]
-                }
-            },
-        }
-    }
-
-    app_module._mark_authorization_header_parameters_required(
-        schema,
-        {("/bad-operation", "post"), ("/bad-parameters", "post"), ("/auth-required", "post")},
-    )
-
-    auth_header = schema["paths"]["/auth-required"]["post"]["parameters"][0]
-    assert auth_header["required"] is True
-    assert auth_header["schema"] == {
-        "title": "Authorization",
-        "type": "string",
-        "minLength": 1,
-    }
-
-
-@pytest.mark.unit
-def test_openapi_auth_contract_patch_returns_when_paths_is_not_a_mapping() -> None:
-    schema = {"paths": []}
-
-    app_module._mark_authorization_header_parameters_required(
-        schema,
-        {("/auth-required", "post")},
-    )
-
-    assert schema == {"paths": []}
+        assert authorization_params == []
 
 
 @pytest.mark.unit
@@ -247,14 +179,14 @@ def test_callback_endpoints_document_structured_error_responses(
         assert "403" not in responses
         for status_code in expected_statuses:
             schema = responses[status_code]["content"]["application/json"]["schema"]
-            assert schema == {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"}
+            assert schema == {"$ref": _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF}
 
     post_422 = path["post"]["responses"]["422"]
     assert post_422["description"] == "Validation Error or Callback Target Policy Violation"
     assert post_422["content"]["application/json"]["schema"] == {
         "oneOf": [
             {"$ref": "#/components/schemas/HTTPValidationError"},
-            {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"},
+            {"$ref": _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF},
         ],
         "title": "CallbackRegistrationUnprocessableEntityResponse",
     }
@@ -267,8 +199,8 @@ def test_callback_endpoints_document_structured_error_responses(
 
 
 @pytest.mark.unit
-def test_authorization_headers_are_required_in_openapi(openapi_spec: dict) -> None:
-    optional_auth_headers: list[str] = []
+def test_openapi_does_not_model_bearer_auth_as_header_parameters(openapi_spec: dict) -> None:
+    modeled_auth_headers: list[str] = []
     for path, path_item in openapi_spec.get("paths", {}).items():
         for method, operation in path_item.items():
             if not isinstance(operation, dict):
@@ -278,42 +210,11 @@ def test_authorization_headers_are_required_in_openapi(openapi_spec: dict) -> No
                     continue
                 if (
                     parameter.get("in") == "header"
-                    and parameter.get("name") == "authorization"
-                    and parameter.get("required") is not True
+                    and str(parameter.get("name", "")).lower() == "authorization"
                 ):
-                    optional_auth_headers.append(f"{method.upper()} {path}")
+                    modeled_auth_headers.append(f"{method.upper()} {path}")
 
-    assert optional_auth_headers == []
-
-
-@pytest.mark.unit
-def test_required_authorization_headers_are_non_nullable_strings_in_openapi(
-    openapi_spec: dict,
-) -> None:
-    invalid_auth_headers: list[str] = []
-    for path, path_item in openapi_spec.get("paths", {}).items():
-        for method, operation in path_item.items():
-            if not isinstance(operation, dict):
-                continue
-            for parameter in operation.get("parameters", []):
-                if not isinstance(parameter, dict):
-                    continue
-                if (
-                    parameter.get("in") != "header"
-                    or parameter.get("name") != "authorization"
-                    or parameter.get("required") is not True
-                ):
-                    continue
-                schema = parameter.get("schema")
-                if (
-                    not isinstance(schema, dict)
-                    or schema.get("type") != "string"
-                    or schema.get("minLength") != 1
-                    or "anyOf" in schema
-                ):
-                    invalid_auth_headers.append(f"{method.upper()} {path}")
-
-    assert invalid_auth_headers == []
+    assert modeled_auth_headers == []
 
 
 @pytest.mark.unit
@@ -357,3 +258,111 @@ def test_spec_round_trips_to_json_and_back(openapi_spec: dict) -> None:
     serialized = json.dumps(openapi_spec, sort_keys=True)
     deserialized = json.loads(serialized)
     assert deserialized == openapi_spec, "Spec changed during JSON round-trip"
+
+
+@pytest.mark.unit
+def test_api_token_routes_are_documented_as_bearer_authenticated(
+    openapi_spec: dict,
+) -> None:
+    security_schemes = openapi_spec.get("components", {}).get("securitySchemes", {})
+    assert security_schemes.get("bearerAuth") == {
+        "scheme": "bearer",
+        "type": "http",
+    }
+
+    paths = openapi_spec.get("paths", {})
+    for method, path in sorted(_API_TOKEN_PROTECTED_REST_OPERATIONS):
+        operation = paths[path][method]
+        assert operation.get("security") == [{"bearerAuth": []}], (
+            f"{method.upper()} {path} must advertise bearer auth"
+        )
+        auth_header_params = [
+            parameter
+            for parameter in operation.get("parameters", [])
+            if parameter.get("in") == "header"
+            and str(parameter.get("name", "")).lower() == "authorization"
+        ]
+        assert auth_header_params == [], (
+            f"{method.upper()} {path} must not model auth as an optional header parameter"
+        )
+        for status_code, description in (
+            ("401", "Unauthorized"),
+            ("503", "Service Unavailable"),
+        ):
+            response = operation.get("responses", {}).get(status_code)
+            assert response is not None, f"{method.upper()} {path} must document {status_code}"
+            assert response["description"] == description
+            schema = response["content"]["application/json"]["schema"]
+            refs = _schema_refs(schema)
+            assert _HTTP_EXCEPTION_ERROR_RESPONSE_REF in refs
+            if status_code == "401":
+                assert refs == {_HTTP_EXCEPTION_ERROR_RESPONSE_REF}
+                assert (
+                    response.get("headers", {}).get("WWW-Authenticate") == _WWW_AUTHENTICATE_HEADER
+                )
+            if status_code == "503" and _ERROR_RESPONSE_REF in refs:
+                assert refs == {_HTTP_EXCEPTION_ERROR_RESPONSE_REF, _ERROR_RESPONSE_REF}
+
+    schemas = openapi_spec.get("components", {}).get("schemas", {})
+    auth_error_schema = schemas.get("HttpExceptionErrorResponse", {})
+    assert auth_error_schema.get("required") == ["detail"]
+    assert (
+        auth_error_schema.get("properties", {}).get("detail", {}).get("$ref") == _ERROR_RESPONSE_REF
+    )
+
+
+@pytest.mark.unit
+def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dict) -> None:
+    operation = openapi_spec["paths"]["/release-readiness"]["get"]
+    response = operation["responses"]["503"]
+
+    assert response["description"] == "Service Unavailable"
+    refs = _schema_refs(response["content"]["application/json"]["schema"])
+    assert refs == {
+        _HTTP_EXCEPTION_ERROR_RESPONSE_REF,
+        _RELEASE_READINESS_RESPONSE_REF,
+    }
+
+
+def _schema_refs(schema: dict) -> set[str]:
+    direct_ref = schema.get("$ref")
+    if isinstance(direct_ref, str):
+        return {direct_ref}
+    return {item["$ref"] for item in schema.get("anyOf", []) if isinstance(item.get("$ref"), str)}
+
+
+@pytest.mark.unit
+async def test_api_token_runtime_failures_match_documented_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(use_lifespan=False)
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            monkeypatch.setenv("AWF_API_TOKEN", "secret")
+            get_settings.cache_clear()
+
+            missing = await client.get("/v1/operations")
+            assert missing.status_code == 401
+            assert missing.headers["WWW-Authenticate"] == "Bearer"
+            assert missing.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+            wrong = await client.get(
+                "/v1/operations",
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert wrong.status_code == 401
+            assert wrong.headers["WWW-Authenticate"] == "Bearer"
+            assert wrong.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+            monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+            get_settings.cache_clear()
+
+            unconfigured = await client.get("/v1/operations")
+            assert unconfigured.status_code == 503
+            assert unconfigured.json()["detail"]["error_code"] == "API_TOKEN_NOT_CONFIGURED"
+
+            health = await client.get("/healthz")
+            assert health.status_code == 200
+    finally:
+        get_settings.cache_clear()

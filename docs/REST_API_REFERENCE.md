@@ -12,8 +12,12 @@ The OpenAPI spec is served at `/openapi.json` and browsable at `/docs`.
 A checked-in stable copy is available as `openapi.json` in the repository root.
 
 All endpoints return JSON. Endpoints requiring authentication use the
-`Authorization: Bearer $AWF_API_TOKEN` header. Workspaces and most read
-endpoints are unauthenticated when `AWF_API_TOKEN` is not configured.
+`Authorization: Bearer $AWF_API_TOKEN` header.
+
+Public operators' health/readiness probes intentionally remain usable without
+`AWF_API_TOKEN` so monitoring can run during bootstrapping. Workspace metadata
+and control surfaces require the header and return a `503 API_TOKEN_NOT_CONFIGURED`
+envelope when authentication is enabled but `AWF_API_TOKEN` is missing.
 
 Common response patterns:
 
@@ -80,6 +84,7 @@ header and provider readiness preflight.
 curl -X POST http://localhost:8000/v2/workspaces \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: example-task-001" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
   -d '{
     "repo": {
       "url": "git@github.com:example/app.git",
@@ -125,6 +130,7 @@ The v2 task object accepts policy metadata:
 curl -X POST http://localhost:8000/v1/workspaces \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: example-legacy-001" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
   -d '{
     "repo_url": "git@github.com:example/app.git",
     "branch_base": "main",
@@ -143,19 +149,22 @@ curl -X POST http://localhost:8000/v1/workspaces \
 ### Dashboard-friendly workspace overview
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/overview?status=monitoring_pr&agent=codex&limit=25"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/overview?status=monitoring_pr&agent=codex&limit=25"
 ```
 
 ### List workspaces (full detail)
 
 ```bash
-curl "http://localhost:8000/v1/workspaces?limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces?limit=50"
 ```
 
 Filter by status, agent, or repo URL:
 
 ```bash
-curl "http://localhost:8000/v1/workspaces?status=monitoring_pr&agent=codex&repo_url=git@github.com:example/app.git&limit=25"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces?status=monitoring_pr&agent=codex&repo_url=git@github.com:example/app.git&limit=25"
 ```
 
 ---
@@ -163,11 +172,24 @@ curl "http://localhost:8000/v1/workspaces?status=monitoring_pr&agent=codex&repo_
 ## Get Workspace Status
 
 ```bash
-curl http://localhost:8000/v1/workspaces/ws_123
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123"
 ```
 
 Returns the full workspace response including status, task policy, validation
 provenance, lifecycle stages, LLM usage, and provider recovery state.
+
+### Secret lease status (operator metadata)
+
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`).
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
+```
+
+Returns redacted secret lease inventory (`lease_id`, `secret_name`, `target`, `provider`,
+`status`, `expires_at`, etc.) for operator metadata visibility and control.
 
 ---
 
@@ -175,8 +197,11 @@ provenance, lifecycle stages, LLM usage, and provider recovery state.
 
 ### List workspace events
 
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`).
+
 ```bash
-curl "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
 ```
 
 Events response shape:
@@ -192,7 +217,8 @@ Events response shape:
 ### List workspace events (per-workspace)
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
 ```
 
 ### List workspace log streams
@@ -394,7 +420,8 @@ curl "http://localhost:8000/v1/workspaces/ws_123/validation?limit=20"
 List structured stale reasons for a workspace's merge candidate.
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/ws_123/stale-reasons?include_resolved=false&limit=20"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/stale-reasons?include_resolved=false&limit=20"
 ```
 
 ---
@@ -643,10 +670,11 @@ curl "http://localhost:8000/v1/metrics/slo?since_hours=168"
 
 ## Secret Leases
 
-List declared secret lease status for a workspace. No auth required.
+List declared secret lease status for a workspace. Auth required.
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
 ```
 
 ---

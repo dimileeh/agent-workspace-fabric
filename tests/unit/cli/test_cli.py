@@ -271,6 +271,64 @@ class TestWorkspaceCreate:
         assert kwargs["headers"]["Idempotency-Key"] == "same-key-42"
 
     @pytest.mark.unit
+    def test_api_token_header_forwarded_without_printing_secret(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_auth"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@x:y.git",
+                    "--title",
+                    "t",
+                    "--prompt",
+                    "p",
+                    "--idempotency-key",
+                    "same-key-42",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer env-secret",
+            "Idempotency-Key": "same-key-42",
+        }
+
+    @pytest.mark.unit
+    def test_api_token_option_overrides_env_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_auth"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@x:y.git",
+                    "--title",
+                    "t",
+                    "--prompt",
+                    "p",
+                    "--api-token",
+                    "cli-secret",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "cli-secret" not in result.stdout
+        assert "cli-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
+
+    @pytest.mark.unit
     def test_provider_readiness_override_flag_is_sent(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_override"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
@@ -335,6 +393,42 @@ class TestWorkspaceShow:
         assert result.exit_code == 0
         assert "ws_xyz" in result.stdout
         assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/workspaces/ws_xyz")
+
+    @pytest.mark.unit
+    def test_injects_env_api_token_without_printing_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"id": "ws_xyz", "status": "ready", "version": 3},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "show", "ws_xyz"])
+
+        assert result.exit_code == 0
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_api_token_option_overrides_env_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"id": "ws_xyz", "status": "ready", "version": 3},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                ["workspace", "show", "ws_xyz", "--api-token", "cli-secret"],
+            )
+
+        assert result.exit_code == 0
+        assert "cli-secret" not in result.stdout
+        assert "cli-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
 
     @pytest.mark.unit
     def test_pretty_format_emits_sorted_keys(self) -> None:
@@ -1097,6 +1191,36 @@ class TestWorkspaceList:
         assert result.exit_code == 0
         kwargs = mock.call_args.kwargs
         assert kwargs["params"] == [("limit", 7)]
+
+    @pytest.mark.unit
+    def test_injects_env_api_token_without_printing_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list", "--limit", "7"])
+
+        assert result.exit_code == 0
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_api_token_option_overrides_env_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                ["workspace", "list", "--api-token", "cli-secret"],
+            )
+
+        assert result.exit_code == 0
+        assert "cli-secret" not in result.stdout
+        assert "cli-secret" not in result.stderr
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
 
     @pytest.mark.unit
     def test_forwards_fleet_filters_as_query_params(self) -> None:

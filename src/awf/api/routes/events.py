@@ -7,11 +7,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import WorkspaceEventListResponse, WorkspaceEventResponse
 from awf.db.repositories import WorkspaceEventRepository
 
-router = APIRouter(prefix="/v1/events", tags=["events"])
+router = APIRouter(
+    prefix="/v1/events",
+    tags=["events"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 
 
 @router.get("", response_model=WorkspaceEventListResponse)

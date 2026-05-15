@@ -162,13 +162,20 @@ def _no_orphan_summary(settings: Settings, _session: Any) -> Any:
 @pytest.fixture
 async def metrics_app_and_client(
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[Any, AsyncClient]]:
+    monkeypatch.setenv("AWF_API_TOKEN", "unit-test-api-token")
+    get_settings.cache_clear()
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     app.state.orphan_resource_summary_provider = _no_orphan_summary
     app.state.local_capacity_detector = lambda _settings: LocalCapacityLimits()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield app, c
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            c.headers["Authorization"] = "Bearer unit-test-api-token"
+            yield app, c
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.unit

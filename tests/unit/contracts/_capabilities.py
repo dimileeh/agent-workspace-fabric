@@ -425,6 +425,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
         response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="create_workspace_v2",
@@ -515,9 +516,11 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--provider-readiness-override",
                 "--provider-readiness-override-reason",
                 "--idempotency-key",
+                "--api-token",
             }
         ),
         response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="adopt_pr_monitor",
@@ -612,7 +615,9 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--api-token"}),
         response_fields=frozenset({"id", "status", "version"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="list_workspaces",
@@ -628,7 +633,8 @@ _CAPABILITIES += (
         rest_response_model="list[WorkspaceResponse]",
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
-        cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit"}),
+        cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit", "--api-token"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="wait_for_workspace",
@@ -648,6 +654,7 @@ _CAPABILITIES += (
         ),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "status", "version"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_overview",
@@ -664,6 +671,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="merge_queue",
@@ -680,6 +688,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"repo_url", "base_branch", "status", "limit", "cursor"}),
         mcp_request_fields=frozenset({"repo_url", "base_branch", "status", "limit", "cursor"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="list_tasks",
@@ -696,6 +705,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="list_task_attempts",
@@ -716,6 +726,7 @@ _CAPABILITIES += (
         response_fields=frozenset(
             {"task_id", "task_ref", "items", "next_cursor", "has_more", "limit", "cursor"}
         ),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_validation",
@@ -734,6 +745,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id", "limit", "cursor"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_stale_reasons",
@@ -752,6 +764,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id", "include_resolved", "limit", "cursor"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_artifacts",
@@ -809,6 +822,7 @@ _CAPABILITIES += (
         rest_response_model="FailureAnalysisSummaryResponse",
         rest_query_fields=frozenset({"since_hours", "limit"}),
         mcp_request_fields=frozenset({"since_hours", "limit"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_reliability_metrics",
@@ -824,6 +838,7 @@ _CAPABILITIES += (
         rest_response_model="WorkspaceReliabilitySummaryResponse",
         rest_query_fields=frozenset({"since_hours"}),
         mcp_request_fields=frozenset({"since_hours"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="resource_saturation_metrics",
@@ -837,6 +852,7 @@ _CAPABILITIES += (
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="ResourceSaturationSummaryResponse",
+        auth_required=True,
     ),
     ContractCapability(
         name="slo_metrics",
@@ -852,6 +868,7 @@ _CAPABILITIES += (
         rest_response_model="SloMetricsSummaryResponse",
         rest_query_fields=frozenset({"since_hours"}),
         mcp_request_fields=frozenset({"since_hours"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="locks",
@@ -869,6 +886,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"repo_url", "task_class", "status", "limit", "cursor"}),
         cli_options=frozenset({"--repo-url", "--task-class", "--status", "--limit", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="overlap_graph",
@@ -889,6 +907,7 @@ _CAPABILITIES += (
             {"repo_url", "base_branch", "task_class", "queue_state", "limit"}
         ),
         response_fields=frozenset({"nodes", "edges", "summary"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="service_health",
@@ -931,7 +950,7 @@ _CAPABILITIES += (
         parity_backlog_slice="—",
         supports_idempotency_key=False,
         supports_if_match=False,
-        rest_response_model="dict[str, object]",
+        rest_response_model="ReleaseReadinessResponse",
         rest_query_fields=frozenset(
             {
                 "provider",
@@ -962,6 +981,7 @@ _CAPABILITIES += (
             }
         ),
         response_fields=frozenset({"status", "summary", "checks", "next_actions"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_runtime",
@@ -981,6 +1001,7 @@ _CAPABILITIES += (
         cli_arguments=frozenset({"workspace_id"}),
         cli_options=frozenset({"--api-token"}),
         response_fields=frozenset({"workspace_id", "stack_state", "services"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_operations",
@@ -1099,6 +1120,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"workspace_id", "event_type", "limit"}),
         mcp_request_fields=frozenset({"workspace_id", "event_type", "limit"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_events",
@@ -1119,6 +1141,7 @@ _CAPABILITIES += (
         cli_arguments=frozenset({"workspace_id"}),
         cli_options=frozenset({"--limit", "--event-type", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
 )
 

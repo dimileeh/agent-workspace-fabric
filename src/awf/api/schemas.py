@@ -1510,3 +1510,9 @@ class HTTPExceptionErrorResponse(BaseModel):
     """FastAPI ``HTTPException`` envelope for structured API errors."""
 
     detail: ErrorResponse
+
+
+class HttpExceptionErrorResponse(BaseModel):
+    """FastAPI HTTPException envelope carrying AWF's structured error detail."""
+
+    detail: ErrorResponse

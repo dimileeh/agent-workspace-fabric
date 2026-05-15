@@ -672,6 +672,7 @@ class TestMcpOperatorSurfaceParity:
         rest_response = await operator_stack.client.get(
             "/release-readiness",
             params={"failure_window_hours": 12, "slo_window_hours": 168},
+            headers=operator_stack.auth_headers,
         )
         assert rest_response.status_code == 200
 
@@ -1325,6 +1326,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/merge-queue",
             params={"repo_url": "git@github.com:example/merge.git", "limit": 10},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1369,6 +1371,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/workspaces/overview",
             params={"status": "running"},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1393,7 +1396,10 @@ class TestMcpOperatorSurfaceParity:
     ) -> None:
         workspace_id = await _seed_validation(operator_stack.factory)
 
-        response = await operator_stack.client.get(f"/v1/workspaces/{workspace_id}/validation")
+        response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/validation",
+            headers=operator_stack.auth_headers,
+        )
         assert response.status_code == 200
         rest = response.json()
         mcp = await _call(
@@ -1416,6 +1422,7 @@ class TestMcpOperatorSurfaceParity:
         limited_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/validation",
             params={"limit": 1},
+            headers=operator_stack.auth_headers,
         )
         limited_mcp = await _call(
             operator_stack.mcp,
@@ -1435,11 +1442,13 @@ class TestMcpOperatorSurfaceParity:
         workspace_id = await _seed_stale_reasons(operator_stack.factory)
 
         active_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/stale-reasons"
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            headers=operator_stack.auth_headers,
         )
         resolved_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/stale-reasons",
             params={"include_resolved": "true"},
+            headers=operator_stack.auth_headers,
         )
 
         assert active_response.status_code == 200
@@ -1466,6 +1475,7 @@ class TestMcpOperatorSurfaceParity:
         limited_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/stale-reasons",
             params={"include_resolved": "true", "limit": 1},
+            headers=operator_stack.auth_headers,
         )
         limited_mcp = await _call(
             operator_stack.mcp,
@@ -1557,6 +1567,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/metrics/failures/summary",
             params={"since_hours": 2, "limit": 5},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1664,10 +1675,12 @@ class TestMcpOperatorSurfaceParity:
         reliability_response = await operator_stack.client.get(
             "/v1/metrics/workspaces/summary",
             params={"since_hours": 2},
+            headers=operator_stack.auth_headers,
         )
         slo_response = await operator_stack.client.get(
             "/v1/metrics/slo",
             params={"since_hours": 2},
+            headers=operator_stack.auth_headers,
         )
         assert reliability_response.status_code == 200
         assert slo_response.status_code == 200
@@ -1705,7 +1718,10 @@ class TestMcpOperatorSurfaceParity:
             updated_at=now - timedelta(minutes=2),
         )
 
-        response = await resource_stack.client.get("/v1/metrics/resources/saturation")
+        response = await resource_stack.client.get(
+            "/v1/metrics/resources/saturation",
+            headers=resource_stack.auth_headers,
+        )
         assert response.status_code == 200
         rest = response.json()
         mcp = await _call(
@@ -1753,6 +1769,7 @@ class TestMcpOperatorSurfaceParity:
                 "queue_state": "all",
                 "limit": 10,
             },
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()

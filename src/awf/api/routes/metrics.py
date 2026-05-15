@@ -13,7 +13,8 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.service.disk import DiskCheck, check_disk_space
@@ -46,7 +47,12 @@ from awf.service.workspace_runtime_health import (
     summarize_runtime_health,
 )
 
-router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
+router = APIRouter(
+    prefix="/v1/metrics",
+    tags=["metrics"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 _log = get_logger(__name__)
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 OrphanResourceSummaryProvider = Callable[

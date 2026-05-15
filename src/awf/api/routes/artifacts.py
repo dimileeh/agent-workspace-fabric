@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
-from awf.api.schemas import ErrorResponse, WorkspaceArtifactListResponse, WorkspaceArtifactResponse
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
+from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.db.repositories import WorkspaceRepository
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
@@ -29,7 +30,7 @@ from awf.service.bounded_list import InvalidBoundedListCursorError
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/artifacts",
     tags=["artifacts"],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
 
 __all__ = [
