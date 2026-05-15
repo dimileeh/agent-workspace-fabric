@@ -354,12 +354,13 @@ async def client(
     """
     api_token = os.environ.get("AWF_API_TOKEN") or _API_TEST_TOKEN
     monkeypatch.setenv("AWF_API_TOKEN", api_token)
-    get_settings.cache_clear()
-    app = create_app(use_lifespan=False)
-    configure_database(app, make_session_factory(engine))
-    app.state.workspace_admission_disk_check = _ok_workspace_admission_disk_check
 
     try:
+        get_settings.cache_clear()
+        app = create_app(use_lifespan=False)
+        configure_database(app, make_session_factory(engine))
+        app.state.workspace_admission_disk_check = _ok_workspace_admission_disk_check
+
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             c.headers["Authorization"] = f"Bearer {api_token}"
             yield c
