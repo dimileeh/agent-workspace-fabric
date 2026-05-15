@@ -359,6 +359,7 @@ class _RunnerDeps:
     adapter: AgentAdapter
     gh: GitHubClient
     sleep: Callable[[float], Awaitable[None]]
+    provider_recovery_default_model: str | None = None
     log_store: LogStore | None = None
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None
 
@@ -480,6 +481,7 @@ class PullRequestMonitorRunner:
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         workspace_runtime_context: str = "",
+        provider_recovery_default_model: str | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -487,6 +489,7 @@ class PullRequestMonitorRunner:
             adapter=adapter,
             gh=gh,
             sleep=sleep,
+            provider_recovery_default_model=provider_recovery_default_model,
             log_store=log_store,
             post_merge_target_reconciler=post_merge_target_reconciler,
         )
@@ -891,7 +894,11 @@ class PullRequestMonitorRunner:
             ws = await repo.get(workspace_id)
             if ws is None:
                 return "deterministic"
-            effective_default_model = self._deps.adapter.default_model
+            effective_default_model = (
+                self._deps.provider_recovery_default_model
+                if self._deps.provider_recovery_default_model is not None
+                else self._deps.adapter.default_model
+            )
             metadata = provider_recovery_metadata_from_failure(
                 reason_code=exc.reason_code,
                 message=message,

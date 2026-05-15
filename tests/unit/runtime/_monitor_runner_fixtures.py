@@ -312,6 +312,7 @@ def make_runner(
     log_store: LogStore | None = None,
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
+    provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
         "session_factory": factory,
@@ -335,6 +336,7 @@ def make_runner(
         "sleep": sleep_fn,
         "worktrees_root": worktrees_root,
         "log_store": log_store,
+        "provider_recovery_default_model": provider_recovery_default_model,
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root

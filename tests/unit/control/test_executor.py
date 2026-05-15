@@ -577,17 +577,22 @@ class TestHappyPath:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        captured: list[tuple[str | None, str | None]] = []
+        captured: list[tuple[str | None, str | None, str | None]] = []
 
         class Monitor:
             async def run(self, **_: object) -> None:
                 return None
 
-        def monitor_factory(adapter: AgentAdapter, *_: object) -> Monitor:
+        def monitor_factory(
+            adapter: AgentAdapter,
+            *_: object,
+            provider_recovery_default_model: str | None = None,
+        ) -> Monitor:
             captured.append(
                 (
                     adapter._default_model,
                     adapter._default_effort,
+                    provider_recovery_default_model,
                 )
             )
             return Monitor()
@@ -628,7 +633,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        assert captured == [("ollama/glm-5.1:cloud", "xhigh")]
+        assert captured == [("ollama/glm-5.1:cloud", "xhigh", "ollama/kimi-k2.6:cloud")]
 
     @pytest.mark.unit
     async def test_planning_profile_runs_plan_execute_compare_before_validation(

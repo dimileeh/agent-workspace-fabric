@@ -2706,13 +2706,15 @@ async def test_monitor_explicit_model_capacity_falls_back_to_configured_default(
         }
         await session.commit()
 
-    adapter = FakeAdapter(default_model=configured_default)
+    # Production handoff binds explicit task policy into the adapter default.
+    adapter = FakeAdapter(default_model=explicit_model)
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        provider_recovery_default_model=configured_default,
     )
     exc = AgentRunError(
         agent=AgentRuntime.codex,

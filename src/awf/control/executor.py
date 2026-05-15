@@ -1483,6 +1483,9 @@ class WorkspaceExecutor:
                     adapter=adapter,
                     profile=profile,
                     workspace=workspace,
+                    provider_recovery_default_model=(
+                        defaults.model if defaults is not None else None
+                    ),
                 )
         except Exception as exc:
             _log.error(
@@ -3378,6 +3381,9 @@ class WorkspaceExecutor:
                             adapter=adapter,
                             profile=profile,
                             workspace=persisted,
+                            provider_recovery_default_model=(
+                                defaults.model if defaults is not None else None
+                            ),
                         )
                     if _monitor is not None:
                         _log.info(
@@ -3582,6 +3588,9 @@ class WorkspaceExecutor:
                     adapter=adapter,
                     profile=profile,
                     workspace=persisted,
+                    provider_recovery_default_model=(
+                        defaults.model if defaults is not None else None
+                    ),
                 )
 
             if monitor is not None:
@@ -3743,6 +3752,9 @@ class WorkspaceExecutor:
                     adapter=adapter,
                     profile=profile,
                     workspace=ws,
+                    provider_recovery_default_model=(
+                        defaults.model if defaults is not None else None
+                    ),
                 )
         except Exception as exc:
             _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
@@ -7460,6 +7472,7 @@ def _call_pr_monitor_factory(
     adapter: AgentAdapter,
     profile: WorkspaceProfile,
     workspace: Workspace,
+    provider_recovery_default_model: str | None = None,
 ) -> _MonitorRunnerProto:
     """Call a monitor factory with the richest supported context.
 
@@ -7478,13 +7491,19 @@ def _call_pr_monitor_factory(
         return factory(adapter, profile)
 
     bind_errors: list[TypeError] = []
-    for args in ((adapter, profile, workspace), (adapter, profile), (adapter,)):
+    provider_recovery_kwargs = {"provider_recovery_default_model": provider_recovery_default_model}
+    for args, kwargs in (
+        ((adapter, profile, workspace), provider_recovery_kwargs),
+        ((adapter, profile, workspace), {}),
+        ((adapter, profile), {}),
+        ((adapter,), {}),
+    ):
         try:
-            signature.bind(*args)
+            signature.bind(*args, **kwargs)
         except TypeError as exc:
             bind_errors.append(exc)
             continue
-        return factory(*args)
+        return factory(*args, **kwargs)
 
     raise bind_errors[0]
 
