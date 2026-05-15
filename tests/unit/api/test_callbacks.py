@@ -399,8 +399,11 @@ async def test_register_callback_rejects_rotated_invalid_bearer_before_rate_limi
     assert second_token.status_code == 401
     assert second_token.json()["detail"]["error_code"] == "UNAUTHORIZED"
     assert await _subscription_count(engine) == 1
-    assert _CALLBACK_TOKEN not in json.dumps(second_token.json())
-    assert f"Bearer {_CALLBACK_TOKEN}" not in json.dumps(second_token.json())
+    payload = json.dumps(second_token.json())
+    assert _CALLBACK_TOKEN not in payload
+    assert f"Bearer {_CALLBACK_TOKEN}" not in payload
+    assert "callback-other-token" not in payload
+    assert "Bearer callback-other-token" not in payload
 
 
 @pytest.mark.unit
