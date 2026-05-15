@@ -142,7 +142,7 @@ The same raw policy rule applies to agent selection and agent overrides, but
 omitting `agent` requests the default `codex` agent policy; it is not a no-op
 for conflict detection, and conflicts with an existing live adoption for another
 agent. For overrides, request `model` and `effort` inputs persist as
-`agent_model` and `agent_effort` in `task_policy`. Omitting `model` or `effort`
+`agent_model` and `agent_effort` in `task_policy`; omitting `model` or `effort`
 requests the default/no-override policy, so a replay that omits those fields
 conflicts with an existing live adoption pinned to explicit `agent_model` or
 `agent_effort` values from prior `model` or `effort` inputs.
