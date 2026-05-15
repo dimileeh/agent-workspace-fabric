@@ -41,6 +41,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1761,7 +1762,7 @@ function TaskDetailsModal({
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const scrollY = window.scrollY;
     const previousBodyOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
