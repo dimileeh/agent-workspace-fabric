@@ -194,6 +194,55 @@ async def test_register_callback_rejects_burst_after_configured_limit(
 
 
 @pytest.mark.unit
+async def test_register_callback_rate_limit_rejects_fresh_key_before_replay_read(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    replay_keys: list[str] = []
+    original_replay_existing = callbacks_route.CallbackService.replay_existing
+
+    async def tracked_replay_existing(
+        self: callbacks_route.CallbackService,
+        payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        replay_keys.append(idempotency_key)
+        return await original_replay_existing(
+            self,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing",
+        tracked_replay_existing,
+    )
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "callback-replay-read-first"},
+        headers={"Idempotency-Key": "callback-replay-read-first"},
+    )
+    rejected = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-replay-read-second",
+            "target_url": "https://operator.example.com/awf/events-2",
+        },
+        headers={"Idempotency-Key": "callback-replay-read-second"},
+    )
+
+    assert first.status_code == 201
+    _assert_callback_rate_limited(rejected, identity_type="client_host")
+    assert "callback-replay-read-second" not in replay_keys
+
+
+@pytest.mark.unit
 async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,

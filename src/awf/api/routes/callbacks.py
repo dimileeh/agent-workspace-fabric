@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -21,11 +23,63 @@ from awf.api.schemas import (
     ErrorResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
+from awf.service.callbacks import (
+    CallbackIdempotencyConflictError,
+    CallbackService,
+    callback_request_hash,
+)
 
 router = APIRouter(prefix="/v1/callbacks", tags=["callbacks"])
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
 _CALLBACK_REGISTER_RATE_LIMITED = "CALLBACK_REGISTER_RATE_LIMITED"
+_CALLBACK_REPLAY_CACHE_STATE_KEY = "callback_register_idempotency_replay_cache"
+_CALLBACK_REPLAY_CACHE_MAX_ENTRIES = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedCallbackReplay:
+    request_hash: str
+    response: CallbackSubscriptionResponse
+
+
+class _CallbackIdempotencyReplayCache:
+    def __init__(self, *, max_entries: int = _CALLBACK_REPLAY_CACHE_MAX_ENTRIES) -> None:
+        self._max_entries = max_entries
+        self._entries: OrderedDict[str, _CachedCallbackReplay] = OrderedDict()
+
+    def replay(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscriptionResponse | None:
+        cached = self._entries.get(idempotency_key)
+        if cached is None:
+            return None
+        self._entries.move_to_end(idempotency_key)
+        if cached.request_hash != callback_request_hash(payload):
+            raise CallbackIdempotencyConflictError(
+                "Idempotency-Key previously used with a different callback request."
+            )
+        return cached.response.model_copy(deep=True)
+
+    def remember(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+        response: CallbackSubscriptionResponse,
+    ) -> None:
+        self._entries[idempotency_key] = _CachedCallbackReplay(
+            request_hash=callback_request_hash(payload),
+            response=response.model_copy(deep=True),
+        )
+        self._entries.move_to_end(idempotency_key)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+
+_STATELESS_CALLBACK_REPLAY_CACHE = _CallbackIdempotencyReplayCache()
 
 
 @router.post(
@@ -44,13 +98,13 @@ async def register_callback(
     route_settings = resolve_settings_dependency(settings)
     _ensure_callbacks_enabled(route_settings)
     key = _require_idempotency_key(idempotency_key)
-    service = CallbackService(session_factory)
+    replay_cache = _callback_idempotency_replay_cache(request)
     try:
-        existing = await service.replay_existing(payload, idempotency_key=key)
+        cached = replay_cache.replay(payload, idempotency_key=key)
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
-    if existing is not None:
-        return CallbackSubscriptionResponse.model_validate(existing)
+    if cached is not None:
+        return cached
 
     admission = admit_request(
         request,
@@ -62,6 +116,7 @@ async def register_callback(
     if not admission.allowed:
         return _callback_register_rate_limited_response(admission)
 
+    service = CallbackService(session_factory)
     try:
         subscription = await service.register(
             payload,
@@ -69,7 +124,9 @@ async def register_callback(
         )
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
-    return CallbackSubscriptionResponse.model_validate(subscription)
+    response = CallbackSubscriptionResponse.model_validate(subscription)
+    replay_cache.remember(payload, idempotency_key=key, response=response)
+    return response
 
 
 @router.get("", response_model=CallbackSubscriptionListResponse)
@@ -128,6 +185,32 @@ def _callback_register_rate_limited_response(
         ).model_dump(),
         headers={"Retry-After": str(retry_after)},
     )
+
+
+def _callback_idempotency_replay_cache(
+    request: Request | object | None,
+) -> _CallbackIdempotencyReplayCache:
+    state = _request_app_state(request)
+    if state is None:
+        return _STATELESS_CALLBACK_REPLAY_CACHE
+
+    existing = getattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, None)
+    if isinstance(existing, _CallbackIdempotencyReplayCache):
+        return existing
+
+    cache = _CallbackIdempotencyReplayCache()
+    setattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, cache)
+    return cache
+
+
+def _request_app_state(request: Request | object | None) -> object | None:
+    if request is None:
+        return None
+    try:
+        app = getattr(request, "app", None)
+    except (KeyError, RuntimeError):
+        return None
+    return getattr(app, "state", None)
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:

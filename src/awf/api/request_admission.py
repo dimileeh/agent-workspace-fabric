@@ -137,6 +137,9 @@ class RequestAdmissionLimiter:
         self._last_pruned_windows[window_seconds] = current_window
 
 
+_STATELESS_REQUEST_LIMITER: Final = RequestAdmissionLimiter()
+
+
 def extract_request_identity(
     request: Request | object | None,
     *,
@@ -180,7 +183,7 @@ def admit_request(
 def request_admission_limiter(request: Request | object | None) -> RequestAdmissionLimiter:
     state = _request_app_state(request)
     if state is None:
-        return RequestAdmissionLimiter()
+        return _STATELESS_REQUEST_LIMITER
 
     existing = getattr(state, _LIMITER_STATE_KEY, None)
     if isinstance(existing, RequestAdmissionLimiter):
@@ -269,7 +272,10 @@ def _client_host(request: Request | object | None) -> str:
 def _request_app_state(request: Request | object | None) -> object | None:
     if request is None:
         return None
-    app = getattr(request, "app", None)
+    try:
+        app = getattr(request, "app", None)
+    except (KeyError, RuntimeError):
+        return None
     return getattr(app, "state", None)
 
 

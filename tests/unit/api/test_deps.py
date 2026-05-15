@@ -17,6 +17,7 @@ from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
     RequestAdmissionLimiter,
+    admit_request,
     extract_request_identity,
 )
 from awf.common.config import Settings
@@ -296,6 +297,33 @@ def test_request_admission_limiter_prunes_once_per_window() -> None:
         reason_code="WORKSPACE_CREATE_RATE_LIMITED",
     ).allowed
     assert all(key[4] == 2 for key in limiter._buckets)
+
+
+@pytest.mark.unit
+def test_request_admission_reuses_limiter_without_app_state() -> None:
+    request = SimpleNamespace(
+        headers=Headers({}),
+        client=SimpleNamespace(host="203.0.113.250"),
+    )
+
+    first = admit_request(
+        request,
+        endpoint_family="stateless_request_test",
+        limit=1,
+        window_seconds=60,
+        reason_code="STATELESS_REQUEST_RATE_LIMITED",
+    )
+    rejected = admit_request(
+        request,
+        endpoint_family="stateless_request_test",
+        limit=1,
+        window_seconds=60,
+        reason_code="STATELESS_REQUEST_RATE_LIMITED",
+    )
+
+    assert first.allowed is True
+    assert rejected.allowed is False
+    assert rejected.metadata["reason_code"] == "STATELESS_REQUEST_RATE_LIMITED"
 
 
 @pytest.mark.unit
