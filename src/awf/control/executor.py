@@ -7600,8 +7600,9 @@ def _validation_run_command_records(
         ordered.append(record)
     if pending_healthchecks:
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
-    coverage_command = profile.validation.coverage.command
-    if "validate" in phase_names and _should_run_local_coverage(profile) and coverage_command:
+    if "validate" in phase_names and _should_run_local_coverage(profile):
+        coverage_command = profile.validation.coverage.command
+        assert coverage_command is not None
         coverage_record = {
             "phase": "coverage",
             "command": coverage_command.command,
@@ -7657,7 +7658,38 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
         TaskClass.build_config_task.value,
     }:
         task_class_tier = 2
-    return max(profile_tier, task_class_tier)
+    operation_tier = _successful_validate_operation_tier(workspace) or 1
+    return max(profile_tier, task_class_tier, operation_tier)
+
+
+def _successful_validate_operation_tier(workspace: Workspace) -> int | None:
+    tiers: list[int] = []
+    operations = getattr(workspace, "operations", None) or []
+    for operation in operations:
+        if getattr(operation, "type", None) != OperationType.validate.value:
+            continue
+        if getattr(operation, "status", None) != OperationStatus.succeeded.value:
+            continue
+        for metadata in (getattr(operation, "result", None), getattr(operation, "payload", None)):
+            tier = _requested_tier_from_metadata(metadata)
+            if tier is not None:
+                tiers.append(tier)
+    return max(tiers, default=None)
+
+
+def _requested_tier_from_metadata(metadata: object) -> int | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    requested_tier = metadata.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    validation = metadata.get("validation")
+    if not isinstance(validation, Mapping):
+        return None
+    requested_tier = validation.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    return None
 
 
 def _should_run_local_coverage(profile: WorkspaceProfile) -> bool:

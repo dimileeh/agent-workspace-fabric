@@ -1619,6 +1619,42 @@ def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
 
 
 @pytest.mark.unit
+def test_validation_tier_for_workspace_uses_successful_validate_operation_tier() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "tier", "validation": {"requested_tier": 1}})
+    workspace = SimpleNamespace(
+        task_class=None,
+        operations=[
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.failed.value,
+                payload={"requested_tier": 3},
+                result={"requested_tier": 3},
+            ),
+            SimpleNamespace(
+                type=OperationType.refresh.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": 3},
+                result={"requested_tier": 3},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": "3"},
+                result={"requested_tier": "3"},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": 2},
+                result={"requested_tier": 2},
+            ),
+        ],
+    )
+
+    assert _validation_tier_for_workspace(workspace, profile) == 2  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
 async def test_baseline_coverage_preflight_returns_logged_policy_result(
     tmp_path: Path,
 ) -> None:
