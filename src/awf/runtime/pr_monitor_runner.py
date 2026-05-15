@@ -3771,6 +3771,12 @@ class PullRequestMonitorRunner:
                         compose_file=compose_file,
                         state=state,
                     )
+                except ProtectedScopeDiffError as exc:
+                    return await self._protected_scope_diff_unavailable_push_result(
+                        workspace_id=workspace_id,
+                        remote_branch=remote_branch,
+                        exc=exc,
+                    )
                 except _MonitorPolicyBlockedError as exc:
                     return _GitPushResult(
                         pushed=False,
@@ -3792,6 +3798,12 @@ class PullRequestMonitorRunner:
                         compose_project=compose_project,
                         compose_file=compose_file,
                         state=state,
+                    )
+                except ProtectedScopeDiffError as exc:
+                    return await self._protected_scope_diff_unavailable_push_result(
+                        workspace_id=workspace_id,
+                        remote_branch=remote_branch,
+                        exc=exc,
                     )
                 except _MonitorPolicyBlockedError as exc:
                     return _GitPushResult(
@@ -4359,6 +4371,12 @@ class PullRequestMonitorRunner:
                 compose_file=compose_file,
                 command_evidence=command_evidence,
             )
+        except ProtectedScopeDiffError as exc:
+            return await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
                 pushed=False,
@@ -4588,6 +4606,12 @@ class PullRequestMonitorRunner:
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_push_url,
             )
+        except ProtectedScopeDiffError as exc:
+            return await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
                 pushed=False,
@@ -4658,8 +4682,6 @@ class PullRequestMonitorRunner:
                     remote_push_url=remote_push_url,
                 )
             )
-            if filtered_violations is None:
-                return None
             violations = filtered_violations
         if not violations:
             return CommandResult(returncode=0, stdout=status_stdout, stderr="")
@@ -4708,8 +4730,6 @@ class PullRequestMonitorRunner:
                     remote_push_url=remote_push_url,
                 )
             )
-            if filtered_remaining is None:
-                return None
             remaining = filtered_remaining
         if remaining:
             _log.warning(
@@ -4750,7 +4770,7 @@ class PullRequestMonitorRunner:
         violations: list[QualityGateViolation],
         remote_branch: str,
         remote_push_url: str | None = None,
-    ) -> list[QualityGateViolation] | None:
+    ) -> list[QualityGateViolation]:
         """Filter out protected dirty paths that restore the remote PR branch tree."""
 
         untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
@@ -4774,12 +4794,18 @@ class PullRequestMonitorRunner:
             ]
         )
         if not fetch_result.ok:
+            message = (
+                "Could not verify protected-scope restore against the remote PR branch: "
+                f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
+                f"stdout={fetch_result.stdout.strip() or '<empty>'} "
+                f"stderr={fetch_result.stderr.strip() or '<empty>'}"
+            )
             _log.warning(
                 "monitor.protected_scope_revert_baseline_fetch_failed",
                 workspace_id=workspace_id,
                 stderr=fetch_result.stderr[:400],
             )
-            return None
+            raise ProtectedScopeDiffError(message)
 
         try:
             local_base = await self._merge_base_with_head(
@@ -4793,7 +4819,7 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 error=str(exc)[:400],
             )
-            return None
+            raise
 
         restored_paths: list[str] = []
         for violation in tracked_violations:
@@ -4815,13 +4841,19 @@ class PullRequestMonitorRunner:
             if diff_result.returncode == 1:
                 remaining.append(violation)
                 continue
+            message = (
+                "Could not verify protected-scope restore against the remote PR branch: "
+                f"diff {local_base} -- {violation.path} exit={diff_result.returncode} "
+                f"stdout={diff_result.stdout.strip() or '<empty>'} "
+                f"stderr={diff_result.stderr.strip() or '<empty>'}"
+            )
             _log.warning(
                 "monitor.protected_scope_revert_diff_failed",
                 workspace_id=workspace_id,
                 path=violation.path,
                 stderr=diff_result.stderr[:400],
             )
-            return None
+            raise ProtectedScopeDiffError(message)
 
         if restored_paths:
             _log.info(
@@ -5019,6 +5051,58 @@ class PullRequestMonitorRunner:
             owned_paths=owned_paths,
         )
 
+    async def _protected_scope_diff_unavailable_block(
+        self,
+        *,
+        workspace_id: str,
+        remote_branch: str,
+        exc: ProtectedScopeDiffError,
+    ) -> _ProtectedScopePushBlock:
+        redacted_error = redact_audit_text(str(exc), limit=1000)
+        message = (
+            "AWF could not verify protected-scope changes before push; "
+            "refusing to push this repair until the PR branch diff baseline "
+            f"is available. {redacted_error}"
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.monitor_protected_scope_push_blocked",
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    payload={
+                        "reason": "diff_baseline_unavailable",
+                        "remote_branch": remote_branch,
+                        "error": redacted_error,
+                    },
+                )
+            ],
+        )
+        return _ProtectedScopePushBlock(
+            message=message,
+            reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        )
+
+    async def _protected_scope_diff_unavailable_push_result(
+        self,
+        *,
+        workspace_id: str,
+        remote_branch: str,
+        exc: ProtectedScopeDiffError,
+    ) -> _GitPushResult:
+        block = await self._protected_scope_diff_unavailable_block(
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+            exc=exc,
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=block.message,
+            reason_code=block.reason_code,
+        )
+
     async def _protected_scope_push_block(
         self,
         *,
@@ -5047,29 +5131,10 @@ class PullRequestMonitorRunner:
                     remote_push_url=remote_push_url,
                 )
         except ProtectedScopeDiffError as exc:
-            redacted_error = redact_audit_text(str(exc), limit=1000)
-            message = (
-                "AWF could not verify protected-scope changes before push; "
-                "refusing to push this repair until the PR branch diff baseline "
-                f"is available. {redacted_error}"
-            )
-            await self._append_workspace_events(
+            return await self._protected_scope_diff_unavailable_block(
                 workspace_id=workspace_id,
-                events=[
-                    WorkspaceEventCreate(
-                        event_type="workspace.monitor_protected_scope_push_blocked",
-                        reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-                        payload={
-                            "reason": "diff_baseline_unavailable",
-                            "remote_branch": remote_branch,
-                            "error": redacted_error,
-                        },
-                    )
-                ],
-            )
-            return _ProtectedScopePushBlock(
-                message=message,
-                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                remote_branch=remote_branch,
+                exc=exc,
             )
         if not violations:
             return None

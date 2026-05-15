@@ -4147,6 +4147,78 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
 
 
 @pytest.mark.unit
+async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
+    )
+    cmd.queue_result(returncode=128, stderr="network reset")  # protected revert baseline fetch
+    cmd.queue_result(returncode=0, stdout="")  # would continue to push without the fix
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stderr="pushed")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed locally.")
+    adapter.queue(stdout="Restored protected workflow edit and fixed source.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+    assert "network reset" in push_result.stderr
+    call_args = [call.args for call in cmd.calls]
+    assert not any(args[:1] == ["git"] and "add" in args for args in call_args)
+    assert not any(args[:1] == ["git"] and "commit" in args for args in call_args)
+    assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+
+    assert len(events) == 2
+    diff_event = next(
+        event for event in events if event.reason_code == "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+    )
+    assert diff_event.payload is not None
+    assert diff_event.payload["reason"] == "diff_baseline_unavailable"
+
+
+@pytest.mark.unit
 async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_reason(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5878,13 +5950,14 @@ async def test_commit_dirty_worktree_fails_closed_when_protected_revert_check_er
         worktrees_root=tmp_path / "worktrees",
     )
 
-    assert not await runner._commit_dirty_worktree(
-        workspace_id=workspace_id,
-        message="fix: repair protected scope",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
-    )
+    with pytest.raises(ProtectedScopeDiffError):
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: repair protected scope",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+        )
     assert adapter.calls == []
     call_args = [call.args for call in cmd.calls]
     assert not any(args[:1] == ["git"] and "add" in args for args in call_args)
