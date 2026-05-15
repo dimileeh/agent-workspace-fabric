@@ -1861,6 +1861,76 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_policy_block(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_clears_addressed_thread_state_on_protected_scope_early_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fixed_thread = ReviewThread(
+        thread_id="T_fixed",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this first",
+        author="reviewer",
+    )
+    blocked_thread = ReviewThread(
+        thread_id="T_blocked",
+        path="src/foo.py",
+        line=24,
+        body_excerpt="then protected scope diff fails",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    async def _address_thread(**kwargs: object) -> str:
+        thread = kwargs["thread"]
+        assert isinstance(thread, ReviewThread)
+        if thread.thread_id == fixed_thread.thread_id:
+            return "fix_committed"
+        raise ProtectedScopeDiffError("diff baseline unavailable")
+
+    async def _protected_scope_result(**kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(kwargs["exc"]),
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_result,
+    )
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_protected_thread",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(fixed_thread, blocked_thread),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_protected_thread",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert "T_fixed" not in state.threads_addressed_ids
+    assert _review_thread_body_state_key("T_fixed") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1901,6 +1971,76 @@ async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     assert result.pushed is False
     assert result.returncode == 1
     assert "Supply-chain policy blocked review fix" in result.stderr
+
+
+@pytest.mark.unit
+async def test_fix_cycle_clears_addressed_review_state_on_protected_scope_early_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fixed_review = ReviewComment(
+        comment_id="C_fixed",
+        body_excerpt="please adjust this first",
+        author="reviewer",
+    )
+    blocked_review = ReviewComment(
+        comment_id="C_blocked",
+        body_excerpt="then protected scope diff fails",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    async def _address_review_comment_result(**kwargs: object) -> pr_monitor_runner.VerdictResult:
+        comment = kwargs["comment"]
+        assert isinstance(comment, ReviewComment)
+        if comment.comment_id == fixed_review.comment_id:
+            return pr_monitor_runner.VerdictResult(verdict="fix_committed")
+        raise ProtectedScopeDiffError("diff baseline unavailable")
+
+    async def _protected_scope_result(**kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(kwargs["exc"]),
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_address_review_comment_result",
+        _address_review_comment_result,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_result,
+    )
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_protected_review",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(fixed_review, blocked_review),
+        state=state,
+        remote_branch="awf/ws_protected_review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert "C_fixed" not in state.threads_addressed_ids
+    assert _review_comment_body_state_key("C_fixed") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

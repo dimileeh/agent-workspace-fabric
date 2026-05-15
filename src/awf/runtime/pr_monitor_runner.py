@@ -3772,6 +3772,8 @@ class PullRequestMonitorRunner:
                         state=state,
                     )
                 except ProtectedScopeDiffError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
                     return await self._protected_scope_diff_unavailable_push_result(
                         workspace_id=workspace_id,
                         remote_branch=remote_branch,
@@ -3800,6 +3802,8 @@ class PullRequestMonitorRunner:
                         state=state,
                     )
                 except ProtectedScopeDiffError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
                     return await self._protected_scope_diff_unavailable_push_result(
                         workspace_id=workspace_id,
                         remote_branch=remote_branch,
