@@ -460,6 +460,61 @@ def test_request_admission_limiter_keeps_live_buckets_for_other_window_sizes() -
 
 
 @pytest.mark.unit
+def test_request_admission_limiter_marks_all_scanned_window_sizes_pruned() -> None:
+    now = 120.0
+
+    def clock() -> float:
+        return now
+
+    limiter = RequestAdmissionLimiter(clock=clock)
+    live_thirty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "live-30-second-window",
+        30,
+        4,
+    )
+    live_sixty_second_bucket = (
+        WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        "client_host",
+        "live-60-second-window",
+        60,
+        2,
+    )
+    limiter._buckets = _CountingAdmissionBuckets(
+        {
+            live_thirty_second_bucket: 1,
+            live_sixty_second_bucket: 1,
+        }
+    )
+    identity = extract_request_identity(
+        _request(authorization="Bearer active-token"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert limiter._last_pruned_windows[30] == 4
+    assert limiter._last_pruned_windows[60] == 2
+
+    limiter._buckets.iterated_keys = 0
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=identity,
+        limit=10,
+        window_seconds=30,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert limiter._buckets.iterated_keys == 0
+
+
+@pytest.mark.unit
 def test_request_admission_reuses_limiter_without_app_state() -> None:
     request = SimpleNamespace(
         headers=Headers({}),

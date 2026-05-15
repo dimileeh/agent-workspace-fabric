@@ -154,10 +154,20 @@ class RequestAdmissionLimiter:
         if last_pruned_window is not None and current_window <= last_pruned_window:
             return
 
-        stale_keys = [key for key in self._buckets if key[4] < int(now // key[3])]
+        pruned_windows = {window_seconds: current_window}
+        stale_keys = []
+        for key in self._buckets:
+            bucket_window_seconds = key[3]
+            bucket_current_window = int(now // bucket_window_seconds)
+            pruned_windows[bucket_window_seconds] = bucket_current_window
+            if key[4] < bucket_current_window:
+                stale_keys.append(key)
         for key in stale_keys:
             del self._buckets[key]
-        self._last_pruned_windows[window_seconds] = current_window
+        for pruned_window_seconds, pruned_current_window in pruned_windows.items():
+            previous_pruned_window = self._last_pruned_windows.get(pruned_window_seconds)
+            if previous_pruned_window is None or pruned_current_window > previous_pruned_window:
+                self._last_pruned_windows[pruned_window_seconds] = pruned_current_window
 
 
 def extract_request_identity(

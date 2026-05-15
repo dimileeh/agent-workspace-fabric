@@ -944,6 +944,58 @@ def test_callback_replay_key_cache_default_retains_keys_past_response_cache_limi
 
 
 @pytest.mark.unit
+async def test_register_callback_known_replay_key_db_miss_returns_conflict_without_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _direct_callback_request()
+    payload = _callback_payload(
+        name="callback-known-missing",
+        target_url="https://operator.example.com/awf/known-missing",
+    )
+    idempotency_key = "callback-known-missing-key"
+    callbacks_route._callback_idempotency_replay_key_cache(request).remember(  # noqa: SLF001
+        payload,
+        idempotency_key=idempotency_key,
+    )
+    replay_keys: list[str] = []
+    register_keys: list[str] = []
+
+    async def missing_replay(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        replay_keys.append(idempotency_key)
+
+    async def fail_register(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        register_keys.append(idempotency_key)
+        raise AssertionError("known replay-key durable miss must not register a callback")
+
+    monkeypatch.setattr(callbacks_route.CallbackService, "replay_existing", missing_replay)
+    monkeypatch.setattr(callbacks_route.CallbackService, "register", fail_register)
+
+    with pytest.raises(callbacks_route.HTTPException) as exc_info:
+        await callbacks_route.register_callback(
+            payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            session_factory=object(),  # type: ignore[arg-type]
+            settings=_callback_request_admission_settings(limit=10),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error_code"] == "IDEMPOTENCY_REPLAY_UNAVAILABLE"
+    assert replay_keys == [idempotency_key]
+    assert register_keys == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "changed_body",
     [

@@ -45,6 +45,7 @@ router = APIRouter(
 )
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
 _CALLBACK_REGISTER_RATE_LIMITED = "CALLBACK_REGISTER_RATE_LIMITED"
+_IDEMPOTENCY_REPLAY_UNAVAILABLE = "IDEMPOTENCY_REPLAY_UNAVAILABLE"
 _CALLBACK_REPLAY_CACHE_STATE_KEY = "callback_register_idempotency_replay_cache"
 _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY = "callback_register_idempotency_replay_key_cache"
 _CALLBACK_REPLAY_CACHE_MAX_ENTRIES = 4096
@@ -211,6 +212,7 @@ async def register_callback(
         )
         if response is not None:
             return response
+        raise _idempotency_replay_unavailable()
 
     admission = admit_request(
         request,
@@ -322,6 +324,20 @@ def _idempotency_conflict() -> HTTPException:
     )
 
 
+def _idempotency_replay_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error_code": _IDEMPOTENCY_REPLAY_UNAVAILABLE,
+            "message": (
+                "Idempotency-Key was recognized but the original callback registration "
+                "is no longer available; use a fresh key only when creating a new "
+                "callback registration is intended."
+            ),
+        },
+    )
+
+
 def _callback_register_rate_limited_response(
     decision: RequestAdmissionDecision,
 ) -> JSONResponse:
@@ -353,13 +369,16 @@ async def _callback_durable_replay_after_rejection(
         raise _idempotency_conflict() from exc
     if not known_replay_key:
         return None
-    return await _callback_durable_replay_response(
+    response = await _callback_durable_replay_response(
         service,
         replay_cache,
         replay_key_cache,
         payload,
         idempotency_key=idempotency_key,
     )
+    if response is None:
+        raise _idempotency_replay_unavailable()
+    return response
 
 
 async def _callback_durable_replay_response(

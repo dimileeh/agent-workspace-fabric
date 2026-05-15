@@ -121,6 +121,7 @@ router_v2 = APIRouter(
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
 _WORKSPACE_CREATE_RATE_LIMITED = "WORKSPACE_CREATE_RATE_LIMITED"
+_IDEMPOTENCY_REPLAY_UNAVAILABLE = "IDEMPOTENCY_REPLAY_UNAVAILABLE"
 _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY = "workspace_create_idempotency_replay_key_cache"
 _WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES = 4096
 _WORKSPACE_CREATE_V1_API_VERSION = "v1"
@@ -243,6 +244,7 @@ async def create_workspace(
             )
             if replay is not None:
                 return replay
+            return _workspace_create_idempotency_replay_unavailable_response()
 
     admission = admit_request(
         request,
@@ -338,6 +340,7 @@ async def create_workspace_v2(
             )
             if replay is not None:
                 return replay
+            return _workspace_create_idempotency_replay_unavailable_response()
 
     admission = admit_request(
         request,
@@ -467,7 +470,9 @@ async def _workspace_create_v1_durable_replay_after_rejection(
         payload,
         idempotency_key=idempotency_key,
     )
-    if replay is not None and not isinstance(replay, JSONResponse):
+    if replay is None:
+        return _workspace_create_idempotency_replay_unavailable_response()
+    if not isinstance(replay, JSONResponse):
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
@@ -525,7 +530,9 @@ async def _workspace_create_v2_durable_replay_after_rejection(
         idempotency_key=idempotency_key,
         settings=settings,
     )
-    if replay is not None and not isinstance(replay, JSONResponse):
+    if replay is None:
+        return _workspace_create_idempotency_replay_unavailable_response()
+    if not isinstance(replay, JSONResponse):
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
@@ -571,6 +578,20 @@ def _workspace_create_idempotency_conflict_response() -> JSONResponse:
             message=(
                 "Idempotency-Key previously used with a different payload; "
                 "supply a fresh key or replay with the original body."
+            ),
+        ).model_dump(),
+    )
+
+
+def _workspace_create_idempotency_replay_unavailable_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content=ErrorResponse(
+            error_code=_IDEMPOTENCY_REPLAY_UNAVAILABLE,
+            message=(
+                "Idempotency-Key was recognized but the original workspace record "
+                "is no longer available; use a fresh key only when creating a new "
+                "workspace is intended."
             ),
         ).model_dump(),
     )

@@ -1063,6 +1063,90 @@ class TestCreateWorkspace:
         )
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "known missing replay v1"}
+                ),
+                "known-missing-workspace-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="known missing replay v2")),
+                "known-missing-workspace-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_known_replay_key_db_miss_returns_conflict_without_create(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        replay_key_cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        replay_key_cache.remember(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=api_version,
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        create_calls: list[str | None] = []
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> None:
+            lookup_keys.append(key)
+
+        async def fail_v1_create(_self: WorkspaceRepository, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("known replay-key durable miss must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("known replay-key durable miss must not create a workspace")
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        session = SimpleNamespace(info={}, bind=None)
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=10),
+                session=session,  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=10),
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 409
+        assert json.loads(response.body)["error_code"] == "IDEMPOTENCY_REPLAY_UNAVAILABLE"
+        assert lock_keys == [idempotency_key]
+        assert lookup_keys == [idempotency_key]
+        assert create_calls == []
+
+    @pytest.mark.unit
     async def test_rejects_empty_task_prompt(self, client: AsyncClient) -> None:
         bad = {**_MINIMAL_BODY, "task_prompt": ""}
         response = await client.post("/v1/workspaces", json=bad)
