@@ -11,7 +11,7 @@ import hmac
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi import Depends, HTTPException, Request, Security, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -81,6 +81,28 @@ def require_api_token(
     settings: Settings = Depends(get_settings),
 ) -> None:
     """Require the local AWF bearer token for sensitive operator APIs."""
+    _require_authorization_header(
+        _authorization_header_value(credentials),
+        settings=settings,
+    )
+
+
+def require_websocket_api_token(
+    websocket: WebSocket,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Require the local AWF bearer token for WebSocket handshakes."""
+    _require_authorization_header(
+        _normalized_authorization_header(websocket.headers.get("authorization")),
+        settings=settings,
+    )
+
+
+def _require_authorization_header(
+    authorization: str | None,
+    *,
+    settings: Settings,
+) -> None:
     if not settings.api_token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -90,7 +112,6 @@ def require_api_token(
             },
         )
     expected = f"Bearer {settings.api_token}".encode()
-    authorization = _authorization_header_value(credentials)
     supplied = (authorization or "").encode()
     if not hmac.compare_digest(supplied, expected):
         raise HTTPException(
@@ -105,5 +126,14 @@ def _authorization_header_value(
 ) -> str | None:
     if credentials is None:
         return None
-    scheme = "Bearer" if credentials.scheme.lower() == "bearer" else credentials.scheme
-    return f"{scheme} {credentials.credentials}"
+    return _normalized_authorization_header(f"{credentials.scheme} {credentials.credentials}")
+
+
+def _normalized_authorization_header(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+    scheme, separator, credentials = authorization.partition(" ")
+    if not separator:
+        return authorization
+    normalized_scheme = "Bearer" if scheme.lower() == "bearer" else scheme
+    return f"{normalized_scheme} {credentials}"

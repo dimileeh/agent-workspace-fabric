@@ -8,6 +8,7 @@ import pytest
 import structlog
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from starlette.datastructures import Headers
 
 import awf.api.deps as deps
 from awf.common.config import Settings
@@ -41,6 +42,14 @@ def test_require_api_token_accepts_http_bearer_credentials_case_insensitively() 
     credentials = _bearer_credentials("secret", scheme="bearer")
 
     deps.require_api_token(credentials, settings=settings)
+
+
+@pytest.mark.unit
+def test_require_websocket_api_token_reads_handshake_authorization_header() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    websocket = SimpleNamespace(headers=Headers({"authorization": "bearer secret"}))
+
+    deps.require_websocket_api_token(websocket, settings=settings)  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
