@@ -453,22 +453,21 @@ async def _workspace_create_v1_durable_replay_after_rejection(
     *,
     idempotency_key: str,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    if not await repo.has_idempotency_key(idempotency_key):
-        return None
-    replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     replay = await _workspace_create_v1_replay_response(
         repo,
         payload,
         idempotency_key=idempotency_key,
     )
     if replay is None:
-        return _workspace_create_idempotency_replay_unavailable_response()
+        return None
     if not isinstance(replay, JSONResponse):
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
             api_version=_WORKSPACE_CREATE_V1_API_VERSION,
         )
+    else:
+        replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     return replay
 
 
@@ -503,9 +502,6 @@ async def _workspace_create_v2_durable_replay_after_rejection(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    if not await repo.has_idempotency_key(idempotency_key):
-        return None
-    replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     replay = await _workspace_create_v2_replay_response(
         repo,
         payload,
@@ -513,13 +509,15 @@ async def _workspace_create_v2_durable_replay_after_rejection(
         settings=settings,
     )
     if replay is None:
-        return _workspace_create_idempotency_replay_unavailable_response()
+        return None
     if not isinstance(replay, JSONResponse):
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
             api_version=_WORKSPACE_CREATE_V2_API_VERSION,
         )
+    else:
+        replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     return replay
 
 

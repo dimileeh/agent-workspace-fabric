@@ -819,7 +819,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limit_rejects_fresh_idempotency_key_with_exact_replay_probe(
+    async def test_rate_limit_rejects_fresh_idempotency_key_with_lock_scoped_replay_check(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -839,7 +839,6 @@ class TestCreateWorkspace:
         list_calls = 0
         original_lock = WorkspaceRepository.acquire_idempotency_key_lock
         original_lookup = WorkspaceRepository.get_by_idempotency_key
-        original_probe = WorkspaceRepository.has_idempotency_key
 
         async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
             lock_keys.append(key)
@@ -851,7 +850,7 @@ class TestCreateWorkspace:
 
         async def tracked_probe(self: WorkspaceRepository, key: str) -> bool:
             probe_keys.append(key)
-            return await original_probe(self, key)
+            raise AssertionError("rate-limited replays must not trust a pre-lock probe")
 
         async def fail_list_replay_keys(_self: WorkspaceRepository) -> list[str]:
             nonlocal list_calls
@@ -892,9 +891,9 @@ class TestCreateWorkspace:
 
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
-        assert lock_keys == [first_key]
-        assert lookup_keys == [first_key]
-        assert probe_keys == [second_key]
+        assert lock_keys == [first_key, second_key]
+        assert lookup_keys == [first_key, second_key]
+        assert probe_keys == []
         assert list_calls == 0
 
     @pytest.mark.unit
@@ -942,6 +941,66 @@ class TestCreateWorkspace:
         assert first.status_code == 202
         assert replay.status_code == 202
         assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "in-flight over quota replay v1"},
+                "workspace-inflight-rate-limit-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="in-flight over quota replay v2"),
+                "workspace-inflight-rate-limit-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_duplicate_idempotency_key_waits_on_replay_lock_when_probe_misses(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        probe_keys: list[str] = []
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        assert first.status_code == 202
+        _clear_workspace_create_replay_key_cache(app)
+
+        async def stale_pre_lock_probe(_self: WorkspaceRepository, key: str) -> bool:
+            probe_keys.append(key)
+            return False
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "has_idempotency_key",
+            stale_pre_lock_probe,
+        )
+
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert probe_keys == []
 
     @pytest.mark.unit
     async def test_rejects_v1_create_burst_after_configured_limit(
