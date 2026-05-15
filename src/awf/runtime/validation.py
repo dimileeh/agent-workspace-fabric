@@ -527,6 +527,8 @@ _SETUP_DEPENDENCY_NESTED_COMMAND_VERBS: dict[str, dict[str, frozenset[str]]] = {
 _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
     {
         "--cache",
+        "--cert",
+        "--client-cert",
         "--config",
         "--cwd",
         "--directory",

@@ -552,9 +552,19 @@ def test_setup_dependency_network_classifier_accepts_install_package_manager_ver
 
 
 @pytest.mark.unit
-def test_setup_dependency_network_classifier_accepts_pip_proxy_before_subcommand() -> None:
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip --proxy http://proxy:8080 install -r requirements.txt",
+        "pip --cert /etc/ssl/corp.pem install -r requirements.txt",
+        "python -m pip --client-cert client.pem install -r requirements.txt",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_pip_value_flags_before_subcommand(
+    command: str,
+) -> None:
     classification = _classify_setup_dependency_network_failure(
-        command="pip --proxy http://proxy:8080 install -r requirements.txt",
+        command=command,
         returncode=1,
         stdout="",
         stderr="setup command failed: temporary failure in name resolution",
