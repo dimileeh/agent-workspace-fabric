@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import (
-    ErrorResponse,
     OperationResponse,
     WorkspaceControlRequest,
     WorkspaceControlResponse,
@@ -39,7 +39,7 @@ router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}",
     tags=["workspace-controls"],
     dependencies=[Depends(require_api_token)],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
 
 

@@ -7,7 +7,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import ValidationProvenanceListResponse
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.validation_provenance import (
@@ -16,7 +17,12 @@ from awf.service.validation_provenance import (
     list_validation_provenance_response,
 )
 
-router = APIRouter(prefix="/v1/workspaces/{workspace_id}/validation", tags=["validation"])
+router = APIRouter(
+    prefix="/v1/workspaces/{workspace_id}/validation",
+    tags=["validation"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 
 __all__ = ["list_validation_provenance"]
 

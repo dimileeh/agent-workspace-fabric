@@ -152,7 +152,7 @@ async def test_workspace_summary_validates_since_hours_bounds(
 
 
 @pytest.mark.unit
-async def test_workspace_summary_is_token_free_when_api_token_is_configured(
+async def test_workspace_summary_response_does_not_echo_api_token_when_authorized(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,11 +160,15 @@ async def test_workspace_summary_is_token_free_when_api_token_is_configured(
     get_settings.cache_clear()
 
     try:
-        response = await client.get("/v1/metrics/workspaces/summary")
+        response = await client.get(
+            "/v1/metrics/workspaces/summary",
+            headers={"Authorization": "Bearer secret"},
+        )
     finally:
         get_settings.cache_clear()
 
     assert response.status_code == 200
+    assert "secret" not in response.text
 
 
 @pytest.mark.unit

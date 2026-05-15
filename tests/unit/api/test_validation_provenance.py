@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.validation as validation_route
 import awf.service.validation_provenance as validation_service
+from awf.common.config import get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -29,8 +31,12 @@ def test_validation_provenance_ensure_utc_accepts_naive_datetime() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
     monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 _V2_PROFILE_BODY = {
@@ -67,6 +73,7 @@ _V1_BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+_AUTH_HEADERS = {"Authorization": "Bearer secret"}
 
 
 def test_validation_route_exports_only_route_endpoint() -> None:
@@ -119,19 +126,19 @@ def test_validation_provenance_command_lookup_includes_database_hooks() -> None:
 
 
 async def _create_v2_profile_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v2/workspaces", json=_V2_PROFILE_BODY)
+    response = await client.post("/v2/workspaces", json=_V2_PROFILE_BODY, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
 
 async def _create_v2_workspace_with_body(client: AsyncClient, body: dict) -> str:
-    response = await client.post("/v2/workspaces", json=body)
+    response = await client.post("/v2/workspaces", json=body, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
 
 async def _create_v1_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v1/workspaces", json=_V1_BODY)
+    response = await client.post("/v1/workspaces", json=_V1_BODY, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -143,6 +150,7 @@ async def _create_v1_workspace_with_commands(
     response = await client.post(
         "/v1/workspaces",
         json={**_V1_BODY, "test_commands": commands},
+        headers=_AUTH_HEADERS,
     )
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
@@ -495,7 +503,7 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
         stderr_lines=0,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     body = response.json()
@@ -579,7 +587,7 @@ async def test_validation_provenance_prefers_persisted_validation_runs(
         },
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     body = response.json()
@@ -657,7 +665,7 @@ async def test_validation_provenance_exposes_persisted_identity_fields(
         environment_identity_inputs=identity_inputs,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -689,7 +697,7 @@ async def test_validation_provenance_legacy_row_uses_safe_identity_fallbacks(
         target_head_sha="legacy-target-head",
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -734,7 +742,7 @@ async def test_validation_provenance_reports_persisted_coverage_policy(
         },
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -774,7 +782,7 @@ async def test_validation_provenance_reports_failing_test_evidence(
         },
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -811,7 +819,7 @@ async def test_validation_provenance_malformed_persisted_command_uses_safe_defau
         target_head_sha=None,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -838,7 +846,7 @@ async def test_validation_provenance_malformed_persisted_commands_container_uses
         commands={"unexpected": "object"},
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -867,7 +875,7 @@ async def test_validation_provenance_uses_latest_candidate_head_for_freshness(
         target_head_sha="run-head",
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -927,7 +935,7 @@ async def test_validation_provenance_resolves_profile_commands_by_phase_index(
             stderr_lines=0,
         )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert [
@@ -981,7 +989,7 @@ async def test_validation_provenance_displays_http_healthcheck_target(
         stderr_lines=0,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert [
@@ -1024,7 +1032,7 @@ async def test_validation_provenance_resolves_coverage_command_from_profile(
         stderr_lines=0,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -1075,7 +1083,7 @@ async def test_validation_provenance_handles_stream_id_suffixes_and_label_fallba
         name="ignored log",
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     items = response.json()["items"]
@@ -1113,7 +1121,7 @@ async def test_validation_provenance_marks_open_streams_running_and_uses_request
         closed=False,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     body = response.json()
@@ -1144,7 +1152,7 @@ async def test_validation_provenance_ignores_malformed_resolved_profile(
         stderr_lines=0,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -1171,7 +1179,7 @@ async def test_validation_provenance_marks_open_streams_failed_for_failed_worksp
         closed=False,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -1210,7 +1218,7 @@ async def test_validation_provenance_marks_failed_command_from_workspace_failure
         stderr_lines=1,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
@@ -1241,7 +1249,7 @@ async def test_validation_provenance_keeps_records_after_failed_command_unknown(
             stderr_lines=0,
         )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
@@ -1269,7 +1277,7 @@ async def test_validation_provenance_failed_workspace_without_message_keeps_stat
         stderr_lines=0,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     item = response.json()["items"][0]
@@ -1308,7 +1316,7 @@ async def test_validation_provenance_phase_failure_uses_last_matching_phase_reco
         stderr_lines=1,
     )
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
@@ -1323,7 +1331,7 @@ async def test_validation_provenance_empty_when_workspace_has_no_validation_logs
 ) -> None:
     workspace_id = await _create_v1_workspace(client)
 
-    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert response.json() == {
@@ -1339,7 +1347,7 @@ async def test_validation_provenance_empty_when_workspace_has_no_validation_logs
 async def test_validation_provenance_missing_workspace_returns_404(
     client: AsyncClient,
 ) -> None:
-    response = await client.get("/v1/workspaces/ws_missing/validation")
+    response = await client.get("/v1/workspaces/ws_missing/validation", headers=_AUTH_HEADERS)
 
     assert response.status_code == 404
     assert response.json()["detail"]["error_code"] == "NOT_FOUND"
@@ -1461,6 +1469,7 @@ async def test_validation_provenance_next_cursor_fetches_second_page(
     first_response = await client.get(
         f"/v1/workspaces/{workspace_id}/validation",
         params={"limit": 1},
+        headers=_AUTH_HEADERS,
     )
 
     assert first_response.status_code == 200
@@ -1472,6 +1481,7 @@ async def test_validation_provenance_next_cursor_fetches_second_page(
     second_response = await client.get(
         f"/v1/workspaces/{workspace_id}/validation",
         params={"limit": 1, "cursor": first_page["next_cursor"]},
+        headers=_AUTH_HEADERS,
     )
 
     assert second_response.status_code == 200

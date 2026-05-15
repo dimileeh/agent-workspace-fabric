@@ -1536,6 +1536,7 @@ def workspace_create(
         help="Audit reason for --provider-readiness-override.",
     ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -1597,7 +1598,9 @@ def workspace_create(
     if disk_mb is not None:
         body["resources"]["disk_mb"] = disk_mb
 
-    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+    headers = _api_token_headers(api_token)
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     response = _call(
         "POST",
         "/v2/workspaces",
@@ -1611,11 +1614,17 @@ def workspace_create(
 @workspace_app.command("show")
 def workspace_show(
     workspace_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Fetch the current state of one workspace."""
-    response = _call("GET", f"/v1/workspaces/{workspace_id}", base_url=_base_url(base_url))
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
     _handle_response(response, fmt)
 
 
@@ -1971,6 +1980,7 @@ def workspace_list(
     agent: AgentRuntime | None = typer.Option(None, "--agent"),
     repo_url: str | None = typer.Option(None, "--repo-url"),
     limit: int = typer.Option(50, "--limit"),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -1989,6 +1999,7 @@ def workspace_list(
         "/v1/workspaces",
         base_url=_base_url(base_url),
         params=params_list,
+        headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
 
