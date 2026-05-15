@@ -57,6 +57,30 @@ OPERATION_TYPE_FILTER_PARITY_CAPABILITIES = (
     "global_operations",
 )
 
+WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH = (
+    ("GET", "/v1/events"),
+    ("GET", "/release-readiness"),
+    ("GET", "/v1/locks"),
+    ("GET", "/v1/locks/overlap-graph"),
+    ("GET", "/v1/merge-queue"),
+    ("GET", "/v1/metrics/failures/summary"),
+    ("GET", "/v1/metrics/resources/saturation"),
+    ("GET", "/v1/metrics/slo"),
+    ("GET", "/v1/metrics/workspaces/summary"),
+    ("GET", "/v1/tasks"),
+    ("GET", "/v1/tasks/{task_ref}/attempts"),
+    ("POST", "/v1/workspaces"),
+    ("POST", "/v2/workspaces"),
+    ("GET", "/v1/workspaces"),
+    ("GET", "/v1/workspaces/overview"),
+    ("GET", "/v1/workspaces/{workspace_id}"),
+    ("GET", "/v1/workspaces/{workspace_id}/events"),
+    ("GET", "/v1/workspaces/{workspace_id}/runtime"),
+    ("GET", "/v1/workspaces/{workspace_id}/stale-reasons"),
+    ("GET", "/v1/workspaces/{workspace_id}/secret-leases"),
+    ("GET", "/v1/workspaces/{workspace_id}/validation"),
+)
+
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
@@ -102,6 +126,30 @@ def test_rest_query_metadata_uses_public_aliases() -> None:
         "limit",
     }
     assert "operation_type" not in routes[("GET", "/v1/operations")].query_fields
+
+
+@pytest.mark.unit
+def test_health_route_is_public_for_service_probing() -> None:
+    route = rest_routes().get(("GET", "/healthz"))
+    assert route is not None
+    assert "require_api_token" not in route.dependencies
+
+
+@pytest.mark.unit
+def test_readiness_route_is_public_for_service_probing() -> None:
+    route = rest_routes().get(("GET", "/readyz"))
+    assert route is not None
+    assert "require_api_token" not in route.dependencies
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method, path", WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH)
+def test_workspace_metadata_routes_remain_auth_protected(method: str, path: str) -> None:
+    route = rest_routes().get((method, path))
+    assert route is not None, f"{method} {path} route is missing in app routes."
+    assert "require_api_token" in route.dependencies, (
+        f"{method} {path} must require require_api_token unless explicitly public."
+    )
 
 
 @pytest.mark.unit

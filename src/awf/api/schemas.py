@@ -1545,3 +1545,9 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     detail: dict[str, Any] | None = None
+
+
+class HttpExceptionErrorResponse(BaseModel):
+    """FastAPI HTTPException envelope carrying AWF's structured error detail."""
+
+    detail: ErrorResponse
