@@ -19,6 +19,7 @@ from awf.service.callbacks import (
     CallbackIdempotencyConflictError,
     CallbackService,
     CallbackTargetPolicyError,
+    CallbackTargetPolicyViolationError,
 )
 
 router = APIRouter(
@@ -69,6 +70,14 @@ async def register_callback(
             payload,
             idempotency_key=key,
         )
+    except CallbackTargetPolicyViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+                "message": str(exc),
+            },
+        ) from exc
     except CallbackTargetPolicyError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

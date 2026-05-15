@@ -338,15 +338,6 @@ class CallbackDeliveryService:
                         now=self._clock,
                     )
                     continue
-                except CallbackTargetValidationTimeoutError as exc:
-                    await _record_callback_target_validation_timeout(
-                        repo,
-                        delivery,
-                        subscription,
-                        exc,
-                        now=self._clock,
-                    )
-                    continue
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
                     _log.error(
                         "callback.delivery_request_failed",

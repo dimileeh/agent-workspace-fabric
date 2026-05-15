@@ -229,7 +229,7 @@ async def test_register_callback_rejects_http_target_when_https_required_without
 
     assert response.status_code == 422
     assert response.json()["detail"] == {
-        "error_code": "CALLBACK_TARGET_INVALID",
+        "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
         "message": "target_url must use https",
     }
     assert await _subscription_count(engine) == 0
@@ -258,7 +258,7 @@ async def test_register_callback_rejects_non_allowlisted_target_without_insert(
 
     assert response.status_code == 422
     assert response.json()["detail"] == {
-        "error_code": "CALLBACK_TARGET_INVALID",
+        "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
         "message": "target_url host is not allowlisted",
     }
     assert await _subscription_count(engine) == 0
