@@ -131,7 +131,21 @@ def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "api_token",
-    [None, "", " ", "local-dev-token", "changeme", "default", "short"],
+    [
+        None,
+        "",
+        " ",
+        "local-dev-token",
+        "changeme",
+        "default",
+        "short",
+        "secret-secret-secret-secret",
+        "admin-admin-admin-admin-admin",
+        "apikey-apikey-apikey-apikey",
+        "api-key-api-key-api-key-api-key",
+        "api_key_api_key_api_key_api_key",
+        "bearer-bearer-bearer-bearer",
+    ],
 )
 def test_production_guardrails_reject_missing_or_weak_api_token(
     api_token: str | None,

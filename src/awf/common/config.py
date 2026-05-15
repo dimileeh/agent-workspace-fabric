@@ -27,8 +27,14 @@ DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 _MIN_PRODUCTION_API_TOKEN_LENGTH = 24
+_WEAK_API_TOKEN_SEPARATORS = ("-", "_", ".")
 _WEAK_API_TOKEN_VALUES = frozenset(
     {
+        "admin",
+        "api-key",
+        "api_key",
+        "apikey",
+        "bearer",
         "change-me",
         "changeme",
         "default",
@@ -41,6 +47,7 @@ _WEAK_API_TOKEN_VALUES = frozenset(
         "placeholder",
         "replace-me",
         "replace_me",
+        "secret",
         "test",
         "token",
     }
@@ -155,10 +162,36 @@ def _api_token_diagnostic(api_token: str | None) -> ProductionSettingsDiagnostic
 
 
 def _is_weak_api_token(api_token: str) -> bool:
+    normalized = api_token.lower()
     return (
-        len(api_token) < _MIN_PRODUCTION_API_TOKEN_LENGTH
-        or api_token.lower() in _WEAK_API_TOKEN_VALUES
+        len(normalized) < _MIN_PRODUCTION_API_TOKEN_LENGTH
+        or normalized in _WEAK_API_TOKEN_VALUES
+        or _is_repeated_weak_api_token_value(normalized)
     )
+
+
+def _is_repeated_weak_api_token_value(api_token: str) -> bool:
+    for weak_value in _WEAK_API_TOKEN_VALUES:
+        if len(weak_value) >= len(api_token):
+            continue
+        for separator in _WEAK_API_TOKEN_SEPARATORS:
+            if _is_repeated_token_value(api_token, weak_value, separator):
+                return True
+    return False
+
+
+def _is_repeated_token_value(api_token: str, value: str, separator: str) -> bool:
+    count = 0
+    remainder = api_token
+    while remainder.startswith(value):
+        count += 1
+        remainder = remainder[len(value) :]
+        if not remainder:
+            return count > 1
+        if not remainder.startswith(separator):
+            return False
+        remainder = remainder[len(separator) :]
+    return False
 
 
 def _normalized_secret(value: str | None) -> str | None:
