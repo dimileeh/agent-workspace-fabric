@@ -220,6 +220,7 @@ async def test_retry_endpoint_requires_authorization_when_api_token_configured(
     response = await client.post(
         f"/v1/workspaces/{original_id}/retry",
         params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers={"Authorization": "Bearer wrong"},
     )
 
     assert response.status_code == 401

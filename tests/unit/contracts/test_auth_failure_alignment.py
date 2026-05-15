@@ -327,6 +327,7 @@ def _protected_rest_path(capability_name: str) -> str:
     capability = CAPABILITIES_BY_NAME[capability_name]
     return capability.rest_path.format(
         workspace_id="ws_auth_contract",
+        task_ref="task_auth_contract",
         stream_id="agent.stdout",
         operation_id="op_auth_contract",
     )

@@ -18,11 +18,12 @@ import asyncio
 import contextlib
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from awf import __version__
+from awf.api.deps import require_api_token
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
@@ -107,7 +108,7 @@ async def healthz() -> HealthResponse:
     return HealthResponse(status="ok", service="awf", version=__version__)
 
 
-@router.get("/release-readiness")
+@router.get("/release-readiness", dependencies=[Depends(require_api_token)])
 async def release_readiness(
     response: Response,
     provider: list[str] = Query(default=[]),

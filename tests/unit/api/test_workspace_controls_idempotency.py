@@ -856,7 +856,10 @@ async def test_recovery_operations_require_authorization(
     response = await client.post(
         f"/v1/workspaces/{workspace_id}/{action}",
         json={"reason": "operator recovery"},
-        headers={"Idempotency-Key": f"{action}-auth"},
+        headers={
+            "Authorization": "Bearer wrong",
+            "Idempotency-Key": f"{action}-auth",
+        },
     )
 
     assert response.status_code == 401

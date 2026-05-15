@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as fastapi_status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
 from awf.api.schemas import MergeQueueListResponse
 from awf.db.enums import WorkspaceStatus
 from awf.service.merge_queue import (
@@ -16,7 +16,11 @@ from awf.service.merge_queue import (
     list_merge_queue_response,
 )
 
-router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
+router = APIRouter(
+    prefix="/v1/merge-queue",
+    tags=["merge-queue"],
+    dependencies=[Depends(require_api_token)],
+)
 
 __all__ = ["list_merge_queue"]
 

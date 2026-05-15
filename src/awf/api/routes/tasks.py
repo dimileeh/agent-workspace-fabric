@@ -7,12 +7,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
 from awf.api.schemas import TaskAttemptListResponse, TaskListResponse
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 
-router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
+router = APIRouter(
+    prefix="/v1/tasks",
+    tags=["tasks"],
+    dependencies=[Depends(require_api_token)],
+)
 
 
 @router.get("", response_model=TaskListResponse)

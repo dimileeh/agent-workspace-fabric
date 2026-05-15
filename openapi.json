@@ -10676,6 +10676,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Release Readiness",
         "tags": [
           "system"
@@ -11018,6 +11023,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "List Locks",
         "tags": [
           "locks"
@@ -11124,6 +11134,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Get Overlap Graph",
         "tags": [
           "locks"
@@ -11238,6 +11253,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "List Merge Queue",
         "tags": [
           "merge-queue"
@@ -11297,6 +11317,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Get Failure Analysis Summary",
         "tags": [
           "metrics"
@@ -11318,6 +11343,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Get Resource Saturation Summary",
         "tags": [
           "metrics"
@@ -11363,6 +11393,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Get Slo Metrics Summary",
         "tags": [
           "metrics"
@@ -11408,6 +11443,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Get Workspace Reliability Summary",
         "tags": [
           "metrics"
@@ -11721,6 +11761,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "List Tasks",
         "tags": [
           "tasks"
@@ -11775,6 +11820,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "List Task Attempts",
         "tags": [
           "tasks"

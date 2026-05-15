@@ -22,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
-from awf.common.config import Settings
+from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 from tests.postgres import postgres_test_engine
@@ -57,6 +57,7 @@ _POSTGRES_SCHEMA_HELPER_CALLS = frozenset(
         "postgres_test_url_sync",
     }
 )
+_API_TEST_TOKEN = "secret"
 
 
 def _uses_postgres_test_fixture(item: pytest.Item) -> bool:
@@ -342,18 +343,28 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
-async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
+async def client(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[AsyncClient]:
     """AsyncClient bound to a fresh AWF app with an isolated PostgreSQL schema.
 
     Uses ``use_lifespan=False`` so the real lifespan (which reads env + builds a
     production engine) doesn't run; we attach our own session factory instead.
     """
+    api_token = os.environ.get("AWF_API_TOKEN") or _API_TEST_TOKEN
+    monkeypatch.setenv("AWF_API_TOKEN", api_token)
+    get_settings.cache_clear()
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     app.state.workspace_admission_disk_check = _ok_workspace_admission_disk_check
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            c.headers["Authorization"] = f"Bearer {api_token}"
+            yield c
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.fixture

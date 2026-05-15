@@ -59,6 +59,16 @@ OPERATION_TYPE_FILTER_PARITY_CAPABILITIES = (
 
 WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH = (
     ("GET", "/v1/events"),
+    ("GET", "/release-readiness"),
+    ("GET", "/v1/locks"),
+    ("GET", "/v1/locks/overlap-graph"),
+    ("GET", "/v1/merge-queue"),
+    ("GET", "/v1/metrics/failures/summary"),
+    ("GET", "/v1/metrics/resources/saturation"),
+    ("GET", "/v1/metrics/slo"),
+    ("GET", "/v1/metrics/workspaces/summary"),
+    ("GET", "/v1/tasks"),
+    ("GET", "/v1/tasks/{task_ref}/attempts"),
     ("POST", "/v1/workspaces"),
     ("POST", "/v2/workspaces"),
     ("GET", "/v1/workspaces"),
