@@ -421,6 +421,68 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_transient_failure_with_required_rollup_dispatches_rerun_for_underlying_job(
+        self,
+    ) -> None:
+        transient_failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "error: Failed to install cpython-3.12.9-linux-x86_64-gnu\n"
+                "Caused by: HTTP status server error (503 Service Unavailable)"
+            ),
+            run_id="25897584271",
+        )
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "A required CI job did not pass.\n"
+                "lint-and-type: success\n"
+                "python-full-coverage: failure\n"
+                "console: success\n"
+                "release-artifacts: success"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(
+                check_state=CheckState.FAILURE,
+                ci_failures=(transient_failure, rollup_failure),
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (transient_failure,)
+
+    @pytest.mark.unit
+    def test_required_rollup_without_underlying_transient_job_dispatches_agent_repair(
+        self,
+    ) -> None:
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "A required CI job did not pass.\n"
+                "lint-and-type: success\n"
+                "python-full-coverage: failure"
+            ),
+            run_id="25897584271",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(rollup_failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (rollup_failure,)
+
+    @pytest.mark.unit
     def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
@@ -581,6 +643,34 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_rerun_budget_reads_legacy_rollup_signature(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (502 Bad Gateway)",
+            run_id="25655330295",
+        )
+        rollup_failure = CheckFailure(
+            name="ci-required",
+            conclusion="FAILURE",
+            log_excerpt="A required CI job did not pass.",
+            run_id="25655330295",
+        )
+        status = _status(
+            check_state=CheckState.FAILURE,
+            ci_failures=(failure, rollup_failure),
+        )
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "2"
+
+        action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == status.ci_failures
 
     @pytest.mark.unit
     def test_transient_failure_with_disabled_rerun_budget_dispatches_agent_repair(self) -> None:

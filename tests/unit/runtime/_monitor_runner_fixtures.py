@@ -46,8 +46,8 @@ class FakeAdapter(AgentAdapter):
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
 
-    def __init__(self) -> None:  # type: ignore[override]
-        super().__init__(runner=None)  # type: ignore[arg-type]
+    def __init__(self, *, default_model: str | None = None) -> None:  # type: ignore[override]
+        super().__init__(runner=None, default_model=default_model)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
         self.workspace_ids = []
@@ -312,6 +312,7 @@ def make_runner(
     log_store: LogStore | None = None,
     merge_coordinator: object | None = None,
     post_merge_target_reconciler: Any | None = None,
+    provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
         "session_factory": factory,
@@ -335,6 +336,7 @@ def make_runner(
         "sleep": sleep_fn,
         "worktrees_root": worktrees_root,
         "log_store": log_store,
+        "provider_recovery_default_model": provider_recovery_default_model,
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root

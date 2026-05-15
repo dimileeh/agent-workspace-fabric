@@ -67,6 +67,61 @@ test("desktop theme screenshots cover dashboard, details, and fullscreen logs", 
   await page.screenshot({ path: testInfo.outputPath("desktop-fullscreen-logs.png"), fullPage: true });
 });
 
+test("task details modal scrolls long prompts without moving the dashboard", async ({ page }) => {
+  await page.setViewportSize({ width: 947, height: 982 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const detailsButton = page.getByRole("button", { name: "Details" }).first();
+  await expect(detailsButton).toBeVisible();
+  const scrollTarget = await detailsButton.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return Math.max(1, window.scrollY + rect.top - window.innerHeight / 3);
+  });
+  await page.evaluate((top) => window.scrollTo(0, top), scrollTarget);
+  await expect(detailsButton).toBeInViewport();
+  const backgroundScrollBefore = await page.evaluate(() => window.scrollY);
+  expect(backgroundScrollBefore).toBeGreaterThan(0);
+
+  await detailsButton.click();
+  await expect(page.getByRole("dialog", { name: /Task details/i })).toBeVisible();
+  const detailsScroll = page.getByTestId("task-details-scroll");
+  await expect(detailsScroll).toBeVisible();
+  const modalScrollBefore = await detailsScroll.evaluate((node) => node.scrollTop);
+
+  await detailsScroll.hover();
+  await page.mouse.wheel(0, 900);
+
+  await expect.poll(async () => detailsScroll.evaluate((node) => node.scrollTop)).toBeGreaterThan(modalScrollBefore + 20);
+  await expect.poll(async () => page.evaluate(() => window.scrollY)).toBe(backgroundScrollBefore);
+});
+
+test("workspace list cards wrap long text without clipping", async ({ page }) => {
+  await page.setViewportSize({ width: 1358, height: 982 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const title = page.getByTestId(`workspace-title-${workspaceId}`);
+  await expect(title).toContainText("policy parity title should wrap");
+  const metrics = await title.evaluate((node) => ({
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+    lineHeight: Number.parseFloat(window.getComputedStyle(node).lineHeight),
+  }));
+
+  expect(metrics.clientHeight).toBeGreaterThan(metrics.lineHeight * 2.4);
+  expect(metrics.scrollHeight - metrics.clientHeight).toBeLessThanOrEqual(1);
+
+  const repo = page.getByTestId(`workspace-repo-${workspaceId}`);
+  const repoMetrics = await repo.evaluate((node) => ({
+    clientWidth: node.clientWidth,
+    scrollWidth: node.scrollWidth,
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+  }));
+  expect(repoMetrics.scrollWidth - repoMetrics.clientWidth).toBeLessThanOrEqual(1);
+  expect(repoMetrics.scrollHeight - repoMetrics.clientHeight).toBeLessThanOrEqual(1);
+});
+
 test("mobile theme screenshots cover dashboard, workspace, and logs views", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await seedDarkAccessiblePreferences(page);
@@ -77,7 +132,7 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-dashboard.png"), fullPage: true });
 
-  await page.getByRole("button", { name: /Dark theme verification workspace/i }).click();
+  await page.getByRole("button", { name: /policy parity title should wrap fully inside the list row/i }).click();
   await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toBeVisible();
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-workspace.png"), fullPage: true });
@@ -261,8 +316,11 @@ function workspaceOverview(id: string, status = "running") {
   return {
     workspace_id: id,
     task_id: `task-${id}`,
-    title: id === workspaceId ? "Dark theme verification workspace" : "Completed monitor verification",
-    task_prompt: "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
+    title:
+      id === workspaceId
+        ? "P1: complete workspace create v2 CLI and MCP policy parity title should wrap fully inside the list row"
+        : "Completed monitor verification",
+    task_prompt: id === workspaceId ? longTaskPrompt() : "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
     repo_url: "https://github.com/example/awf",
     base_branch: "codex/awf-post-merge-fixes",
     branch_name: `codex/${id}`,
@@ -287,6 +345,15 @@ function workspaceOverview(id: string, status = "running") {
     created_at: now,
     updated_at: now,
   };
+}
+
+function longTaskPrompt() {
+  const steps = Array.from(
+    { length: 48 },
+    (_, index) =>
+      `- Step ${index + 1}: verify that the task details dialog keeps prompt scrolling inside the modal viewport.`,
+  );
+  return ["# Task", "This prompt is intentionally long for modal scroll coverage.", ...steps].join("\n");
 }
 
 function workspaceDetail(id: string) {

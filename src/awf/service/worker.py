@@ -149,6 +149,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         adapter: AgentAdapter,
         profile: WorkspaceProfile,
         workspace: Workspace,
+        *,
+        provider_recovery_default_model: str | None = None,
     ) -> Any:
         monitor_builder = (
             build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
@@ -174,6 +176,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
             "workspace_runtime_context": render_workspace_runtime_context(profile),
+            "provider_recovery_default_model": provider_recovery_default_model,
         }
         return monitor_builder(**monitor_kwargs)
 
