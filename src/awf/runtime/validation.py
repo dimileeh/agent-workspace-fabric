@@ -639,7 +639,9 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"no address associated with hostname|"
             r"nodename nor servname provided|"
             r"name or service not known|"
+            r"could not resolve host|"
             r"dns error|"
+            r"\bENOTFOUND\b|"
             r"\bEAI_AGAIN\b"
             r")"
         ),

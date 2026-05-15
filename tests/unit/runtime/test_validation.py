@@ -717,6 +717,14 @@ def test_setup_dependency_network_classifier_skips_yarn_non_install_options(
             "registry.npmjs.org",
         ),
         (
+            "npm ci",
+            "npm ERR! request to https://registry.npmjs.org/react/-/react-18.2.0.tgz "
+            "failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org",
+            "dns",
+            "react==18.2.0",
+            "registry.npmjs.org",
+        ),
+        (
             "pnpm install --frozen-lockfile",
             "ERR_PNPM_FETCH_ request to "
             "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz "
@@ -741,13 +749,23 @@ def test_setup_dependency_network_classifier_skips_yarn_non_install_options(
             "react==18.2.0",
             "registry.npmjs.org",
         ),
+        (
+            "pnpm install --frozen-lockfile",
+            "ERR_PNPM_PREPARE_PKG_FAILURE Command failed: git ls-remote --refs "
+            "https://github.com/acme/private-dep.git\n"
+            "fatal: unable to access 'https://github.com/acme/private-dep.git/': "
+            "Could not resolve host: github.com",
+            "dns",
+            None,
+            "github.com",
+        ),
     ],
 )
 def test_setup_dependency_network_classifier_accepts_node_transient_error_codes(
     command: str,
     stderr: str,
     expected_category: str,
-    expected_package: str,
+    expected_package: str | None,
     expected_host: str,
 ) -> None:
     classification = _classify_setup_dependency_network_failure(
