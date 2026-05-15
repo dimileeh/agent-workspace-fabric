@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, Final, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -116,7 +116,6 @@ router_v2 = APIRouter(
 )
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
-_DIRECT_REQUEST_DEFAULT: Final[Request] = cast(Request, None)
 _WORKSPACE_CREATE_RATE_LIMITED = "WORKSPACE_CREATE_RATE_LIMITED"
 
 __all__ = [
@@ -135,6 +134,10 @@ __all__ = [
 ]
 
 
+def _current_request(request: Request) -> Request:
+    return request
+
+
 @router.post(
     "",
     response_model=WorkspaceAcceptedResponse,
@@ -143,7 +146,7 @@ __all__ = [
 )
 async def create_workspace(
     payload: WorkspaceCreateRequest,
-    request: Request = _DIRECT_REQUEST_DEFAULT,
+    request: Annotated[Request | None, Depends(_current_request)] = None,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     settings: object = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),

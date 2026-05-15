@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Annotated, get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 import awf.api.routes.artifacts as artifact_routes
 import awf.api.routes.validation as validation_routes
@@ -33,6 +35,19 @@ def _admission_ok_disk_check() -> DiskCheck:
         status="ok",
         reason="SUFFICIENT_DISK",
     )
+
+
+def test_workspace_v1_direct_request_default_is_type_visible_optional() -> None:
+    parameter = inspect.signature(workspace_routes.create_workspace).parameters["request"]
+    annotation = get_type_hints(
+        workspace_routes.create_workspace,
+        include_extras=True,
+    )["request"]
+
+    assert parameter.default is None
+    assert get_origin(annotation) is Annotated
+    request_type = get_args(annotation)[0]
+    assert set(get_args(request_type)) == {Request, type(None)}
 
 
 @pytest.mark.unit
