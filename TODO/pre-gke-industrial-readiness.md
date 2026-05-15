@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-14
+Last updated: 2026-05-15
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -78,11 +78,10 @@ Active slices are currently recorded below. The previous active PRs #242, #243,
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_82b51b498cd044d2b4646d67` | Codex / `gpt-5.5` | running | Retry attempt 2 for failed `ws_6c3a1f289fe040dfb32cc8d0`, launched 2026-05-14 after confirming host and `awf-agent-runtime:latest` container DNS/HTTPS access to `files.pythonhosted.org` had recovered. Setup passed and installed `docker==7.1.0`; workspace is now running. |
-| P0 Test Coverage And Quality Gates | Make workspace setup dependency installs resilient and cache-aware | `ws_0e15317e2baa44328c40f81e` | Codex / `gpt-5.5` | requested | Launched 2026-05-14 to make transient dependency fetch/DNS setup failures classify/retry before provider time. AWF emitted `OWNED_PATH_OVERLAP_RISK` with active `ws_82b51b498cd044d2b4646d67` across executor/runtime validation tests; keep both visible and expect rebase/merge-queue ordering if both reach PRs. |
-| P1 MCP And Project Onboarding Client Parity | Complete workspace create v2 CLI and MCP policy parity | `ws_61e0f7b210fa423faef0b6f3` | Codex / `gpt-5.3-codex-spark` | requested | Launched 2026-05-14 after analysis confirmed REST v2 already supports `task.out_of_scope_changes` and `task.provider_recovery`, while `awf workspace create`, `awf_create_workspace_v2`, docs, and contract status still mark the surface as partial. Scope is limited to exposing those existing policy fields through CLI/MCP, updating parity tests/docs, and not adding an `effort` option. |
-| P1 Security, Secrets, And Egress Policy | API auth posture and timing-safe token checks | `ws_7dd27492f4184baf8eb67b81` | Codex / `gpt-5.3-codex-spark` | requested | Launched 2026-05-14 as a narrow security slice covering constant-time bearer-token comparison plus auth requirements for workspace create/list/read/events/stale-reasons and secret-lease inventory. Deliberately excludes callback SSRF/auth, rate limiting, and production config fail-fast. AWF emitted advisory owned-path overlap with active coverage/parity workspaces; keep visible and expect normal PR monitor/rebase handling. |
-| P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_e56b535618c649cdb5a60999` | Codex / `gpt-5.3-codex-spark` | requested | Launched 2026-05-14 as a narrow callback slice requiring auth for callback create/list, delivery-time target revalidation, minimal HTTPS/allowlist policy hooks if needed, and tests proving callback envelopes remain allowlisted. Deliberately excludes workspace API auth posture and request rate limiting. AWF emitted advisory owned-path overlap with active coverage/auth workspaces; keep visible and expect normal PR monitor/rebase handling. |
+| P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_716851d0d48f4ff69bcc41ad` | Codex / `gpt-5.5` | provisioning | Clean retry launched 2026-05-15 after `ws_82b51b498cd044d2b4646d67` was interrupted by local service restart before PR creation. The failed worktree is preserved as evidence with one local commit plus dirty follow-up files, but this slice should proceed from a clean current base. |
+| P0 Test Coverage And Quality Gates | Make workspace setup dependency installs resilient and cache-aware | `ws_0e15317e2baa44328c40f81e` | Codex / `gpt-5.5` | monitoring_pr | Opened PR [#248](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/248) and is monitoring. AWF emitted `OWNED_PATH_OVERLAP_RISK` with active coverage-determinism retries across executor/runtime validation tests; keep both visible and expect rebase/merge-queue ordering if both reach PRs. |
+| P1 Security, Secrets, And Egress Policy | API auth posture and timing-safe token checks | `ws_95ce188d34484e5093b727c5` | Codex / `gpt-5.5` | monitoring_pr | Monitor-only adoption for existing PR [#250](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/250), created 2026-05-15 after failed Spark workspace `ws_7dd27492f4184baf8eb67b81` hit Codex Spark capacity/circuit behavior. Preserve the PR branch; do not reschedule from scratch unless this monitor fails deterministically. |
+| P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_60589ae904754135b70e6e9f` | Codex / `gpt-5.5` | monitoring_pr | Monitor-only adoption for existing PR [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249), created 2026-05-15 after failed Spark workspace `ws_e56b535618c649cdb5a60999` hit Codex Spark capacity during PR comment repair and then stale-active terminalization before the local provider-recovery guard. Preserve the PR branch; do not reschedule from scratch unless this monitor fails deterministically. |
 
 ### Reschedule Required Slices
 
@@ -100,6 +99,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | Complete workspace create v2 CLI and MCP policy parity | `ws_4599ede79dce445790f4c6e4` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | merged | Monitor-only adoption replaced failed Spark workspace `ws_61e0f7b210fa423faef0b6f3`, handled PR monitoring on Codex `gpt-5.5`, and merged 2026-05-14 with all GitHub CI checks green. |
 | P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_7038898eac3747ecaa53fb2c` | [#242](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/242) | merged | Codex `gpt-5.5`; completed 2026-05-14 and preserves primary validation/provider failure causality across stale callbacks, recovery/remonitor epochs, cleanup/runtime secondary failures, and worker reconnect paths. |
 | P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_f9c0654695334f2386c2c7eb` | [#246](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/246) | merged | Gemini `gemini-3.1-pro-preview`; clean retry completed 2026-05-14 after failed `ws_02ef6b49f7dc4657a8e63355` and superseded planning-scope failure `ws_b9112aecd2d94fc7b4babf26`; adds CLI/API/MCP create/list parity and active multi-status list semantics. |
 | P1 MCP And Project Onboarding Client Parity | Add MCP parity for global events | `ws_32a3971e4aa147c08ed46683` | [#245](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/245) | merged | OpenCode/Ollama `ollama/glm-5.1:cloud`; clean retry completed 2026-05-14 after failed `ws_cd0ccbb17db943ed8415aff1` and `ws_dabd5b60a8464f10b927f1d2`; adds the global events MCP parity surface. |
@@ -255,7 +255,11 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_82b51b498cd044d2b4646d67` | none | superseded | Attempt had one local commit plus dirty follow-up files, but no PR. It failed 2026-05-14 because a local service restart interrupted the running agent and stale-active cleanup stopped the runtime. Evidence is retained in the failed worktree; clean retry `ws_716851d0d48f4ff69bcc41ad` now owns the slice from current base. |
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_6c3a1f289fe040dfb32cc8d0` | none | failed | Attempt failed 2026-05-14 before agent execution with `SERVICE_STARTUP_FAILURE`: profile setup command `uv sync --extra dev` failed to download `docker==7.1.0` because PyPI DNS lookup returned `No address associated with hostname`. Treat as AWF setup/dependency resilience work, not provider or agent failure. |
+| P1 MCP And Project Onboarding Client Parity | Complete workspace create v2 CLI and MCP policy parity | `ws_61e0f7b210fa423faef0b6f3` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | superseded | Original Spark monitor failed after Codex `gpt-5.3-codex-spark` capacity/circuit exhaustion and stale-active terminalization. Existing PR branch was preserved and re-adopted by `ws_4599ede79dce445790f4c6e4` using Codex default `gpt-5.5`/`xhigh`. |
+| P1 Security, Secrets, And Egress Policy | API auth posture and timing-safe token checks | `ws_7dd27492f4184baf8eb67b81` | [#250](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/250) | superseded | Original Spark monitor failed after Codex `gpt-5.3-codex-spark` capacity/circuit exhaustion and stale-active terminalization. Existing PR branch was preserved and re-adopted by `ws_95ce188d34484e5093b727c5` using Codex default `gpt-5.5`/`xhigh`. |
+| P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_e56b535618c649cdb5a60999` | [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249) | superseded | Original Spark monitor failed during PR comment repair with `AGENT_PROVIDER_CAPACITY_EXHAUSTED`, entered provider recovery, then was incorrectly terminalized by stale-active cleanup. Existing PR branch was preserved and re-adopted by `ws_60589ae904754135b70e6e9f` using Codex default `gpt-5.5`/`xhigh`. |
 | P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_b9112aecd2d94fc7b4babf26` | none | superseded | Failed 2026-05-14 because Gemini edited implementation files during the planning phase. AWF correctly blocked the premature implementation and created clean retry `ws_f9c0654695334f2386c2c7eb`; do not salvage the failed branch unless explicitly requested. |
 
 ## Foundations Already In Place
@@ -775,6 +779,20 @@ and production configuration footguns.
   approved fallback providers/models, for example Gemini -> OpenCode GLM or
   Gemini -> Codex `gpt-5.5`, while preserving canonical task/attempt lineage
   and recording why the fallback was selected.
+- [x] Prefer Codex default `gpt-5.5` / `xhigh` when a non-default Codex model
+  fails with capacity/quota/usage-limit exhaustion and no explicit fallback
+  policy is configured. Regression source: 2026-05-14 Spark-launched
+  workspaces `ws_61e0f7b210fa423faef0b6f3`,
+  `ws_7dd27492f4184baf8eb67b81`, and
+  `ws_e56b535618c649cdb5a60999` reached PRs but stalled/failed after
+  Codex `gpt-5.3-codex-spark` capacity/circuit failures. Acceptance:
+  provider recovery must switch monitor/agent recovery to the Codex default
+  model instead of repeatedly selecting an exhausted non-default model; it
+  must not fall back from `gpt-5.5` to itself; and stale-active cleanup must
+  not terminalize monitor rows that are waiting for provider recovery retry or
+  fallback. Evidence: local 2026-05-15 fix adds provider-recovery and worker
+  stale-active regression tests, rebuilds/restarts AWF, and re-adopts PRs
+  #247/#249/#250 with Codex `gpt-5.5` monitors.
 - [x] Clean up no-work failed containers, networks, and pressure directories
   after logs/artifacts are durably retained, without removing evidence needed
   for failure analysis or retries.
