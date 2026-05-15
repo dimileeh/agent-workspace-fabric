@@ -765,6 +765,82 @@ async def _insert_validation_run(
 
 class TestCreateWorkspace:
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "first_body", "second_body", "first_key", "second_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "fresh key db first v1"},
+                {**_MINIMAL_BODY, "task_title": "fresh key db second v1"},
+                "workspace-fresh-db-first-v1",
+                "workspace-fresh-db-second-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="fresh key db first v2"),
+                _v2_body(title="fresh key db second v2"),
+                "workspace-fresh-db-first-v2",
+                "workspace-fresh-db-second-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limit_rejects_fresh_idempotency_key_before_db_replay_miss(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        first_body: dict[str, object],
+        second_body: dict[str, object],
+        first_key: str,
+        second_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        original_lock = WorkspaceRepository.acquire_idempotency_key_lock
+        original_lookup = WorkspaceRepository.get_by_idempotency_key
+
+        async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+            await original_lock(self, key)
+
+        async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
+            lookup_keys.append(key)
+            return await original_lookup(self, key)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "acquire_idempotency_key_lock",
+            tracked_lock,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "get_by_idempotency_key",
+            tracked_lookup,
+        )
+
+        first = await client.post(
+            path,
+            json=first_body,
+            headers={"Idempotency-Key": first_key},
+        )
+        rejected = await client.post(
+            path,
+            json=second_body,
+            headers={"Idempotency-Key": second_key},
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+        assert lock_keys == [first_key]
+        assert lookup_keys == [first_key]
+
+    @pytest.mark.unit
     async def test_rejects_v1_create_burst_after_configured_limit(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
@@ -785,6 +861,40 @@ class TestCreateWorkspace:
 
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
+    async def test_v1_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        payload = {**_MINIMAL_BODY, "task_title": "idempotent rate limit replay v1"}
+
+        first = await client.post(
+            "/v1/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v1-replay"},
+        )
+        replay = await client.post(
+            "/v1/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v1-replay"},
+        )
+        fresh = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "fresh key bounded v1"},
+            headers={"Idempotency-Key": "rate-limit-v1-fresh"},
+        )
+        listed = await client.get("/v1/workspaces")
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(fresh)
+        assert len(listed.json()) == 1
 
     @pytest.mark.unit
     async def test_v1_and_v2_create_share_workspace_create_rate_limit_bucket(
