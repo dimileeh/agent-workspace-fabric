@@ -957,7 +957,7 @@ class TestUnexpectedErrorDuringAgentRun:
         assert "not_before" in recovery_payload
 
     @pytest.mark.unit
-    async def test_provider_recovery_uses_workspace_model_override_as_effective_default(
+    async def test_provider_recovery_explicit_codex_capacity_falls_back_to_configured_default(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -986,6 +986,7 @@ class TestUnexpectedErrorDuringAgentRun:
             _StderrClassifyingCodexAdapter,
         )
         override_model = "gpt-5.3-codex-spark"
+        configured_default = "gpt-5"
         ws_id = await _seed_ready(
             factory,
             agent="codex",
@@ -1035,18 +1036,18 @@ class TestUnexpectedErrorDuringAgentRun:
         state = retry_workspace.task_policy["provider_recovery_state"]
         assert retry_workspace.status == WorkspaceStatus.requested.value
         assert retry_workspace.agent == "codex"
-        assert retry_workspace.task_policy["agent_model"] == override_model
-        assert state["action"] == "retry"
+        assert retry_workspace.task_policy["agent_model"] == configured_default
+        assert state["action"] == "fallback"
         assert state["target_provider"] == "openai"
-        assert state["target_model"] == override_model
-        assert state["retry_attempt_number"] == 1
-        assert state["fallback_attempt_number"] == 0
-        assert "not_before" in state
+        assert state["target_model"] == configured_default
+        assert state["retry_attempt_number"] == 0
+        assert state["fallback_attempt_number"] == 1
+        assert "not_before" not in state
 
         recovery_payload = event.payload["provider_recovery"]
-        assert recovery_payload["action"] == "retry"
-        assert recovery_payload["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
-        assert recovery_payload["target_model"] == override_model
+        assert recovery_payload["action"] == "fallback"
+        assert recovery_payload["decision_reason_code"] == "PROVIDER_FALLBACK_SELECTED"
+        assert recovery_payload["target_model"] == configured_default
 
     @pytest.mark.unit
     async def test_generic_no_work_agent_failure_does_not_create_provider_recovery_attempt(
