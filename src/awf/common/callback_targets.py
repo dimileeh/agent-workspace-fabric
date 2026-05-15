@@ -12,6 +12,7 @@ _NAT64_LOCAL_USE_PREFIX = ipaddress.IPv6Network("64:ff9b:1::/48")
 # the local-use /48 namespace is blocked outright instead of decoded.
 _NAT64_TRANSLATION_PREFIXES = (_NAT64_WELL_KNOWN_PREFIX,)
 _SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
+_IPV4_COMPATIBLE_PREFIX = ipaddress.IPv6Network("::/96")
 
 
 def looks_like_legacy_ipv4_literal(hostname: str) -> bool:
@@ -117,5 +118,7 @@ def _is_blocked_callback_target_address(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
     return isinstance(address, ipaddress.IPv6Address) and (
-        address in _SIX_TO_FOUR_PREFIX or address in _NAT64_LOCAL_USE_PREFIX
+        address in _SIX_TO_FOUR_PREFIX
+        or address in _NAT64_LOCAL_USE_PREFIX
+        or address in _IPV4_COMPATIBLE_PREFIX
     )
