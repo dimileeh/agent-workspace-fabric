@@ -529,7 +529,7 @@ not listed here.
   `tests/unit/control/test_executor_post_agent_commit_classifier.py::test_ruff_check_fixable_diagnostics_expose_bounded_autofix_paths`
   and
   `tests/unit/control/test_executor_post_agent_commit.py::test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_agent`.
-- [ ] Make workspace setup dependency installs resilient and cache-aware.
+- [x] Make workspace setup dependency installs resilient and cache-aware.
   Regression source: `ws_6c3a1f289fe040dfb32cc8d0` failed 2026-05-14 before
   any agent execution because profile setup ran `uv sync --extra dev` and could
   not DNS-resolve/download `docker==7.1.0` from PyPI
@@ -546,7 +546,7 @@ not listed here.
   `ws_82b51b498cd044d2b4646d67`, proving the original failure was transient and
   that AWF should automate this recovery path instead of requiring manual
   diagnosis.
-- [ ] Make AWF self-dogfood parallel final coverage deterministic inside the
+- [x] Make AWF self-dogfood parallel final coverage deterministic inside the
   workspace runtime. Regression source: `ws_4f44c108a58f46d092f4e411` ran
   `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing`, reached
   99.02% coverage, but still produced `13` pytest errors/timeouts. Acceptance:
