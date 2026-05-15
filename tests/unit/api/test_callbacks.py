@@ -550,11 +550,17 @@ async def test_list_callbacks_validates_limit_bounds(
 
 
 @pytest.mark.unit
-async def test_register_callback_requires_authorization_token(client: AsyncClient) -> None:
+async def test_register_callback_requires_authorization_token(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+) -> None:
+    _, client = callback_app_and_client
     response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-no-token"},
+        headers=_authorized_headers(
+            idempotency_key="callback-no-token",
+            authorization=None,
+        ),
     )
 
     assert response.status_code == 401
@@ -577,7 +583,10 @@ async def test_register_callback_rejects_invalid_authorization_token(client: Asy
 
 
 @pytest.mark.unit
-async def test_list_callbacks_requires_authorization_token(client: AsyncClient) -> None:
+async def test_list_callbacks_requires_authorization_token(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+) -> None:
+    _, client = callback_app_and_client
     response = await client.get("/v1/callbacks")
 
     assert response.status_code == 401
