@@ -27,7 +27,7 @@ DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 _MIN_PRODUCTION_API_TOKEN_LENGTH = 24
-_WEAK_API_TOKEN_SEPARATORS = ("-", "_", ".")
+_WEAK_API_TOKEN_SEPARATORS = ("", "-", "_", ".")
 _WEAK_API_TOKEN_VALUES = frozenset(
     {
         "admin",
@@ -175,7 +175,7 @@ def _is_weak_api_token(api_token: str) -> bool:
 
 
 def _is_repeated_weak_api_token_value(api_token: str) -> bool:
-    """Detect placeholder tokens repeated with common separators."""
+    """Detect placeholder tokens repeated with or without common separators."""
     for weak_value in _WEAK_API_TOKEN_VALUES:
         if len(weak_value) >= len(api_token):
             continue

@@ -145,6 +145,7 @@ def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
         "changeme",
         "default",
         "short",
+        "secretsecretsecretsecret",
         "secret-secret-secret-secret",
         "secret-secret-secret-secret-",
         "admin-admin-admin-admin-admin",
