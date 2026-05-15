@@ -83,7 +83,12 @@ def _callback_request_without_app_state() -> Request:
     )
 
 
-def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> None:
+def _assert_callback_rate_limited(
+    response: Response,
+    *,
+    identity_type: str,
+    expected_limit: int = 1,
+) -> None:
     assert response.status_code == 429
     body = response.json()
     assert body["error_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
@@ -93,7 +98,7 @@ def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> 
     assert detail["endpoint_family"] == "callback_register"
     assert detail["identity_type"] == identity_type
     assert detail["identity_digest"]
-    assert detail["limit"] == 1
+    assert detail["limit"] == expected_limit
     assert detail["window_seconds"] == 60
     assert detail["retry_after_seconds"] > 0
     assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
@@ -425,6 +430,58 @@ async def test_register_callback_db_replay_bypasses_limit_when_replay_caches_are
     assert replay.json()["id"] == first.json()["id"]
     _assert_callback_rate_limited(fresh, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_cold_db_replay_does_not_spend_fresh_quota(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=2)
+    headers = _authorized_headers(idempotency_key="callback-cold-replay-quota")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    second_fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-cold-replay-quota-second",
+            "target_url": "https://operator.example.com/awf/cold-replay-second",
+        },
+        headers=_authorized_headers(idempotency_key="callback-cold-replay-quota-second"),
+    )
+    third_fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-cold-replay-quota-third",
+            "target_url": "https://operator.example.com/awf/cold-replay-third",
+        },
+        headers=_authorized_headers(idempotency_key="callback-cold-replay-quota-third"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert second_fresh.status_code == 201
+    _assert_callback_rate_limited(
+        third_fresh,
+        identity_type="bearer_token",
+        expected_limit=2,
+    )
+    assert await _subscription_count(engine) == 2
 
 
 @pytest.mark.unit

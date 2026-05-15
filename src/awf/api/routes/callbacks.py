@@ -205,6 +205,16 @@ async def register_callback(
             return response
         raise _idempotency_replay_unavailable()
 
+    response = await _callback_durable_replay_response_for_persisted_key(
+        service,
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=key,
+    )
+    if response is not None:
+        return response
+
     admission = await admit_request_async(
         request,
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
@@ -213,7 +223,7 @@ async def register_callback(
         reason_code=_CALLBACK_REGISTER_RATE_LIMITED,
     )
     if not admission.allowed:
-        response = await _callback_durable_replay_after_rejection(
+        response = await _callback_durable_replay_response_for_persisted_key(
             service,
             replay_cache,
             replay_key_cache,
@@ -344,7 +354,7 @@ def _callback_register_rate_limited_response(
     )
 
 
-async def _callback_durable_replay_after_rejection(
+async def _callback_durable_replay_response_for_persisted_key(
     service: CallbackService,
     replay_cache: _CallbackIdempotencyReplayCache,
     replay_key_cache: _CallbackIdempotencyReplayKeyCache,
