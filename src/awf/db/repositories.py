@@ -21,6 +21,7 @@ from typing import Any, Final, Protocol, cast
 
 from sqlalchemy import (
     DateTime,
+    Float,
     Integer,
     Interval,
     Numeric,
@@ -4258,7 +4259,16 @@ def _postgresql_scheduler_age_boost_expr(
 def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
     return cast(
         "ColumnElement[Any]",
-        func.make_interval(0, 0, 0, 0, 0, 0, literal(float(seconds)), type_=Interval()),
+        func.make_interval(
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            sql_cast(literal(float(seconds)), Float),
+            type_=Interval(),
+        ),
     )
 
 
