@@ -6,6 +6,7 @@ modules to reduce duplication and improve maintainability.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,34 @@ from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 EngineOrFactory = AsyncEngine | async_sessionmaker[AsyncSession]
+
+_INTERNAL_ERROR_FIELD_KEYS = (
+    "task_external_id",
+    "task_kind",
+    "idempotency_key",
+    "request_hash",
+    "payload_hash",
+    "body_hash",
+)
+
+
+def _iter_response_keys(payload: object) -> Iterator[str]:
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            if isinstance(key, str):
+                yield key
+            yield from _iter_response_keys(value)
+    elif isinstance(payload, (list, tuple)):
+        for item in payload:
+            yield from _iter_response_keys(item)
+
+
+def assert_no_internal_error_fields(payload: object) -> None:
+    """Assert response payloads do not expose internal error field names."""
+    response_keys = set(_iter_response_keys(payload))
+
+    for internal_field in _INTERNAL_ERROR_FIELD_KEYS:
+        assert internal_field not in response_keys
 
 
 async def create_workspace(

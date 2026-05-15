@@ -18,6 +18,7 @@ from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import workspaces as workspaces_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
+from tests.unit.helpers import assert_no_internal_error_fields
 
 
 def _admission_ok_disk_check() -> DiskCheck:
@@ -277,7 +278,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
         "task ID for this backlog slice or retry the original scope."
     )
     assert body["detail"] == {"external_id": "task-123"}
-    assert "task_external_id" not in json.dumps(body, sort_keys=True)
+    assert_no_internal_error_fields(body)
 
 
 @pytest.mark.unit

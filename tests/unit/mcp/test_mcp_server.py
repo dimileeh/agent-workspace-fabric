@@ -10,7 +10,6 @@ harness) against a throwaway PostgreSQL. This validates:
 from __future__ import annotations
 
 import base64
-import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +36,7 @@ from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
+from tests.unit.helpers import assert_no_internal_error_fields
 
 _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -1696,7 +1696,7 @@ class TestCreateWorkspaceV2:
             ),
             "detail": {"external_id": external_id},
         }
-        assert "task_external_id" not in json.dumps(conflict.structuredContent, sort_keys=True)
+        assert_no_internal_error_fields(conflict.structuredContent)
 
     @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(

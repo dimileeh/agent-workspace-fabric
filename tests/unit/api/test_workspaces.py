@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +47,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service import workspaces as workspaces_service
 from awf.service.disk import DiskCheck
+from tests.unit.helpers import assert_no_internal_error_fields as _assert_no_internal_error_fields
 
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
 
@@ -92,33 +93,6 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
-
-_INTERNAL_ERROR_FIELD_KEYS = (
-    "task_external_id",
-    "task_kind",
-    "idempotency_key",
-    "request_hash",
-    "payload_hash",
-    "body_hash",
-)
-
-
-def _iter_response_keys(payload: object) -> Iterator[str]:
-    if isinstance(payload, Mapping):
-        for key, value in payload.items():
-            if isinstance(key, str):
-                yield key
-            yield from _iter_response_keys(value)
-    elif isinstance(payload, (list, tuple)):
-        for item in payload:
-            yield from _iter_response_keys(item)
-
-
-def _assert_no_internal_error_fields(payload: object) -> None:
-    response_keys = set(_iter_response_keys(payload))
-
-    for internal_field in _INTERNAL_ERROR_FIELD_KEYS:
-        assert internal_field not in response_keys
 
 
 @pytest.mark.unit
