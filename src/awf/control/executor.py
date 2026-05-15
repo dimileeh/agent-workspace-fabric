@@ -7602,7 +7602,10 @@ def _validation_run_command_records(
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
     if "validate" in phase_names and _should_run_local_coverage(profile):
         coverage_command = profile.validation.coverage.command
-        assert coverage_command is not None
+        if coverage_command is None:
+            raise RuntimeError(
+                "_should_run_local_coverage returned True but coverage.command is None"
+            )
         coverage_record = {
             "phase": "coverage",
             "command": coverage_command.command,

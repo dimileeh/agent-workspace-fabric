@@ -1791,10 +1791,6 @@ def _normalize_pytest_summary_line(line: str) -> str:
     return _PYTEST_PROGRESS_PREFIX_RE.sub("", line)
 
 
-def _looks_like_pytest_node_id(value: str) -> bool:
-    return _pytest_node_id_from_text(value, allow_file_level=True) is not None
-
-
 def _pytest_node_id_from_text(value: str, *, allow_file_level: bool = False) -> str | None:
     text = value.lstrip()
     match = _PYTEST_NODE_ID_RE.match(text)

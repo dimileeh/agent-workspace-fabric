@@ -1452,6 +1452,27 @@ def test_validation_command_records_can_mark_coverage_reused() -> None:
 
 
 @pytest.mark.unit
+def test_validation_command_records_raise_when_coverage_predicate_loses_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-missing-coverage-command",
+            "validation": {"strategy": {"final_gate": "coverage"}},
+            "phases": {"validate": ["pytest tests/unit -q"]},
+        }
+    )
+    monkeypatch.setattr(executor_mod, "_should_run_local_coverage", lambda _: True)
+
+    with pytest.raises(RuntimeError, match="coverage.command is None"):
+        _validation_run_command_records(
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=False,
+        )
+
+
+@pytest.mark.unit
 def test_validation_command_count_includes_database_refresh_hooks_and_coverage() -> None:
     profile = WorkspaceProfile.model_validate(
         {
