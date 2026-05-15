@@ -48,6 +48,7 @@ _IDEMPOTENCY_REPLAY_UNAVAILABLE = "IDEMPOTENCY_REPLAY_UNAVAILABLE"
 _CALLBACK_REPLAY_CACHE_STATE_KEY = "callback_register_idempotency_replay_cache"
 _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY = "callback_register_idempotency_replay_key_cache"
 _CALLBACK_REPLAY_CACHE_MAX_ENTRIES = 4096
+_CALLBACK_REPLAY_KEY_CACHE_MAX_ENTRIES = _CALLBACK_REPLAY_CACHE_MAX_ENTRIES
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +138,10 @@ class _CallbackIdempotencyReplayKeyCache:
             return
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
+
+
+def _new_callback_replay_key_cache() -> _CallbackIdempotencyReplayKeyCache:
+    return _CallbackIdempotencyReplayKeyCache(max_entries=_CALLBACK_REPLAY_KEY_CACHE_MAX_ENTRIES)
 
 
 @router.post(
@@ -446,7 +451,7 @@ def _callback_idempotency_replay_key_cache(
     if isinstance(existing, _CallbackIdempotencyReplayKeyCache):
         return existing
 
-    cache = _CallbackIdempotencyReplayKeyCache()
+    cache = _new_callback_replay_key_cache()
     setattr(state, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, cache)
     return cache
 
@@ -473,13 +478,13 @@ def _direct_callback_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _CallbackIdempotencyReplayKeyCache:
     if request is None:
-        return _CallbackIdempotencyReplayKeyCache()
+        return _new_callback_replay_key_cache()
 
     existing = getattr(request, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, None)
     if isinstance(existing, _CallbackIdempotencyReplayKeyCache):
         return existing
 
-    cache = _CallbackIdempotencyReplayKeyCache()
+    cache = _new_callback_replay_key_cache()
     try:
         setattr(request, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, cache)
     except (AttributeError, TypeError):

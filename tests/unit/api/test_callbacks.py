@@ -862,6 +862,24 @@ def test_callback_replay_key_cache_real_request_without_app_state_fails_loudly()
 
 
 @pytest.mark.unit
+def test_callback_replay_key_cache_app_state_is_bounded() -> None:
+    request = _direct_callback_request()
+    cache = callbacks_route._callback_idempotency_replay_key_cache(request)
+    payload = _callback_payload(
+        name="callback-key-app-state-bound",
+        target_url="https://operator.example.com/awf/key-app-state-bound",
+    )
+    max_entries = callbacks_route._CALLBACK_REPLAY_KEY_CACHE_MAX_ENTRIES  # noqa: SLF001
+
+    for index in range(max_entries + 1):
+        cache.remember(payload, idempotency_key=f"callback-app-state-key-{index}")
+
+    newest_key = f"callback-app-state-key-{max_entries}"
+    assert cache.matches(payload, idempotency_key="callback-app-state-key-0") is False
+    assert cache.matches(payload, idempotency_key=newest_key) is True
+
+
+@pytest.mark.unit
 def test_callback_replay_conflict_does_not_promote_lru_entry() -> None:
     cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)
     first_payload = _callback_payload(
