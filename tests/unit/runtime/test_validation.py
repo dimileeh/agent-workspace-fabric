@@ -555,7 +555,14 @@ def test_setup_dependency_network_classifier_accepts_install_package_manager_ver
 @pytest.mark.parametrize(
     "command",
     [
+        "pip --cache-dir /tmp/pip install -r requirements.txt",
         "pip --proxy http://proxy:8080 install -r requirements.txt",
+        "pip --log /tmp/pip.log install -r requirements.txt",
+        "pip --retries 2 install -r requirements.txt",
+        "pip --exists-action w install -r requirements.txt",
+        "pip --keyring-provider disabled install -r requirements.txt",
+        "pip --resume-retries 2 install -r requirements.txt",
+        "pip --use-feature fast-deps install -r requirements.txt",
         "pip --cert /etc/ssl/corp.pem install -r requirements.txt",
         "python -m pip --client-cert client.pem install -r requirements.txt",
     ],
