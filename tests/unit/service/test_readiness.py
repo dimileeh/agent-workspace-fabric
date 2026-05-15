@@ -67,6 +67,60 @@ def test_ready_for_gke_criteria_reference_executable_release_gate() -> None:
 
 
 @pytest.mark.unit
+def test_readiness_evidence_lines_cover_slo_and_status_edge_shapes() -> None:
+    slo_lines = readiness._readiness_evidence_lines(  # noqa: SLF001
+        CoreReadinessCheck(
+            name="prd_slo_thresholds",
+            status="fail",
+            reason_code="PRD_SLO_BREACH",
+            message="SLOs breached.",
+            evidence={
+                "since_hours": 24,
+                "breaches": {
+                    "creation_success": "missing data",
+                    "cleanup_success": {
+                        "actual": None,
+                        "threshold": {"operator": ">=", "value": 0.99},
+                    },
+                    "failure_rate": {
+                        "actual": "n/a",
+                        "threshold": {"operator": "<", "value": "1%"},
+                    },
+                },
+            },
+        )
+    )
+    assert slo_lines == [
+        "        window: 24h",
+        "        breaches:",
+        "          - cleanup_success: no data >= 99.0%",
+        "          - creation_success: missing data",
+        "          - failure_rate: n/a < 1%",
+    ]
+
+    no_breach_lines = readiness._readiness_evidence_lines(  # noqa: SLF001
+        CoreReadinessCheck(
+            name="prd_slo_thresholds",
+            status="warn",
+            reason_code="PRD_SLO_METRICS_UNAVAILABLE",
+            message="SLO metrics unavailable.",
+            evidence={},
+        )
+    )
+    assert no_breach_lines == ["        breaches: none reported"]
+
+    assert readiness._readiness_evidence_lines(  # noqa: SLF001
+        CoreReadinessCheck(
+            name="service_status",
+            status="ok",
+            reason_code="SERVICE_READY",
+            message="Service ready.",
+            evidence={"status": "ok"},
+        )
+    ) == ["        evidence status: ok"]
+
+
+@pytest.mark.unit
 async def test_core_readiness_reports_collector_failures_and_missing_demo(
     tmp_path: Path,
 ) -> None:
