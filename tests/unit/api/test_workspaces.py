@@ -97,7 +97,15 @@ _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
 def _assert_no_internal_error_fields(payload: object) -> None:
     serialized = json.dumps(payload, sort_keys=True)
 
-    assert "task_external_id" not in serialized
+    for internal_field in (
+        "task_external_id",
+        "task_kind",
+        "idempotency_key",
+        "request_hash",
+        "payload_hash",
+        "body_hash",
+    ):
+        assert internal_field not in serialized
 
 
 @pytest.fixture(autouse=True)
@@ -802,7 +810,9 @@ class TestCreateWorkspace:
         assert first.workspace_id == replay.workspace_id
         assert isinstance(conflict, JSONResponse)
         assert conflict.status_code == 409
-        assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = json.loads(conflict.body)
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestCreateWorkspaceV2DiskPressure:
@@ -2637,7 +2647,9 @@ class TestIdempotency:
         r2 = await client.post("/v1/workspaces", json=mutated, headers=headers)
 
         assert r2.status_code == 409
-        assert r2.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = r2.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestGetWorkspace:

@@ -12,7 +12,7 @@ AWF contract reference:
 | Add failing regression tests first for still-valid findings. | Complete | Initial regression slice failed on raw PostgreSQL interval SQL and old external-ID conflict wording before source changes. Doctor redaction proof already passed; support-bundle proof passed after fixing the test helper setup. |
 | Remove fragile PostgreSQL interval string interpolation while preserving scheduler scoring behavior. | Complete | `src/awf/db/repositories.py` now uses a SQLAlchemy `make_interval` expression through `_postgresql_interval_seconds_expr`; scheduler SQL tests assert `make_interval(...)`, no raw interval literal, and no `EXTRACT(epoch...)` regression. |
 | Prevent the fragile interval pattern from returning. | Complete | `tests/unit/db/test_workspace_repository.py` adds a static source assertion against `_postgresql_scheduler_age_boost_expr`; targeted `rg` for the raw pattern in the repository/test path returns no matches. |
-| Keep selected create/idempotency/conflict 409 payloads stable and actionable without leaking `task_external_id`. | Complete | REST v1/v2 idempotency and v2 task external-ID conflict tests assert stable error codes, public `detail={"external_id": ...}`, natural-language guidance, and no serialized `task_external_id`. The duplicate MCP workspace-create conflict helper now uses the same public wording and assertion. |
+| Keep selected create/idempotency/conflict 409 payloads stable and actionable without leaking `task_external_id`. | Complete | REST v1/v2 idempotency and v2 task external-ID conflict tests assert stable error codes, public `detail={"external_id": ...}`, natural-language guidance, and no serialized `task_external_id`. Iteration 1 extended both v1 idempotency conflict tests to assert the serialized 409 payload excludes `task_external_id` and related internal column-style names. The duplicate MCP workspace-create conflict helper now uses the same public wording and assertion. |
 | Prove doctor/support-bundle known-secret sets are redaction-only. | Complete | Doctor and support-bundle tests now include configured API-token and database-password sentinels in log-like/status/doctor/failure payloads; pretty output, serialized bundle/report JSON, and written bundle artifact all exclude the sentinels and include `<redacted>`. |
 | Keep scope narrow and avoid active P1 auth/callback/rate-limit/config workstreams. | Complete | Source changes are limited to scheduler SQL expression construction, selected conflict message wording, and the duplicated MCP conflict payload. No auth, callback, rate-limit, production config, executor, scheduler orchestration, generated artifact, workflow, or lockfile changes were made. |
 
@@ -41,6 +41,12 @@ Final result:
 240 passed in 240.79s (0:04:00)
 ```
 
+Iteration 1 revalidation result:
+
+```text
+240 passed in 212.69s (0:03:32)
+```
+
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server.py::TestCreateWorkspaceV2::test_create_workspace_v2_external_id_scope_conflict_returns_structured_error -q
 ```
@@ -49,6 +55,18 @@ Result:
 
 ```text
 1 passed in 7.92s
+```
+
+Iteration 1 conformance gap check:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspaces.py::TestCreateWorkspace::test_direct_v1_create_replays_same_payload_and_rejects_conflict tests/unit/api/test_workspaces.py::TestIdempotency::test_same_key_different_body_returns_409 -q
+```
+
+Result:
+
+```text
+2 passed in 3.12s
 ```
 
 ```bash
@@ -62,6 +80,15 @@ rg -n 'Task external_id|task_external_id.*already associated|text\(f"INTERVAL|IN
 ```
 
 Result: no matches.
+
+Iteration 1 scoped API leakage search:
+
+```bash
+rg -n 'task_external_id' src/awf/api/routes/workspaces.py tests/unit/api/test_workspaces.py tests/unit/api/test_route_error_edges.py
+```
+
+Result: remaining matches are route/model field wiring or negative test
+assertions, not selected serialized 409 payload content.
 
 ```bash
 uv run --python 3.12 --extra dev ruff check src/awf tests
@@ -96,6 +123,15 @@ Success: no issues found in 155 source files
 - `tests/unit/mcp/test_mcp_server.py`
 - `plans/SECURITY_CLEANUP_AUDIT_PLAN.md`
 - `plans/SECURITY_CLEANUP_AUDIT_VALIDATION.md`
+
+## Iteration 1
+
+The AWF conformance report identified a proof gap in v1 workspace create
+idempotency conflict tests: they checked only status and `error_code`. The
+response implementation was already non-leaking, so this iteration added focused
+assertions to the direct route and HTTP v1 conflict tests and broadened the
+shared helper to reject `task_external_id`, `task_kind`, `idempotency_key`, and
+hash-like internal field names in serialized selected 409 payloads.
 
 ## Gaps
 
