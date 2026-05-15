@@ -78,9 +78,7 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_60589ae904754135b70e6e9f` | Codex / `gpt-5.5` | monitoring_pr | Monitor-only adoption for existing PR [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249), created 2026-05-15 after failed Spark workspace `ws_e56b535618c649cdb5a60999` hit Codex Spark capacity during PR comment repair and then stale-active terminalization before the local provider-recovery guard. Preserve the PR branch; do not reschedule from scratch unless this monitor fails deterministically. |
-| P1 Security, Secrets, And Egress Policy | Add production configuration footgun guardrails | `ws_084580a1fa544b95bcbcab98` | Codex / `gpt-5.5` | monitoring_pr | Clean retry opened PR [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255) on 2026-05-15; GitHub CI is still in progress. This retry replaced cancelled `ws_6f426618098f4361be6e4354`, whose stale worker image ignored `validation.strategy.final_gate: none` and entered repeated local full-coverage repair loops. |
-| P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | Codex / `gpt-5.5` | monitoring_pr | Clean retry opened PR [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) on 2026-05-15. GitHub `python-full-coverage` is currently failed; leave the monitor active so it can use CI evidence to repair. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`. |
+| P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | Codex / `gpt-5.5` | monitoring_pr | Clean retry opened PR [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) on 2026-05-15. GitHub checks are rerunning after earlier full-coverage failure evidence; leave the monitor active so it can finish repair/merge. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`. |
 | P1 Security, Secrets, And Egress Policy | Complete low-risk security cleanup audit | `ws_7bad4fd57a2b4995acc9292a` | Codex / `gpt-5.5` | monitoring_pr | Opened PR [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257) on 2026-05-15; GitHub full coverage is in progress and Greptile is green so far. Scope is intentionally narrow: replace fragile SQL interval interpolation, reduce selected 409/error internal field leakage, and prove doctor known-secret sets are redaction-only. AWF reported advisory owned-path overlap with `ws_163f54bbf14e4ad18f8bc16a` on `src/awf/api/schemas.py` and with `ws_8b76839898f1400abc16ad08` on workspace route/API tests; prompt instructs this workspace not to duplicate auth, callback, rate-limit, or production-config work. |
 
 ### Reschedule Required Slices
@@ -99,6 +97,8 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Security, Secrets, And Egress Policy | Add production configuration footgun guardrails | `ws_084580a1fa544b95bcbcab98` | [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255) | merged | Clean retry completed and merged 2026-05-15 with GitHub CI green. Replaced cancelled `ws_6f426618098f4361be6e4354`, whose stale worker image ignored `validation.strategy.final_gate: none` and entered repeated local full-coverage repair loops. |
+| P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_60589ae904754135b70e6e9f` | [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249) | merged | Monitor-only adoption completed and merged 2026-05-15 with GitHub CI green. Replaced failed Spark workspace `ws_e56b535618c649cdb5a60999`, which hit Codex Spark capacity during PR comment repair and stale-active terminalization before the local provider-recovery guard. |
 | P1 MCP And Project Onboarding Client Parity | Expose `adopt-pr` model and effort selection | `ws_163f54bbf14e4ad18f8bc16a` | [#254](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/254) | merged | Completed and merged 2026-05-15 with GitHub CI green. Adds optional model/effort selection for PR monitor adoption and defaults effort to the highest appropriate setting for the chosen model. |
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_716851d0d48f4ff69bcc41ad` | [#252](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/252) | merged | Completed and merged 2026-05-15. Note: the fix is present in latest `codex/awf-post-merge-fixes`; the local service had to be rebuilt afterward so the worker would honor `validation.strategy.final_gate: none`. |
 | P0 Test Coverage And Quality Gates | Make workspace setup dependency installs resilient and cache-aware | `ws_0e15317e2baa44328c40f81e` | [#248](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/248) | merged | Completed and merged 2026-05-15 with GitHub CI green; transient dependency/DNS setup fetch failures are retried/classified by AWF instead of surfacing as opaque service startup failures. |
@@ -619,7 +619,7 @@ and production configuration footguns.
   `hmac.compare_digest` or equivalent constant-time comparison.
   Evidence: PR [#250](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/250)
   merged 2026-05-15 via monitor workspace `ws_c63623b7d5194bfa83cc702e`.
-- [ ] Harden callback registration and delivery against SSRF and DNS rebinding.
+- [x] Harden callback registration and delivery against SSRF and DNS rebinding.
   Acceptance: callback registration/listing requires API auth; callback targets
   are revalidated at delivery time rather than only at registration; production
   policy can require HTTPS-only and optional allowlisted callback hosts; and
@@ -628,6 +628,8 @@ and production configuration footguns.
   mismatch where `docs/REST_API_REFERENCE.md` says callback create/list require
   `Authorization: Bearer $AWF_API_TOKEN` but the route handlers do not enforce
   `require_api_token`.
+  Evidence: PR [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249)
+  merged 2026-05-15 via monitor workspace `ws_60589ae904754135b70e6e9f`.
 - [ ] Add bounded request admission for workspace creation and callback
   registration. Acceptance: workspace create and callback register endpoints
   enforce per-token or safe local fallback rate limits; burst exhaustion returns
@@ -636,13 +638,15 @@ and production configuration footguns.
   evaluated together with the auth posture slice: unauthenticated local-dev
   exceptions, if retained, still need bounded admission so repeated create or
   callback requests cannot exhaust Docker, Git mirrors, disk, or database rows.
-- [ ] Add production configuration footgun guardrails. Acceptance: local dev
+- [x] Add production configuration footgun guardrails. Acceptance: local dev
   defaults remain usable, but production/network-facing mode fails fast when
   `AWF_DATABASE_URL` or security-sensitive callback/auth settings use bundled
   development defaults; docs explain local versus production expectations; and
   tests prove insecure production config is rejected. Must cover default
   `postgresql+asyncpg://awf:awf_dev@localhost:5433/awf`, callbacks enabled with
   insecure policy, and missing/weak API-token posture in production mode.
+  Evidence: PR [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255)
+  merged 2026-05-15 via clean retry workspace `ws_084580a1fa544b95bcbcab98`.
 - [ ] Complete low-risk security cleanup audit from the 2026-05-14 architecture
   review. Acceptance: fragile SQL interval string interpolation is replaced by a
   typed/parameterized SQLAlchemy expression; selected 409/error responses avoid
