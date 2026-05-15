@@ -25,6 +25,7 @@ from sqlalchemy import text
 from awf import __version__
 from awf.api.deps import require_api_token
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
+from awf.api.schemas import HttpExceptionErrorResponse
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
@@ -104,6 +105,30 @@ class ReadyResponse(BaseModel):
     agent_readiness: dict[str, Any]
 
 
+class ReleaseReadinessCheckResponse(BaseModel):
+    name: str
+    status: str
+    reason_code: str
+    message: str
+    evidence: dict[str, Any]
+
+
+class ReleaseReadinessResponse(BaseModel):
+    status: str
+    summary: dict[str, int]
+    checks: list[ReleaseReadinessCheckResponse]
+    next_actions: list[str]
+
+
+_RELEASE_READINESS_AUTH_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **API_TOKEN_AUTH_ERROR_RESPONSES,
+    503: {
+        "model": HttpExceptionErrorResponse | ReleaseReadinessResponse,
+        "description": "Service Unavailable",
+    },
+}
+
+
 @router.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
     return HealthResponse(status="ok", service="awf", version=__version__)
@@ -112,7 +137,8 @@ async def healthz() -> HealthResponse:
 @router.get(
     "/release-readiness",
     dependencies=[Depends(require_api_token)],
-    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+    response_model=ReleaseReadinessResponse,
+    responses=_RELEASE_READINESS_AUTH_ERROR_RESPONSES,
 )
 async def release_readiness(
     response: Response,

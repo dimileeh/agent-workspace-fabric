@@ -4199,6 +4199,77 @@
         "title": "ReadyResponse",
         "type": "object"
       },
+      "ReleaseReadinessCheckResponse": {
+        "properties": {
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "reason_code",
+          "message",
+          "evidence"
+        ],
+        "title": "ReleaseReadinessCheckResponse",
+        "type": "object"
+      },
+      "ReleaseReadinessResponse": {
+        "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseReadinessCheckResponse"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "next_actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Summary",
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "summary",
+          "checks",
+          "next_actions"
+        ],
+        "title": "ReleaseReadinessResponse",
+        "type": "object"
+      },
       "ReservedResourcesResponse": {
         "properties": {
           "active_workspace_count": {
@@ -10657,9 +10728,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Release Readiness Release Readiness Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ReleaseReadinessResponse"
                 }
               }
             },
@@ -10697,7 +10766,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ReleaseReadinessResponse"
+                    }
+                  ],
+                  "title": "Response 503 Release Readiness Release Readiness Get"
                 }
               }
             },

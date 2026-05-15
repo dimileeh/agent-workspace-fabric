@@ -27,6 +27,7 @@ _WWW_AUTHENTICATE_HEADER = {
 }
 _HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorResponse"
 _ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
+_RELEASE_READINESS_RESPONSE_REF = "#/components/schemas/ReleaseReadinessResponse"
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
@@ -239,6 +240,19 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
     assert (
         auth_error_schema.get("properties", {}).get("detail", {}).get("$ref") == _ERROR_RESPONSE_REF
     )
+
+
+@pytest.mark.unit
+def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dict) -> None:
+    operation = openapi_spec["paths"]["/release-readiness"]["get"]
+    response = operation["responses"]["503"]
+
+    assert response["description"] == "Service Unavailable"
+    refs = _schema_refs(response["content"]["application/json"]["schema"])
+    assert refs == {
+        _HTTP_EXCEPTION_ERROR_RESPONSE_REF,
+        _RELEASE_READINESS_RESPONSE_REF,
+    }
 
 
 def _schema_refs(schema: dict) -> set[str]:
