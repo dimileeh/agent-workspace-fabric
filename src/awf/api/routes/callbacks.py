@@ -45,6 +45,7 @@ router = APIRouter(
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
 _CALLBACK_REGISTER_RATE_LIMITED = "CALLBACK_REGISTER_RATE_LIMITED"
 _CALLBACK_REPLAY_CACHE_STATE_KEY = "callback_register_idempotency_replay_cache"
+_CALLBACK_REPLAY_KEY_CACHE_STATE_KEY = "callback_register_idempotency_replay_key_cache"
 _CALLBACK_REPLAY_CACHE_MAX_ENTRIES = 4096
 
 
@@ -91,6 +92,39 @@ class _CallbackIdempotencyReplayCache:
             self._entries.popitem(last=False)
 
 
+class _CallbackIdempotencyReplayKeyCache:
+    def __init__(self, *, max_entries: int = _CALLBACK_REPLAY_CACHE_MAX_ENTRIES) -> None:
+        self._max_entries = max_entries
+        self._entries: OrderedDict[str, str] = OrderedDict()
+
+    def matches(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> bool:
+        request_hash = self._entries.get(idempotency_key)
+        if request_hash is None:
+            return False
+        if request_hash != callback_request_hash(payload):
+            raise CallbackIdempotencyConflictError(
+                "Idempotency-Key previously used with a different callback request."
+            )
+        self._entries.move_to_end(idempotency_key)
+        return True
+
+    def remember(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        self._entries[idempotency_key] = callback_request_hash(payload)
+        self._entries.move_to_end(idempotency_key)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+
 @router.post(
     "",
     response_model=CallbackSubscriptionResponse,
@@ -127,6 +161,7 @@ async def register_callback(
     _ensure_callbacks_enabled(route_settings)
     key = _require_idempotency_key(idempotency_key)
     replay_cache = _callback_idempotency_replay_cache(request)
+    replay_key_cache = _callback_idempotency_replay_key_cache(request)
     service = CallbackService(session_factory, settings=route_settings)
     try:
         cached = replay_cache.replay(payload, idempotency_key=key)
@@ -136,13 +171,24 @@ async def register_callback(
         return cached
 
     try:
-        durable_replay = await service.replay_existing(payload, idempotency_key=key)
+        known_replay_key = replay_key_cache.matches(payload, idempotency_key=key)
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
-    if durable_replay is not None:
-        response = CallbackSubscriptionResponse.model_validate(durable_replay)
-        replay_cache.remember(payload, idempotency_key=key, response=response)
-        return response
+    if known_replay_key:
+        try:
+            durable_replay = await service.replay_existing(payload, idempotency_key=key)
+        except CallbackIdempotencyConflictError as exc:
+            raise _idempotency_conflict() from exc
+        if durable_replay is not None:
+            response = CallbackSubscriptionResponse.model_validate(durable_replay)
+            _remember_callback_replay(
+                replay_cache,
+                replay_key_cache,
+                payload,
+                idempotency_key=key,
+                response=response,
+            )
+            return response
 
     admission = admit_request(
         request,
@@ -153,6 +199,21 @@ async def register_callback(
     )
     if not admission.allowed:
         return _callback_register_rate_limited_response(admission)
+
+    try:
+        durable_replay = await service.replay_existing(payload, idempotency_key=key)
+    except CallbackIdempotencyConflictError as exc:
+        raise _idempotency_conflict() from exc
+    if durable_replay is not None:
+        response = CallbackSubscriptionResponse.model_validate(durable_replay)
+        _remember_callback_replay(
+            replay_cache,
+            replay_key_cache,
+            payload,
+            idempotency_key=key,
+            response=response,
+        )
+        return response
 
     try:
         subscription = await service.register(
@@ -178,7 +239,13 @@ async def register_callback(
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
     response = CallbackSubscriptionResponse.model_validate(subscription)
-    replay_cache.remember(payload, idempotency_key=key, response=response)
+    _remember_callback_replay(
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=key,
+        response=response,
+    )
     return response
 
 
@@ -244,6 +311,18 @@ def _callback_register_rate_limited_response(
     )
 
 
+def _remember_callback_replay(
+    replay_cache: _CallbackIdempotencyReplayCache,
+    replay_key_cache: _CallbackIdempotencyReplayKeyCache,
+    payload: CallbackSubscriptionCreateRequest,
+    *,
+    idempotency_key: str,
+    response: CallbackSubscriptionResponse,
+) -> None:
+    replay_cache.remember(payload, idempotency_key=idempotency_key, response=response)
+    replay_key_cache.remember(payload, idempotency_key=idempotency_key)
+
+
 def _callback_idempotency_replay_cache(
     request: Request | object | None,
 ) -> _CallbackIdempotencyReplayCache:
@@ -260,6 +339,22 @@ def _callback_idempotency_replay_cache(
     return cache
 
 
+def _callback_idempotency_replay_key_cache(
+    request: Request | object | None,
+) -> _CallbackIdempotencyReplayKeyCache:
+    state = request_app_state(request)
+    if state is None:
+        return _direct_callback_idempotency_replay_key_cache(request)
+
+    existing = getattr(state, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, None)
+    if isinstance(existing, _CallbackIdempotencyReplayKeyCache):
+        return existing
+
+    cache = _CallbackIdempotencyReplayKeyCache()
+    setattr(state, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, cache)
+    return cache
+
+
 def _direct_callback_idempotency_replay_cache(
     request: Request | object | None,
 ) -> _CallbackIdempotencyReplayCache:
@@ -273,6 +368,24 @@ def _direct_callback_idempotency_replay_cache(
     cache = _CallbackIdempotencyReplayCache()
     try:
         setattr(request, _CALLBACK_REPLAY_CACHE_STATE_KEY, cache)
+    except (AttributeError, TypeError):
+        return cache
+    return cache
+
+
+def _direct_callback_idempotency_replay_key_cache(
+    request: Request | object | None,
+) -> _CallbackIdempotencyReplayKeyCache:
+    if request is None:
+        return _CallbackIdempotencyReplayKeyCache()
+
+    existing = getattr(request, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, None)
+    if isinstance(existing, _CallbackIdempotencyReplayKeyCache):
+        return existing
+
+    cache = _CallbackIdempotencyReplayKeyCache()
+    try:
+        setattr(request, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, cache)
     except (AttributeError, TypeError):
         return cache
     return cache

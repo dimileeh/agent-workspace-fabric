@@ -250,7 +250,7 @@ async def test_register_callback_rejects_burst_after_configured_limit(
 
 
 @pytest.mark.unit
-async def test_register_callback_rate_limit_rejects_fresh_key_after_db_replay_miss(
+async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_miss(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -295,10 +295,7 @@ async def test_register_callback_rate_limit_rejects_fresh_key_after_db_replay_mi
 
     assert first.status_code == 201
     _assert_callback_rate_limited(rejected, identity_type="bearer_token")
-    assert replay_keys == [
-        "callback-replay-read-first",
-        "callback-replay-read-second",
-    ]
+    assert replay_keys == ["callback-replay-read-first"]
 
 
 @pytest.mark.unit
@@ -776,6 +773,19 @@ def test_callback_replay_cache_without_app_state_is_request_local() -> None:
 
 
 @pytest.mark.unit
+def test_callback_replay_key_cache_without_app_state_is_request_local() -> None:
+    request = SimpleNamespace()
+
+    cache = callbacks_route._callback_idempotency_replay_key_cache(request)
+
+    assert callbacks_route._callback_idempotency_replay_key_cache(request) is cache
+    assert callbacks_route._callback_idempotency_replay_key_cache(SimpleNamespace()) is not cache
+    assert callbacks_route._callback_idempotency_replay_key_cache(None) is not (
+        callbacks_route._callback_idempotency_replay_key_cache(None)
+    )
+
+
+@pytest.mark.unit
 def test_callback_replay_conflict_does_not_promote_lru_entry() -> None:
     cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)
     first_payload = _callback_payload(
@@ -818,6 +828,39 @@ def test_callback_replay_conflict_does_not_promote_lru_entry() -> None:
 
     assert cache.replay(second_payload, idempotency_key="callback-lru-second") is not None
     assert cache.replay(first_payload, idempotency_key="callback-lru-first") is None
+
+
+@pytest.mark.unit
+def test_callback_replay_key_conflict_does_not_promote_lru_entry() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayKeyCache(max_entries=2)
+    first_payload = _callback_payload(
+        name="callback-key-lru-first",
+        target_url="https://operator.example.com/awf/key-lru-first",
+    )
+    second_payload = _callback_payload(
+        name="callback-key-lru-second",
+        target_url="https://operator.example.com/awf/key-lru-second",
+    )
+    cache.remember(first_payload, idempotency_key="callback-key-lru-first")
+    cache.remember(second_payload, idempotency_key="callback-key-lru-second")
+
+    with pytest.raises(callbacks_route.CallbackIdempotencyConflictError):
+        cache.matches(
+            _callback_payload(
+                name="callback-key-lru-first",
+                target_url="https://operator.example.com/awf/key-lru-conflict",
+            ),
+            idempotency_key="callback-key-lru-first",
+        )
+
+    third_payload = _callback_payload(
+        name="callback-key-lru-third",
+        target_url="https://operator.example.com/awf/key-lru-third",
+    )
+    cache.remember(third_payload, idempotency_key="callback-key-lru-third")
+
+    assert cache.matches(second_payload, idempotency_key="callback-key-lru-second") is True
+    assert cache.matches(first_payload, idempotency_key="callback-key-lru-first") is False
 
 
 @pytest.mark.unit
