@@ -140,6 +140,28 @@ async def test_subscription_create_idempotent_persists_hash_and_detects_conflict
 
 
 @pytest.mark.unit
+async def test_subscription_repository_lists_idempotency_replay_keys(
+    session: AsyncSession,
+) -> None:
+    await _subscription(
+        session,
+        idempotency_key="idem-replay-list-a",
+        request_hash="hash-replay-list-a",
+    )
+    await _subscription(
+        session,
+        idempotency_key="idem-replay-list-b",
+        request_hash="hash-replay-list-b",
+    )
+    repo = CallbackSubscriptionRepository(session)
+
+    replay_keys = await repo.list_idempotency_replay_keys()
+
+    assert ("idem-replay-list-a", "hash-replay-list-a") in replay_keys
+    assert ("idem-replay-list-b", "hash-replay-list-b") in replay_keys
+
+
+@pytest.mark.unit
 async def test_subscription_create_idempotent_falls_back_without_insert_guard(
     session: AsyncSession,
 ) -> None:

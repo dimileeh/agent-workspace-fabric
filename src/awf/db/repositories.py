@@ -4602,6 +4602,15 @@ class CallbackSubscriptionRepository:
         stmt = select(CallbackSubscription).where(CallbackSubscription.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_idempotency_replay_keys(self) -> builtins.list[tuple[str, str]]:
+        stmt = select(
+            CallbackSubscription.idempotency_key, CallbackSubscription.request_hash
+        ).order_by(
+            CallbackSubscription.created_at.asc(),
+            CallbackSubscription.id.asc(),
+        )
+        return [(key, request_hash) for key, request_hash in (await self._session.execute(stmt))]
+
     async def list(
         self,
         *,

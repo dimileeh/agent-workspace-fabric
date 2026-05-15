@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -93,9 +94,16 @@ class _CallbackIdempotencyReplayCache:
 
 
 class _CallbackIdempotencyReplayKeyCache:
-    def __init__(self, *, max_entries: int = _CALLBACK_REPLAY_CACHE_MAX_ENTRIES) -> None:
+    def __init__(self, *, max_entries: int | None = None) -> None:
+        if max_entries is not None and max_entries < 1:
+            raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
         self._entries: OrderedDict[str, str] = OrderedDict()
+        self._durable_warmed = False
+
+    @property
+    def durable_warmed(self) -> bool:
+        return self._durable_warmed
 
     def matches(
         self,
@@ -119,8 +127,27 @@ class _CallbackIdempotencyReplayKeyCache:
         *,
         idempotency_key: str,
     ) -> None:
-        self._entries[idempotency_key] = callback_request_hash(payload)
+        self.remember_hash(
+            idempotency_key=idempotency_key,
+            request_hash=callback_request_hash(payload),
+        )
+
+    def remember_hash(self, *, idempotency_key: str, request_hash: str) -> None:
+        self._entries[idempotency_key] = request_hash
         self._entries.move_to_end(idempotency_key)
+        self._trim()
+
+    def warm_durable(self, entries: Iterable[tuple[str, str]]) -> None:
+        for idempotency_key, request_hash in entries:
+            self.remember_hash(
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+        self._durable_warmed = True
+
+    def _trim(self) -> None:
+        if self._max_entries is None:
+            return
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
 
@@ -175,19 +202,14 @@ async def register_callback(
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
     if known_replay_key:
-        try:
-            durable_replay = await service.replay_existing(payload, idempotency_key=key)
-        except CallbackIdempotencyConflictError as exc:
-            raise _idempotency_conflict() from exc
-        if durable_replay is not None:
-            response = CallbackSubscriptionResponse.model_validate(durable_replay)
-            _remember_callback_replay(
-                replay_cache,
-                replay_key_cache,
-                payload,
-                idempotency_key=key,
-                response=response,
-            )
+        response = await _callback_durable_replay_response(
+            service,
+            replay_cache,
+            replay_key_cache,
+            payload,
+            idempotency_key=key,
+        )
+        if response is not None:
             return response
 
     admission = admit_request(
@@ -198,21 +220,25 @@ async def register_callback(
         reason_code=_CALLBACK_REGISTER_RATE_LIMITED,
     )
     if not admission.allowed:
-        return _callback_register_rate_limited_response(admission)
-
-    try:
-        durable_replay = await service.replay_existing(payload, idempotency_key=key)
-    except CallbackIdempotencyConflictError as exc:
-        raise _idempotency_conflict() from exc
-    if durable_replay is not None:
-        response = CallbackSubscriptionResponse.model_validate(durable_replay)
-        _remember_callback_replay(
+        response = await _callback_durable_replay_after_rejection(
+            service,
             replay_cache,
             replay_key_cache,
             payload,
             idempotency_key=key,
-            response=response,
         )
+        if response is not None:
+            return response
+        return _callback_register_rate_limited_response(admission)
+
+    response = await _callback_durable_replay_response(
+        service,
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=key,
+    )
+    if response is not None:
         return response
 
     try:
@@ -309,6 +335,56 @@ def _callback_register_rate_limited_response(
         ).model_dump(),
         headers={"Retry-After": str(retry_after)},
     )
+
+
+async def _callback_durable_replay_after_rejection(
+    service: CallbackService,
+    replay_cache: _CallbackIdempotencyReplayCache,
+    replay_key_cache: _CallbackIdempotencyReplayKeyCache,
+    payload: CallbackSubscriptionCreateRequest,
+    *,
+    idempotency_key: str,
+) -> CallbackSubscriptionResponse | None:
+    if not replay_key_cache.durable_warmed:
+        replay_key_cache.warm_durable(await service.list_idempotency_replay_keys())
+    try:
+        known_replay_key = replay_key_cache.matches(payload, idempotency_key=idempotency_key)
+    except CallbackIdempotencyConflictError as exc:
+        raise _idempotency_conflict() from exc
+    if not known_replay_key:
+        return None
+    return await _callback_durable_replay_response(
+        service,
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _callback_durable_replay_response(
+    service: CallbackService,
+    replay_cache: _CallbackIdempotencyReplayCache,
+    replay_key_cache: _CallbackIdempotencyReplayKeyCache,
+    payload: CallbackSubscriptionCreateRequest,
+    *,
+    idempotency_key: str,
+) -> CallbackSubscriptionResponse | None:
+    try:
+        durable_replay = await service.replay_existing(payload, idempotency_key=idempotency_key)
+    except CallbackIdempotencyConflictError as exc:
+        raise _idempotency_conflict() from exc
+    if durable_replay is None:
+        return None
+    response = CallbackSubscriptionResponse.model_validate(durable_replay)
+    _remember_callback_replay(
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=idempotency_key,
+        response=response,
+    )
+    return response
 
 
 def _remember_callback_replay(

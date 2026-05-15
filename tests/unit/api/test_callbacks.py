@@ -379,6 +379,44 @@ async def test_register_callback_db_replay_bypasses_limit_when_replay_cache_is_c
 
 
 @pytest.mark.unit
+async def test_register_callback_db_replay_bypasses_limit_when_replay_caches_are_cold(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = _authorized_headers(idempotency_key="callback-db-cold-rate-replay")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-db-cold-rate-fresh",
+            "target_url": "https://operator.example.com/awf/db-cold-fresh",
+        },
+        headers=_authorized_headers(idempotency_key="callback-db-cold-rate-fresh"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
 async def test_register_callback_uses_verified_bearer_identity_for_rate_limit(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,
@@ -889,6 +927,20 @@ def test_callback_replay_key_conflict_does_not_promote_lru_entry() -> None:
 
     assert cache.matches(second_payload, idempotency_key="callback-key-lru-second") is True
     assert cache.matches(first_payload, idempotency_key="callback-key-lru-first") is False
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_default_retains_keys_past_response_cache_limit() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayKeyCache()
+    payload = _callback_payload(
+        name="callback-key-default-retain",
+        target_url="https://operator.example.com/awf/key-default-retain",
+    )
+
+    for index in range(callbacks_route._CALLBACK_REPLAY_CACHE_MAX_ENTRIES + 1):  # noqa: SLF001
+        cache.remember(payload, idempotency_key=f"callback-default-key-{index}")
+
+    assert cache.matches(payload, idempotency_key="callback-default-key-0") is True
 
 
 @pytest.mark.unit
