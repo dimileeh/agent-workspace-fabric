@@ -704,6 +704,10 @@ The response is `PullRequestMonitorAdoptionResponse` and includes the adopted
 `events_url`, `logs_url`, and `attached_existing`. A repeat adoption for the
 same repo/PR and same monitor policy returns the same workspace with
 `attached_existing=true`; policy changes return `PR_ADOPTION_POLICY_CONFLICT`.
+Agent `model` and `effort` overrides are part of that raw monitor policy:
+omitting them requests the default/no-override policy and conflicts with an
+existing live adoption pinned to explicit `agent_model` or `agent_effort`
+values.
 If the previous adoption row is terminal or superseded, a retry creates a fresh
 monitor workspace with `attached_existing=false` and records the previous
 terminal adoption lineage.

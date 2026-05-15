@@ -249,6 +249,136 @@ def test_ruff_check_autofix_repair_files_ignores_fixable_diagnostic_without_path
 
 
 @pytest.mark.unit
+def test_recovery_needs_existing_pr_push_rejects_blank_and_unknown_modes() -> None:
+    assert not _recovery_needs_existing_pr_push(
+        {"recovery_mode": "validate_only", "source_head_sha": "old"},
+        validated_workspace_head_sha="   ",
+        rebase_recovery_result=None,
+    )
+    assert not _recovery_needs_existing_pr_push(
+        {"recovery_mode": "repair_only", "source_head_sha": "old"},
+        validated_workspace_head_sha="new",
+        rebase_recovery_result=None,
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_failure_details_require_retry_metadata() -> None:
+    metadata_key = executor_mod.SETUP_DEPENDENCY_NETWORK_METADATA_KEY
+
+    assert (
+        executor_mod._setup_dependency_network_details(  # noqa: SLF001
+            SimpleNamespace(metadata=None)
+        )
+        is None
+    )
+    assert (
+        executor_mod._setup_dependency_network_details(  # noqa: SLF001
+            SimpleNamespace(metadata={metadata_key: "not-a-dict"})
+        )
+        is None
+    )
+    assert (
+        executor_mod._setup_dependency_network_failure_details(  # noqa: SLF001
+            SimpleNamespace(
+                reason_code="OTHER_FAILURE",
+                metadata={metadata_key: {"host": "files.pythonhosted.org"}},
+            )
+        )
+        is None
+    )
+
+    details = executor_mod._setup_dependency_network_failure_details(  # noqa: SLF001
+        SimpleNamespace(
+            reason_code=executor_mod.SETUP_DEPENDENCY_NETWORK_FAILURE,
+            metadata={
+                metadata_key: {
+                    "host": "files.pythonhosted.org",
+                    "package": "docker==7.1.0",
+                }
+            },
+        )
+    )
+
+    assert details == {"host": "files.pythonhosted.org", "package": "docker==7.1.0"}
+
+
+@pytest.mark.unit
+def test_validation_evidence_helpers_cover_compaction_value_shapes() -> None:
+    assert json.loads(executor_mod._validation_evidence_json({"status": "ok"})) == {"status": "ok"}
+    assert executor_mod._validation_evidence_coverage_summary(None) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "NoneType",
+    }
+    assert executor_mod._validation_evidence_floor_value("short") == "short"  # noqa: SLF001
+    assert executor_mod._validation_evidence_floor_value(3) == 3  # noqa: SLF001
+    assert executor_mod._validation_evidence_floor_value(True) is True  # noqa: SLF001
+
+    long_summary = executor_mod._validation_evidence_floor_value("x" * 513)  # noqa: SLF001
+    assert long_summary == {
+        "truncated": True,
+        "original_type": "string",
+        "original_length": 513,
+    }
+    assert executor_mod._validation_evidence_size_summary({"a": 1, "b": 2}) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "mapping",
+        "original_entry_count": 2,
+        "retained_keys": ["a", "b"],
+    }
+    assert executor_mod._validation_evidence_size_summary([1, 2, 3]) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "list",
+        "original_length": 3,
+    }
+
+
+@pytest.mark.unit
+def test_requested_tier_metadata_and_adopted_remote_helpers_handle_invalid_shapes() -> None:
+    assert executor_mod._requested_tier_from_metadata(None) is None  # noqa: SLF001
+    assert executor_mod._requested_tier_from_metadata({"requested_tier": 0}) is None  # noqa: SLF001
+    assert (  # noqa: SLF001
+        executor_mod._requested_tier_from_metadata({"validation": {"requested_tier": 2}}) == 2
+    )
+    assert executor_mod._requested_tier_from_metadata({"validation": []}) is None  # noqa: SLF001
+    assert (
+        executor_mod._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(
+                task_kind="sync_feature_pr",
+                repo_url="https://git.example.invalid/org/repo",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_failure_text_includes_structured_report_details() -> None:
+    message = executor_mod._post_validation_conformance_failure_text(  # noqa: SLF001
+        executor_mod._PlanningRunFailure(
+            message="post-validation conformance failed",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            details={
+                "conformance": {
+                    "summary": "docs still missing",
+                    "report_reason_code": "PLAN_CONFORMANCE_UNSATISFIED",
+                    "gaps": [" add docs ", "", "add validation evidence"],
+                }
+            },
+        )
+    )
+
+    assert message.splitlines() == [
+        "post-validation conformance failed",
+        "Summary: docs still missing",
+        "Report reason code: PLAN_CONFORMANCE_UNSATISFIED",
+        "Remaining conformance gaps:",
+        "- add docs",
+        "- add validation evidence",
+    ]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("conformance_fields", "payload_fields", "expected_iteration", "expected_max_iterations"),
     [
@@ -493,6 +623,28 @@ async def test_post_validation_report_git_error_preserves_unstage_failure_metada
         "--",
         report_path.as_posix(),
     ]
+
+
+@pytest.mark.unit
+async def test_post_validation_report_skips_commit_when_report_is_not_staged(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout="docs/awf-plans/other.conformance.json\n")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    committed = await executor._commit_post_validation_conformance_report(
+        workspace_id="ws_post",
+        worktree_path=tmp_path / "worktree",
+        report_path=report_path,
+        validation_run_id="validation-run-1",
+    )
+
+    assert committed is False
+    assert all("commit" not in call.args for call in runner.calls)
 
 
 @pytest.mark.unit
@@ -1333,6 +1485,161 @@ def _executor_with_runner(
     return executor
 
 
+def _autofix_classification(
+    *,
+    repair_files: tuple[str, ...] = ("src/app.py",),
+) -> executor_mod._PostAgentCommitClassification:  # noqa: SLF001
+    return executor_mod._PostAgentCommitClassification(  # noqa: SLF001
+        reason_code="POST_AGENT_COMMIT_AUTOFIX_NEEDED",
+        failed_hooks=("ruff-check",),
+        format_repair_files=(),
+        normalizer_repair_files=(),
+        autofix_repair_files=repair_files,
+        summary="ruff reported fixable diagnostics",
+        repair_strategy="deterministic_autofix",
+    )
+
+
+@pytest.mark.unit
+async def test_autofixable_precommit_repair_skips_when_no_staged_python_matches(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+
+    repaired = await executor._run_post_agent_autofixable_precommit_repair(
+        workspace_id="ws_autofix",
+        worktree_path=tmp_path / "worktree",
+        commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+        classification=_autofix_classification(repair_files=("src/app.py",)),
+        staged_paths=["README.md"],
+        run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert repaired is False
+    executor._record_post_agent_commit_format_repair.assert_awaited_once()  # type: ignore[attr-defined]
+    assert (
+        executor._record_post_agent_commit_format_repair.await_args.kwargs["retry_outcome"]  # type: ignore[attr-defined]
+        == "skipped"
+    )
+
+
+@pytest.mark.unit
+async def test_autofixable_precommit_repair_raises_when_ruff_fix_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="ruff failed")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostAgentCommitStepError) as exc_info:
+        await executor._run_post_agent_autofixable_precommit_repair(
+            workspace_id="ws_autofix",
+            worktree_path=tmp_path / "worktree",
+            commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+            classification=_autofix_classification(),
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
+
+    assert exc_info.value.stage == "ruff check --fix"
+    assert exc_info.value.reason_code_override == "POST_AGENT_FORMAT_REPAIR_FAILED"
+    assert runner.calls[0].args[-2:] == ["--", "src/app.py"]
+
+
+@pytest.mark.unit
+async def test_autofixable_precommit_repair_raises_when_restaging_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostAgentCommitStepError) as exc_info:
+        await executor._run_post_agent_autofixable_precommit_repair(
+            workspace_id="ws_autofix",
+            worktree_path=tmp_path / "worktree",
+            commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+            classification=_autofix_classification(),
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=1, stdout="", stderr="add failed")
+            ),
+        )
+
+    assert exc_info.value.stage == "git add"
+    assert exc_info.value.reason_code_override == "POST_AGENT_FORMAT_REPAIR_FAILED"
+
+
+@pytest.mark.unit
+async def test_autofixable_precommit_repair_commits_repaired_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    run_commit = AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr=""))
+    git_in_worktree = AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr=""))
+
+    repaired = await executor._run_post_agent_autofixable_precommit_repair(
+        workspace_id="ws_autofix",
+        worktree_path=tmp_path / "worktree",
+        commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+        classification=_autofix_classification(),
+        staged_paths=["src/app.py"],
+        run_commit=run_commit,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert repaired is True
+    run_commit.assert_awaited_once()
+    git_in_worktree.assert_awaited_once_with(["add", "--", "src/app.py"])
+    assert (
+        executor._record_post_agent_commit_format_repair.await_args.kwargs["retry_outcome"]  # type: ignore[attr-defined]
+        == "succeeded"
+    )
+
+
+@pytest.mark.unit
+async def test_autofixable_precommit_repair_raises_when_retry_commit_still_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostAgentCommitStepError) as exc_info:
+        await executor._run_post_agent_autofixable_precommit_repair(
+            workspace_id="ws_autofix",
+            worktree_path=tmp_path / "worktree",
+            commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+            classification=_autofix_classification(),
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(
+                return_value=CommandResult(returncode=1, stdout="", stderr="commit still failed")
+            ),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
+
+    assert exc_info.value.stage == "git commit"
+    assert exc_info.value.precommit_repair_attempted is True
+    assert exc_info.value.repair_strategy == "deterministic_autofix"
+
+
 @pytest.mark.unit
 def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
     assert (
@@ -1999,6 +2306,32 @@ async def test_baseline_coverage_preflight_skips_when_strategy_disables_it(
 
 
 @pytest.mark.unit
+async def test_final_coverage_gate_skips_when_coverage_command_is_absent(
+    tmp_path: Path,
+) -> None:
+    validation = _CoverageValidation(_coverage(tmp_path, percent=100, status="passed"))
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-no-command",
+            "validation": {"strategy": {"final_gate": "coverage"}},
+        }
+    )
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id="ws_no_coverage_command",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+    )
+
+    assert result.coverage is None
+    assert validation.calls == []
+
+
+@pytest.mark.unit
 async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     tmp_path: Path,
 ) -> None:
@@ -2172,6 +2505,63 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
         assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_validation_run_evidence_for_conformance_reports_missing_run(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        executor = WorkspaceExecutor(
+            session_factory=make_session_factory(engine),
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=object(),  # type: ignore[arg-type]
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+
+        evidence = await executor._validation_run_evidence_for_conformance("missing-run")
+
+        assert "AWF persisted validation run evidence" in evidence
+        assert '"status": "missing"' in evidence
+        assert '"reason_code": "VALIDATION_RUN_NOT_FOUND"' in evidence
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_auto_retry_planning_scope_failure_ignores_other_reason_codes(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+
+    await executor._auto_retry_planning_scope_failure(
+        workspace_id="ws_plan",
+        failure=executor_mod._PlanningRunFailure(
+            message="ordinary conformance failure",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_git_commit_count_since_handles_failed_and_invalid_output(
+    tmp_path: Path,
+) -> None:
+    failed_runner = FakeCommandRunner()
+    failed_runner.queue_result(returncode=1, stderr="bad revision")
+    failed_executor = _executor_with_runner(failed_runner, tmp_path)
+    assert await failed_executor._git_commit_count_since(tmp_path / "worktree", "base") == 0
+
+    invalid_runner = FakeCommandRunner()
+    invalid_runner.queue_result(returncode=0, stdout="not-an-int\n")
+    invalid_executor = _executor_with_runner(invalid_runner, tmp_path)
+    assert await invalid_executor._git_commit_count_since(tmp_path / "worktree", "base") == 0
 
 
 @pytest.mark.unit

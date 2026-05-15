@@ -330,6 +330,59 @@ def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> Non
 
 
 @pytest.mark.unit
+def test_failure_causality_small_helpers_cover_missing_and_fallback_shapes() -> None:
+    assert (
+        failure_causality_service.primary_failure_reason_code(
+            {"reason_code": 123},
+            fallback="FALLBACK_REASON",
+        )
+        == "FALLBACK_REASON"
+    )
+    assert (
+        failure_causality_service.primary_failure_reason_code(
+            None,
+            fallback="FALLBACK_REASON",
+        )
+        == "FALLBACK_REASON"
+    )
+
+    payload = build_preserved_failure_payload(
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "details": {"validation_run_id": "vr_123"},
+        },
+        secondary_failure={"reason_code": "CLEANUP_FAILED"},
+    )
+    assert payload["details"] == {"validation_run_id": "vr_123"}
+    assert "reason_code" not in payload
+    assert "message" not in payload
+
+    sqlite_fallback = failure_causality_service._json_payload_object_predicate(  # noqa: SLF001
+        _RecordingSession("mysql"),  # type: ignore[arg-type]
+        "primary_failure",
+    )
+    assert str(sqlite_fallback.compile(dialect=postgresql.dialect())) == "false"
+
+    class _NoBindSession:
+        info: dict[str, object] = {}
+        bind = None
+
+    class _NamelessDialect:
+        name = 123
+
+    class _NamelessBind:
+        dialect = _NamelessDialect()
+
+    class _NamelessBindSession:
+        info: dict[str, object] = {}
+        bind = _NamelessBind()
+
+    assert failure_causality_service._session_dialect_name(_NoBindSession()) is None  # type: ignore[arg-type]  # noqa: SLF001
+    assert failure_causality_service._session_dialect_name(_NamelessBindSession()) is None  # type: ignore[arg-type]  # noqa: SLF001
+    assert failure_causality_service._secondary_failure_history_contains([], []) is True  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_preserved_failure_payload_caps_secondary_failure_history() -> None:
     expected_limit = 20
     previous_secondaries = tuple(

@@ -181,6 +181,20 @@ def test_runbook_documents_exact_grace_override_for_idempotent_retries() -> None
 
 
 @pytest.mark.unit
+def test_runbook_documents_agent_default_idempotency_semantics() -> None:
+    doc = _read("docs/PR_MONITOR_ADOPTION.md")
+    normalized_doc = re.sub(r"\s+", " ", doc)
+
+    for retry_term in (
+        "omitting `agent` requests the default `codex` agent policy",
+        "not a no-op",
+        "conflicts with an existing live adoption for another agent",
+        "omitting `model` or `effort` requests the default/no-override policy",
+    ):
+        assert retry_term in normalized_doc
+
+
+@pytest.mark.unit
 def test_runbook_covers_observability_and_recovery_surfaces() -> None:
     doc = _read("docs/PR_MONITOR_ADOPTION.md")
 
