@@ -2189,9 +2189,9 @@ def _read_text_if_present(path: Path) -> str | None:
     try:
         if path.is_file():
             return path.read_text(encoding="utf-8", errors="replace")
+        return None
     except OSError:
         return None
-    return None
 
 
 def _alembic_policy_missing_worktree_metadata(

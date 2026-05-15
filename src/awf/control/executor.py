@@ -1354,6 +1354,8 @@ class WorkspaceExecutor:
                 continue
             retry_count = _metadata_int(details, "retry_count") or 0
             if retry_count > 0:
+                # Exhausted attempts intentionally emit both the retry event and
+                # the exhausted event from the same redacted retry metadata.
                 event_specs.append(
                     (
                         SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
