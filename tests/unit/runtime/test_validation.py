@@ -2251,6 +2251,13 @@ class TestCoverageEnforcement:
             "tests/unit/control/test_executor.py::"
             "TestFinalGate::test_parallel_fixture_failure[workspace:local]",
         ]
+        assert result.command_result.metadata["failing_test_evidence"] == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+            "- AssertionError: boom",
+        ]
 
     @pytest.mark.unit
     async def test_run_profile_coverage_rejects_provider_fail_under_even_when_rounded_percent_passes(
@@ -2847,6 +2854,11 @@ class TestCoverageEnforcement:
             "tests/unit/test_widget.py::test_handles[bad value]",
             "tests/unit/test_widget.py::test_handles[a - b]",
             "tests/unit/test_widget.py::test_setup[param: slow]",
+        ]
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_widget.py::test_handles[bad value] - AssertionError: boom",
+            "FAILED tests/unit/test_widget.py::test_handles[a - b] - AssertionError: boom",
+            "ERROR tests/unit/test_widget.py::test_setup[param: slow]: setup failed",
         ]
 
     @pytest.mark.unit
