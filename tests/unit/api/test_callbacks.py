@@ -16,9 +16,11 @@ from starlette.requests import Request
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
 from awf.api.routes import callbacks as callbacks_route
+from awf.common import callback_targets
 from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 
+_CALLBACK_TOKEN = "callback-secret"
 _VALID_BODY = {
     "name": "operator-console",
     "target_url": "https://operator.example.com/awf/events",
@@ -45,6 +47,7 @@ async def _subscription_count(engine: AsyncEngine) -> int:
 def _callback_request_admission_settings(*, limit: int = 1) -> Settings:
     return Settings(
         _env_file=None,
+        api_token=_CALLBACK_TOKEN,
         callbacks_enabled=True,
         request_admission_window_seconds=60,
         workspace_create_rate_limit_count=20,
@@ -81,6 +84,27 @@ def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> 
     assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
 
 
+def _authorized_headers(
+    *,
+    idempotency_key: str | None = None,
+    authorization: str | None = f"Bearer {_CALLBACK_TOKEN}",
+) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
+@pytest.fixture(autouse=True)
+def _configure_api_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWF_API_TOKEN", _CALLBACK_TOKEN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.mark.unit
 async def test_register_callback_direct_call_uses_default_settings_dependency(
     engine: AsyncEngine,
@@ -109,7 +133,11 @@ async def callback_app_and_client(
 
 @pytest.mark.unit
 async def test_register_callback_requires_idempotency_key(client: AsyncClient) -> None:
-    response = await client.post("/v1/callbacks", json=_VALID_BODY)
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(),
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"] == {
@@ -126,7 +154,7 @@ async def test_register_callback_rejects_oversized_idempotency_key(
     response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "k" * 129},
+        headers=_authorized_headers(idempotency_key="k" * 129),
     )
 
     assert response.status_code == 400
@@ -144,7 +172,7 @@ async def test_register_callback_persists_safe_public_contract(
     response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-register-1"},
+        headers=_authorized_headers(idempotency_key="callback-register-1"),
     )
 
     assert response.status_code == 201
@@ -176,7 +204,7 @@ async def test_register_callback_rejects_burst_after_configured_limit(
     first = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "name": "callback-rate-first"},
-        headers={"Idempotency-Key": "callback-rate-first"},
+        headers=_authorized_headers(idempotency_key="callback-rate-first"),
     )
     rejected = await client.post(
         "/v1/callbacks",
@@ -185,11 +213,11 @@ async def test_register_callback_rejects_burst_after_configured_limit(
             "name": "callback-rate-second",
             "target_url": "https://operator.example.com/awf/events-2",
         },
-        headers={"Idempotency-Key": "callback-rate-second"},
+        headers=_authorized_headers(idempotency_key="callback-rate-second"),
     )
 
     assert first.status_code == 201
-    _assert_callback_rate_limited(rejected, identity_type="client_host")
+    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
 
 
@@ -225,7 +253,7 @@ async def test_register_callback_rate_limit_rejects_fresh_key_after_db_replay_mi
     first = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "name": "callback-replay-read-first"},
-        headers={"Idempotency-Key": "callback-replay-read-first"},
+        headers=_authorized_headers(idempotency_key="callback-replay-read-first"),
     )
     rejected = await client.post(
         "/v1/callbacks",
@@ -234,11 +262,11 @@ async def test_register_callback_rate_limit_rejects_fresh_key_after_db_replay_mi
             "name": "callback-replay-read-second",
             "target_url": "https://operator.example.com/awf/events-2",
         },
-        headers={"Idempotency-Key": "callback-replay-read-second"},
+        headers=_authorized_headers(idempotency_key="callback-replay-read-second"),
     )
 
     assert first.status_code == 201
-    _assert_callback_rate_limited(rejected, identity_type="client_host")
+    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
     assert replay_keys == [
         "callback-replay-read-first",
         "callback-replay-read-second",
@@ -256,12 +284,12 @@ async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_key
     first = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-rate-replay"},
+        headers=_authorized_headers(idempotency_key="callback-rate-replay"),
     )
     replay = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-rate-replay"},
+        headers=_authorized_headers(idempotency_key="callback-rate-replay"),
     )
     fresh = await client.post(
         "/v1/callbacks",
@@ -270,13 +298,13 @@ async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_key
             "name": "callback-rate-fresh",
             "target_url": "https://operator.example.com/awf/fresh",
         },
-        headers={"Idempotency-Key": "callback-rate-fresh"},
+        headers=_authorized_headers(idempotency_key="callback-rate-fresh"),
     )
 
     assert first.status_code == 201
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
-    _assert_callback_rate_limited(fresh, identity_type="client_host")
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
 
 
@@ -287,7 +315,7 @@ async def test_register_callback_db_replay_bypasses_limit_when_replay_cache_is_c
 ) -> None:
     app, client = callback_app_and_client
     app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
-    headers = {"Idempotency-Key": "callback-db-rate-replay"}
+    headers = _authorized_headers(idempotency_key="callback-db-rate-replay")
 
     first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
     setattr(
@@ -303,63 +331,56 @@ async def test_register_callback_db_replay_bypasses_limit_when_replay_cache_is_c
             "name": "callback-db-rate-fresh",
             "target_url": "https://operator.example.com/awf/db-fresh",
         },
-        headers={"Idempotency-Key": "callback-db-rate-fresh"},
+        headers=_authorized_headers(idempotency_key="callback-db-rate-fresh"),
     )
 
     assert first.status_code == 201
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
-    _assert_callback_rate_limited(fresh, identity_type="client_host")
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
 
 
 @pytest.mark.unit
-async def test_register_callback_uses_client_host_for_unverified_bearer_identity(
+async def test_register_callback_uses_verified_bearer_identity_for_rate_limit(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,
 ) -> None:
     app, client = callback_app_and_client
     app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
 
-    fallback = await client.post(
+    first = await client.post(
         "/v1/callbacks",
-        json={**_VALID_BODY, "name": "fallback-identity"},
-        headers={"Idempotency-Key": "callback-fallback-identity"},
+        json={**_VALID_BODY, "name": "verified-identity-first"},
+        headers=_authorized_headers(idempotency_key="callback-verified-identity-first"),
     )
-    bearer = await client.post(
+    second = await client.post(
         "/v1/callbacks",
         json={
             **_VALID_BODY,
-            "name": "bearer-identity",
-            "target_url": "https://operator.example.com/awf/bearer",
+            "name": "verified-identity-second",
+            "target_url": "https://operator.example.com/awf/verified-second",
         },
-        headers={
-            "Authorization": "Bearer callback-token",
-            "Idempotency-Key": "callback-bearer-identity",
-        },
+        headers=_authorized_headers(idempotency_key="callback-verified-identity-second"),
     )
 
-    assert fallback.status_code == 201
-    _assert_callback_rate_limited(bearer, identity_type="client_host")
+    assert first.status_code == 201
+    _assert_callback_rate_limited(second, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
 
 
 @pytest.mark.unit
-async def test_register_callback_bounds_rotated_unverified_bearers_by_client_host(
+async def test_register_callback_rejects_rotated_invalid_bearer_before_rate_limit(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,
 ) -> None:
     app, client = callback_app_and_client
     app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
-    secret_token = "callback-secret-token"
 
     first = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "name": "token-a-first"},
-        headers={
-            "Authorization": f"Bearer {secret_token}",
-            "Idempotency-Key": "callback-token-a-first",
-        },
+        headers=_authorized_headers(idempotency_key="callback-token-a-first"),
     )
     second_token = await client.post(
         "/v1/callbacks",
@@ -375,10 +396,11 @@ async def test_register_callback_bounds_rotated_unverified_bearers_by_client_hos
     )
 
     assert first.status_code == 201
-    _assert_callback_rate_limited(second_token, identity_type="client_host")
+    assert second_token.status_code == 401
+    assert second_token.json()["detail"]["error_code"] == "UNAUTHORIZED"
     assert await _subscription_count(engine) == 1
-    assert secret_token not in json.dumps(second_token.json())
-    assert f"Bearer {secret_token}" not in json.dumps(second_token.json())
+    assert _CALLBACK_TOKEN not in json.dumps(second_token.json())
+    assert f"Bearer {_CALLBACK_TOKEN}" not in json.dumps(second_token.json())
 
 
 @pytest.mark.unit
@@ -389,6 +411,8 @@ async def test_register_callback_bounds_rotated_unverified_bearers_by_client_hos
         {**_VALID_BODY, "target_url": "https://user:pass@operator.example.com/events"},
         {**_VALID_BODY, "target_url": "https://operator.example.com/events#frag"},
         {**_VALID_BODY, "target_url": "https:///missing-host"},
+        {**_VALID_BODY, "target_url": "https://operator.example.com:abc/events"},
+        {**_VALID_BODY, "target_url": "https://operator.example.com:99999/events"},
         {**_VALID_BODY, "event_types": []},
         {**_VALID_BODY, "event_types": [""]},
         {**_VALID_BODY, "event_types": ["system.secret"]},
@@ -402,10 +426,26 @@ async def test_register_callback_validates_url_events_and_extra_fields(
     response = await client.post(
         "/v1/callbacks",
         json=payload,
-        headers={"Idempotency-Key": "callback-invalid"},
+        headers=_authorized_headers(idempotency_key="callback-invalid"),
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_register_callback_validation_errors_keep_fastapi_shape(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json={key: value for key, value in _VALID_BODY.items() if key != "name"},
+        headers=_authorized_headers(idempotency_key="callback-missing-name"),
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert any(item["loc"] == ["body", "name"] and item["type"] == "missing" for item in detail)
 
 
 @pytest.mark.unit
@@ -417,14 +457,15 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
     app.dependency_overrides[get_settings] = lambda: Settings(
         _env_file=None,
         callbacks_enabled=False,
+        api_token=_CALLBACK_TOKEN,
     )
 
     register_response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-disabled"},
+        headers=_authorized_headers(idempotency_key="callback-disabled"),
     )
-    list_response = await client.get("/v1/callbacks")
+    list_response = await client.get("/v1/callbacks", headers=_authorized_headers())
 
     assert register_response.status_code == 503
     assert register_response.json()["detail"] == {
@@ -435,6 +476,61 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
     assert list_response.json()["detail"] == {
         "error_code": "CALLBACKS_DISABLED",
         "message": "External callbacks are disabled by configuration.",
+    }
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_http_target_when_https_required_without_insert(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_token=_CALLBACK_TOKEN,
+        callbacks_require_https=True,
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "target_url": "http://operator.example.com/awf/events"},
+        headers=_authorized_headers(idempotency_key="callback-http-policy"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+        "message": "target_url must use https",
+    }
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_non_allowlisted_target_without_insert(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_token=_CALLBACK_TOKEN,
+        callbacks_allowed_hosts=("operator.example.com",),
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "target_url": "https://callback-disallowed.example.com/awf/events",
+        },
+        headers=_authorized_headers(idempotency_key="callback-allowlist-policy"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+        "message": "target_url host is not allowlisted",
     }
     assert await _subscription_count(engine) == 0
 
@@ -461,6 +557,8 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
         "http://[::1]/events",
         "http://[::ffff:127.0.0.1]/events",
         "http://[::ffff:169.254.169.254]/latest/meta-data",
+        "http://[::ffff:0:169.254.169.254]/latest/meta-data",
+        "http://[2002:c0a8:0101::1]/events",
         "http://[fe80::1]/events",
     ],
 )
@@ -472,7 +570,7 @@ async def test_register_callback_rejects_internal_target_hosts_without_insert(
     response = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "target_url": target_url},
-        headers={"Idempotency-Key": f"callback-internal-{target_url}"},
+        headers=_authorized_headers(idempotency_key=f"callback-internal-{target_url}"),
     )
 
     assert response.status_code == 422
@@ -491,7 +589,7 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
     monkeypatch: pytest.MonkeyPatch,
     target_url: str,
 ) -> None:
-    real_ip_address = api_schemas.ipaddress.ip_address
+    real_ip_address = callback_targets.ipaddress.ip_address
 
     class LegacyIPv4MappedAddress:
         is_global = True
@@ -507,7 +605,7 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
             return address
         return LegacyIPv4MappedAddress(ipv4_mapped)
 
-    monkeypatch.setattr(api_schemas.ipaddress, "ip_address", legacy_ip_address)
+    monkeypatch.setattr(callback_targets.ipaddress, "ip_address", legacy_ip_address)
 
     with pytest.raises(ValidationError, match="target_url must use a public host"):
         api_schemas.CallbackSubscriptionCreateRequest.model_validate(
@@ -518,14 +616,31 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
 @pytest.mark.unit
 def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
     assert (
-        api_schemas._looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
+        callback_targets.looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
             _NoLegacyIPv4Labels()
         )
         is False
     )
-    assert api_schemas._looks_like_legacy_ipv4_literal("192.168..1") is False
-    assert api_schemas._looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
-    assert api_schemas._looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True
+    assert callback_targets.looks_like_legacy_ipv4_literal("192.168..1") is False
+    assert callback_targets.looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
+    assert callback_targets.looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True
+
+
+@pytest.mark.unit
+def test_workspace_reason_legacy_compatibility_validator_leaves_non_mappings_unchanged() -> None:
+    assert (
+        api_schemas.WorkspaceReasonWithLegacyStopStackRequest._drop_ignored_legacy_body_fields(
+            "not-a-body-mapping"
+        )
+        == "not-a-body-mapping"
+    )
+
+
+@pytest.mark.unit
+def test_workspace_reason_legacy_compatibility_validator_drops_ignored_fields() -> None:
+    assert api_schemas.WorkspaceReasonWithLegacyStopStackRequest._drop_ignored_legacy_body_fields(
+        {"reason": "operator cleanup", "stop_stack": True}
+    ) == {"reason": "operator cleanup"}
 
 
 @pytest.mark.unit
@@ -534,7 +649,7 @@ def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
     ["0x7f.0x0.0x0.0x1", "0x.0.0.1", "0xgg.0.0.1", "127..0.1"],
 )
 def test_legacy_ipv4_literal_detection_handles_hex_and_malformed_labels(hostname: str) -> None:
-    result = api_schemas._looks_like_legacy_ipv4_literal(hostname)
+    result = callback_targets.looks_like_legacy_ipv4_literal(hostname)
 
     if hostname == "0x7f.0x0.0x0.0x1":
         assert result is True
@@ -559,7 +674,7 @@ async def test_register_callback_rejects_internal_namespaced_event_types_without
     response = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "event_types": [event_type]},
-        headers={"Idempotency-Key": f"callback-invalid-{event_type}"},
+        headers=_authorized_headers(idempotency_key=f"callback-invalid-{event_type}"),
     )
 
     assert response.status_code == 422
@@ -582,7 +697,7 @@ async def test_register_callback_accepts_exact_public_event_types(
                 "workspace.state_changed",
             ],
         },
-        headers={"Idempotency-Key": "callback-public-exact"},
+        headers=_authorized_headers(idempotency_key="callback-public-exact"),
     )
 
     assert response.status_code == 201
@@ -603,7 +718,7 @@ async def test_register_callback_idempotent_replay_returns_original_without_dupl
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    headers = {"Idempotency-Key": "callback-replay"}
+    headers = _authorized_headers(idempotency_key="callback-replay")
 
     first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
     before_count = await _subscription_count(engine)
@@ -630,7 +745,7 @@ async def test_register_callback_same_key_with_changed_body_returns_conflict(
     engine: AsyncEngine,
     changed_body: dict[str, object],
 ) -> None:
-    headers = {"Idempotency-Key": "callback-conflict"}
+    headers = _authorized_headers(idempotency_key="callback-conflict")
 
     first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
     before_count = await _subscription_count(engine)
@@ -654,7 +769,7 @@ async def test_list_callbacks_returns_pagination_envelope_and_enabled_filter(
     enabled = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "name": "enabled"},
-        headers={"Idempotency-Key": "callback-list-enabled"},
+        headers=_authorized_headers(idempotency_key="callback-list-enabled"),
     )
     disabled = await client.post(
         "/v1/callbacks",
@@ -664,13 +779,17 @@ async def test_list_callbacks_returns_pagination_envelope_and_enabled_filter(
             "target_url": "https://operator.example.com/disabled",
             "enabled": False,
         },
-        headers={"Idempotency-Key": "callback-list-disabled"},
+        headers=_authorized_headers(idempotency_key="callback-list-disabled"),
     )
     assert enabled.status_code == 201
     assert disabled.status_code == 201
 
-    all_response = await client.get("/v1/callbacks")
-    enabled_response = await client.get("/v1/callbacks", params={"enabled": True})
+    all_response = await client.get("/v1/callbacks", headers=_authorized_headers())
+    enabled_response = await client.get(
+        "/v1/callbacks",
+        params={"enabled": True},
+        headers=_authorized_headers(),
+    )
 
     assert all_response.status_code == 200
     all_body = all_response.json()
@@ -690,6 +809,65 @@ async def test_list_callbacks_validates_limit_bounds(
     client: AsyncClient,
     limit: int,
 ) -> None:
-    response = await client.get("/v1/callbacks", params={"limit": limit})
+    response = await client.get(
+        "/v1/callbacks",
+        params={"limit": limit},
+        headers=_authorized_headers(),
+    )
 
     assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_register_callback_requires_authorization_token(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+) -> None:
+    _, client = callback_app_and_client
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(
+            idempotency_key="callback-no-token",
+            authorization=None,
+        ),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_invalid_authorization_token(client: AsyncClient) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(
+            idempotency_key="callback-bad-token",
+            authorization="Bearer wrong",
+        ),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_list_callbacks_requires_authorization_token(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+) -> None:
+    _, client = callback_app_and_client
+    response = await client.get("/v1/callbacks")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_list_callbacks_rejects_invalid_authorization_token(client: AsyncClient) -> None:
+    response = await client.get(
+        "/v1/callbacks",
+        headers={"Authorization": "Bearer wrong"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"

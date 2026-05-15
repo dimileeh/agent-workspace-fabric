@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory, resolve_settings_dependency
+from awf.api.deps import get_db_session_factory, require_api_token, resolve_settings_dependency
 from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
@@ -23,15 +23,25 @@ from awf.api.schemas import (
     CallbackSubscriptionListResponse,
     CallbackSubscriptionResponse,
     ErrorResponse,
+    HTTPExceptionErrorResponse,
 )
 from awf.common.config import Settings, get_settings
 from awf.service.callbacks import (
     CallbackIdempotencyConflictError,
     CallbackService,
+    CallbackTargetPolicyError,
+    CallbackTargetPolicyViolationError,
     callback_request_hash,
 )
 
-router = APIRouter(prefix="/v1/callbacks", tags=["callbacks"])
+router = APIRouter(
+    prefix="/v1/callbacks",
+    tags=["callbacks"],
+    responses={
+        401: {"model": HTTPExceptionErrorResponse, "description": "Unauthorized"},
+        503: {"model": HTTPExceptionErrorResponse, "description": "Service Unavailable"},
+    },
+)
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
 _CALLBACK_REGISTER_RATE_LIMITED = "CALLBACK_REGISTER_RATE_LIMITED"
 _CALLBACK_REPLAY_CACHE_STATE_KEY = "callback_register_idempotency_replay_cache"
@@ -88,7 +98,26 @@ _STATELESS_CALLBACK_REPLAY_CACHE = _CallbackIdempotencyReplayCache()
     "",
     response_model=CallbackSubscriptionResponse,
     status_code=status.HTTP_201_CREATED,
-    responses={429: RATE_LIMITED_ERROR_RESPONSE},
+    dependencies=[Depends(require_api_token)],
+    responses={
+        400: {"model": HTTPExceptionErrorResponse, "description": "Bad Request"},
+        409: {"model": HTTPExceptionErrorResponse, "description": "Conflict"},
+        422: {
+            "description": "Validation Error or Callback Target Policy Violation",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "title": "CallbackRegistrationUnprocessableEntityResponse",
+                        "oneOf": [
+                            {"$ref": "#/components/schemas/HTTPValidationError"},
+                            {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"},
+                        ],
+                    }
+                }
+            },
+        },
+        429: RATE_LIMITED_ERROR_RESPONSE,
+    },
 )
 async def register_callback(
     payload: CallbackSubscriptionCreateRequest,
@@ -101,6 +130,7 @@ async def register_callback(
     _ensure_callbacks_enabled(route_settings)
     key = _require_idempotency_key(idempotency_key)
     replay_cache = _callback_idempotency_replay_cache(request)
+    service = CallbackService(session_factory, settings=route_settings)
     try:
         cached = replay_cache.replay(payload, idempotency_key=key)
     except CallbackIdempotencyConflictError as exc:
@@ -108,7 +138,6 @@ async def register_callback(
     if cached is not None:
         return cached
 
-    service = CallbackService(session_factory)
     try:
         durable_replay = await service.replay_existing(payload, idempotency_key=key)
     except CallbackIdempotencyConflictError as exc:
@@ -133,6 +162,22 @@ async def register_callback(
             payload,
             idempotency_key=key,
         )
+    except CallbackTargetPolicyViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+                "message": str(exc),
+            },
+        ) from exc
+    except CallbackTargetPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_INVALID",
+                "message": str(exc),
+            },
+        ) from exc
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
     response = CallbackSubscriptionResponse.model_validate(subscription)
@@ -140,7 +185,11 @@ async def register_callback(
     return response
 
 
-@router.get("", response_model=CallbackSubscriptionListResponse)
+@router.get(
+    "",
+    response_model=CallbackSubscriptionListResponse,
+    dependencies=[Depends(require_api_token)],
+)
 async def list_callbacks(
     enabled: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,

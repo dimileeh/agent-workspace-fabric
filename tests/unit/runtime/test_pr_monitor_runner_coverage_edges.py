@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_mock
@@ -5871,6 +5872,109 @@ def test_protected_manual_ready_handoff_rejects_blocking_review_comments() -> No
     )
 
     assert _is_protected_manual_ready_handoff(status, MonitorState()) is False
+
+
+@pytest.mark.unit
+def test_monitor_recovery_conformance_payload_normalizes_matching_handoff() -> None:
+    assert pr_monitor_runner._normalize_conformance_handoff_reason_code(None) is None  # noqa: SLF001
+    assert pr_monitor_runner._normalize_conformance_handoff_reason_code("  ") is None  # noqa: SLF001
+    assert (
+        pr_monitor_runner._normalize_conformance_handoff_reason_code(  # noqa: SLF001
+            "conformance-requires-awf-validation"
+        )
+        == "CONFORMANCE_REQUIRES_AWF_VALIDATION"
+    )
+
+    workspace = SimpleNamespace(
+        events=[
+            SimpleNamespace(event_type="workspace.unrelated", payload=None, reason_code=None),
+            SimpleNamespace(
+                event_type=pr_monitor_runner._PLANNING_VALIDATION_HANDOFF_EVENT,  # noqa: SLF001
+                payload={
+                    "report_reason_code": "conformance-requires-awf-validation",
+                    "summary": "validation evidence missing",
+                    "gaps": ["rerun AWF validation"],
+                    "plan_path": "plans/example.md",
+                    "iteration": 2,
+                },
+                reason_code=None,
+            ),
+        ]
+    )
+
+    assert pr_monitor_runner._monitor_recovery_conformance_payload(workspace) == {  # noqa: SLF001
+        "conformance": {
+            "reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
+            "report_reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
+            "summary": "validation evidence missing",
+            "gaps": ["rerun AWF validation"],
+            "plan_path": "plans/example.md",
+            "iteration": 2,
+        }
+    }
+
+
+@pytest.mark.unit
+def test_monitor_recovery_conformance_payload_stops_after_satisfied_event() -> None:
+    workspace = SimpleNamespace(
+        events=[
+            SimpleNamespace(
+                event_type=pr_monitor_runner._PLANNING_VALIDATION_HANDOFF_EVENT,  # noqa: SLF001
+                payload={"reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION"},
+                reason_code=None,
+            ),
+            SimpleNamespace(
+                event_type=pr_monitor_runner._POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT,  # noqa: SLF001
+                payload=None,
+                reason_code=None,
+            ),
+        ]
+    )
+
+    assert pr_monitor_runner._monitor_recovery_conformance_payload(workspace) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_monitor_recovery_conformance_payload_ignores_non_matching_reason() -> None:
+    workspace = SimpleNamespace(
+        events=[
+            SimpleNamespace(
+                event_type=pr_monitor_runner._PLANNING_VALIDATION_HANDOFF_EVENT,  # noqa: SLF001
+                payload={"reason_code": "PLAN_CONFORMANCE_UNSATISFIED"},
+                reason_code=None,
+            )
+        ]
+    )
+
+    assert pr_monitor_runner._monitor_recovery_conformance_payload(workspace) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_requires_protected_merge_state() -> None:
+    clean = _status_for_helpers()
+    clean_status = PRStatus(
+        number=clean.number,
+        head_sha=clean.head_sha,
+        mergeable=clean.mergeable,
+        check_state=clean.check_state,
+        unresolved_inline_threads=clean.unresolved_inline_threads,
+        unresolved_review_comments=clean.unresolved_review_comments,
+        base_behind_count=clean.base_behind_count,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+    assert _is_protected_manual_ready_handoff(clean_status, MonitorState()) is False
+
+    blocked = PRStatus(
+        number=clean.number,
+        head_sha=clean.head_sha,
+        mergeable=clean.mergeable,
+        check_state=clean.check_state,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=clean.base_behind_count,
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+    assert _is_protected_manual_ready_handoff(blocked, MonitorState()) is True
 
 
 @pytest.mark.unit

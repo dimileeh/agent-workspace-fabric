@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from awf.common.callback_events import (
     callback_subscription_matches_event_type,
@@ -118,6 +119,80 @@ class TestSettings:
         )
 
         assert settings.network_posture_open_legacy_cutoff is None
+
+    @pytest.mark.unit
+    def test_empty_local_capacity_values_are_unset(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            local_capacity_cpu_cores="",
+            local_capacity_memory_gb="",
+            local_capacity_dind_slots="",
+        )
+
+        assert settings.local_capacity_cpu_cores is None
+        assert settings.local_capacity_memory_gb is None
+        assert settings.local_capacity_dind_slots is None
+
+    @pytest.mark.unit
+    def test_callback_allowed_hosts_accepts_comma_separated_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AWF_CALLBACKS_ALLOWED_HOSTS",
+            "operator.example.com,backup.example.com",
+        )
+
+        settings = Settings(_env_file=None)
+
+        assert settings.callbacks_allowed_hosts == (
+            "operator.example.com",
+            "backup.example.com",
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (
+                " Operator.EXAMPLE.com.:8443,backup.example.com:443 ",
+                ("operator.example.com", "backup.example.com"),
+            ),
+            (
+                ["Operator.EXAMPLE.com.:8443", "[2606:4700:4700::1111]:443"],
+                ("operator.example.com", "2606:4700:4700::1111"),
+            ),
+        ],
+    )
+    def test_callback_allowed_hosts_strips_port_suffixes(
+        self,
+        value: str | list[str],
+        expected: tuple[str, ...],
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            callbacks_allowed_hosts=value,
+        )
+
+        assert settings.callbacks_allowed_hosts == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_callback_allowed_hosts_treats_empty_values_as_unset(
+        self,
+        value: str | None,
+    ) -> None:
+        settings = Settings(_env_file=None, callbacks_allowed_hosts=value)
+
+        assert settings.callbacks_allowed_hosts == ()
+
+    @pytest.mark.unit
+    def test_invalid_callback_allowed_hosts_raises_validation_error(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="callbacks_allowed_hosts must be a comma-separated string, list, or tuple",
+        ):
+            Settings(_env_file=None, callbacks_allowed_hosts=123)
 
 
 class TestRedaction:

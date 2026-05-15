@@ -33,6 +33,7 @@ _RETRY_AFTER_HEADER = {
     "schema": {"type": "string"},
 }
 _HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorResponse"
+_CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HTTPExceptionErrorResponse"
 _ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
 _RELEASE_READINESS_RESPONSE_REF = "#/components/schemas/ReleaseReadinessResponse"
 
@@ -153,6 +154,74 @@ def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
         assert method.lower() in path_item, (
             f"Expected {method} {path} in spec, but only found methods: {list(path_item.keys())}"
         )
+
+
+@pytest.mark.unit
+def test_callback_endpoints_advertise_bearer_auth_in_openapi(openapi_spec: dict) -> None:
+    path = openapi_spec["paths"]["/v1/callbacks"]
+    for method in ("get", "post"):
+        operation = path[method]
+        assert operation.get("security") == [{"bearerAuth": []}]
+        authorization_params = [
+            param
+            for param in operation.get("parameters", [])
+            if param.get("in") == "header" and str(param.get("name", "")).lower() == "authorization"
+        ]
+        assert authorization_params == []
+
+
+@pytest.mark.unit
+def test_callback_endpoints_document_structured_error_responses(
+    openapi_spec: dict,
+) -> None:
+    path = openapi_spec["paths"]["/v1/callbacks"]
+    expected_statuses_by_method = {
+        "get": {"401", "503"},
+        "post": {"400", "401", "409", "503"},
+    }
+
+    for method, expected_statuses in expected_statuses_by_method.items():
+        responses = path[method]["responses"]
+        assert expected_statuses <= responses.keys()
+        assert "403" not in responses
+        for status_code in expected_statuses:
+            schema = responses[status_code]["content"]["application/json"]["schema"]
+            assert schema == {"$ref": _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF}
+
+    post_422 = path["post"]["responses"]["422"]
+    assert post_422["description"] == "Validation Error or Callback Target Policy Violation"
+    assert post_422["content"]["application/json"]["schema"] == {
+        "oneOf": [
+            {"$ref": "#/components/schemas/HTTPValidationError"},
+            {"$ref": _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF},
+        ],
+        "title": "CallbackRegistrationUnprocessableEntityResponse",
+    }
+
+    wrapper_schema = openapi_spec["components"]["schemas"]["HTTPExceptionErrorResponse"]
+    assert wrapper_schema["required"] == ["detail"]
+    assert wrapper_schema["properties"]["detail"] == {
+        "$ref": "#/components/schemas/ErrorResponse",
+    }
+
+
+@pytest.mark.unit
+def test_openapi_does_not_model_bearer_auth_as_header_parameters(openapi_spec: dict) -> None:
+    modeled_auth_headers: list[str] = []
+    for path, path_item in openapi_spec.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if not isinstance(operation, dict):
+                continue
+            for parameter in operation.get("parameters", []):
+                if not isinstance(parameter, dict):
+                    continue
+                if (
+                    parameter.get("in") == "header"
+                    and str(parameter.get("name", "")).lower() == "authorization"
+                ):
+                    modeled_auth_headers.append(f"{method.upper()} {path}")
+
+    assert modeled_auth_headers == []
 
 
 @pytest.mark.unit
