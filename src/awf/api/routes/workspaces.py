@@ -242,6 +242,14 @@ async def create_workspace(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
+        replay = await _workspace_create_v1_durable_replay_response(
+            repo,
+            replay_key_cache,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+        if replay is not None:
+            return replay
 
     admission = await admit_request_async(
         request,
@@ -251,31 +259,7 @@ async def create_workspace(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
-        if idempotency_key is not None:
-            replay = await _workspace_create_v1_durable_replay_after_rejection(
-                repo,
-                replay_key_cache,
-                payload,
-                idempotency_key=idempotency_key,
-            )
-            if replay is not None:
-                return replay
         return _workspace_create_rate_limited_response(admission)
-
-    if idempotency_key is not None:
-        replay = await _workspace_create_v1_replay_response(
-            repo,
-            payload,
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            if not isinstance(replay, JSONResponse):
-                replay_key_cache.remember(
-                    payload,
-                    idempotency_key=idempotency_key,
-                    api_version=_WORKSPACE_CREATE_V1_API_VERSION,
-                )
-            return replay
 
     ws = await repo.create(
         repo_url=payload.repo_url,
@@ -338,6 +322,15 @@ async def create_workspace_v2(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
+        replay = await _workspace_create_v2_durable_replay_response(
+            repo,
+            replay_key_cache,
+            payload,
+            idempotency_key=idempotency_key,
+            settings=settings,
+        )
+        if replay is not None:
+            return replay
 
     admission = await admit_request_async(
         request,
@@ -347,33 +340,7 @@ async def create_workspace_v2(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
-        if idempotency_key is not None:
-            replay = await _workspace_create_v2_durable_replay_after_rejection(
-                repo,
-                replay_key_cache,
-                payload,
-                idempotency_key=idempotency_key,
-                settings=settings,
-            )
-            if replay is not None:
-                return replay
         return _workspace_create_rate_limited_response(admission)
-
-    if idempotency_key is not None:
-        replay = await _workspace_create_v2_replay_response(
-            repo,
-            payload,
-            idempotency_key=idempotency_key,
-            settings=settings,
-        )
-        if replay is not None:
-            if not isinstance(replay, JSONResponse):
-                replay_key_cache.remember(
-                    payload,
-                    idempotency_key=idempotency_key,
-                    api_version=_WORKSPACE_CREATE_V2_API_VERSION,
-                )
-            return replay
 
     disk_check = await _workspace_admission_disk_check(request, settings)
     if not disk_check.ok:
@@ -443,7 +410,7 @@ async def _workspace_create_v1_replay_response(
     return _accepted(existing.id, existing.status, existing.version, existing.created_at)
 
 
-async def _workspace_create_v1_durable_replay_after_rejection(
+async def _workspace_create_v1_durable_replay_response(
     repo: WorkspaceRepository,
     replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
     payload: WorkspaceCreateRequest,
@@ -491,7 +458,7 @@ async def _workspace_create_v2_replay_response(
     )
 
 
-async def _workspace_create_v2_durable_replay_after_rejection(
+async def _workspace_create_v2_durable_replay_response(
     repo: WorkspaceRepository,
     replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
     payload: WorkspaceCreateV2Request,

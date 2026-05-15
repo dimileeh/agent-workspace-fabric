@@ -944,6 +944,64 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("path", "payload", "fresh_payload", "replay_key", "fresh_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "cold replay quota v1"},
+                {**_MINIMAL_BODY, "task_title": "fresh after cold replay v1"},
+                "workspace-cold-replay-quota-v1",
+                "workspace-fresh-after-cold-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="cold replay quota v2"),
+                _v2_body(title="fresh after cold replay v2"),
+                "workspace-cold-replay-quota-v2",
+                "workspace-fresh-after-cold-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_cold_idempotency_replay_with_remaining_quota_does_not_spend_fresh_slot(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        path: str,
+        payload: dict[str, object],
+        fresh_payload: dict[str, object],
+        replay_key: str,
+        fresh_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=2
+        )
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        _clear_workspace_create_replay_key_cache(app)
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        fresh = await client.post(
+            path,
+            json=fresh_payload,
+            headers={"Idempotency-Key": fresh_key},
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert fresh.status_code == 202
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("path", "payload", "idempotency_key"),
         [
             pytest.param(
