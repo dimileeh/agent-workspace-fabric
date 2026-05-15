@@ -121,6 +121,19 @@ class TestSettings:
         assert settings.network_posture_open_legacy_cutoff is None
 
     @pytest.mark.unit
+    def test_empty_local_capacity_values_are_unset(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            local_capacity_cpu_cores="",
+            local_capacity_memory_gb="",
+            local_capacity_dind_slots="",
+        )
+
+        assert settings.local_capacity_cpu_cores is None
+        assert settings.local_capacity_memory_gb is None
+        assert settings.local_capacity_dind_slots is None
+
+    @pytest.mark.unit
     def test_callback_allowed_hosts_accepts_comma_separated_env(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -136,6 +149,16 @@ class TestSettings:
             "operator.example.com",
             "backup.example.com",
         )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_callback_allowed_hosts_treats_empty_values_as_unset(
+        self,
+        value: str | None,
+    ) -> None:
+        settings = Settings(_env_file=None, callbacks_allowed_hosts=value)
+
+        assert settings.callbacks_allowed_hosts == ()
 
     @pytest.mark.unit
     def test_invalid_callback_allowed_hosts_raises_validation_error(self) -> None:

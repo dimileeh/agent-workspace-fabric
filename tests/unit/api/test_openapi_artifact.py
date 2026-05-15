@@ -146,6 +146,56 @@ def test_openapi_auth_contract_patch_runs_once_after_schema_is_cached(
 
 
 @pytest.mark.unit
+def test_openapi_auth_contract_patch_ignores_malformed_path_entries() -> None:
+    schema = {
+        "paths": {
+            123: {"get": {"parameters": []}},
+            "/not-a-dict": None,
+            "/not-auth-required": {"get": {"parameters": []}},
+            "/bad-operation": {"post": []},
+            "/bad-parameters": {"post": {"parameters": None}},
+            "/auth-required": {
+                "post": {
+                    "parameters": [
+                        {
+                            "in": "header",
+                            "name": "authorization",
+                            "required": False,
+                            "schema": {"title": "Authorization"},
+                        }
+                    ]
+                }
+            },
+        }
+    }
+
+    app_module._mark_authorization_header_parameters_required(
+        schema,
+        {("/bad-operation", "post"), ("/bad-parameters", "post"), ("/auth-required", "post")},
+    )
+
+    auth_header = schema["paths"]["/auth-required"]["post"]["parameters"][0]
+    assert auth_header["required"] is True
+    assert auth_header["schema"] == {
+        "title": "Authorization",
+        "type": "string",
+        "minLength": 1,
+    }
+
+
+@pytest.mark.unit
+def test_openapi_auth_contract_patch_returns_when_paths_is_not_a_mapping() -> None:
+    schema = {"paths": []}
+
+    app_module._mark_authorization_header_parameters_required(
+        schema,
+        {("/auth-required", "post")},
+    )
+
+    assert schema == {"paths": []}
+
+
+@pytest.mark.unit
 def test_callback_endpoints_document_structured_error_responses(
     openapi_spec: dict,
 ) -> None:

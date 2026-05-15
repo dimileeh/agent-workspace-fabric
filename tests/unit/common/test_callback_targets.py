@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+
 import pytest
 
 from awf.common import callback_targets
@@ -68,3 +70,12 @@ def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
         )
         is False
     )
+
+
+@pytest.mark.unit
+def test_nat64_extraction_rejects_unsupported_prefix_lengths() -> None:
+    with pytest.raises(ValueError, match="unsupported NAT64 prefix length"):
+        callback_targets._extract_nat64_embedded_ipv4_address(  # noqa: SLF001
+            ipaddress.IPv6Address("64:ff9b::808:808"),
+            24,
+        )

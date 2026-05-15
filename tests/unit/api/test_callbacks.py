@@ -284,6 +284,23 @@ def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_reason_legacy_compatibility_validator_leaves_non_mappings_unchanged() -> None:
+    assert (
+        api_schemas.WorkspaceReasonWithLegacyStopStackRequest._drop_ignored_legacy_body_fields(
+            "not-a-body-mapping"
+        )
+        == "not-a-body-mapping"
+    )
+
+
+@pytest.mark.unit
+def test_workspace_reason_legacy_compatibility_validator_drops_ignored_fields() -> None:
+    assert api_schemas.WorkspaceReasonWithLegacyStopStackRequest._drop_ignored_legacy_body_fields(
+        {"reason": "operator cleanup", "stop_stack": True}
+    ) == {"reason": "operator cleanup"}
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "hostname",
     ["0x7f.0x0.0x0.0x1", "0x.0.0.1", "0xgg.0.0.1", "127..0.1"],

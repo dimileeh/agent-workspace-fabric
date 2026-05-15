@@ -202,6 +202,109 @@ async def test_failure_causality_json_object_filters_keep_postgresql_json_typeof
 
 
 @pytest.mark.unit
+def test_failure_causality_json_object_filter_unknown_dialect_is_false() -> None:
+    session = _RecordingSession("mysql")
+
+    predicate = failure_causality_service._json_payload_object_predicate(  # noqa: SLF001
+        session,  # type: ignore[arg-type]
+        "primary_failure",
+    )
+
+    assert str(predicate.compile(dialect=sqlite.dialect())) == "0"
+
+
+@pytest.mark.unit
+def test_failure_causality_session_dialect_falls_back_to_bind_name() -> None:
+    class _Dialect:
+        name = "sqlite"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Session:
+        info: dict[str, object] = {}
+        bind = _Bind()
+
+    assert (
+        failure_causality_service._session_dialect_name(  # noqa: SLF001
+            _Session()  # type: ignore[arg-type]
+        )
+        == "sqlite"
+    )
+
+
+@pytest.mark.unit
+def test_failure_causality_session_dialect_returns_none_without_string_name() -> None:
+    class _Session:
+        info: dict[str, object] = {}
+        bind = object()
+
+    assert (
+        failure_causality_service._session_dialect_name(  # noqa: SLF001
+            _Session()  # type: ignore[arg-type]
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_failure_causality_session_dialect_returns_none_without_bind() -> None:
+    class _Session:
+        info: dict[str, object] = {}
+        bind = None
+
+    assert (
+        failure_causality_service._session_dialect_name(  # noqa: SLF001
+            _Session()  # type: ignore[arg-type]
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_primary_failure_reason_code_prefers_primary_reason() -> None:
+    assert (
+        failure_causality_service.primary_failure_reason_code(
+            {"reason_code": "PYTEST_TEST_FAILURE"},
+            fallback="FALLBACK",
+        )
+        == "PYTEST_TEST_FAILURE"
+    )
+
+
+@pytest.mark.unit
+def test_primary_failure_reason_code_uses_fallback_for_blank_primary_reason() -> None:
+    assert (
+        failure_causality_service.primary_failure_reason_code(
+            {},
+            fallback="FALLBACK",
+        )
+        == "FALLBACK"
+    )
+
+
+@pytest.mark.unit
+def test_preserved_failure_payload_allows_primary_without_reason_or_message() -> None:
+    payload = build_preserved_failure_payload(
+        {"details": {"exit_code": 1}},
+        secondary_failure={"reason_code": "CLEANUP_FAILED"},
+    )
+
+    assert "reason_code" not in payload
+    assert "message" not in payload
+    assert payload["details"] == {"exit_code": 1}
+    assert payload["secondary_failure"] == {"reason_code": "CLEANUP_FAILED"}
+
+
+@pytest.mark.unit
+def test_secondary_failure_history_prefix_accepts_empty_prefix() -> None:
+    assert failure_causality_service._secondary_failure_history_contains(  # noqa: SLF001
+        [{"reason_code": "CLEANUP_FAILED"}],
+        [],
+    )
+
+
+@pytest.mark.unit
 def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> None:
     prior_secondary = {
         "failure_reason": "cleanup_failure",
