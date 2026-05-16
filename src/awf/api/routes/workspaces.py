@@ -33,7 +33,6 @@ from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
     admit_request_async,
-    check_request_async,
     request_app_state,
 )
 from awf.api.responses import (
@@ -269,10 +268,6 @@ async def create_workspace(
         if replay is not None:
             return replay
 
-        admission_check = await _check_workspace_create_request_admission(request, settings)
-        if not admission_check.allowed:
-            return _workspace_create_rate_limited_response(admission_check)
-
     admission = await admit_request_async(
         request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
@@ -363,10 +358,6 @@ async def create_workspace_v2(
         )
         if replay is not None:
             return replay
-
-        admission_check = await _check_workspace_create_request_admission(request, settings)
-        if not admission_check.allowed:
-            return _workspace_create_rate_limited_response(admission_check)
 
     admission = await admit_request_async(
         request,
@@ -547,19 +538,6 @@ def _workspace_create_rate_limited_response(
             detail=dict(decision.metadata),
         ).model_dump(),
         headers={"Retry-After": str(retry_after)},
-    )
-
-
-async def _check_workspace_create_request_admission(
-    request: Request | object | None,
-    settings: Settings,
-) -> RequestAdmissionDecision:
-    return await check_request_async(
-        request,
-        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-        limit=settings.workspace_create_rate_limit_count,
-        window_seconds=settings.request_admission_window_seconds,
-        reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
 
 

@@ -845,12 +845,20 @@ class TestCreateWorkspace:
         app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
             limit=1
         )
+        check_calls = 0
         lock_keys: list[str] = []
         lookup_keys: list[str] = []
         probe_keys: list[str] = []
         list_calls = 0
         original_lock = WorkspaceRepository.acquire_idempotency_key_lock
         original_lookup = WorkspaceRepository.get_by_idempotency_key
+
+        async def tracked_check_request_async(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            nonlocal check_calls
+            check_calls += 1
+            return workspaces_route.RequestAdmissionDecision(allowed=True, metadata={})
 
         async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
             lock_keys.append(key)
@@ -889,6 +897,12 @@ class TestCreateWorkspace:
             "list_idempotency_replay_keys",
             fail_list_replay_keys,
         )
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            tracked_check_request_async,
+            raising=False,
+        )
 
         first = await client.post(
             path,
@@ -907,6 +921,7 @@ class TestCreateWorkspace:
         assert lookup_keys == [first_key, second_key]
         assert probe_keys == []
         assert list_calls == 0
+        assert check_calls == 0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
