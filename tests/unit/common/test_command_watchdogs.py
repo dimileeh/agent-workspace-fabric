@@ -109,8 +109,7 @@ async def test_asyncio_runner_cancellation_terminates_subprocess(tmp_path: Path)
             ],
         )
     )
-    await _wait_for_file(pid_file)
-    pid = int(pid_file.read_text())
+    pid = await _wait_for_pid_file(pid_file)
 
     try:
         task.cancel()
@@ -261,12 +260,17 @@ def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
     )
 
 
-async def _wait_for_file(path: Path) -> None:
+async def _wait_for_pid_file(path: Path) -> int:
+    last_value: str | None = None
     for _ in range(200):
         if path.exists():
-            return
+            last_value = path.read_text()
+            try:
+                return int(last_value)
+            except ValueError:
+                pass
         await asyncio.sleep(0.01)
-    raise AssertionError(f"{path} was not created")
+    raise AssertionError(f"{path} did not contain a process id; last value={last_value!r}")
 
 
 def _pid_exists(pid: int) -> bool:
