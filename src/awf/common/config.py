@@ -99,7 +99,11 @@ def settings_guardrails(
 
     Local and CI defaults intentionally remain usable. This helper treats only
     ``AWF_ENV=prod`` as production for the current local-first guardrail slice.
+    Callback registration is safe in production once the API token guardrail
+    passes because callback routes enforce bearer-token authentication.
     """
+
+    del callbacks_enabled
 
     if env != "prod":
         return ()
@@ -124,22 +128,6 @@ def settings_guardrails(
     token_diagnostic = _api_token_diagnostic(api_token)
     if token_diagnostic is not None:
         diagnostics.append(token_diagnostic)
-
-    if callbacks_enabled:
-        diagnostics.append(
-            ProductionSettingsDiagnostic(
-                code="production_callbacks_disabled_until_auth",
-                field="AWF_CALLBACKS_ENABLED",
-                message=(
-                    "Callback registration is enabled, but callback routes do not "
-                    "yet enforce AWF API bearer token authentication."
-                ),
-                remediation=(
-                    "Disable AWF_CALLBACKS_ENABLED in production until callback "
-                    "route authentication is implemented."
-                ),
-            )
-        )
 
     return tuple(diagnostics)
 
