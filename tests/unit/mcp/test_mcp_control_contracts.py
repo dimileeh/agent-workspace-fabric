@@ -264,19 +264,24 @@ class _MockService:
                 },
             )
         )
+        finished_at = datetime(2026, 1, 1, tzinfo=UTC)
         return OperationResponse(
             id="op_refresh",
             workspace_id=workspace_id,
             type="refresh",
-            status="pending",
+            status="succeeded",
             error_code=None,
             error_message=None,
             payload=None,
-            result=None,
+            result={
+                "status": "monitoring_pr",
+                "reason_code": "OPERATOR_REFRESH",
+                "requested_action": "refresh",
+            },
             idempotency_key=idempotency_key,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            started_at=None,
-            finished_at=None,
+            started_at=finished_at,
+            finished_at=finished_at,
         )
 
     async def request_rebase_workspace(
@@ -647,7 +652,7 @@ class TestSuccessPaths:
 
         assert isinstance(refresh, dict)
         assert refresh["type"] == "refresh"
-        assert refresh["status"] == "pending"
+        assert refresh["status"] == "succeeded"
         assert isinstance(rebase, dict)
         assert rebase["type"] == "rebase"
         assert rebase["status"] == "pending"
@@ -1018,7 +1023,12 @@ class TestRealDbPaths:
             ops = await OperationRepository(session).list_for_workspace(workspace.id, limit=10)
             refresh_ops = [o for o in ops if o.type == OperationType.refresh.value]
             assert len(refresh_ops) == 1
-            assert refresh_ops[0].status == OperationStatus.pending.value
+            assert refresh_ops[0].status == OperationStatus.succeeded.value
+            assert refresh_ops[0].result == {
+                "status": WorkspaceStatus.monitoring_pr.value,
+                "reason_code": "OPERATOR_REFRESH",
+                "requested_action": OperationType.refresh.value,
+            }
 
     async def test_rebase_creates_operation_row(
         self, factory: async_sessionmaker[AsyncSession]

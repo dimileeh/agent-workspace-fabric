@@ -674,6 +674,15 @@ class WorkspaceControlService:
                 expected_version=expected_version,
             ),
         )
+        await operations.finish(
+            operation,
+            status=OperationStatus.succeeded,
+            result={
+                "status": workspace.status,
+                "reason_code": OPERATOR_REFRESH_REASON_CODE,
+                "requested_action": OperationType.refresh.value,
+            },
+        )
         return operation
 
     async def request_validate_workspace(
