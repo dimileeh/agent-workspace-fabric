@@ -27,8 +27,7 @@ export function summarizeCoordinationWarnings(
   const maxWarnings = Math.max(1, options.maxWarnings ?? 2);
   const visible = items.slice(0, maxWarnings);
   const overflowCount = Math.max(0, items.length - visible.length);
-  const advisoryCount = items.filter((warning) => warning.severity === "advisory").length;
-  const labelCount = advisoryCount || items.length;
+  const label = formatCoordinationWarningLabel(items);
   const detail = [
     ...visible.map(formatCoordinationWarningDetail),
     ...(overflowCount ? [`+${overflowCount} more`] : []),
@@ -36,7 +35,7 @@ export function summarizeCoordinationWarnings(
 
   return {
     count: items.length,
-    label: `${labelCount} advisory overlap${labelCount === 1 ? "" : "s"}`,
+    label,
     detail,
     overflowCount,
     warnings: visible,
@@ -52,6 +51,33 @@ export function summarizeVisibleCoordinationWarnings(
     return summarizeCoordinationWarnings([], options);
   }
   return summarizeCoordinationWarnings(warnings, options);
+}
+
+function formatCoordinationWarningLabel(warnings: WorkspaceCoordinationWarning[]): string {
+  const labelCount = warnings.length;
+  const plural = labelCount === 1 ? "" : "s";
+  const severity = sharedCoordinationWarningSeverity(warnings);
+  if (severity === "advisory") {
+    return `${labelCount} advisory overlap${plural}`;
+  }
+  if (severity) {
+    return `${labelCount} ${severity} coordination warning${plural}`;
+  }
+  return `${labelCount} coordination warning${plural}`;
+}
+
+function sharedCoordinationWarningSeverity(warnings: WorkspaceCoordinationWarning[]): string | null {
+  const firstSeverity = coordinationWarningSeverity(warnings[0]);
+  if (!firstSeverity) {
+    return null;
+  }
+  return warnings.every((warning) => coordinationWarningSeverity(warning) === firstSeverity)
+    ? firstSeverity
+    : null;
+}
+
+function coordinationWarningSeverity(warning: WorkspaceCoordinationWarning | undefined): string {
+  return warning && typeof warning.severity === "string" ? warning.severity.trim().toLowerCase() : "";
 }
 
 function formatCoordinationWarningDetail(warning: WorkspaceCoordinationWarning): string {

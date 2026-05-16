@@ -91,6 +91,42 @@ test("summarizeCoordinationWarnings reports truncation", () => {
   assert.match(summary.detail, /\+1 more/);
 });
 
+test("summarizeCoordinationWarnings uses a generic label for mixed warning severities", () => {
+  const summary = summarizeCoordinationWarnings([
+    {
+      warning_code: "OWNED_PATH_OVERLAP_RISK",
+      message: "Owned paths overlap active workspaces.",
+      severity: "advisory",
+      blocks_launch: false,
+      workspace_ids: ["ws_one"],
+      overlaps: [
+        {
+          workspace_id: "ws_one",
+          existing_path: "a/**",
+          requested_path: "a/file.ts",
+        },
+      ],
+      stale_policy_context: {},
+      overlap_count: 1,
+      overlaps_truncated: false,
+    },
+    {
+      warning_code: "EXCLUSIVE_LOCK_CONFLICT",
+      message: "An exclusive coordination lock conflicts with this workspace.",
+      severity: "blocking",
+      blocks_launch: true,
+      workspace_ids: ["ws_two"],
+      overlaps: [],
+      stale_policy_context: {},
+      overlap_count: 0,
+      overlaps_truncated: false,
+    },
+  ]);
+
+  assert.equal(summary.count, 2);
+  assert.equal(summary.label, "2 coordination warnings");
+});
+
 test("summarizeVisibleCoordinationWarnings hides advisory overlaps for completed workspaces", () => {
   const warnings = [
     {
