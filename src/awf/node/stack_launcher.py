@@ -149,9 +149,12 @@ class ComposeStackLauncher:
                 required_services = [s.name for s in spec.services if s.required]
                 if spec.docker_mode == "dind":
                     required_services.append("docker")
-                if not required_services:
-                    return None
-                msg = f"DOCKER_UNAVAILABLE: Cannot start workspace agent container and required services: {required_services}"
+                msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
+                if required_services:
+                    msg = f"{msg} and required services: {required_services}"
+                detail = e.stderr.strip() or e.stdout.strip()
+                if detail:
+                    msg = f"{msg}: {detail}"
                 raise WorkspaceServiceExecutionError(msg) from e
             raise
         if secret_lease_resolution is None:

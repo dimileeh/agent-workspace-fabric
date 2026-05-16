@@ -242,24 +242,23 @@ def _layout() -> WorktreeLayout:
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_returns_none_when_docker_missing_without_required_services() -> (
-    None
-):
+async def test_compose_stack_launcher_fails_when_docker_missing_without_required_services() -> None:
     compose = _DockerUnavailableCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
         agent_runtime_image="custom-agent-runtime:dev",
     )
 
-    result = await launcher.launch(
-        WorkspaceStackLaunchRequest(
-            workspace_id="ws_launcher",
-            layout=_layout(),
-            profile=WorkspaceProfile(name="generic"),
+    with pytest.raises(WorkspaceServiceExecutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile(name="generic"),
+            )
         )
-    )
 
-    assert result is None
+    assert "Cannot start workspace agent container" in str(raised.value)
     assert compose.specs[0].services == ()
 
 
