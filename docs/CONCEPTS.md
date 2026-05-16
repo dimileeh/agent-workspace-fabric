@@ -448,9 +448,9 @@ The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). Tests, throwaway script
 runs, and the always-on service all use PostgreSQL.
 
-The local Compose stack defaults `AWF_API_TOKEN` to `local-dev-token`. Use the
-same value in the console `.env.local` file, or override it consistently in the
-shell before starting the stack.
+The local Compose stack requires `AWF_API_TOKEN`. Set a local bearer token in
+the shell or `docker/compose/.env` before starting the stack, and use the same
+value in the console `.env.local` file.
 
 The AWF Postgres database is only the control-plane database. Project and
 workspace databases remain separate and profile-isolated; if a workspace
@@ -860,18 +860,17 @@ AWF includes a local Next.js console under `apps/console`. It talks to AWF
 through Next.js BFF routes, so `AWF_API_TOKEN` stays server-side and is never
 sent to browser JavaScript.
 
-Start the full local service stack, which sets `AWF_API_TOKEN=local-dev-token`
-by default:
+Start the full local service stack after setting a local bearer token:
 
 ```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
-For API-only throwaway development, start the AWF API with a matching local
-token:
+For API-only throwaway development, start the AWF API with a local token:
 
 ```bash
-AWF_API_TOKEN=local-dev-token uv run --python 3.12 --extra dev awf serve --reload
+AWF_API_TOKEN="$(openssl rand -hex 32)" uv run --python 3.12 --extra dev awf serve --reload
 ```
 
 Then start the console:

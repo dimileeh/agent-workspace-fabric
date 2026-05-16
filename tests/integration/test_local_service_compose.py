@@ -82,7 +82,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
-        assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
+        assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:?set AWF_API_TOKEN}"
         assert environment["AWF_DATABASE_URL"] == (
             "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:?set "
             "AWF_POSTGRES_PASSWORD}@postgres:5432/awf"

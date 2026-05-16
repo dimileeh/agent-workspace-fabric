@@ -102,9 +102,13 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 
 ```bash
 cp .env.example .env
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-# Optional: mirror Compose-interpolated values into docker/compose/.env.
-printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN" > docker/compose/.env
+# Persist Compose-interpolated values into docker/compose/.env.
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
+} > docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
@@ -112,6 +116,7 @@ For API-only throwaway development, use the local PostgreSQL control-plane DB:
 
 ```bash
 export AWF_DATABASE_URL="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
 uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 ```
 
@@ -119,7 +124,7 @@ Key local service values:
 
 ```text
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
-AWF_API_TOKEN=local-dev-token
+AWF_API_TOKEN=<local bearer token>
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
@@ -143,8 +148,9 @@ AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ### Local vs Production Configuration
 
 The bundled defaults are for `AWF_ENV=local` and `AWF_ENV=ci`. In those modes,
-the local Compose database URL, missing `AWF_API_TOKEN`, and callback defaults
-remain usable for development and tests.
+the local Compose database URL and callback defaults remain usable for
+development and tests. Set `AWF_API_TOKEN` to a local bearer token before
+starting service containers or protected API controls.
 
 For a network-facing deployment, set `AWF_ENV=prod`. AWF validates production
 settings during service configuration and API startup, then fails fast with
