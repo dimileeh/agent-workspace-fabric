@@ -10,7 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-from awf.service.config import ServiceSettings, local_service_environ
+from awf.service.config import (
+    LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    ServiceSettings,
+    local_service_environ,
+)
 from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
 
@@ -218,7 +222,7 @@ def _bootstrap_stages(
             )
         )
 
-    compose = ("docker", "compose", "-f", str(compose_file))
+    compose = _compose_command(compose_file)
     stages.extend(
         [
             _BootstrapStage(
@@ -253,6 +257,14 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     return profile in {
         item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
     }
+
+
+def _compose_command(compose_file: Path) -> tuple[str, ...]:
+    args = ["docker", "compose"]
+    if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
+        args.extend(["--env-file", str(LOCAL_SERVICE_COMPOSE_ENV_FILE)])
+    args.extend(["-f", str(compose_file)])
+    return tuple(args)
 
 
 def _run_stage(

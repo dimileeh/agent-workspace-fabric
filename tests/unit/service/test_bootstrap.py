@@ -37,8 +37,14 @@ def _settings(tmp_path: Path) -> ServiceSettings:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda: {})
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        tmp_path / "missing.env",
+        raising=False,
+    )
 
 
 async def _ok_status_collector(
@@ -169,6 +175,50 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
             "worker",
         ],
     ]
+
+
+@pytest.mark.unit
+def test_bootstrap_passes_compose_env_file_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_API_TOKEN=persisted-token\n", encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        compose_env_file,
+        raising=False,
+    )
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert "--env-file" not in calls[0]
+    for call in calls[1:]:
+        assert call[:6] == [
+            "docker",
+            "compose",
+            "--env-file",
+            str(compose_env_file),
+            "-f",
+            "docker/compose/local-service.yml",
+        ]
 
 
 @pytest.mark.unit
