@@ -831,7 +831,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limit_rejects_fresh_idempotency_key_before_durable_replay_miss(
+    async def test_rate_limit_rejects_fresh_idempotency_key_after_exact_durable_replay_miss(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -903,8 +903,8 @@ class TestCreateWorkspace:
 
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
-        assert lock_keys == [first_key]
-        assert lookup_keys == [first_key]
+        assert lock_keys == [first_key, second_key]
+        assert lookup_keys == [first_key, second_key]
         assert probe_keys == []
         assert list_calls == 0
 
@@ -926,7 +926,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_unknown_cold_idempotency_key_is_rate_limited_before_durable_replay(
+    async def test_cold_cache_persisted_idempotency_replay_bypasses_exhausted_rate_limit(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -975,9 +975,10 @@ class TestCreateWorkspace:
         )
 
         assert first.status_code == 202
-        _assert_workspace_rate_limited(replay)
-        assert lock_keys == [idempotency_key]
-        assert lookup_keys == [idempotency_key]
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert lock_keys == [idempotency_key, idempotency_key]
+        assert lookup_keys == [idempotency_key, idempotency_key]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1055,7 +1056,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limited_duplicate_unknown_key_does_not_probe_when_cache_misses(
+    async def test_rate_limited_duplicate_unknown_key_uses_durable_replay_when_cache_misses(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -1093,7 +1094,8 @@ class TestCreateWorkspace:
             headers={"Idempotency-Key": idempotency_key},
         )
 
-        _assert_workspace_rate_limited(replay)
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
         assert probe_keys == []
 
     @pytest.mark.unit

@@ -260,10 +260,6 @@ async def create_workspace(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
-        admission_check = await _check_workspace_create_request_admission(request, settings)
-        if not admission_check.allowed:
-            return _workspace_create_rate_limited_response(admission_check)
-
         replay = await _workspace_create_v1_durable_replay_response(
             repo,
             replay_key_cache,
@@ -272,6 +268,10 @@ async def create_workspace(
         )
         if replay is not None:
             return replay
+
+        admission_check = await _check_workspace_create_request_admission(request, settings)
+        if not admission_check.allowed:
+            return _workspace_create_rate_limited_response(admission_check)
 
     admission = await admit_request_async(
         request,
@@ -354,10 +354,6 @@ async def create_workspace_v2(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
-        admission_check = await _check_workspace_create_request_admission(request, settings)
-        if not admission_check.allowed:
-            return _workspace_create_rate_limited_response(admission_check)
-
         replay = await _workspace_create_v2_durable_replay_response(
             repo,
             replay_key_cache,
@@ -367,6 +363,10 @@ async def create_workspace_v2(
         )
         if replay is not None:
             return replay
+
+        admission_check = await _check_workspace_create_request_admission(request, settings)
+        if not admission_check.allowed:
+            return _workspace_create_rate_limited_response(admission_check)
 
     admission = await admit_request_async(
         request,
