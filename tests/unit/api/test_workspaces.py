@@ -831,7 +831,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limit_rejects_fresh_idempotency_key_after_exact_durable_replay_miss(
+    async def test_rate_limit_checks_fresh_idempotency_key_before_exact_durable_replay_miss(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -845,26 +845,30 @@ class TestCreateWorkspace:
         app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
             limit=1
         )
-        check_calls = 0
+        calls: list[str] = []
         lock_keys: list[str] = []
         lookup_keys: list[str] = []
         probe_keys: list[str] = []
         list_calls = 0
+        original_check = getattr(workspaces_route, "check_request_async", None)
         original_lock = WorkspaceRepository.acquire_idempotency_key_lock
         original_lookup = WorkspaceRepository.get_by_idempotency_key
 
         async def tracked_check_request_async(
             *_args: Any, **_kwargs: Any
         ) -> workspaces_route.RequestAdmissionDecision:
-            nonlocal check_calls
-            check_calls += 1
-            return workspaces_route.RequestAdmissionDecision(allowed=True, metadata={})
+            calls.append("check")
+            if original_check is None:
+                raise AssertionError("workspace routes must import check_request_async")
+            return await original_check(*_args, **_kwargs)
 
         async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
             lock_keys.append(key)
             await original_lock(self, key)
 
         async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
+            calls.append(f"lookup:{key}")
             lookup_keys.append(key)
             return await original_lookup(self, key)
 
@@ -919,9 +923,168 @@ class TestCreateWorkspace:
         _assert_workspace_rate_limited(rejected)
         assert lock_keys == [first_key, second_key]
         assert lookup_keys == [first_key, second_key]
+        assert calls[:3] == ["check", f"lock:{first_key}", f"lookup:{first_key}"]
+        assert calls[3:6] == ["check", f"lock:{second_key}", f"lookup:{second_key}"]
         assert probe_keys == []
         assert list_calls == 0
-        assert check_calls == 0
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "post-denial replay v1"}
+                ),
+                "workspace-post-denial-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="post-denial replay v2")),
+                "workspace-post-denial-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_workspace_create_uses_post_denial_durable_replay(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        created_at = datetime(2026, 5, 15, tzinfo=UTC)
+        if isinstance(payload, WorkspaceCreateRequest):
+            existing = SimpleNamespace(
+                id="ws_post_denial_replay_v1",
+                status=WorkspaceStatus.requested.value,
+                version=7,
+                created_at=created_at,
+                repo_url=payload.repo_url,
+                branch_base=payload.branch_base,
+                task_title=payload.task_title,
+                task_prompt=payload.task_prompt,
+                task_external_id=payload.task_external_id,
+                agent=payload.agent.value,
+                env_profile=payload.env_profile,
+                test_commands=list(payload.test_commands),
+                requires_database=payload.requires_database,
+                task_attempt=None,
+            )
+        else:
+            existing = SimpleNamespace(
+                id="ws_post_denial_replay_v2",
+                status=WorkspaceStatus.requested.value,
+                version=8,
+                created_at=created_at,
+                repo_url=payload.repo.url,
+                branch_base=payload.repo.base_branch,
+                task_title=payload.task.title,
+                task_prompt=payload.task.prompt,
+                task_external_id=payload.task.external_id,
+                task_class=None,
+                owned_paths=[],
+                task_policy={"resource_reservation_request": {}},
+                auto_merge=payload.task.auto_merge,
+                initial_review_grace_period_seconds=(
+                    payload.task.initial_review_grace_period_seconds
+                ),
+                agent=payload.task.agent.value,
+                task_kind=payload.task.kind,
+                profile_ref=payload.workspace.profile_ref,
+                requested_profile=None,
+                resolved_profile=None,
+                test_commands=list(payload.validation.commands),
+                task_attempt=object(),
+                events=[],
+            )
+        calls: list[str] = []
+        lookups = 0
+
+        async def allowed_preview(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("check")
+            return workspaces_route.RequestAdmissionDecision(allowed=True, metadata={})
+
+        async def denied_admission(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("admit")
+            return workspaces_route.RequestAdmissionDecision(
+                allowed=False,
+                metadata={
+                    "reason_code": "WORKSPACE_CREATE_RATE_LIMITED",
+                    "endpoint_family": "workspace_create",
+                    "identity_type": "client_host",
+                    "identity_digest": "redacted",
+                    "limit": 1,
+                    "window_seconds": 60,
+                    "remaining": 0,
+                    "retry_after_seconds": 7,
+                },
+            )
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
+
+        async def replay_after_denial(
+            _self: WorkspaceRepository,
+            key: str,
+        ) -> object | None:
+            nonlocal lookups
+            lookups += 1
+            calls.append(f"lookup:{key}:{lookups}")
+            return None if lookups == 1 else existing
+
+        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError("post-denial durable replay must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("post-denial durable replay must not create a workspace")
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            allowed_preview,
+            raising=False,
+        )
+        monkeypatch.setattr(workspaces_route, "admit_request_async", denied_admission)
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", replay_after_denial)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+        assert calls == [
+            "check",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}:1",
+            "admit",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}:2",
+        ]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

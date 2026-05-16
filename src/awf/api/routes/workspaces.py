@@ -33,6 +33,7 @@ from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
     admit_request_async,
+    check_request_async,
     request_app_state,
 )
 from awf.api.responses import (
@@ -259,6 +260,13 @@ async def create_workspace(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
+        admission_preview = await check_request_async(
+            request,
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            limit=settings.workspace_create_rate_limit_count,
+            window_seconds=settings.request_admission_window_seconds,
+            reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+        )
         replay = await _workspace_create_v1_durable_replay_response(
             repo,
             replay_key_cache,
@@ -267,6 +275,8 @@ async def create_workspace(
         )
         if replay is not None:
             return replay
+        if not admission_preview.allowed:
+            return _workspace_create_rate_limited_response(admission_preview)
 
     admission = await admit_request_async(
         request,
@@ -276,6 +286,15 @@ async def create_workspace(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
+        if idempotency_key is not None:
+            replay = await _workspace_create_v1_durable_replay_response(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         return _workspace_create_rate_limited_response(admission)
 
     ws = await repo.create(
@@ -349,6 +368,13 @@ async def create_workspace_v2(
             if replay is not None:
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
+        admission_preview = await check_request_async(
+            request,
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            limit=settings.workspace_create_rate_limit_count,
+            window_seconds=settings.request_admission_window_seconds,
+            reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+        )
         replay = await _workspace_create_v2_durable_replay_response(
             repo,
             replay_key_cache,
@@ -358,6 +384,8 @@ async def create_workspace_v2(
         )
         if replay is not None:
             return replay
+        if not admission_preview.allowed:
+            return _workspace_create_rate_limited_response(admission_preview)
 
     admission = await admit_request_async(
         request,
@@ -367,6 +395,16 @@ async def create_workspace_v2(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
+        if idempotency_key is not None:
+            replay = await _workspace_create_v2_durable_replay_response(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+                settings=settings,
+            )
+            if replay is not None:
+                return replay
         return _workspace_create_rate_limited_response(admission)
 
     disk_check = await _workspace_admission_disk_check(request, settings)
