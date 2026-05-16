@@ -378,8 +378,9 @@ uv run --python 3.12 --extra dev python scripts/run_awf.py \
 ```
 
 Run state is preserved by default. Reusing the same `--work-dir` appends new
-workspace rows to the existing `awf.db`, which keeps the API, PR monitors, and
-console looking at one consistent run history.
+workspace rows to the configured control-plane database (`AWF_DATABASE_URL`),
+which keeps the API, PR monitors, and console looking at one consistent run
+history.
 
 Reset a throwaway run database only when no API or monitor process is using it:
 
