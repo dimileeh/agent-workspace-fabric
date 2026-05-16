@@ -40,7 +40,7 @@ def test_ci_failure_evidence_ignores_run_steps_without_supported_commands() -> N
 
 
 @pytest.mark.unit
-def test_ci_failure_evidence_falls_back_when_pytest_command_is_unavailable() -> None:
+def test_ci_failure_evidence_does_not_suggest_repro_when_pytest_command_is_unavailable() -> None:
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
         "\n".join(
             [
@@ -61,9 +61,7 @@ def test_ci_failure_evidence_falls_back_when_pytest_command_is_unavailable() -> 
     )
     assert evidence.failing_commands == ()
     assert evidence.test_node_ids == ("tests/unit/test_example.py::test_failure",)
-    assert evidence.suggested_repro_commands == (
-        "uv run --python 3.12 --extra dev pytest tests/unit/test_example.py::test_failure -q",
-    )
+    assert evidence.suggested_repro_commands == ()
     assert any("AssertionError" in snippet for snippet in evidence.assertion_snippets)
     assert "fatal: repository not found" in evidence.error_summaries
 
@@ -99,7 +97,7 @@ def test_ci_failure_evidence_skips_run_step_without_known_command_marker() -> No
 
 
 @pytest.mark.unit
-def test_ci_failure_evidence_falls_back_to_uv_pytest_for_node_ids_without_command() -> None:
+def test_ci_failure_evidence_omits_repro_for_node_ids_without_command() -> None:
     node_id = "tests/unit/runtime/test_prompt.py::test_one"
 
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
@@ -109,13 +107,11 @@ def test_ci_failure_evidence_falls_back_to_uv_pytest_for_node_ids_without_comman
 
     assert evidence.failing_commands == ()
     assert evidence.test_node_ids == (node_id,)
-    assert evidence.suggested_repro_commands == (
-        f"uv run --python 3.12 --extra dev pytest {node_id} -q",
-    )
+    assert evidence.suggested_repro_commands == ()
 
 
 @pytest.mark.unit
-def test_ci_failure_evidence_fallback_bounds_and_quotes_multiple_node_ids() -> None:
+def test_ci_failure_evidence_bounds_and_quotes_multiple_node_ids_with_known_command() -> None:
     node_ids = [
         "tests/unit/a/test_one.py::test_alpha",
         "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
@@ -126,16 +122,19 @@ def test_ci_failure_evidence_fallback_bounds_and_quotes_multiple_node_ids() -> N
     ]
 
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
-        "\n".join(f"FAILED {node_id} - AssertionError: boom" for node_id in node_ids),
+        "\n".join(
+            [
+                "tests\tRun tests\tpython -m pytest tests/unit",
+                *(f"FAILED {node_id} - AssertionError: boom" for node_id in node_ids),
+            ]
+        ),
         check_name="provider-neutral-check",
     )
 
     selected = node_ids[: ci_failure_evidence._MAX_REPRO_NODES]  # noqa: SLF001
     quoted = " ".join(shlex.quote(node_id) for node_id in selected)
     assert evidence.test_node_ids == tuple(node_ids)
-    assert evidence.suggested_repro_commands == (
-        f"uv run --python 3.12 --extra dev pytest {quoted} -q",
-    )
+    assert evidence.suggested_repro_commands == (f"python -m pytest {quoted} -q",)
     assert node_ids[-1] not in evidence.suggested_repro_commands[0]
 
 
