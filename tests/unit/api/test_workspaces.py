@@ -2097,6 +2097,24 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert json.loads(resource_conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
+    async def test_v2_warm_cache_replay_uses_durable_auto_profile_match(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        headers = {"Idempotency-Key": "v2-null-profile-then-omitted-workspace"}
+        initial_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
+        initial_payload["workspace"] = {"profile_ref": None, "profile": None}
+        replay_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
+        replay_payload.pop("workspace")
+
+        first = await client.post("/v2/workspaces", json=initial_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+    @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_scope(
         self,
         client: AsyncClient,

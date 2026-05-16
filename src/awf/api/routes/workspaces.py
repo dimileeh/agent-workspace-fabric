@@ -311,6 +311,15 @@ async def create_workspace_v2(
                 api_version=_WORKSPACE_CREATE_V2_API_VERSION,
             )
         except _WorkspaceCreateIdempotencyConflictError:
+            replay = await _workspace_create_v2_durable_replay_response(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+                settings=settings,
+            )
+            if replay is not None:
+                return replay
             return _workspace_create_idempotency_conflict_response()
         if known_replay_key:
             replay = await _workspace_create_v2_replay_response(
