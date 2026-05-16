@@ -848,7 +848,10 @@ class PullRequestMonitorRunner:
             ws = await WorkspaceRepository(s).get(workspace_id)
             if ws is None:
                 return ()
-            return tuple(command for command in ws.test_commands if isinstance(command, str))
+            raw_test_commands: object = ws.test_commands
+            if not isinstance(raw_test_commands, (list, tuple)):
+                return ()
+            return tuple(command for command in raw_test_commands if isinstance(command, str))
 
     async def _provider_recovery_suppresses_cli(self, workspace_id: str) -> bool:
         now = datetime.now(UTC)

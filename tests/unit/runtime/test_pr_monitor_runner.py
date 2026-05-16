@@ -211,6 +211,47 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw_test_commands", "expected"),
+    [
+        (None, ()),
+        ("pytest -q", ()),
+        ({"command": "pytest -q"}, ()),
+        (["ruff check .", 123, "pytest -q"], ("ruff check .", "pytest -q")),
+        (("mypy src/awf", object()), ("mypy src/awf",)),
+    ],
+)
+async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_test_commands: object,
+    expected: tuple[str, ...],
+) -> None:
+    class _SessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _WorkspaceRepository:
+        def __init__(self, session: object) -> None:
+            del session
+
+        async def get(self, workspace_id: str) -> object:
+            del workspace_id
+            return SimpleNamespace(test_commands=raw_test_commands)
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.WorkspaceRepository",
+        _WorkspaceRepository,
+    )
+    runner = _monitor_runner(tmp_path, FakeCommandRunner(), session_factory=_SessionContext)
+
+    assert await runner._workspace_test_commands("ws_1") == expected
+
+
+@pytest.mark.unit
 async def test_address_review_comment_prompt_receives_workspace_runtime_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
