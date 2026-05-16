@@ -44,6 +44,11 @@ _ORIGINAL_RESOLVE_CALLBACK_TARGET_IP_ADDRESSES = (
 )
 
 
+@pytest.mark.unit
+def test_callback_service_persisted_key_replay_uses_primary_replay_path() -> None:
+    assert CallbackService.replay_existing_for_persisted_key is CallbackService.replay_existing
+
+
 @pytest.fixture
 async def factory(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
