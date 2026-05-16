@@ -276,6 +276,14 @@ async def create_workspace(
         if replay is not None:
             return replay
         if not admission_preview.allowed:
+            admission_preview = await check_request_async(
+                request,
+                endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+                limit=settings.workspace_create_rate_limit_count,
+                window_seconds=settings.request_admission_window_seconds,
+                reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+            )
+        if not admission_preview.allowed:
             return _workspace_create_rate_limited_response(admission_preview)
 
     admission = await admit_request_async(
@@ -384,6 +392,14 @@ async def create_workspace_v2(
         )
         if replay is not None:
             return replay
+        if not admission_preview.allowed:
+            admission_preview = await check_request_async(
+                request,
+                endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+                limit=settings.workspace_create_rate_limit_count,
+                window_seconds=settings.request_admission_window_seconds,
+                reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+            )
         if not admission_preview.allowed:
             return _workspace_create_rate_limited_response(admission_preview)
 

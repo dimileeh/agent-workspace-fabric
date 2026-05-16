@@ -93,7 +93,6 @@ def settings_guardrails(
     env: RuntimeEnv,
     database_url: str,
     api_token: str | None,
-    callbacks_enabled: bool,
 ) -> tuple[ProductionSettingsDiagnostic, ...]:
     """Return production-only settings diagnostics without side effects.
 
@@ -102,8 +101,6 @@ def settings_guardrails(
     Callback registration is safe in production once the API token guardrail
     passes because callback routes enforce bearer-token authentication.
     """
-
-    del callbacks_enabled
 
     if env != "prod":
         return ()
@@ -485,7 +482,6 @@ def validate_production_settings(
         env=settings.env,
         database_url=database_url if database_url is not None else settings.database_url,
         api_token=settings.api_token,
-        callbacks_enabled=settings.callbacks_enabled,
     )
     if diagnostics:
         raise ProductionSettingsError(diagnostics)

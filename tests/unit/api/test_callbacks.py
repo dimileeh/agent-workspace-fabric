@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from pydantic import ValidationError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.requests import Request
 
 from awf.api import schemas as api_schemas
@@ -286,23 +286,52 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_m
 ) -> None:
     app, client = callback_app_and_client
     app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
-    replay_keys: list[str] = []
-    original_replay_existing = callbacks_route.CallbackService.replay_existing
+    persisted_probe_keys: list[str] = []
+    locked_replay_keys: list[str] = []
+    original_persisted_probe = (
+        callbacks_route.CallbackService.replay_existing_for_persisted_key_in_session
+    )
+    original_locked_replay = callbacks_route.CallbackService.replay_existing_in_locked_session
 
     async def fail_list_idempotency_replay_keys(
         _self: callbacks_route.CallbackService,
     ) -> list[tuple[str, str]]:
         raise AssertionError("fresh over-limit callbacks must not scan all replay keys")
 
-    async def tracked_replay_existing(
+    async def fail_detached_replay_existing(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        raise AssertionError(f"fresh callback path must keep {idempotency_key} in-session")
+
+    async def tracked_persisted_probe(
         self: callbacks_route.CallbackService,
+        session: AsyncSession,
         payload: api_schemas.CallbackSubscriptionCreateRequest,
         *,
         idempotency_key: str,
     ) -> object:
-        replay_keys.append(idempotency_key)
-        return await original_replay_existing(
+        persisted_probe_keys.append(idempotency_key)
+        return await original_persisted_probe(
             self,
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    async def tracked_locked_replay(
+        self: callbacks_route.CallbackService,
+        session: AsyncSession,
+        payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        locked_replay_keys.append(idempotency_key)
+        return await original_locked_replay(
+            self,
+            session,
             payload,
             idempotency_key=idempotency_key,
         )
@@ -310,7 +339,17 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_m
     monkeypatch.setattr(
         callbacks_route.CallbackService,
         "replay_existing",
-        tracked_replay_existing,
+        fail_detached_replay_existing,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing_for_persisted_key_in_session",
+        tracked_persisted_probe,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing_in_locked_session",
+        tracked_locked_replay,
     )
     monkeypatch.setattr(
         callbacks_route.CallbackService,
@@ -335,7 +374,49 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_m
 
     assert first.status_code == 201
     _assert_callback_rate_limited(rejected, identity_type="bearer_token")
-    assert replay_keys == ["callback-replay-read-first"]
+    assert persisted_probe_keys == [
+        "callback-replay-read-first",
+        "callback-replay-read-second",
+    ]
+    assert locked_replay_keys == [
+        "callback-replay-read-first",
+        "callback-replay-read-second",
+    ]
+
+
+@pytest.mark.unit
+async def test_register_callback_fresh_path_acquires_one_idempotency_lock(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=10)
+    idempotency_key = "callback-fresh-single-lock"
+    lock_keys: list[str] = []
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        lock_keys.append(key)
+        await original_lock(self, key)
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-fresh-single-lock",
+            "target_url": "https://operator.example.com/awf/fresh-single-lock",
+        },
+        headers=_authorized_headers(idempotency_key=idempotency_key),
+    )
+
+    assert response.status_code == 201
+    assert lock_keys == [idempotency_key]
 
 
 @pytest.mark.unit

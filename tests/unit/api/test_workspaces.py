@@ -1088,6 +1088,114 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "fresh retry after v1"}
+                ),
+                "workspace-refresh-retry-after-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="fresh retry after v2")),
+                "workspace-refresh-retry-after-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_workspace_create_refreshes_preview_after_durable_miss(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        calls: list[str] = []
+        retry_after_values = [60, 2]
+
+        def denied_decision(retry_after_seconds: int) -> workspaces_route.RequestAdmissionDecision:
+            return workspaces_route.RequestAdmissionDecision(
+                allowed=False,
+                metadata={
+                    "reason_code": "WORKSPACE_CREATE_RATE_LIMITED",
+                    "endpoint_family": "workspace_create",
+                    "identity_type": "client_host",
+                    "identity_digest": "redacted",
+                    "limit": 1,
+                    "window_seconds": 60,
+                    "remaining": 0,
+                    "retry_after_seconds": retry_after_seconds,
+                },
+            )
+
+        async def denied_preview(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("check")
+            return denied_decision(retry_after_values.pop(0))
+
+        async def fail_admit(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("stale denied previews must refresh before admission")
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
+
+        async def missing_replay(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lookup:{key}")
+
+        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError("rate-limited request must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("rate-limited request must not create a workspace")
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            denied_preview,
+            raising=False,
+        )
+        monkeypatch.setattr(workspaces_route, "admit_request_async", fail_admit)
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", missing_replay)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 429
+        body = json.loads(response.body.decode())
+        assert body["detail"]["retry_after_seconds"] == 2
+        assert response.headers["Retry-After"] == "2"
+        assert calls == [
+            "check",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}",
+            "check",
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("path", "payload", "idempotency_key"),
         [
             pytest.param(

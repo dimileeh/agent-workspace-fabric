@@ -280,6 +280,34 @@ class CallbackService:
             await session.commit()
             return subscription
 
+    async def register_with_locked_idempotency_key(
+        self,
+        session: AsyncSession,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscription:
+        """Create a subscription while the caller holds the idempotency-key lock."""
+        _validate_callback_target_static_policy(
+            payload.target_url,
+            settings=self._settings,
+        )
+        request_hash = callback_request_hash(payload)
+        subscription, _created = await CallbackSubscriptionRepository(session).create_idempotent(
+            name=payload.name,
+            target_url=payload.target_url,
+            event_types=payload.event_types,
+            enabled=payload.enabled,
+            timeout_seconds=payload.timeout_seconds,
+            max_attempts=payload.max_attempts,
+            initial_backoff_seconds=payload.initial_backoff_seconds,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            acquire_lock=False,
+        )
+        await session.commit()
+        return subscription
+
     async def replay_existing(
         self,
         payload: CallbackSubscriptionCreateRequest,
@@ -308,18 +336,64 @@ class CallbackService:
         *,
         idempotency_key: str,
     ) -> CallbackSubscription | None:
-        request_hash = callback_request_hash(payload)
         async with self._factory() as session:
-            repo = CallbackSubscriptionRepository(session)
+            return await self._replay_existing_locked_in_session(
+                session,
+                payload,
+                idempotency_key=idempotency_key,
+                acquire_lock=True,
+            )
+
+    async def replay_existing_for_persisted_key_in_session(
+        self,
+        session: AsyncSession,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscription | None:
+        """Acquire the idempotency lock in the caller's transaction and replay if found."""
+        return await self._replay_existing_locked_in_session(
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+            acquire_lock=True,
+        )
+
+    async def replay_existing_in_locked_session(
+        self,
+        session: AsyncSession,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscription | None:
+        """Replay an idempotency row while the caller already holds the key lock."""
+        return await self._replay_existing_locked_in_session(
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+            acquire_lock=False,
+        )
+
+    async def _replay_existing_locked_in_session(
+        self,
+        session: AsyncSession,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+        acquire_lock: bool,
+    ) -> CallbackSubscription | None:
+        request_hash = callback_request_hash(payload)
+        repo = CallbackSubscriptionRepository(session)
+        if acquire_lock:
             await repo.acquire_idempotency_key_lock(idempotency_key)
-            existing = await repo.get_by_idempotency_key(idempotency_key)
-            if existing is None:
-                return None
-            if existing.request_hash != request_hash:
-                raise CallbackIdempotencyConflictError(
-                    "Idempotency-Key previously used with a different callback request."
-                )
-            return existing
+        existing = await repo.get_by_idempotency_key(idempotency_key)
+        if existing is None:
+            return None
+        if existing.request_hash != request_hash:
+            raise CallbackIdempotencyConflictError(
+                "Idempotency-Key previously used with a different callback request."
+            )
+        return existing
 
     async def get_idempotency_request_hash(self, idempotency_key: str) -> str | None:
         async with self._factory() as session:

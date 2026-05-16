@@ -649,7 +649,7 @@ def test_request_admission_real_request_without_app_state_fails_loudly() -> None
 
 
 @pytest.mark.unit
-def test_request_admission_none_request_uses_shared_direct_limiter() -> None:
+def test_request_admission_none_request_uses_fresh_direct_limiter() -> None:
     first = admit_request(
         None,
         endpoint_family="none_request_test",
@@ -666,7 +666,7 @@ def test_request_admission_none_request_uses_shared_direct_limiter() -> None:
     )
 
     assert first.allowed is True
-    assert second.allowed is False
+    assert second.allowed is True
     assert second.metadata["reason_code"] == "NONE_REQUEST_RATE_LIMITED"
 
 

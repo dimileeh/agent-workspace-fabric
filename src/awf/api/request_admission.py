@@ -212,9 +212,6 @@ class RequestAdmissionLimiter:
                 self._last_pruned_windows[pruned_window_seconds] = pruned_current_window
 
 
-_NULL_REQUEST_LIMITER: Final = RequestAdmissionLimiter()
-
-
 def extract_request_identity(
     request: Request | object | None,
     *,
@@ -338,7 +335,7 @@ def _direct_request_admission_limiter(
     request: Request | object | None,
 ) -> RequestAdmissionLimiter:
     if request is None:
-        return _NULL_REQUEST_LIMITER
+        return RequestAdmissionLimiter()
 
     existing = getattr(request, _DIRECT_LIMITER_ATTR, None)
     if isinstance(existing, RequestAdmissionLimiter):

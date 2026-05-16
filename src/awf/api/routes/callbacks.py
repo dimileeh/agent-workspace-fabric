@@ -215,72 +215,76 @@ async def register_callback(
             return response
         raise _idempotency_replay_unavailable()
 
-    # This durable probe intentionally uses its own short session before admission:
-    # cold persisted idempotency replays must bypass the rate gate. Fresh requests
-    # may miss here and re-check after admission before create_idempotent takes
-    # the final advisory lock for the insert.
-    response = await _callback_durable_replay_response_for_persisted_key(
-        service,
-        replay_cache,
-        replay_key_cache,
-        payload,
-        idempotency_key=key,
-    )
-    if response is not None:
-        return response
-
-    admission = await admit_request_async(
-        request,
-        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
-        limit=route_settings.callback_register_rate_limit_count,
-        window_seconds=route_settings.request_admission_window_seconds,
-        reason_code=_CALLBACK_REGISTER_RATE_LIMITED,
-    )
-    if not admission.allowed:
+    async with session_factory() as session:
+        # Cold persisted idempotency replays must bypass the rate gate. Fresh
+        # requests keep this transaction-level advisory lock through admission
+        # and create so the hot path does not lock the same key repeatedly.
         response = await _callback_durable_replay_response_for_persisted_key(
             service,
             replay_cache,
             replay_key_cache,
             payload,
             idempotency_key=key,
+            session=session,
         )
         if response is not None:
             return response
-        return _callback_register_rate_limited_response(admission)
 
-    response = await _callback_durable_replay_response(
-        service,
-        replay_cache,
-        replay_key_cache,
-        payload,
-        idempotency_key=key,
-    )
-    if response is not None:
-        return response
+        admission = await admit_request_async(
+            request,
+            endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+            limit=route_settings.callback_register_rate_limit_count,
+            window_seconds=route_settings.request_admission_window_seconds,
+            reason_code=_CALLBACK_REGISTER_RATE_LIMITED,
+        )
+        if not admission.allowed:
+            response = await _callback_durable_replay_response_from_locked_session(
+                service,
+                replay_cache,
+                replay_key_cache,
+                payload,
+                idempotency_key=key,
+                session=session,
+            )
+            if response is not None:
+                return response
+            return _callback_register_rate_limited_response(admission)
 
-    try:
-        subscription = await service.register(
+        response = await _callback_durable_replay_response_from_locked_session(
+            service,
+            replay_cache,
+            replay_key_cache,
             payload,
             idempotency_key=key,
+            session=session,
         )
-    except CallbackTargetPolicyViolationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
-                "message": str(exc),
-            },
-        ) from exc
-    except CallbackTargetPolicyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "error_code": "CALLBACK_TARGET_INVALID",
-                "message": str(exc),
-            },
-        ) from exc
-    except CallbackIdempotencyConflictError as exc:
-        raise _idempotency_conflict() from exc
+        if response is not None:
+            return response
+
+        try:
+            subscription = await service.register_with_locked_idempotency_key(
+                session,
+                payload,
+                idempotency_key=key,
+            )
+        except CallbackTargetPolicyViolationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+                    "message": str(exc),
+                },
+            ) from exc
+        except CallbackTargetPolicyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "error_code": "CALLBACK_TARGET_INVALID",
+                    "message": str(exc),
+                },
+            ) from exc
+        except CallbackIdempotencyConflictError as exc:
+            raise _idempotency_conflict() from exc
     response = CallbackSubscriptionResponse.model_validate(subscription)
     _remember_callback_replay(
         replay_cache,
@@ -375,9 +379,47 @@ async def _callback_durable_replay_response_for_persisted_key(
     payload: CallbackSubscriptionCreateRequest,
     *,
     idempotency_key: str,
+    session: AsyncSession | None = None,
 ) -> CallbackSubscriptionResponse | None:
     try:
-        durable_replay = await service.replay_existing_for_persisted_key(
+        if session is None:
+            durable_replay = await service.replay_existing_for_persisted_key(
+                payload,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            durable_replay = await service.replay_existing_for_persisted_key_in_session(
+                session,
+                payload,
+                idempotency_key=idempotency_key,
+            )
+    except CallbackIdempotencyConflictError as exc:
+        raise _idempotency_conflict() from exc
+    if durable_replay is None:
+        return None
+    response = CallbackSubscriptionResponse.model_validate(durable_replay)
+    _remember_callback_replay(
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key=idempotency_key,
+        response=response,
+    )
+    return response
+
+
+async def _callback_durable_replay_response_from_locked_session(
+    service: CallbackService,
+    replay_cache: _CallbackIdempotencyReplayCache,
+    replay_key_cache: _CallbackIdempotencyReplayKeyCache,
+    payload: CallbackSubscriptionCreateRequest,
+    *,
+    idempotency_key: str,
+    session: AsyncSession,
+) -> CallbackSubscriptionResponse | None:
+    try:
+        durable_replay = await service.replay_existing_in_locked_session(
+            session,
             payload,
             idempotency_key=idempotency_key,
         )

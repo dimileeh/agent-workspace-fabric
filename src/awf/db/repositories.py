@@ -4597,8 +4597,10 @@ class CallbackSubscriptionRepository:
         initial_backoff_seconds: int,
         idempotency_key: str,
         request_hash: str,
+        acquire_lock: bool = True,
     ) -> tuple[CallbackSubscription, bool]:
-        await self.acquire_idempotency_key_lock(idempotency_key)
+        if acquire_lock:
+            await self.acquire_idempotency_key_lock(idempotency_key)
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             if existing.request_hash != request_hash:

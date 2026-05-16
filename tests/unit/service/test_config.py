@@ -61,7 +61,6 @@ def test_production_guardrails_allow_local_defaults() -> None:
         env=settings.env,
         database_url=settings.database_url,
         api_token=settings.api_token,
-        callbacks_enabled=settings.callbacks_enabled,
     )
 
     assert diagnostics == ()
@@ -76,11 +75,21 @@ def test_production_guardrails_allow_ci_defaults() -> None:
         env=settings.env,
         database_url=settings.database_url,
         api_token=settings.api_token,
-        callbacks_enabled=settings.callbacks_enabled,
     )
 
     assert diagnostics == ()
     validate_production_settings(settings)
+
+
+@pytest.mark.unit
+def test_settings_guardrails_rejects_removed_callbacks_enabled_argument() -> None:
+    with pytest.raises(TypeError):
+        settings_guardrails(
+            env="prod",
+            database_url=_NON_DEFAULT_DATABASE_URL,
+            api_token=_STRONG_PRODUCTION_API_TOKEN,
+            callbacks_enabled=True,  # type: ignore[call-arg]
+        )
 
 
 @pytest.mark.unit
@@ -225,7 +234,6 @@ def test_production_guardrails_allow_authenticated_callbacks() -> None:
         env=settings.env,
         database_url=settings.database_url,
         api_token=settings.api_token,
-        callbacks_enabled=settings.callbacks_enabled,
     )
 
     assert diagnostics == ()
