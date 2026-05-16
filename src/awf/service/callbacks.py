@@ -310,6 +310,7 @@ class CallbackService:
         *,
         limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     ) -> list[tuple[str, str]]:
+        """Return bounded replay keys for non-request-path cache support."""
         async with self._factory() as session:
             return await CallbackSubscriptionRepository(session).list_idempotency_replay_keys(
                 limit=limit

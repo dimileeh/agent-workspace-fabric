@@ -2744,6 +2744,11 @@ class WorkspaceRepository:
         *,
         limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     ) -> builtins.list[str]:
+        """Return a bounded replay-key sample for non-request-path cache support.
+
+        Fresh request admission paths use exact-key probes instead of this helper
+        so over-limit requests cannot trigger broad replay-key warmups.
+        """
         if limit <= 0:
             return []
         stmt = (
@@ -4662,10 +4667,15 @@ class CallbackSubscriptionRepository:
         *,
         limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     ) -> builtins.list[tuple[str, str]]:
+        """Return bounded callback replay keys for non-request-path cache support."""
         if limit <= 0:
             return []
         stmt = (
             select(CallbackSubscription.idempotency_key, CallbackSubscription.request_hash)
+            .where(
+                CallbackSubscription.idempotency_key.is_not(None),
+                CallbackSubscription.request_hash.is_not(None),
+            )
             .order_by(
                 CallbackSubscription.created_at.asc(),
                 CallbackSubscription.id.asc(),

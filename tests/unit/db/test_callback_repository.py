@@ -189,6 +189,50 @@ async def test_subscription_repository_lists_idempotency_replay_keys_with_limit(
 
 
 @pytest.mark.unit
+async def test_subscription_repository_replay_key_list_filters_null_legacy_rows(
+    session: AsyncSession,
+) -> None:
+    await _subscription(
+        session,
+        idempotency_key="idem-replay-list-filtered",
+        request_hash="hash-replay-list-filtered",
+    )
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(bind, "before_cursor_execute", record_sql)
+    try:
+        await CallbackSubscriptionRepository(session).list_idempotency_replay_keys(limit=2)
+    finally:
+        event.remove(bind, "before_cursor_execute", record_sql)
+
+    replay_key_queries = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and "from callback_subscriptions" in statement
+        and "callback_subscriptions.idempotency_key" in statement
+        and "callback_subscriptions.request_hash" in statement
+    ]
+    assert any(
+        "callback_subscriptions.idempotency_key is not null" in statement
+        and "callback_subscriptions.request_hash is not null" in statement
+        for statement in replay_key_queries
+    )
+
+
+@pytest.mark.unit
 async def test_subscription_repository_gets_idempotency_request_hash_by_key(
     session: AsyncSession,
 ) -> None:
