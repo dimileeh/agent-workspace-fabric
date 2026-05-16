@@ -2,8 +2,6 @@
 
 This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.
 
-## Reason and Error Codes
-
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.

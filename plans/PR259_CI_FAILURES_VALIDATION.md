@@ -44,4 +44,30 @@ Commands run:
 
 ## Gaps
 
-None. The reported CI failures are fixed by the focused and adjacent validation listed above.
+### Iteration 2: Reason Catalog Heading Drift
+
+CI later reported that `tests/unit/service/test_doctor_reasons.py::test_reason_catalog_is_synchronized_with_python_source`
+was failing because `docs/REASON_CATALOG.md` contained a manual
+`## Reason and Error Codes` heading that is not emitted by
+`scripts/generate_reason_catalog.py`.
+
+Additional files changed:
+
+- `docs/REASON_CATALOG.md`
+- `plans/PR259_CI_FAILURES_VALIDATION.md`
+
+Additional commands run:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_doctor_reasons.py::test_reason_catalog_is_synchronized_with_python_source -q`
+  - Before fix: failed with `docs/REASON_CATALOG.md is out of sync with src/awf/service/doctor/reasons.py`.
+  - After fix: passed, `1 passed`.
+- `uv run python scripts/generate_reason_catalog.py`
+  - Passed and regenerated `docs/REASON_CATALOG.md`, removing the non-generated heading.
+- `uv run --python 3.12 --extra dev pytest tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q`
+  - Passed, `1 passed`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspace_controls_idempotency.py::test_refresh_endpoint_returns_operation_response_and_coalesces_active_request tests/unit/service/test_doctor_reasons.py::test_reason_catalog_is_synchronized_with_python_source tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q`
+  - Passed, `3 passed`.
+- `git diff --check`
+  - Passed.
+
+None. The reported CI failure is fixed by the focused and adjacent validation listed above.
