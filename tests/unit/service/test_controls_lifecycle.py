@@ -891,7 +891,7 @@ async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
 
 
 @pytest.mark.unit
-async def test_refresh_active_workspace_finishes_operation_and_allows_new_same_payload_request(
+async def test_refresh_active_workspace_keeps_operation_pending_and_coalesces_new_same_payload_request(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
@@ -916,15 +916,12 @@ async def test_refresh_active_workspace_finishes_operation_and_allows_new_same_p
     first_refresh_event = next(
         event for event in refresh_events if event.payload["operation_id"] == operation.id
     )
-    repeated_refresh_event = next(
-        event for event in refresh_events if event.payload["operation_id"] == repeated.id
-    )
 
-    assert repeated.id != operation.id
+    assert repeated.id == operation.id
     assert workspace.status == WorkspaceStatus.ready.value
-    assert [row.id for row in operations] == [repeated.id, operation.id]
+    assert [row.id for row in operations] == [operation.id]
     assert operation.type == OperationType.refresh.value
-    assert operation.status == OperationStatus.succeeded.value
+    assert operation.status == OperationStatus.pending.value
     assert operation.idempotency_key == "refresh-first"
     assert operation.payload == {
         "owner": "operator_api",
@@ -934,26 +931,16 @@ async def test_refresh_active_workspace_finishes_operation_and_allows_new_same_p
         "requested_action": "refresh",
         "expected_version": 1,
     }
-    assert operation.result == {
-        "status": WorkspaceStatus.ready.value,
-        "reason_code": "OPERATOR_REFRESH",
-        "requested_action": "refresh",
-    }
-    assert repeated.status == OperationStatus.succeeded.value
-    assert repeated.idempotency_key == "refresh-fresh-key"
-    assert repeated.result == operation.result
+    assert operation.result is None
+    assert repeated.idempotency_key == "refresh-first"
+    assert repeated.result is None
+    assert len(refresh_events) == 1
     assert first_refresh_event.reason_code == "OPERATOR_REFRESH"
     assert first_refresh_event.payload == {
         "source": "operator_api",
         "reason": "stale merge queue",
         "operation_id": operation.id,
         "expected_version": 1,
-    }
-    assert repeated_refresh_event.reason_code == "OPERATOR_REFRESH"
-    assert repeated_refresh_event.payload == {
-        "source": "operator_api",
-        "reason": "stale merge queue",
-        "operation_id": repeated.id,
     }
 
 
@@ -988,7 +975,7 @@ async def test_refresh_fresh_key_with_stale_if_match_does_not_coalesce_active_op
         )
 
     assert replay.id == operation.id
-    assert operation.status == OperationStatus.succeeded.value
+    assert operation.status == OperationStatus.pending.value
     assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
     assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
@@ -1180,7 +1167,7 @@ async def test_refresh_replays_same_idempotency_key_after_destroying_state(
     operations = await _operations(session, workspace.id)
 
     assert replay.id == operation.id
-    assert replay.status == OperationStatus.succeeded.value
+    assert replay.status == OperationStatus.pending.value
     assert [row.id for row in operations] == [operation.id]
 
 

@@ -1018,17 +1018,14 @@ class TestRealDbPaths:
 
         assert isinstance(payload, dict)
         assert payload["type"] == "refresh"
+        assert payload["status"] == OperationStatus.pending.value
 
         async with factory() as session:
             ops = await OperationRepository(session).list_for_workspace(workspace.id, limit=10)
             refresh_ops = [o for o in ops if o.type == OperationType.refresh.value]
             assert len(refresh_ops) == 1
-            assert refresh_ops[0].status == OperationStatus.succeeded.value
-            assert refresh_ops[0].result == {
-                "status": WorkspaceStatus.monitoring_pr.value,
-                "reason_code": "OPERATOR_REFRESH",
-                "requested_action": OperationType.refresh.value,
-            }
+            assert refresh_ops[0].status == OperationStatus.pending.value
+            assert refresh_ops[0].result is None
 
     async def test_rebase_creates_operation_row(
         self, factory: async_sessionmaker[AsyncSession]

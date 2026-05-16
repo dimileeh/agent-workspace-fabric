@@ -60,6 +60,30 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service logs",
         "docs/REASON_CATALOG.md#api_unreachable",
     ),
+    "ARTIFACT_BLOCKED": _ReasonText(
+        "AWF blocked reading artifact content through MCP.",
+        (
+            "Inspect the workspace artifact directly from trusted local storage, "
+            "or reduce/redact the artifact before requesting it through MCP."
+        ),
+        (
+            "The artifact content appears unsafe to return, such as binary data, "
+            "encoded secrets, or text that cannot be safely redacted."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#artifact_blocked",
+    ),
+    "ARTIFACT_OVERSIZED": _ReasonText(
+        "AWF refused to read artifact content because it exceeded the configured byte limit.",
+        (
+            "Request a smaller artifact, lower the requested path scope, or use "
+            "the REST artifact download path when an operator intentionally needs "
+            "the full file."
+        ),
+        "The requested artifact is larger than the MCP read limit or grew beyond the limit while being read.",
+        "awf workspace show <workspace_id>",
+        "docs/REASON_CATALOG.md#artifact_oversized",
+    ),
     "WORKSPACE_CREATE_RATE_LIMITED": _ReasonText(
         "AWF rejected a workspace creation request because the request-admission rate limit was exhausted.",
         (
@@ -87,6 +111,61 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf service logs",
         "docs/REASON_CATALOG.md#callback_register_rate_limited",
+    ),
+    "CALLBACK_TARGET_POLICY_VIOLATION": _ReasonText(
+        "AWF refused to register or deliver an outbound callback because the target violated configured callback policy.",
+        (
+            "Update the callback subscription target or callback policy so the "
+            "target is explicitly allowed, then let AWF retry pending deliveries."
+        ),
+        (
+            "The target URL does not satisfy the HTTPS requirement or the "
+            "configured callback host allowlist."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#callback_target_policy_violation",
+    ),
+    "CALLBACK_TARGET_INVALID": _ReasonText(
+        "AWF refused to send an outbound callback because the stored callback target failed delivery-time validation.",
+        (
+            "Update or recreate the callback subscription with a public, "
+            "policy-compliant target URL, then let AWF retry pending deliveries."
+        ),
+        (
+            "The target URL no longer resolves to public addresses, uses a "
+            "disallowed scheme or host, includes unsafe URL components, or "
+            "violates the configured callback HTTPS/host allowlist policy."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#callback_target_invalid",
+    ),
+    "CALLBACK_TARGET_VALIDATION_TIMEOUT": _ReasonText(
+        "AWF could not validate an outbound callback target before the delivery timeout budget expired.",
+        (
+            "Verify DNS and network reachability for the callback host, increase "
+            "the subscription timeout if appropriate, then let AWF retry pending "
+            "deliveries."
+        ),
+        "DNS resolution or callback target validation was too slow or blocked by network conditions.",
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#callback_target_validation_timeout",
+    ),
+    "CALLBACK_DELIVERY_BUDGET_EXCEEDED": _ReasonText(
+        (
+            "AWF could not send an outbound callback because target validation "
+            "consumed the full delivery timeout budget before the POST could start."
+        ),
+        (
+            "Verify callback target DNS and network latency, increase the "
+            "subscription timeout if appropriate, then let AWF retry pending "
+            "deliveries."
+        ),
+        (
+            "DNS resolution or target validation completed too slowly for the "
+            "subscription's configured timeout."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#callback_delivery_budget_exceeded",
     ),
     "IDEMPOTENCY_REPLAY_UNAVAILABLE": _ReasonText(
         "AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.",
@@ -205,6 +284,65 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "The GitHub token is expired, invalid, or lacks required scopes.",
         "gh auth status",
         "docs/REASON_CATALOG.md#github_auth_unusable",
+    ),
+    "INVALID_GITHUB_REPO": _ReasonText(
+        "A GitHub repository identifier or URL could not be parsed.",
+        "Use an `owner/repo` slug or a valid GitHub repository URL.",
+        "The PR adoption request used an unsupported repository format.",
+        "awf workspace adopt-pr",
+        "docs/REASON_CATALOG.md#invalid_github_repo",
+    ),
+    "PR_ADOPTION_INPUT_REQUIRED": _ReasonText(
+        "A PR monitor adoption request omitted required input.",
+        "Provide the repository and PR number, or use a complete GitHub PR URL.",
+        "The request did not include enough repository or PR information to identify the PR.",
+        "awf workspace adopt-pr",
+        "docs/REASON_CATALOG.md#pr_adoption_input_required",
+    ),
+    "PR_ADOPTION_POLICY_CONFLICT": _ReasonText(
+        "The requested PR cannot be adopted under the current workspace policy.",
+        "Review the PR target and adoption options, then retry with policy-compatible input.",
+        (
+            "The PR targets an unsupported branch, conflicts with requested "
+            "metadata, or violates adoption policy."
+        ),
+        "awf workspace adopt-pr",
+        "docs/REASON_CATALOG.md#pr_adoption_policy_conflict",
+    ),
+    "PR_ALREADY_CLOSED": _ReasonText(
+        "The PR selected for monitor adoption is already closed.",
+        "Reopen the PR or adopt an active replacement PR.",
+        "The PR was closed before AWF could adopt monitoring.",
+        "awf workspace adopt-pr",
+        "docs/REASON_CATALOG.md#pr_already_closed",
+    ),
+    "PR_ALREADY_MERGED": _ReasonText(
+        "The PR selected for monitor adoption is already merged.",
+        "No monitor adoption is needed; use workspace cleanup or status commands instead.",
+        "There is no open PR monitor work left for AWF to own.",
+        "awf workspace adopt-pr",
+        "docs/REASON_CATALOG.md#pr_already_merged",
+    ),
+    "PR_METADATA_FETCH_FAILED": _ReasonText(
+        "AWF could not fetch GitHub metadata for the requested PR.",
+        "Verify `gh auth status`, repository access, and network connectivity, then retry adoption.",
+        "GitHub auth, network access, rate limits, or repository permissions blocked the metadata query.",
+        "gh pr view",
+        "docs/REASON_CATALOG.md#pr_metadata_fetch_failed",
+    ),
+    "PR_METADATA_INVALID": _ReasonText(
+        "GitHub returned PR metadata that AWF could not use safely.",
+        "Inspect the PR metadata with `gh pr view --json` and retry after GitHub/API data is consistent.",
+        "Required PR fields were missing or had an unexpected shape.",
+        "gh pr view",
+        "docs/REASON_CATALOG.md#pr_metadata_invalid",
+    ),
+    "PR_NOT_FOUND": _ReasonText(
+        "The requested PR was not found.",
+        "Confirm the repository, PR number, and GitHub permissions.",
+        "The PR number is wrong, the repository is wrong, or the token lacks access.",
+        "gh pr view",
+        "docs/REASON_CATALOG.md#pr_not_found",
     ),
     "GIT_FETCH_BASE_FAILED": _ReasonText(
         "The PR monitor could not refresh the target branch ref for a workspace.",
@@ -421,6 +559,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#local_config_invalid",
     ),
+    "MCP_EGRESS_AUDIT_ERROR": _ReasonText(
+        "The MCP egress audit evidence tool could not read workspace audit evidence.",
+        "Verify the workspace id and AWF database health, then retry the MCP call.",
+        "The workspace lookup failed or the control-plane database was unavailable.",
+        "awf workspace show <workspace_id>",
+        "docs/REASON_CATALOG.md#mcp_egress_audit_error",
+    ),
     "SERVICE_STATUS_COLLECTION_FAILED": _ReasonText(
         "AWF service status checks could not be collected.",
         "Fix the reported local configuration error and re-run doctor.",
@@ -441,6 +586,136 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "The PR is still open, was closed without merging, or the merge SHA was not recorded.",
         "awf service gc",
         "docs/REASON_CATALOG.md#completed_pr_not_merged",
+    ),
+    "CONFORMANCE_REQUIRES_AWF_VALIDATION": _ReasonText(
+        (
+            "Plan conformance found no deterministic implementation gap, but "
+            "AWF-owned validation evidence is missing, stale, or insufficient."
+        ),
+        (
+            "Let AWF run validation and rerun conformance against the persisted "
+            "validation provenance and log stream references."
+        ),
+        (
+            "The agent completed the implementation before AWF ran or persisted "
+            "the required profile validation gates."
+        ),
+        "awf workspace show <workspace_id>",
+        "docs/REASON_CATALOG.md#conformance_requires_awf_validation",
+    ),
+    "POST_AGENT_COMMIT_FAILED": _ReasonText(
+        (
+            "The post-agent ``git commit`` exited non-zero for a reason unrelated "
+            "to a pre-commit hook (e.g. missing git identity, detached HEAD, "
+            '"nothing to commit").'
+        ),
+        (
+            "Inspect the worktree with ``awf workspace logs <workspace_id>`` and "
+            "re-run the commit inside the worktree to reproduce; fix git "
+            "identity or repository state and recover."
+        ),
+        (
+            "Git environment misconfiguration in the workspace container or an "
+            "agent that left the worktree in an unexpected state (orphan HEAD, "
+            "empty index after stage)."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#post_agent_commit_failed",
+    ),
+    "POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED": _ReasonText(
+        (
+            "The post-agent ``git commit`` was rejected because "
+            "``awf-ruff-format-check`` reported files would be reformatted, but "
+            "AWF could not locate any agent-staged paths to repair "
+            "(intersection with ``Would reformat:`` was empty)."
+        ),
+        (
+            "Inspect the ``workspace.post_agent_commit_repair`` event. If the "
+            "flagged path is intentionally part of the workspace change, run "
+            "``uv run --python 3.12 --extra dev ruff format <flagged_path_1> "
+            "<flagged_path_2> ...`` locally on the flagged paths, commit, and "
+            "remonitor."
+        ),
+        (
+            "The format check flagged files outside the agent's staged diff, so "
+            "AWF refused to silently mutate them."
+        ),
+        "uv run --python 3.12 --extra dev ruff format <flagged_paths...>",
+        "docs/REASON_CATALOG.md#post_agent_commit_format_rewrite_needed",
+    ),
+    "POST_AGENT_COMMIT_PRECOMMIT_FAILED": _ReasonText(
+        (
+            "A pre-commit hook rejected the post-agent commit after AWF exhausted "
+            "bounded repair. Deterministic normalizer/formatter hooks are retried "
+            "once by AWF. Ruff diagnostics marked ``[*]`` are repaired with a "
+            "bounded ``ruff check --fix`` pass on already-staged Python paths. "
+            "Remaining semantic hooks such as ``awf-ruff-check``, ``awf-mypy``, "
+            "security, large-file, merge-conflict, or unknown hooks are routed "
+            "through one targeted agent repair pass when the original agent run "
+            "was healthy."
+        ),
+        (
+            "Inspect ``details.post_agent_commit`` and the "
+            "``workspace.post_agent_commit_repair`` event for ``repair_strategy``, "
+            "``failed_hooks``, ``repaired_paths``, ``normalizer_paths``, "
+            "``restaged_paths``, and ``retry_outcome``. Run ``uv run --python "
+            "3.12 --extra dev pre-commit run --all-files`` locally against the "
+            "workspace branch, fix the reported issues, push, and remonitor."
+        ),
+        (
+            "The agent's diff trips a semantic lint/type/security invariant, a "
+            "Ruff auto-fix changed the code but the retry still failed, or a "
+            "deterministic repair/targeted repair retry still left pre-commit "
+            "failing."
+        ),
+        "uv run --python 3.12 --extra dev pre-commit run --all-files",
+        "docs/REASON_CATALOG.md#post_agent_commit_precommit_failed",
+    ),
+    "POST_AGENT_FORMAT_REPAIR_FAILED": _ReasonText(
+        (
+            "AWF detected a repairable post-agent pre-commit failure but the "
+            "repair pipeline itself exited non-zero before the retry commit could run."
+        ),
+        "Inspect the workspace logs for the repair sub-step stderr, fix the toolchain or git state, and remonitor.",
+        (
+            "The workspace image is missing `uv` or dev extras, the pinned Python "
+            "version is unavailable, `ruff` crashed on flagged paths, or the "
+            "post-repair `git add` failed. The corresponding "
+            "``workspace.post_agent_commit_repair`` event records "
+            '``retry_outcome="error"``.'
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#post_agent_format_repair_failed",
+    ),
+    "POST_AGENT_GIT_ADD_FAILED": _ReasonText(
+        (
+            "``git add -A`` failed during post-agent salvage (e.g. exit 128 with "
+            "``fatal: not a git repository``)."
+        ),
+        "Inspect the worktree, recover any salvageable files manually, and recreate the workspace.",
+        (
+            "The agent damaged the worktree's git metadata or removed ``.git``; "
+            "no commit could be attempted to capture work."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#post_agent_git_add_failed",
+    ),
+    "PROVIDER_AUTH_FAILED": _ReasonText(
+        (
+            "A workspace agent or PR monitor could not run because the selected "
+            "LLM provider authentication failed."
+        ),
+        (
+            "Refresh the provider credentials, restart or rebuild the AWF "
+            "service/runtime if credentials are mounted into containers, then "
+            "remonitor or reschedule the workspace."
+        ),
+        (
+            "The provider token is expired, reused, missing inside the workspace "
+            "runtime, or rejected by the provider CLI/API."
+        ),
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#provider_auth_failed",
     ),
 }
 
