@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an AWF Core improvement.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator or contributor problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the desired behavior and the affected API, CLI, MCP, console, or profile surface.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Local AWF Core
+        - Future hosted/cloud
+        - Unsure
+    validations:
+      required: true

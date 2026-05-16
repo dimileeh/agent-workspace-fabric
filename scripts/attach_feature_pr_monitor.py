@@ -14,16 +14,15 @@ common feature-PR case:
 
 Behaviour:
 
-  1. Resolve the PR's metadata via ``gh pr view`` (head branch,
-     base branch, state). Refuse closed/merged PRs — nothing for
-     the monitor to do there.
-  2. Write a deterministic task spec JSON to
-     ``<work_dir>/feature-pr-specs/<slug>-feature-pr<N>.json``.
-  3. If a ``run_awf.py`` process is already driving that spec,
-     exit 0 without re-spawning (idempotency).
-  4. Otherwise, ``Popen`` ``run_awf.py --config <spec> --work-dir <dir>``
-     and detach. The monitor runs in its own process group so this
-     script can exit cleanly while the monitor lives.
+  1. By default, call the supported AWF API endpoint
+     ``POST /v1/workspaces/adopt-pr``. The control plane resolves PR metadata,
+     rejects closed/merged PRs, creates or attaches the service-managed
+     workspace, and owns monitor idempotency.
+  2. The old detached ``run_awf.py`` path remains available only with
+     ``--legacy-detached`` for older recovery playbooks. In that mode this
+     script writes a deterministic task spec JSON to
+     ``<work_dir>/feature-pr-specs/<slug>-feature-pr<N>.json`` and uses the
+     historical process-grep/file-lock idempotency guard.
 
 Exit codes:
   0 — spec written + monitor spawned (or no-op because a monitor was
@@ -46,11 +45,14 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
+
+import httpx
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
@@ -81,14 +83,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--repo",
-        required=True,
         help='Repo URL or slug, e.g. "git@github.com:dimileeh/aira-web.git".',
     )
     parser.add_argument(
         "--pr",
         type=int,
-        required=True,
         help="PR number to attach the monitor to.",
+    )
+    parser.add_argument(
+        "--pr-url",
+        default=None,
+        help="Full GitHub PR URL. When supplied, --repo/--pr are optional.",
     )
     parser.add_argument(
         "--agent",
@@ -121,7 +126,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "which needs the same companion stack the PR's validation "
         "originally depended on.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("AWF_CLI_BASE_URL", "http://localhost:8000"),
+        help="AWF API base URL for the supported adoption endpoint.",
+    )
+    parser.add_argument(
+        "--api-token",
+        default=os.environ.get("AWF_API_TOKEN"),
+        help="AWF API bearer token. Defaults to AWF_API_TOKEN.",
+    )
+    parser.add_argument(
+        "--legacy-detached",
+        action="store_true",
+        help="Use the deprecated detached run_awf.py monitor path.",
+    )
+    ns = parser.parse_args(argv)
+    if ns.legacy_detached and (not ns.repo or ns.pr is None):
+        parser.error("--legacy-detached requires --repo plus --pr")
+    if not ns.pr_url and (not ns.repo or ns.pr is None):
+        parser.error("provide --pr-url, or provide --repo plus --pr")
+    return ns
 
 
 @contextlib.contextmanager
@@ -236,7 +261,7 @@ async def orchestrate_attach(
 
         # Spawn run_awf.py detached. --keep-state is retained for
         # compatibility with older runners; current run_awf.py preserves
-        # the shared SQLite DB by default.
+        # PostgreSQL-backed run state by default.
         #
         # ``sys.executable`` (not a hardcoded ``.venv/bin/python``) so the
         # script works under ``uv run``, system python, or a venv rooted
@@ -244,20 +269,21 @@ async def orchestrate_attach(
         # already follow this pattern.
         log_path = work_dir / f"feature-pr-monitor-{pr_number}.log"
         run_awf = _ROOT / "scripts" / "run_awf.py"
-        handle = spawn(
-            [
-                sys.executable,
-                str(run_awf),
-                "--config",
-                str(spec_path),
-                "--work-dir",
-                str(work_dir),
-                "--keep-state",
-            ],
-            stdout=log_path.open("a"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        with log_path.open("a") as log_file:
+            handle = spawn(
+                [
+                    sys.executable,
+                    str(run_awf),
+                    "--config",
+                    str(spec_path),
+                    "--work-dir",
+                    str(work_dir),
+                    "--keep-state",
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         print(
             f"attach-feature-pr-monitor: spawned run_awf pid={getattr(handle, 'pid', '?')} "
             f"for {repo.slug()}#{pr_number}; log: {log_path}",
@@ -266,11 +292,107 @@ async def orchestrate_attach(
         return 0
 
 
+async def orchestrate_service_adoption(
+    *,
+    repo_url: str | None,
+    pr_number: int | None,
+    pr_url: str | None,
+    agent: str,
+    auto_merge: bool,
+    companions_path: Path | None,
+    work_dir: Path,
+    base_url: str | None,
+    api_token: str | None,
+) -> int:
+    """Call AWF's supported existing-PR adoption API.
+
+    The detached ``run_awf.py`` path remains available behind
+    ``--legacy-detached`` for old recovery playbooks, but the default now
+    creates an AWF service-managed workspace and monitor lineage.
+    """
+    # ``work_dir`` only controls the deprecated detached runner. The
+    # service-managed adoption endpoint uses the AWF service's configured
+    # workspace root, so this wrapper intentionally does not forward it.
+    del work_dir
+    print(
+        "attach-feature-pr-monitor: using supported AWF PR adoption API; "
+        "pass --legacy-detached to use the deprecated run_awf.py path.",
+        file=sys.stderr,
+    )
+    if companions_path is not None:
+        print(
+            "attach-feature-pr-monitor: --companions is ignored by the "
+            "service-managed adoption path; profile settings now own runtime services.",
+            file=sys.stderr,
+        )
+
+    repo_value = repo_url.strip() if isinstance(repo_url, str) else None
+    repo_slug = None
+    normalized_repo_url = None
+    if repo_value:
+        if "github.com" in repo_value:
+            normalized_repo_url = repo_value
+        else:
+            repo_slug = repo_value
+
+    payload = {
+        "repo_url": normalized_repo_url,
+        "repo_slug": repo_slug,
+        "pr_number": pr_number,
+        "pr_url": pr_url,
+        "agent": agent,
+        "profile_ref": "auto",
+        "profile": None,
+        "auto_merge": auto_merge,
+        "initial_review_grace_period_seconds": None,
+        "task_title": None,
+        "task_prompt": None,
+        "reason": "legacy attach-feature-pr-monitor wrapper",
+    }
+    headers = {}
+    token = api_token or os.environ.get("AWF_API_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{(base_url or os.environ.get('AWF_CLI_BASE_URL') or 'http://localhost:8000').rstrip('/')}/v1/workspaces/adopt-pr"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:
+        print(f"attach-feature-pr-monitor ERROR: could not reach AWF API: {exc}", file=sys.stderr)
+        return 1
+
+    if response.status_code >= 400:
+        print(
+            f"attach-feature-pr-monitor ERROR: AWF adoption failed "
+            f"({response.status_code}): {response.text}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        print(json.dumps(response.json(), indent=2), flush=True)
+    except ValueError:
+        print(response.text, flush=True)
+    return 0
+
+
 def _load_companions(path: Path) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], json.loads(path.read_text()))
 
 
 async def _main(ns: argparse.Namespace) -> int:
+    if not getattr(ns, "legacy_detached", False):
+        return await orchestrate_service_adoption(
+            repo_url=ns.repo,
+            pr_number=ns.pr,
+            pr_url=getattr(ns, "pr_url", None),
+            agent=ns.agent,
+            auto_merge=ns.auto_merge,
+            companions_path=ns.companions,
+            work_dir=ns.work_dir,
+            base_url=getattr(ns, "base_url", None),
+            api_token=getattr(ns, "api_token", None),
+        )
+
     runner = AsyncioSubprocessRunner()
     return await orchestrate_attach(
         repo_url=ns.repo,

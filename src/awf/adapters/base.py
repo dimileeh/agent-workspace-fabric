@@ -10,11 +10,24 @@ It just runs the CLI, captures stdout/stderr, and returns a structured result.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from awf.common.commands import AsyncCommandRunner, CommandResult
+from awf.adapters.provider_failures import classify_provider_failure
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    AsyncCommandRunner,
+    CommandResult,
+)
+from awf.common.compose_exec import (
+    build_tracked_compose_exec,
+    cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
+)
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.runtime.logs import LogStore
@@ -22,25 +35,15 @@ from awf.runtime.logs import LogStore
 _log = get_logger(__name__)
 
 
-_AUTH_FAILURE_MARKERS = (
-    "not logged in",
-    "please run /login",
-    "please set an auth method",
-    "manual authorization is required",
-    "could not authenticate",
-    "error authenticating",
-    "invalid_grant",
-    "anthropic_api_key",
-    "gemini_api_key",
-    "google_api_key",
-    "google_genai_use_vertexai",
-    "google_genai_use_gca",
-)
+DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
+"""Default maximum wall-clock duration for a single agent CLI run."""
+
+DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 3600.0
+"""Default maximum stdout/stderr silence for a single agent CLI run."""
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
-# agent must honour inside an AWF workspace. Kept short — most agent
-# CLIs accept prompts as command-line args and some have length caps.
+# agent must honour inside an AWF workspace.
 _AWF_PROMPT_PREAMBLE = """\
 ## AWF workspace contract (DO NOT VIOLATE)
 
@@ -89,10 +92,12 @@ class AgentRunError(Exception):
         agent: AgentRuntime,
         result: CommandResult,
         reason_code: str = "AGENT_CLI_FAILED",
+        details: dict[str, Any] | None = None,
     ) -> None:
         self.agent = agent
         self.result = result
         self.reason_code = reason_code
+        self.details = details or {}
         super().__init__(
             f"{agent.value} exited {result.returncode} ({reason_code}): "
             f"{result.stderr.strip() or result.stdout.strip() or '<no output>'}"
@@ -117,21 +122,39 @@ class AgentAdapter(ABC):
         default_model: str | None = None,
         default_effort: str | None = None,
         log_store: LogStore | None = None,
+        agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
+        agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     ) -> None:
+        if agent_wall_timeout_seconds <= 0:
+            raise ValueError("agent_wall_timeout_seconds must be positive")
+        if agent_idle_timeout_seconds <= 0:
+            raise ValueError("agent_idle_timeout_seconds must be positive")
         self._runner = runner
         self._default_model = default_model
         self._default_effort = default_effort
         self._log_store = log_store
+        self._agent_wall_timeout_seconds = agent_wall_timeout_seconds
+        self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
 
     @property
     @abstractmethod
-    def name(self) -> AgentRuntime: ...
+    def name(self) -> AgentRuntime: ...  # pragma: no cover
+
+    @property
+    def default_model(self) -> str | None:
+        return self._default_model
 
     @abstractmethod
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
+
+    @abstractmethod
+    def _cli_args(self, *, model: str | None) -> list[str]:
         """Return the CLI-specific argv (after ``agent`` service name).
 
-        Example for Codex: ``["codex", "exec", "--model", model, prompt]``.
+        The wrapped prompt is streamed through stdin by ``run``. Implementations
+        must not place it in argv: review comments can exceed Linux's per-arg
+        length limit, and argv prompt transport leaks large prompts into process
+        listings.
         """
 
     async def run(
@@ -142,6 +165,7 @@ class AgentAdapter(ABC):
         prompt: str,
         model: str | None = None,
         workspace_id: str | None = None,
+        log_source: str = "agent",
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -158,71 +182,138 @@ class AgentAdapter(ABC):
         ``control/executor.py`` form a belt-and-braces defence.
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
-        cli_args = self._cli_args(prompt=wrapped_prompt, model=model or self._default_model)
-        args = [
-            "docker",
-            "compose",
-            "--project-name",
-            compose_project,
-            "--file",
-            str(compose_file),
-            "exec",
-            "-T",  # no tty; we're not attached
-            "-w",
-            "/workspace",
-            "agent",
-            *cli_args,
-        ]
+        prompt_input = wrapped_prompt.encode("utf-8")
+        cli_args = self._cli_args(model=model or self._default_model)
+        invocation = build_tracked_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            cli_args=cli_args,
+            source=log_source,
+            label=self.name.value,
+            preserve_stdin=True,
+        )
+        args = invocation.args
         _log.info(
             "agent.run.start",
             agent=self.name.value,
             compose_project=compose_project,
+            workspace_id=workspace_id,
             model=model or self._default_model,
             effort=self._default_effort,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            source=log_source,
+            prompt_bytes=len(prompt_input),
         )
-        # Close stdin explicitly. Some CLIs (Codex in particular) read
-        # "additional input" from stdin after argv parsing; if AWF is
-        # launched from an interactive terminal, inheriting that open
-        # stream makes the agent wait forever for EOF.
+        # Stream the prompt on stdin and close it explicitly. This avoids OS
+        # argv length limits for large review comments while still preventing
+        # CLIs from waiting forever for inherited interactive input.
         sinks = None
         if self._log_store is not None and workspace_id is not None:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,
-                base_stream_id="agent",
-                source="agent",
-                name=self.name.value,
+                base_stream_id=log_source,
+                source=log_source,
+                name=f"{log_source.capitalize()} ({self.name.value})"
+                if log_source != "agent"
+                else self.name.value,
             )
 
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
-            if sinks is not None and run_streaming is not None:
-                result = await run_streaming(
-                    args,
-                    input_bytes=b"",
-                    on_stdout=sinks.write_stdout,
-                    on_stderr=sinks.write_stderr,
+            try:
+                if run_streaming is not None:
+                    result = await run_streaming(
+                        args,
+                        input_bytes=prompt_input,
+                        on_stdout=sinks.write_stdout if sinks is not None else None,
+                        on_stderr=sinks.write_stderr if sinks is not None else None,
+                        wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                        idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                    )
+                else:
+                    _log.warning(
+                        "agent.run.watchdog_unavailable",
+                        agent=self.name.value,
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
+                        reason="runner does not support run_streaming",
+                    )
+                    result = await self._runner.run(args, input_bytes=prompt_input)
+                    if sinks is not None:
+                        await sinks.write_stdout(result.stdout)
+                        await sinks.write_stderr(result.stderr)
+            except asyncio.CancelledError:
+                await cleanup_compose_exec_invocation_after_cancellation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
                 )
-            else:
-                result = await self._runner.run(args, input_bytes=b"")
-                if sinks is not None:
-                    await sinks.write_stdout(result.stdout)
-                    await sinks.write_stderr(result.stderr)
+                raise
         finally:
             if sinks is not None:
                 await sinks.close()
 
         if not result.ok:
+            provider = self.get_provider(model)
+            selected_model = model or self._default_model or "unknown"
+            provider_failure = classify_provider_failure(
+                reason_code=_failure_reason_for_result(result),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                provider=provider,
+                model=selected_model,
+            )
+            reason_code = (
+                provider_failure.reason_code
+                if provider_failure is not None
+                else _failure_reason_for_result(result)
+            )
+            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
+                await cleanup_compose_exec_invocation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
+            log_event = (
+                "agent.run.timeout"
+                if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+                else "agent.run.failed"
+            )
+            _log.warning(
+                log_event,
+                agent=self.name.value,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                returncode=result.returncode,
+                reason_code=reason_code,
+                stdout_bytes=len(result.stdout),
+                stderr_bytes=len(result.stderr),
+            )
+            details: dict[str, str | bool | int | dict[str, object]] | None = None
+            if provider_failure is not None:
+                recovery_metadata = provider_failure.to_metadata()
+                details = {
+                    "provider": recovery_metadata.get("provider", provider),
+                    "model": recovery_metadata.get("model", selected_model),
+                    "retryable": True,
+                    "recommended_action": str(recovery_metadata["recommended_action"]),
+                    "provider_recovery": recovery_metadata,
+                }
             raise AgentRunError(
                 agent=self.name,
                 result=result,
-                reason_code=_failure_reason_for_result(result),
+                reason_code=reason_code,
+                details=details,
             )
 
         _log.info(
             "agent.run.ok",
             agent=self.name.value,
             compose_project=compose_project,
+            workspace_id=workspace_id,
             stdout_bytes=len(result.stdout),
+            stderr_bytes=len(result.stderr),
         )
         return AgentRunResult(
             returncode=result.returncode,
@@ -233,9 +324,9 @@ class AgentAdapter(ABC):
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
-# Populated by awf.adapters.codex / .claude_code / .gemini on import. Keyed by
-# AgentRuntime enum so callers that receive a Workspace.agent string just map
-# through the enum.
+# Populated by awf.adapters.codex / .claude_code / .gemini / .opencode on
+# import. Keyed by AgentRuntime enum so callers that receive a Workspace.agent
+# string just map through the enum.
 _REGISTRY: dict[AgentRuntime, type[AgentAdapter]] = {}
 
 
@@ -259,6 +350,8 @@ def get_adapter(
     default_effort: str | None = None,
     defaults: AgentDefaults | None = None,
     log_store: LogStore | None = None,
+    agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
+    agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -274,11 +367,23 @@ def get_adapter(
         default_model=default_model,
         default_effort=default_effort,
         log_store=log_store,
+        agent_wall_timeout_seconds=agent_wall_timeout_seconds,
+        agent_idle_timeout_seconds=agent_idle_timeout_seconds,
     )
 
 
 def _failure_reason_for_result(result: CommandResult) -> str:
-    output = f"{result.stderr}\n{result.stdout}".lower()
-    if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
-        return "AGENT_AUTH_FAILED"
+    if result.reason_code == COMMAND_TIMEOUT_REASON:
+        return "AGENT_TIMEOUT"
+    if result.reason_code == COMMAND_IDLE_TIMEOUT_REASON:
+        return "AGENT_IDLE_TIMEOUT"
+    provider_failure = classify_provider_failure(
+        reason_code=None,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        provider=None,
+        model=None,
+    )
+    if provider_failure is not None:
+        return provider_failure.reason_code
     return "AGENT_CLI_FAILED"

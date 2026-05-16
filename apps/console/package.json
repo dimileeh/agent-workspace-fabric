@@ -6,6 +6,8 @@
     "dev": "next dev",
     "start": "next start",
     "build": "next build",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/*.test.mjs",
+    "test:browser": "playwright test",
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit"
   },
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@playwright/test": "^1.56.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",

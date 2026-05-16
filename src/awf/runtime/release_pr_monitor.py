@@ -28,9 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.github_client import GitHubClient
+from awf.runtime.logs import LogStore
+from awf.runtime.merge_coordinator import MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
+    PostMergeTargetReconciler,
     PullRequestMonitorRunner,
 )
 
@@ -43,12 +46,19 @@ def build_release_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
+    log_store: LogStore | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     initial_review_grace_period_seconds: float = 900.0,
     pre_merge_settle_seconds: float = 90.0,
+    non_check_reviewer_settle_seconds: float = 180.0,
+    non_check_reviewer_logins: list[str] | tuple[str, ...] = ("greptile-apps",),
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
+    merge_coordinator: MergeCoordinator | None = None,
+    post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
+    workspace_runtime_context: str = "",
+    provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
     release PRs — the single divergence from a feature PR is
@@ -64,6 +74,8 @@ def build_release_pr_monitor(
             settle_interval_seconds=settle_interval_seconds,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=pre_merge_settle_seconds,
+            non_check_reviewer_settle_seconds=non_check_reviewer_settle_seconds,
+            non_check_reviewer_logins=tuple(non_check_reviewer_logins),
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
@@ -71,6 +83,11 @@ def build_release_pr_monitor(
         ),
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
+        log_store=log_store,
+        merge_coordinator=merge_coordinator,
+        post_merge_target_reconciler=post_merge_target_reconciler,
+        workspace_runtime_context=workspace_runtime_context,
+        provider_recovery_default_model=provider_recovery_default_model,
     )
 
 
@@ -82,12 +99,19 @@ def build_feature_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
+    log_store: LogStore | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     initial_review_grace_period_seconds: float = 900.0,
     pre_merge_settle_seconds: float = 90.0,
+    non_check_reviewer_settle_seconds: float = 180.0,
+    non_check_reviewer_logins: list[str] | tuple[str, ...] = ("greptile-apps",),
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
+    merge_coordinator: MergeCoordinator | None = None,
+    post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
+    workspace_runtime_context: str = "",
+    provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` for feature→development
     work. ``auto_merge=True``; on green gates the monitor squash-merges
@@ -103,6 +127,8 @@ def build_feature_pr_monitor(
             settle_interval_seconds=settle_interval_seconds,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=pre_merge_settle_seconds,
+            non_check_reviewer_settle_seconds=non_check_reviewer_settle_seconds,
+            non_check_reviewer_logins=tuple(non_check_reviewer_logins),
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
@@ -110,4 +136,9 @@ def build_feature_pr_monitor(
         ),
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
+        log_store=log_store,
+        merge_coordinator=merge_coordinator,
+        post_merge_target_reconciler=post_merge_target_reconciler,
+        workspace_runtime_context=workspace_runtime_context,
+        provider_recovery_default_model=provider_recovery_default_model,
     )

@@ -7,12 +7,23 @@ compose YAML is syntactically valid and contains all the expected wiring.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+import structlog
 import yaml
 
-from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
+from awf.node import compose_manager as compose_module
+from awf.node.compose_manager import (
+    CompanionService,
+    ComposeManager,
+    ComposeOperationError,
+    ComposeProjectPaths,
+    ComposeService,
+    WorkspaceComposeSpec,
+)
+from awf.profiles.registry import docker_compose_profile
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -30,6 +41,59 @@ def _spec(tmp_path: Path, **overrides: object) -> WorkspaceComposeSpec:
     }
     base.update(overrides)
     return WorkspaceComposeSpec(**base)  # type: ignore[arg-type]
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        *,
+        returncode: int,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+    ) -> None:
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+
+class _HangingProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.kill_called = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        return self.returncode
+
+
+@pytest.mark.unit
+def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
+    paths = ComposeProjectPaths(
+        project_dir=Path("/tmp/compose/ws_secret"),
+        compose_file=Path("/tmp/compose/ws_secret/compose.yml"),
+        secret_lease_mount_metadata={
+            "providers": ["env"],
+            "omitted_optional": [{"secret_name": "optional-openai"}],
+        },
+    )
+
+    with pytest.raises(TypeError):
+        paths.secret_lease_mount_metadata["extra"] = "injected"
+    with pytest.raises(AttributeError):
+        paths.secret_lease_mount_metadata["providers"].append("injected")
+    omitted_optional = paths.secret_lease_mount_metadata["omitted_optional"]
+    with pytest.raises(TypeError):
+        omitted_optional[0]["secret_name"] = "changed"
 
 
 class TestRender:
@@ -52,6 +116,73 @@ class TestRender:
         parsed = yaml.safe_load(paths.compose_file.read_text())
         volumes = parsed["services"]["agent"]["volumes"]
         assert volumes == [f"{spec.worktree_host_path}:/workspace"]
+
+    @pytest.mark.unit
+    def test_agent_can_reach_host_gateway_for_host_services(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        rendered = manager.render(_spec(tmp_path)).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
+
+        assert parsed["services"]["agent"]["extra_hosts"] == ["host.docker.internal:host-gateway"]
+        assert "\n    \n    extra_hosts:" not in rendered
+
+    @pytest.mark.unit
+    def test_open_egress_policy_keeps_public_network_and_host_gateway(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(tmp_path, network_internal=False, host_gateway_enabled=True)
+            ).compose_file.read_text()
+        )
+
+        assert "internal" not in parsed["networks"]["awf_net"]
+        assert parsed["services"]["agent"]["extra_hosts"] == ["host.docker.internal:host-gateway"]
+
+    @pytest.mark.unit
+    def test_offline_egress_policy_renders_internal_network_without_host_gateway(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(tmp_path, network_internal=True, host_gateway_enabled=False)
+            ).compose_file.read_text()
+        )
+
+        assert parsed["networks"]["awf_net"]["internal"] is True
+        assert "extra_hosts" not in parsed["services"]["agent"]
+
+    @pytest.mark.unit
+    def test_offline_egress_policy_keeps_agent_and_services_on_awf_network(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    network_internal=True,
+                    host_gateway_enabled=False,
+                    services=(
+                        ComposeService(
+                            name="mirror",
+                            image="registry-mirror:local",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["agent"]["networks"] == ["awf_net"]
+        assert parsed["services"]["mirror"]["networks"] == ["awf_net"]
 
     @pytest.mark.unit
     def test_profile_service_password_placeholders_are_resolved(
@@ -84,6 +215,45 @@ class TestRender:
         assert pg_env["POSTGRES_PASSWORD"] == "my-secret-1234"
         assert "my-secret-1234" in agent_env["DATABASE_URL"]
         assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_test123-postgres_data"
+
+    @pytest.mark.unit
+    def test_password_placeholder_expansion_noops_without_postgres_password(
+        self, manager: ComposeManager
+    ) -> None:
+        assert (
+            manager._expand_placeholders(
+                "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf",
+                postgres_password=None,
+            )
+            == "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf"
+        )
+
+    @pytest.mark.unit
+    def test_companion_service_password_placeholders_are_resolved(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            postgres_password="companion-secret",
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    environment=(
+                        (
+                            "DATABASE_URL",
+                            "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        assert parsed["services"]["backend"]["environment"] == {
+            "DATABASE_URL": "postgresql://awf:companion-secret@postgres/awf"
+        }
 
     @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
@@ -153,6 +323,26 @@ class TestRender:
         }
 
     @pytest.mark.unit
+    def test_resource_limits_apply_default_pair_when_only_one_limit_is_set(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        cpu_only = yaml.safe_load(
+            manager.render(_spec(tmp_path, cpu_limit="2")).compose_file.read_text()
+        )
+        memory_only = yaml.safe_load(
+            manager.render(_spec(tmp_path, memory_limit="2g")).compose_file.read_text()
+        )
+
+        assert cpu_only["services"]["agent"]["deploy"]["resources"]["limits"] == {
+            "cpus": "2",
+            "memory": "8g",
+        }
+        assert memory_only["services"]["agent"]["deploy"]["resources"]["limits"] == {
+            "cpus": "4",
+            "memory": "2g",
+        }
+
+    @pytest.mark.unit
     def test_resource_limits_absent_when_unset(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
@@ -185,6 +375,35 @@ class TestRender:
         assert env["GIT_COMMITTER_NAME"] == "AWF Agent"
         assert env["GIT_AUTHOR_EMAIL"] == "awf@example.com"
         assert env["GIT_COMMITTER_EMAIL"] == "awf@example.com"
+
+    @pytest.mark.unit
+    def test_declared_secret_lease_mounts_render_read_only_without_secret_values(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import AuthMount
+
+        raw_secret = "sk-live-do-not-render"
+        secret_file = tmp_path / "openai-token"
+        secret_file.write_text(raw_secret, encoding="utf-8")
+        spec = _spec(
+            tmp_path,
+            auth_mounts=(
+                AuthMount(
+                    source=str(secret_file),
+                    target="/run/awf/secrets/openai-token",
+                    mode="ro",
+                ),
+            ),
+            agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+        )
+
+        rendered = manager.render(spec).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
+
+        volumes = parsed["services"]["agent"]["volumes"]
+        assert f"{secret_file}:/run/awf/secrets/openai-token:ro" in volumes
+        assert parsed["services"]["agent"]["environment"]["OPENAI_API_KEY"] == ("${OPENAI_API_KEY}")
+        assert raw_secret not in rendered
 
     @pytest.mark.unit
     def test_companion_service_renders_as_build_from_source(
@@ -263,20 +482,92 @@ class TestRender:
         assert "depends_on" not in parsed["services"]["agent"]
 
     @pytest.mark.unit
-    def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
+    def test_named_volume_detection_ignores_bind_sources(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
         spec = _spec(
             tmp_path,
-            docker_mode="dind",
-            agent_environment=(("DOCKER_HOST", "tcp://docker:2375"),),
+            services=(
+                ComposeService(
+                    name="cache",
+                    image="busybox",
+                    volumes=(
+                        ("cache_data", "/cache"),
+                        (str(tmp_path / "host-cache"), "/host-cache"),
+                        ("./relative-cache", "/relative-cache"),
+                        (".hidden-cache", "/hidden-cache"),
+                    ),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        assert parsed["volumes"] == {"cache_data": {"name": "awf-ws_test123-cache_data"}}
+
+    @pytest.mark.unit
+    def test_named_volume_detection_skips_malformed_volume_entries(
+        self, manager: ComposeManager
+    ) -> None:
+        names = manager._named_volumes_for(  # noqa: SLF001 - direct helper contract test
+            [
+                {"name": "not-a-list", "volumes": "cache_data:/cache"},
+                {"name": "bad-items", "volumes": ["cache_data:/cache", ("too", "long", "x")]},
+                {"name": "good", "volumes": [("cache_data", "/cache")]},
+            ]
+        )
+
+        assert names == ["cache_data"]
+
+    @pytest.mark.unit
+    def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
+        profile = docker_compose_profile()
+        spec = _spec(
+            tmp_path,
+            docker_mode=profile.docker.mode.value,
+            agent_environment=tuple(profile.runtime.environment.items()),
         )
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
         assert parsed["services"]["docker"]["image"] == "docker:27-dind"
         assert parsed["services"]["docker"]["privileged"] is True
+        assert parsed["services"]["docker"]["environment"]["DOCKER_TLS_CERTDIR"] == ""
+        assert parsed["services"]["docker"]["healthcheck"]["test"] == [
+            "CMD-SHELL",
+            "docker info >/dev/null 2>&1",
+        ]
         assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
         assert parsed["services"]["agent"]["depends_on"] == {
             "docker": {"condition": "service_healthy"}
         }
         assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
+
+    @pytest.mark.unit
+    def test_dind_mode_sets_default_agent_docker_host(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(_spec(tmp_path, docker_mode="dind")).compose_file.read_text()
+        )
+
+        assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
+
+    @pytest.mark.unit
+    def test_explicit_agent_docker_host_is_preserved(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    docker_mode="dind",
+                    agent_environment=(("DOCKER_HOST", "tcp://custom-docker:2375"),),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert (
+            parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://custom-docker:2375"
+        )
 
     @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:
@@ -290,3 +581,304 @@ class TestRender:
         tmpl = env.from_string("name: {{ only_in_template }}")
         with pytest.raises(UndefinedError):
             tmpl.render()
+
+    @pytest.mark.unit
+    async def test_down_project_is_noop_when_compose_file_is_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, Path, list[str], str]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                self.calls.append((project_name, compose_file, args, operation))
+
+        manager = _RecordingComposeManager()
+
+        await manager.down_project(
+            project_name="awf_ws_missing",
+            compose_file=tmp_path / "missing-compose.yml",
+            workspace_id="ws_missing",
+        )
+
+        assert manager.calls == []
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_removes_containers_networks_and_volumes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, ...]] = []
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.calls.append((operation, *args))
+                if operation == "ps":
+                    return "container-a\ncontainer-b\n"
+                if operation == "network ls":
+                    return "network-a\nnetwork-b\n"
+                if operation == "volume ls":
+                    return "volume-a\nvolume-b\n"
+                return ""
+
+        manager = _RecordingComposeManager()
+
+        with structlog.testing.capture_logs() as captured:
+            await manager.remove_project_by_label(
+                project_name="awf_ws_lost",
+                workspace_id="ws_lost",
+                remove_volumes=True,
+            )
+
+        label_filter = "label=com.docker.compose.project=awf_ws_lost"
+        assert manager.calls == [
+            ("ps", "ps", "-aq", "--filter", label_filter),
+            ("rm", "rm", "-f", "container-a", "container-b"),
+            ("network ls", "network", "ls", "-q", "--filter", label_filter),
+            ("network rm", "network", "rm", "network-a"),
+            ("network rm", "network", "rm", "network-b"),
+            ("volume ls", "volume", "ls", "-q", "--filter", label_filter),
+            ("volume rm", "volume", "rm", "-f", "volume-a", "volume-b"),
+        ]
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["containers"] == 2
+        assert event["networks"] == 2
+        assert event["volumes"] == 2
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_can_keep_volumes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, ...]] = []
+
+            async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+                self.calls.append((operation, *args))
+                if operation == "ps":
+                    return ""
+                if operation == "network ls":
+                    return "network-a\n"
+                if operation == "volume ls":
+                    raise AssertionError("volume listing should be skipped")
+                return ""
+
+        manager = _RecordingComposeManager()
+
+        with structlog.testing.capture_logs() as captured:
+            await manager.remove_project_by_label(
+                project_name="awf_ws_keep_volumes",
+                workspace_id="ws_keep_volumes",
+                remove_volumes=False,
+            )
+
+        label_filter = "label=com.docker.compose.project=awf_ws_keep_volumes"
+        assert manager.calls == [
+            ("ps", "ps", "-aq", "--filter", label_filter),
+            ("network ls", "network", "ls", "-q", "--filter", label_filter),
+            ("network rm", "network", "rm", "network-a"),
+        ]
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["volumes"] == 0
+
+    @pytest.mark.unit
+    async def test_compose_command_reports_missing_docker_binary(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _raise_missing(*_args: object, **_kwargs: object) -> _FakeProcess:
+            raise FileNotFoundError("docker")
+
+        monkeypatch.setattr(
+            compose_module.asyncio,
+            "create_subprocess_exec",
+            _raise_missing,
+        )
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._compose(  # noqa: SLF001
+                "awf_ws_missing_docker",
+                tmp_path / "compose.yml",
+                ["up", "-d"],
+                operation="up",
+            )
+
+        assert exc.value.returncode == 127
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert "docker" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_compose_command_uses_environment_project_and_file_contract(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def _spawn(*args: object, **kwargs: object) -> _FakeProcess:
+            calls.append((args, kwargs))
+            return _FakeProcess(returncode=0)
+
+        compose_file = tmp_path / "compose.yml"
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager._compose(  # noqa: SLF001
+            "awf_ws_long_flags",
+            compose_file,
+            ["up", "-d"],
+            operation="up",
+        )
+
+        assert calls
+        args, kwargs = calls[0]
+        assert args == ("docker", "compose", "up", "-d")
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_ws_long_flags"
+        assert env["COMPOSE_FILE"] == str(compose_file)
+
+    @pytest.mark.unit
+    async def test_compose_command_times_out_and_kills_hung_process(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _HangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module, "COMPOSE_CAPTURE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._compose(  # noqa: SLF001
+                "awf_ws_hung_compose",
+                tmp_path / "compose.yml",
+                ["up", "-d", "--wait"],
+                operation="up",
+            )
+
+        assert process.kill_called is True
+        assert exc.value.returncode == 124
+        assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
+        assert "docker compose up exceeded" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_docker_capture_returns_stdout_on_success(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0, stdout=b"container-a\ncontainer-b\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        stdout = await manager._docker_capture(["ps", "-aq"], operation="ps")  # noqa: SLF001
+
+        assert stdout == "container-a\ncontainer-b\n"
+        assert calls == [("docker", "ps", "-aq")]
+
+    @pytest.mark.unit
+    async def test_docker_capture_classifies_daemon_connectivity_errors(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(
+                returncode=1,
+                stderr=b"error during connect: docker endpoint unavailable",
+            )
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["network", "ls"], operation="network ls")  # noqa: SLF001
+
+        assert exc.value.returncode == 1
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert "docker endpoint unavailable" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_docker_capture_classifies_command_failures(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=2, stdout=b"usage\n", stderr=b"bad flag\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["volume", "rm"], operation="volume rm")  # noqa: SLF001
+
+        assert exc.value.returncode == 2
+        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
+        assert exc.value.stdout == "usage\n"
+        assert exc.value.stderr == "bad flag\n"
+
+    @pytest.mark.unit
+    async def test_docker_capture_reports_missing_docker_binary(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _raise_missing(*_args: object, **_kwargs: object) -> _FakeProcess:
+            raise FileNotFoundError("docker")
+
+        monkeypatch.setattr(
+            compose_module.asyncio,
+            "create_subprocess_exec",
+            _raise_missing,
+        )
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
+
+        assert exc.value.returncode == 127
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_docker_capture_times_out_and_kills_hung_process(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _HangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module, "DOCKER_CAPTURE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
+
+        assert process.kill_called is True
+        assert exc.value.returncode == 124
+        assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
+        assert "exceeded" in exc.value.stderr

@@ -22,15 +22,24 @@ class _StubAdapter(AgentAdapter):
     def __init__(self) -> None:
         super().__init__(runner=None)  # type: ignore[arg-type]
 
+    def get_provider(self, model: str | None) -> str:
+        return "fake"
+
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
+    def _cli_args(self, *, model: str | None) -> list[str]:
         return []
 
     async def run(  # type: ignore[override]
-        self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         return AgentRunResult(returncode=0, stdout="", stderr="")
 
@@ -62,6 +71,24 @@ def test_feature_monitor_has_auto_merge_enabled(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) -> None:
+    async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        return {"repo_url": repo_url, "branch": branch, "workspace_id": workspace_id}
+
+    cmd = FakeCommandRunner()
+    runner = build_feature_pr_monitor(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(cmd),
+        worktrees_root=tmp_path,
+        post_merge_target_reconciler=_reconcile,
+    )
+
+    assert runner._deps.post_merge_target_reconciler is _reconcile
+
+
+@pytest.mark.unit
 def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
     runner = build_release_pr_monitor(
@@ -74,8 +101,12 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         settle_interval_seconds=7,
         initial_review_grace_period_seconds=123,
         pre_merge_settle_seconds=11,
+        non_check_reviewer_settle_seconds=45,
+        non_check_reviewer_logins=["custom-reviewer"],
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
     assert runner._config.initial_review_grace_period_seconds == 123
     assert runner._config.pre_merge_settle_seconds == 11
+    assert runner._config.non_check_reviewer_settle_seconds == 45
+    assert runner._config.non_check_reviewer_logins == ("custom-reviewer",)

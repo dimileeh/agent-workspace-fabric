@@ -6,7 +6,7 @@ Dmitri's primary constraint on shipping aira features is **parallel agent throug
 
 **AWF (Aira Agent Workspace Fabric)** is a standalone execution service that any orchestrator (OpenClaw agents via skill, aira-agent's own supervisor, a human-triggered CLI, etc.) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch a **coding CLI** (Codex / Claude Code / Gemini) inside the container with the repo mounted, run tests (with sidecar services like Postgres + Alembic migrations as the repo profile requires), and submit a PR against the development branch. The distinction matters: **AWF is called by orchestrators; the actual code-writing is done by the coding CLI inside the container.**
 
-This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-detection / auto-rebase / merge-queue / task-class lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
+This MVP intentionally ships the "developer-in-a-box" primitive only. Owned paths are stored as coordination hints and stale-detection inputs; overlapping owned paths are admitted and surfaced as overlap-risk warnings. The stale-detection / auto-rebase / merge-queue / explicit exclusive-lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
 
 ### Design decisions (confirmed with Dmitri 2026-04-21)
 
@@ -20,8 +20,8 @@ This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-
 - Stale detection on target-branch advance
 - Auto-rebase / rebase orchestration
 - Merge queue / canonical-attempt governance
-- Task-class lock matrix (docs/test/refactor/migration/dependency/build_config)
-- Overlap detection
+- Task-class exclusive resource lock matrix (docs/test/refactor/migration/dependency/build_config)
+- Merge-time overlap resolution beyond advisory owned-path risk events
 - Three-tier validation (MVP has one tier: task-local validation inside the workspace)
 - Post-merge confidence validation
 - Multi-node execution / node-agent federation (MVP is single-host Docker)
@@ -113,6 +113,7 @@ All endpoints under `/v1`, all mutating endpoints accept `Idempotency-Key`.
 | `/v1/workspaces/{id}` | `DELETE` | Destroy (cleanup) → returns operation record |
 | `/v1/workspaces/{id}/logs` | `GET` | Log metadata + retrieval URLs |
 | `/v1/workspaces/{id}/artifacts` | `GET` | Artifact metadata + retrieval URLs |
+| `/v1/workspaces/{id}/artifacts/download?path={relative_path}` | `GET` | Token-protected artifact bytes from the workspace artifact root only |
 | `/v1/operations/{id}` | `GET` | Async operation status |
 | `/v1/events` | `GET` | Event stream with cursor + filters |
 
@@ -123,10 +124,16 @@ Same underlying service, exposed as MCP tools so Codex / Claude Code can invoke 
 | Tool | Description |
 |---|---|
 | `awf_create_workspace` | Identical body to `POST /v1/workspaces`. Returns `workspace_id`. |
+| `awf_create_workspace_v2` | Clean v2 submission shape for profile-driven workspaces. |
 | `awf_get_workspace` | Fetch current state by `workspace_id`. |
 | `awf_wait_for_workspace` | Blocking helper: polls until terminal state or `timeout_seconds`. Useful for agents that want synchronous behavior. |
-| `awf_cancel_workspace` | Cancel. |
 | `awf_list_workspaces` | List with filters. |
+| `awf_list_workspace_events` | List one workspace's immutable events newest-first. |
+| `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
+| `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
+
+MCP stays read-only beyond create in the always-on service. Destructive controls
+remain on the authenticated REST/operator surface.
 
 ### Workspace lifecycle (MVP)
 
@@ -193,7 +200,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | `src/awf/node/provisioner.py` | Orchestrates git + compose for one workspace |
 | `src/awf/node/cleanup.py` | Compose down + volume removal + event emit |
 | `src/awf/adapters/base.py` | AgentAdapter Protocol + registry |
-| ` src/awf/adapters/codex.py` | First adapter (Codex — most mature headless coding CLI) |
+| `src/awf/adapters/codex.py` | First adapter (Codex — most mature headless coding CLI) |
 | `src/awf/runtime/validation.py` | Runs `test_commands` inside container, captures artifacts/logs |
 | `src/awf/runtime/pr_creator.py` | `git push` + `gh pr create --base development` |
 | `src/awf/cli/main.py` | Typer CLI mirroring REST API |
@@ -215,7 +222,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | 1 | **Scaffold repo + API skeleton** | `pyproject.toml`, FastAPI app, Pydantic schemas, Alembic init, Postgres schema for workspaces/operations/events. `curl POST /v1/workspaces` returns a workspace_id in `requested` state. | `pyproject.toml`, `src/awf/api/**`, `src/awf/db/**`, `migrations/versions/0001_initial.py` |
 | 2 | **Git worktree manager** | Bare mirror creation + worktree creation from base SHA. Workspace advances `requested → provisioning → ready` with a real checkout on disk. | `src/awf/node/git_manager.py`, `src/awf/control/worker.py` |
 | 3 | **Compose provisioner + Postgres sidecar** | Jinja2 template renders, `docker compose up` launches agent + Postgres, health-check waits for Postgres readiness. Workspace `ready` event emitted only once DB is reachable. | `docker/compose/workspace.base.yml.j2`, `src/awf/node/compose_manager.py`, `src/awf/node/provisioner.py` |
-| 4 | **Codex adapter (first)** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, ` src/awf/adapters/codex.py` |
+| 4 | **Codex adapter (first)** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, `src/awf/adapters/codex.py` |
 | 5 | **Validation runner** | Executes `test_commands` inside container against workspace-local Postgres (Alembic migrate + pytest). Captures logs + artifacts. Workspace transitions `running → validating → pushing` on pass, `failed` on fail. | `src/awf/runtime/validation.py`, `src/awf/runtime/artifacts.py` |
 | 6 | **PR creator + cleanup** | `git push` + `gh pr create --base development`. `DELETE /v1/workspaces/{id}` runs compose down + volume removal. Full lifecycle returns a real PR URL; no orphaned containers after destroy. | `src/awf/runtime/pr_creator.py`, `src/awf/node/cleanup.py` |
 | 7 | **MCP server surface** | Expose `awf_create_workspace`, `awf_get_workspace`, `awf_wait_for_workspace`, `awf_cancel_workspace`, `awf_list_workspaces` as MCP tools. A Claude Code session can invoke `awf_create_workspace` and get a PR back. | `src/awf/mcp/server.py` |
@@ -240,7 +247,7 @@ pytest tests/integration/ -v                # spins real Postgres via testcontai
 
 **Parallelism smoke test:**
 1. Submit 3 workspaces simultaneously (same repo, different tasks, different file scopes)
-2. Verify all 3 reach `ready` within 30s without lock contention
+2. Verify all 3 reach `ready` within 30s; overlapping owned paths may produce advisory risk warnings but must not block admission
 3. Verify all 3 produce separate PRs
 4. Verify cleanup of all 3 leaves no orphaned containers or volumes
 
@@ -261,7 +268,7 @@ Once the MVP is in daily use for Aira dev, collect data on which conflicts actua
 Build the Phase 1.5 pieces *targeted at observed incidents*, not at the PRD's full list. Likely subset:
 - Stale detection + auto-rebase on target advance (if stale branches show up often)
 - Lightweight merge queue for the `development` branch (if overlapping merges become the babysitting pain)
-- Task-class lock matrix (only for the classes that actually cause trouble, probably migrations + dependency updates)
+- Explicit exclusive resource locks (only for classes/resources that actually need serialization; do not promote ordinary owned-path overlap into blocking by default)
 
 Do NOT build:
 - Three-tier validation unless Tier 1 alone proves insufficient

@@ -9,19 +9,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory():  # type: ignore[no-untyped-def]
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.unit
@@ -67,7 +62,10 @@ async def test_safely_provision_swallows_provisioner_exceptions(
         await s.commit()
 
     provisioner = AsyncMock()
-    provisioner.provision.side_effect = [RuntimeError("boom"), None]  # first fails, second ok
+    provisioner.provision_claimed.side_effect = [
+        RuntimeError("boom"),
+        None,
+    ]  # first fails, second ok
 
     worker = ControlWorker(
         session_factory=factory,
@@ -78,7 +76,7 @@ async def test_safely_provision_swallows_provisioner_exceptions(
     # run_once must not raise even though one provision threw.
     dispatched = await worker.run_once()
     assert dispatched == 2
-    assert provisioner.provision.call_count == 2
+    assert provisioner.provision_claimed.call_count == 2
 
     # Both workspaces were looked up from the DB; assert shape.
     async with factory() as s:

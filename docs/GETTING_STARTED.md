@@ -1,0 +1,392 @@
+# Getting Started
+
+> **Note:** For a quick, step-by-step introduction, see the [Quickstart](QUICKSTART.md).
+
+## Prerequisites
+
+Install:
+
+- Python 3.12.
+- `uv`.
+- Docker Desktop or Docker Engine with Compose plugin.
+- Git.
+- GitHub CLI `gh`.
+- A GitHub account with access to the target repo.
+- SSH key or Git credentials that can clone and push the repo.
+- At least one coding-agent credential:
+  - Codex CLI auth in `~/.codex`, or OpenAI auth environment as supported by
+    the installed Codex CLI.
+  - Claude Code auth in `~/.claude` / `~/.claude.json` or Anthropic env vars.
+  - Gemini auth in `~/.gemini` or Google/Gemini env vars.
+  - OpenCode via Ollama auth/state in `~/.config/opencode` and `~/.ollama`.
+
+Verify GitHub CLI:
+
+```bash
+gh auth status
+```
+
+Verify Docker:
+
+```bash
+docker info
+docker compose version
+```
+
+### Installation
+
+The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
+
+```bash
+uv tool install aira-awf
+```
+
+If you prefer to install it into an existing environment, use:
+
+```bash
+uv pip install aira-awf
+```
+
+For contributors who want to modify AWF itself:
+
+```bash
+git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
+cd aira-agent-workspace-fabric
+uv sync
+```
+
+### Recommended Local Bootstrap
+
+Once AWF is installed, the fastest path to a working local control plane is
+`awf init`. With no arguments it bootstraps AWF on this machine: it checks
+Docker, ensures the host state directory under
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, copies `.env.example` to
+`.env` when `.env` is missing (use `--no-write-env` to skip), and starts or
+validates the local Postgres + migrate + API + worker stack via
+`awf service bootstrap`.
+
+```bash
+awf init
+awf service status --format pretty
+```
+
+If bootstrap or first-run health checks fail, use the
+[First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
+before continuing with provider or workspace-level work.
+
+After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
+PRs and use `awf init <path>` to inspect a project repository (see
+[Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode
+walkthrough and per-provider copy-paste prompts). The two `awf init` shapes are
+explicit:
+
+- `awf init` — bootstrap AWF on this machine (Docker, state dir, `.env`,
+  service stack).
+- `awf init <path>` — run local onboarding readiness checks for a project
+  checkout.
+
+Subsequent sections describe the contributor/development setup; a fresh
+machine only needs the steps above plus a coding-agent credential.
+
+If the PR already exists and you only need AWF to monitor it, use the supported
+adoption path instead of rerunning the original coding agent. See
+[PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for CLI, REST, MCP, GitHub auth,
+monitor policy, idempotency, console inspection, and mocked-local validation.
+
+### Configure Environment
+
+Local service development should use Postgres via the Compose stack. The
+service worker needs a GitHub token for PR creation, review-thread inspection,
+and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
+`GITHUB_TOKEN` are accepted fallbacks.
+
+```bash
+cp .env.example .env
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
+# Persist Compose-interpolated values into docker/compose/.env.
+{
+  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
+  printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
+} > docker/compose/.env
+uv run --python 3.12 --extra dev awf service bootstrap
+```
+
+For API-only throwaway development, use the local PostgreSQL control-plane DB:
+
+```bash
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
+```
+
+Key local service values:
+
+```text
+AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
+AWF_API_TOKEN=<local bearer token>
+AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
+AWF_HOST_WORK_DIR=${HOME}/.awf/service
+AWF_HOST_HOME=${HOME}
+AWF_HOST_SSH_AUTH_SOCK=<optional Linux SSH_AUTH_SOCK override>
+AWF_GITHUB_TOKEN=<token from gh auth token>
+OPENAI_API_KEY=<optional Codex env auth>
+ANTHROPIC_API_KEY=<optional Claude env auth>
+GEMINI_API_KEY=<optional Gemini env auth>
+AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+COMPOSE_PROFILES=ollama-bridge
+AWF_OLLAMA_BRIDGE_BIND_ADDRESS=172.17.0.1
+AWF_AGENT_WALL_TIMEOUT_SECONDS=7200
+AWF_AGENT_IDLE_TIMEOUT_SECONDS=3600
+AWF_COMPLETED_WORKSPACE_RETENTION_HOURS=168
+AWF_WORKSPACE_CLEANUP_ENABLED=true
+AWF_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS=3600
+AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
+AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
+```
+
+### Local vs Production Configuration
+
+The bundled defaults are for `AWF_ENV=local` and `AWF_ENV=ci`. In those modes,
+the local Compose database URL and callback defaults remain usable for
+development and tests. Set `AWF_API_TOKEN` to a local bearer token before
+starting service containers or protected API controls.
+
+For a network-facing deployment, set `AWF_ENV=prod`. AWF validates production
+settings during service configuration and API startup, then fails fast with
+structured diagnostics before opening the database or admitting work if local
+development defaults are still active.
+
+Production must set:
+
+- `AWF_DATABASE_URL` to a production PostgreSQL database with
+  deployment-specific credentials. Do not use the bundled local
+  `awf` / `awf_dev` credentials.
+- `AWF_API_TOKEN` to a deployment-specific high-entropy bearer token. Missing
+  values, short values, and local placeholders such as `local-dev-token`,
+  `changeme`, or `default` are rejected.
+- `AWF_CALLBACKS_ENABLED=false`. Production startup rejects enabled callbacks
+  until callback routes enforce bearer-token authentication and the callback
+  SSRF hardening slice adds HTTPS and allowlist policy validation. A strong
+  `AWF_API_TOKEN` is still required for production, but it is not sufficient to
+  expose callback registration safely.
+
+Production validation diagnostics name the unsafe setting and remediation, but
+they do not print raw tokens, database passwords, or full secret-bearing
+database URLs.
+
+Agent watchdogs are conservative by default: AWF terminates a coding CLI after
+7200 seconds of wall-clock runtime or 900 seconds without stdout/stderr output.
+Partial stdout/stderr is kept in workspace logs for salvage and diagnosis.
+
+The local dogfood runner uses the configured PostgreSQL control-plane DB. Set
+`AWF_DATABASE_URL` before launching it when you need an isolated control plane.
+
+### Agent Credentials in Containers
+
+`scripts/run_awf.py` and local service worker-created workspace stacks map local
+auth into the agent container:
+
+- `~/.config/gh`
+- `~/.config/gcloud`
+- `~/.gitconfig`
+- `~/.ssh`
+- `~/.codex` copied into a per-workspace isolated auth directory.
+- `~/.claude` and `~/.claude.json`
+- `~/.gemini`
+- `~/.config/opencode` and small `~/.ollama` auth files copied into
+  per-workspace isolated auth directories for OpenCode/Ollama runs.
+- selected provider environment variables.
+
+Prefer declaring the credentials a workspace needs in the profile:
+
+```yaml
+secrets:
+  - name: github-token
+    kind: env
+    target: GH_TOKEN
+    provider: github
+    ref: token
+  - name: openai-token
+    kind: env
+    target: OPENAI_API_KEY
+    provider: env
+    ref: env/OPENAI_API_KEY
+  - name: github-cli-config
+    kind: mount
+    target: /home/agent/.config/gh
+    provider: local-auth
+    ref: .config/gh
+```
+
+Local env leases support `provider: env` with `ref: NAME` or `ref: env/NAME`.
+GitHub env leases use the first available `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or
+`GITHUB_TOKEN` and expose `GH_TOKEN` plus `GITHUB_TOKEN` placeholders inside the
+agent container. Local mount leases support `provider: host-file` /
+`provider: local-file` for exact existing host files, and
+`provider: local-auth` / `provider: auth` for known read-only auth refs such as
+`.config/gh`, `.config/gcloud`, `.gitconfig`, and `.ssh`. AWF records lease
+issue/mount/expiry/revoke metadata, provider names, targets, counts, and compose
+paths. It does not persist or log secret values, and this local slice does not
+broker Vault, AWS, GCP Secret Manager, or other cloud secrets.
+
+Codex auth is intentionally isolated per workspace because a live host
+`~/.codex` contains state and locks that can collide with Codex Desktop.
+OpenCode/Ollama auth is isolated for the same reason: the agent can refresh
+local provider state without mutating the operator's live config.
+
+For local service mode, these host paths must be visible to the worker at their
+host absolute paths. `docker/compose/local-service.yml` does this by mounting
+only the listed credential paths read-only into the API and worker containers;
+the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
+`rules/`, plus OpenCode config and Ollama auth files, into
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/...` before
+launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
+OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
+
+Profile lint blocks profile-declared service volumes that mount `${HOME}`,
+`${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` into broad auth
+locations such as `/home/agent` or `/root`. Declared local-file lease refs that
+point at those broad host-home roots are also rejected. The only
+local-development compatibility exception is the credential path list above,
+mounted read-only; set `security.host_home_auth_mounts.mode: warn` to allow
+those narrow mounts with a structured warning. Writable host-home credential
+mounts and writable declared local auth leases are rejected; seed writable auth
+into AWF's per-workspace auth directory instead.
+
+Readiness checks use the same service-visible signals without reading secret
+file contents:
+
+- GitHub: `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`, plus a bounded
+  `gh auth status` check for PR creation, comments, and merges.
+- Codex: isolated per-workspace copies from `~/.codex`, or Codex/OpenAI static
+  env auth such as `OPENAI_API_KEY`.
+- Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude`, or `~/.claude.json`.
+- Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
+  visible `GOOGLE_APPLICATION_CREDENTIALS`, or `~/.gemini`.
+- OpenCode/Ollama: `~/.config/opencode`, selected small `~/.ollama` auth files,
+  `OLLAMA_API_KEY`, and a cheap Ollama `/api/version` reachability probe.
+- Docker: configured Docker host/socket control and Docker registry auth signals
+  such as `DOCKER_AUTH_CONFIG` or `~/.docker/config.json`. Docker CLI and daemon
+  health remain separate readiness resource checks.
+
+The top-level `agent_readiness.security` summary aggregates warning counts,
+provider names, and reason codes such as `STATIC_TOKEN_FALLBACK` or
+`DOCKER_HOST_BROAD_CONTROL`.
+
+Use strict checks before provider-specific work:
+
+```bash
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
+uv run --python 3.12 --extra dev awf service status --provider codex --format pretty
+curl 'http://localhost:8000/readyz?provider=opencode'
+```
+
+Default agent models and effort are centralized in
+`src/awf/adapters/defaults.py`:
+
+| Agent | Default model | AWF effort |
+| --- | --- | --- |
+| `claude_code` | `claude-opus-4-7` | `xhigh` mapped to Claude Code `max` |
+| `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
+| `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
+| `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
+
+If a local subscription or provider account cannot use a default model, choose a
+supported model in the task or adapter configuration. In the v2 API, set
+`task.model` to override the selected agent's default for that workspace.
+For example, Gemini dogfood tests can use a Flash preview model when Pro is
+unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
+`ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or
+`ollama/deepseek-v4-pro:cloud`.
+
+### Run the API Server
+
+```bash
+uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
+```
+
+Open API docs:
+
+```text
+http://localhost:8000/docs
+```
+
+### Run a Full Local AWF Task
+
+1. Ensure Docker is running.
+2. Ensure `awf-agent-runtime:latest` exists.
+3. Ensure `gh auth status` is clean.
+4. Ensure the target repo can be cloned and pushed over SSH.
+5. Write a `scripts/run_awf.py` JSON task.
+6. Run `scripts/run_awf.py`.
+7. Watch the terminal logs for:
+   - `agent.run.start`
+   - `agent.run.ok`
+   - `pr.created`
+   - `monitor.action`
+   - `monitor.initial_review_grace_waiting`
+   - `monitor.compose_teardown_ok`
+
+## Local Dogfood Runner
+
+`scripts/run_awf.py` is the compatibility dogfood runner for exercising the same
+building blocks outside the always-on service. It stores its PostgreSQL DB under
+the configured `AWF_DATABASE_URL`, provisions workspaces, launches Docker
+Compose, runs the agent, creates a PR, and runs the PR monitor. The service
+worker is the normal always-on executor; use the script for isolated
+experiments, checked-in specs, release/sync compatibility runs, and
+PostgreSQL-backed throwaway runs.
+
+Example config:
+
+```json
+[
+  {
+    "repo_url": "git@github.com:dimileeh/aira-agent-workspace-fabric.git",
+    "branch_base": "codex/awf-universal-profile-base",
+    "task_title": "Add workspace list filters for operator console",
+    "task_prompt": "Implement the requested feature with tests.",
+    "agent": "codex",
+    "test_commands": [
+      "uv run ruff check src/awf/api src/awf/db tests/unit/api tests/unit/db",
+      "uv run mypy src/awf/api src/awf/db",
+      "uv run pytest tests/unit/api tests/unit/db/test_workspace_repository.py -q"
+    ],
+    "requires_database": false,
+    "profile_ref": "auto",
+    "task_kind": "feature_branch_pr",
+    "auto_merge": true,
+    "initial_review_grace_period_seconds": 900
+  }
+]
+```
+
+`auto_merge: true` means the feature PR monitor may merge after all gates pass.
+`initial_review_grace_period_seconds: 0` is useful only for explicit fast-path
+tests; normal dogfood runs should keep the default grace window so first-pass
+reviewers have time to post comments.
+
+Run it:
+
+```bash
+uv run --python 3.12 --extra dev python scripts/run_awf.py \
+  --config /tmp/awf-task.json \
+  --work-dir ~/.awf/runs/example-run
+```
+
+Run state is preserved by default. Reusing the same `--work-dir` appends new
+workspace rows to the configured control-plane database (`AWF_DATABASE_URL`),
+which keeps the API, PR monitors, and console looking at one consistent run
+history.
+
+Reset a throwaway run database only when no API or monitor process is using it:
+
+```bash
+uv run --python 3.12 --extra dev python scripts/run_awf.py \
+  --config /tmp/awf-task.json \
+  --work-dir ~/.awf/runs/example-run \
+  --reset-state
+```

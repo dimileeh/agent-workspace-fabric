@@ -48,7 +48,9 @@ class TestPushAndOpen:
         assert len(runner.calls) == 5
         # The push is at index 3 (after the 3 diagnostics).
         push_call = runner.calls[3]
-        assert push_call.args[:2] == ["git", "-C"]
+        assert push_call.args[0] == "git"
+        assert f"safe.directory={_WORKTREE}" in push_call.args
+        assert "-C" in push_call.args
         assert "push" in push_call.args
         assert "-u" in push_call.args
         assert "origin" in push_call.args
@@ -60,6 +62,128 @@ class TestPushAndOpen:
         assert "--head" in gh_args and "awf/ws_xyz" in gh_args
         assert "--title" in gh_args and "Add docstring" in gh_args
         assert "--body" in gh_args
+
+    @pytest.mark.unit
+    async def test_reuses_existing_pr_after_push_without_creating_duplicate(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_xyz",
+            base_branch="development",
+            title="Add docstring",
+            body="One-line docstring on the module.",
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
+        assert result.branch == "awf/ws_xyz"
+        assert result.head_sha == "abc123def4567890"
+        assert len(runner.calls) == 4
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
+    async def test_updates_existing_pr_with_explicit_remote_head_ref(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted PR",
+            body="Existing PR update.",
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+            remote_branch_name="awf/ws_original",
+        )
+
+        push_args = runner.calls[3].args
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
+        assert result.branch == "awf/ws_original"
+        assert push_args[:1] == ["git"]
+        assert "push" in push_args
+        assert "origin" in push_args
+        assert "HEAD:refs/heads/awf/ws_original" in push_args
+        assert "feature-sync/ws_local" not in push_args
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
+    async def test_updates_existing_pr_with_qualified_remote_head_ref(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted PR",
+            body="Existing PR update.",
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+            remote_branch_name="refs/heads/awf/ws_original",
+        )
+
+        push_args = runner.calls[3].args
+        assert result.branch == "awf/ws_original"
+        assert "HEAD:refs/heads/awf/ws_original" in push_args
+        assert "HEAD:refs/heads/refs/heads/awf/ws_original" not in push_args
+
+    @pytest.mark.unit
+    async def test_updates_existing_pr_on_explicit_remote_url(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted fork PR",
+            body="Existing fork PR update.",
+            existing_pr_url="https://github.com/base/aira-agent/pull/42",
+            remote_branch_name="fix/fork-review",
+            remote_url="git@github.com:contributor/aira-agent.git",
+        )
+
+        push_args = runner.calls[3].args
+        push_index = push_args.index("push")
+        assert result.url == "https://github.com/base/aira-agent/pull/42"
+        assert result.branch == "fix/fork-review"
+        assert push_args[push_index + 1] == "git@github.com:contributor/aira-agent.git"
+        assert "HEAD:refs/heads/fix/fork-review" in push_args
+        assert "origin" not in push_args[push_index + 1 :]
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
+    async def test_explicit_remote_url_push_does_not_set_upstream(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted fork PR",
+            body="Existing fork PR update.",
+            existing_pr_url="https://github.com/base/aira-agent/pull/42",
+            remote_branch_name="fix/fork-review",
+            remote_url="https://user:token@github.com/contributor/aira-agent.git",
+        )
+
+        push_args = runner.calls[3].args
+        assert "-u" not in push_args
+        assert "--set-upstream" not in push_args
+        assert "https://user:token@github.com/contributor/aira-agent.git" in push_args
+        assert "HEAD:refs/heads/fix/fork-review" in push_args
 
     @pytest.mark.unit
     async def test_extracts_pr_url_even_with_leading_noise(self) -> None:
@@ -153,6 +277,7 @@ class TestPushAndOpen:
         # The first three calls are the diagnostics, in order.
         call0, call1, call2, call3, _ = runner.calls
         assert "rev-parse" in call0.args and "HEAD" in call0.args
+        assert f"safe.directory={_WORKTREE}" in call0.args
         assert "--abbrev-ref" in call1.args
         assert "log" in call2.args and "origin/development..HEAD" in call2.args
         # The FOURTH call is the push.

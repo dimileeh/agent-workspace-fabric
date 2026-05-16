@@ -17,15 +17,28 @@ class CLI feature; SDK-based implementations tend to reinvent them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import secrets
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
+
+DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
+COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
+_DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
+_COMPOSE_DISPATCH_RETRY_MARKERS = (
+    "unknown shorthand flag: 'd' in -d",
+    "unknown flag: --remove-orphans",
+)
 
 
 class ComposeOperationError(Exception):
@@ -132,6 +145,7 @@ class ComposeService:
     command: str | None = None
     volumes: tuple[tuple[str, str], ...] = ()
     privileged: bool = False
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -155,6 +169,8 @@ class WorkspaceComposeSpec:
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
     companions: tuple[CompanionService, ...] = ()
+    network_internal: bool = False
+    host_gateway_enabled: bool = True
 
     def project_name(self) -> str:
         return f"awf_{self.workspace_id}"
@@ -164,6 +180,27 @@ class WorkspaceComposeSpec:
 class ComposeProjectPaths:
     project_dir: Path
     compose_file: Path
+    secret_lease_mount_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "secret_lease_mount_metadata",
+            frozen_mapping(self.secret_lease_mount_metadata),
+        )
+
+
+def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
+    """Detect Docker CLI/plugin dispatch flakes where ``compose`` is dropped.
+
+    Docker Desktop can occasionally return top-level ``docker`` flag errors for
+    a valid ``docker compose ...`` argv under heavy parallel test pressure. A
+    single retry is safe because Compose ``up``/``down`` are idempotent for the
+    same project/file pair and avoids failing workspaces on a malformed local
+    CLI dispatch.
+    """
+
+    return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
 class ComposeManager:
@@ -234,6 +271,8 @@ class ComposeManager:
             (k, self._expand_placeholders(v, postgres_password=password))
             for k, v in spec.agent_environment
         ]
+        if spec.docker_mode == "dind" and "DOCKER_HOST" not in {k for k, _ in agent_env}:
+            agent_env.append(("DOCKER_HOST", "tcp://docker:2375"))
 
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
@@ -253,6 +292,8 @@ class ComposeManager:
             services=services,
             named_volumes=named_volumes,
             agent_depends_on=agent_depends_on,
+            network_internal=spec.network_internal,
+            host_gateway_enabled=spec.host_gateway_enabled,
         )
         compose_file.write_text(rendered, encoding="utf-8")
 
@@ -261,24 +302,108 @@ class ComposeManager:
     async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
         """Start the stack. With ``wait=True``, blocks until services are healthy."""
         paths = self.render(spec)
-        args = ["up", "-d"]
+        args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.append("--wait")
+            args.extend(["--wait", "--wait-timeout", "300"])
         await self._compose(spec.project_name(), paths.compose_file, args, operation="up")
         return paths
+
+    async def ensure_project_up(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        wait: bool = True,
+    ) -> None:
+        """Start an already-rendered compose project without re-rendering.
+
+        Used by PR-monitor resume: the workspace row already records the
+        compose project and compose.yml path that were active before the
+        service restart. Re-rendering from a profile at resume time risks
+        drifting from the stack the monitor originally owned.
+        """
+        args = ["up", "-d", "--remove-orphans"]
+        if wait:
+            args.extend(["--wait", "--wait-timeout", "300"])
+        _log.info(
+            "compose.ensure_project_up",
+            workspace_id=workspace_id,
+            project_name=project_name,
+            compose_file=str(compose_file),
+            wait=wait,
+        )
+        await self._compose(project_name, compose_file, args, operation="up")
 
     async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
         """Stop + remove the stack. Idempotent — absent projects are not errors."""
         paths = self._paths_for(spec)
-        if not paths.compose_file.exists():
+        await self.down_project(
+            project_name=spec.project_name(),
+            compose_file=paths.compose_file,
+            workspace_id=spec.workspace_id,
+            remove_volumes=remove_volumes,
+        )
+
+    async def down_project(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool = True,
+    ) -> None:
+        """Stop + remove a stack using an already-rendered compose file path."""
+        if not compose_file.exists():
             # Nothing rendered; assume never launched.
-            _log.info("compose.down.noop", workspace_id=spec.workspace_id)
+            _log.info("compose.down.noop", workspace_id=workspace_id)
             return
 
-        args = ["down"]
+        args = ["down", "--remove-orphans"]
         if remove_volumes:
             args.append("-v")
-        await self._compose(spec.project_name(), paths.compose_file, args, operation="down")
+        await self._compose(project_name, compose_file, args, operation="down")
+
+    async def remove_project_by_label(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        remove_volumes: bool = True,
+    ) -> None:
+        """Best-effort removal when the compose file is unavailable."""
+        label_filter = f"label=com.docker.compose.project={project_name}"
+        container_ids = await self._docker_resource_ids(
+            ["ps", "-aq", "--filter", label_filter],
+            operation="ps",
+        )
+        if container_ids:
+            await self._docker(["rm", "-f", *container_ids], operation="rm")
+
+        network_ids = await self._docker_resource_ids(
+            ["network", "ls", "-q", "--filter", label_filter],
+            operation="network ls",
+        )
+        for network_id in network_ids:
+            await self._docker(["network", "rm", network_id], operation="network rm")
+
+        volume_names: list[str] = []
+        if remove_volumes:
+            volume_names = await self._docker_resource_ids(
+                ["volume", "ls", "-q", "--filter", label_filter],
+                operation="volume ls",
+            )
+            if volume_names:
+                await self._docker(["volume", "rm", "-f", *volume_names], operation="volume rm")
+
+        _log.info(
+            "compose.project_label_removed",
+            workspace_id=workspace_id,
+            project_name=project_name,
+            containers=len(container_ids),
+            networks=len(network_ids),
+            volumes=len(volume_names),
+        )
 
     # ── Internals ──────────────────────────────────────────────────────────
 
@@ -294,30 +419,147 @@ class ComposeManager:
         cmd = [
             "docker",
             "compose",
-            "--project-name",
-            project_name,
-            "--file",
-            str(compose_file),
             *args,
         ]
-        _log.debug("compose.exec", operation=operation, cmd=cmd)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await proc.communicate()
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        env = {
+            **os.environ,
+            "COMPOSE_PROJECT_NAME": project_name,
+            "COMPOSE_FILE": str(compose_file),
+        }
+        for attempt in range(2):
+            _log.debug("compose.exec", operation=operation, cmd=cmd, attempt=attempt + 1)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+                )
+            except FileNotFoundError as e:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=127,
+                    stdout="",
+                    stderr=str(e),
+                    reason_code="DOCKER_UNAVAILABLE",
+                ) from e
+            except TimeoutError as e:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(ProcessLookupError, TimeoutError):
+                    await asyncio.wait_for(
+                        proc.wait(),
+                        timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+                    )
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=124,
+                    stdout="",
+                    stderr=(
+                        f"docker compose {operation} exceeded "
+                        f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                    ),
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
 
-        assert proc.returncode is not None
-        if proc.returncode != 0:
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+            assert proc.returncode is not None
+            if proc.returncode == 0:
+                return
+            if attempt == 0 and _is_transient_compose_dispatch_failure(stderr):
+                _log.warning(
+                    "compose.dispatch_retry",
+                    operation=operation,
+                    stderr=stderr[:400],
+                )
+                continue
+            reason_code = "COMPOSE_COMMAND_FAILED"
+            err_lower = stderr.lower()
+            if (
+                "daemon" in err_lower
+                or "error during connect" in err_lower
+                or "docker endpoint" in err_lower
+            ):
+                reason_code = "DOCKER_UNAVAILABLE"
+
             raise ComposeOperationError(
                 operation=operation,
                 returncode=proc.returncode,
                 stdout=stdout,
                 stderr=stderr,
+                reason_code=reason_code,
             )
+
+    async def _docker_resource_ids(self, args: list[str], *, operation: str) -> list[str]:
+        result = await self._docker_capture(args, operation=operation)
+        return [line.strip() for line in result.splitlines() if line.strip()]
+
+    async def _docker(self, args: list[str], *, operation: str) -> None:
+        await self._docker_capture(args, operation=operation)
+
+    async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+        cmd = ["docker", *args]
+        _log.debug("docker.exec", operation=operation, cmd=cmd)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError as e:
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=127,
+                stdout="",
+                stderr=str(e),
+                reason_code="DOCKER_UNAVAILABLE",
+            ) from e
+        except TimeoutError as e:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(ProcessLookupError, TimeoutError):
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+                )
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=124,
+                stdout="",
+                stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
+                reason_code="DOCKER_COMMAND_TIMEOUT",
+            ) from e
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        assert proc.returncode is not None
+        if proc.returncode != 0:
+            reason_code = "COMPOSE_COMMAND_FAILED"
+            err_lower = stderr.lower()
+            if (
+                "daemon" in err_lower
+                or "error during connect" in err_lower
+                or "docker endpoint" in err_lower
+            ):
+                reason_code = "DOCKER_UNAVAILABLE"
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                reason_code=reason_code,
+            )
+        return stdout
 
     def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
         services = list(spec.services)

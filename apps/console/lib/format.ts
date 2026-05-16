@@ -1,4 +1,22 @@
-import type { WorkspaceStatus } from "@/lib/types";
+import type {
+  LlmUsageSummary,
+  PricingMetadata,
+  WorkspaceLifecycleStage,
+  WorkspaceStatus,
+} from "@/lib/types";
+
+export type LogSortDirection = "asc" | "desc";
+
+export type RenderableLogEntry = {
+  streamId: string;
+  fd?: string | null;
+  data: string;
+  occurredAt: string;
+};
+
+export type SelectableLogStream = {
+  stream_id: string;
+};
 
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
@@ -10,6 +28,92 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "monitoring_pr",
   "completed",
 ];
+
+export function fallbackLifecycleStages(
+  status: WorkspaceStatus,
+  terminalSourceStage?: string | null,
+): WorkspaceLifecycleStage[] {
+  const activeIndex = lifecycleStages.indexOf(status);
+  const terminal = status === "failed" || status === "cancelled";
+  const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
+  const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
+
+  return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
+    let stageStatus: WorkspaceLifecycleStage["status"];
+    if (terminal) {
+      stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+    } else if (stage === status) {
+      stageStatus = "active";
+    } else if (index < activeIndex) {
+      stageStatus = "completed";
+    } else {
+      stageStatus = "pending";
+    }
+
+    return {
+      stage,
+      started_at: null,
+      ended_at: null,
+      duration_seconds: null,
+      status: stageStatus,
+    };
+  });
+}
+
+export function fallbackLlmUsage(
+  usage?: Partial<LlmUsageSummary> | null,
+): LlmUsageSummary {
+  const hasReason = usage !== undefined && usage !== null && "reason" in usage;
+  return {
+    input_tokens: usage?.input_tokens ?? null,
+    output_tokens: usage?.output_tokens ?? null,
+    total_tokens: usage?.total_tokens ?? null,
+    cost_estimate: usage?.cost_estimate ?? null,
+    currency: usage?.currency ?? null,
+    status: usage?.status === "available" ? "available" : "unavailable",
+    source: usage?.source ?? "none",
+    reason: hasReason ? usage.reason ?? null : "usage_not_reported",
+  };
+}
+
+export function formatCostWithPricing(
+  cost: number | null,
+  currency: string | null | undefined,
+  pricing: PricingMetadata | null | undefined,
+): string {
+  if (cost === null || cost === undefined) {
+    return "—";
+  }
+  if (pricing && !pricing.is_current) {
+    return "—";
+  }
+  const c = currency || pricing?.currency || "USD";
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: c,
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  } catch {
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  }
+}
+
+export function pricingAvailabilityReason(
+  pricing: PricingMetadata | null | undefined,
+): string | null {
+  if (!pricing) {
+    return "pricing not configured";
+  }
+  if (!pricing.is_current) {
+    return "pricing stale";
+  }
+  return null;
+}
 
 export function compactId(value: string | null | undefined, head = 8): string {
   if (!value) {
@@ -58,6 +162,23 @@ export function relativeTime(value: string | null | undefined): string {
   );
 }
 
+export function compactDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
+    return "—";
+  }
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  return `${remainingSeconds}s`;
+}
+
 export function bytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -70,6 +191,76 @@ export function bytes(value: number): string {
     index += 1;
   }
   return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+export function renderLogEntries(
+  entries: RenderableLogEntry[],
+  direction: LogSortDirection,
+): string {
+  return entries.map((entry) => renderLogEntry(entry, direction)).join("\n\n");
+}
+
+export function pickWorkspaceLogStreams(
+  streams: readonly SelectableLogStream[],
+  current: readonly string[],
+): string[] {
+  const available = new Set(streams.map((stream) => stream.stream_id));
+  const retained = current.filter((streamId) => available.has(streamId));
+  if (retained.length > 0) {
+    return retained;
+  }
+  return streams.map((stream) => stream.stream_id);
+}
+
+export function renderLogEntry(
+  entry: RenderableLogEntry,
+  direction: LogSortDirection,
+): string {
+  const stamp = formatLogStamp(entry.occurredAt);
+  const stream = entry.fd ? `${entry.streamId} ${entry.fd}` : entry.streamId;
+  const header = `[${stamp}] ${stream}`;
+  const data = orderLogData(entry.data, direction);
+  return data ? `${header}\n${data}` : header;
+}
+
+function orderLogData(data: string, direction: LogSortDirection): string {
+  const trimmed = data.endsWith("\n") ? data.slice(0, -1) : data;
+  if (direction === "asc" || !trimmed) {
+    return trimmed;
+  }
+  return reverseLogLines(trimmed);
+}
+
+function reverseLogLines(data: string): string {
+  let reversed = "";
+  let wroteLine = false;
+  let end = data.length;
+
+  while (true) {
+    const lineStart = end > 0 ? data.lastIndexOf("\n", end - 1) : -1;
+    if (wroteLine) {
+      reversed += "\n";
+    }
+    reversed += data.slice(lineStart + 1, end);
+    wroteLine = true;
+
+    if (lineStart === -1) {
+      return reversed;
+    }
+    end = lineStart;
+  }
+}
+
+function formatLogStamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
 }
 
 export function statusTone(status: string): "neutral" | "info" | "good" | "warn" | "bad" {
@@ -102,5 +293,20 @@ export function toneClass(tone: ReturnType<typeof statusTone>): string {
       return "border-blue-200 bg-blue-50 text-blue-800";
     default:
       return "border-slate-200 bg-slate-50 text-slate-700";
+  }
+}
+
+export function toneFillClass(tone: ReturnType<typeof statusTone>): string {
+  switch (tone) {
+    case "good":
+      return "bg-emerald-500";
+    case "warn":
+      return "bg-amber-500";
+    case "bad":
+      return "bg-red-500";
+    case "info":
+      return "bg-blue-500";
+    default:
+      return "bg-slate-400";
   }
 }

@@ -2,113 +2,177 @@
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
-from awf.api.schemas import WorkspaceControlRequest, WorkspaceControlResponse
-from awf.common.config import get_settings
-from awf.control.state_machine import WorkspaceStateMachine
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Workspace
-from awf.db.repositories import OperationRepository, WorkspaceRepository
-from awf.node.cleanup import WorkspaceCleaner
-from awf.node.compose_manager import ComposeManager
-from awf.node.git_manager import GitManager
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
+from awf.api.schemas import (
+    OperationResponse,
+    WorkspaceControlRequest,
+    WorkspaceControlResponse,
+    WorkspaceOperationRequest,
+    WorkspaceReasonWithLegacyRequestedTierRequest,
+    WorkspaceReasonWithLegacyStopStackRequest,
+)
+from awf.service.controls import (
+    ActiveWorkspaceDestroyError,
+    IdempotencyConflictError,
+    VersionConflictError,
+    WorkspaceControlError,
+    WorkspaceControlService,
+    WorkspaceNotFoundError,
+    WorkspaceRebaseActiveConflictError,
+    WorkspaceRebaseMissingCandidateError,
+    WorkspaceRebaseMissingPrUrlError,
+    WorkspaceRebaseStateError,
+    WorkspaceRefreshStateError,
+    WorkspaceRemonitorMissingPrUrlError,
+    WorkspaceRemonitorStateError,
+    WorkspaceValidateMissingPrUrlError,
+    WorkspaceValidateStateError,
+    default_cleaner,
+    stop_project_containers,
+)
 
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}",
     tags=["workspace-controls"],
     dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
+_IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 
 @router.post("/cancel", response_model=WorkspaceControlResponse)
 async def cancel_workspace(
     workspace_id: str,
     payload: WorkspaceControlRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
-    repo = WorkspaceRepository(session)
-    operations = OperationRepository(session)
-    workspace = await _require_workspace(repo, workspace_id)
-    operation = await operations.create(
-        workspace_id=workspace_id,
-        operation_type=OperationType.cancel,
-        status=OperationStatus.running,
-        payload=payload.model_dump(),
-    )
-    if payload.stop_stack:
-        await _stop_project(workspace.compose_project_name)
-    if workspace.status != WorkspaceStatus.cancelled.value and WorkspaceStateMachine.can_transition(
-        WorkspaceStatus(workspace.status),
-        WorkspaceStatus.cancelled,
-    ):
-        await repo.transition(
-            workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL"
+    try:
+        return await _controls(session).cancel_workspace(
+            workspace_id,
+            reason=payload.reason,
+            stop_stack=payload.stop_stack,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
         )
-    else:
-        await repo.add_event(
-            workspace,
-            event_type="workspace.cancel_requested",
-            reason_code="OPERATOR_CANCEL",
-            payload=payload.model_dump(),
-        )
-    await operations.finish(
-        operation,
-        status=OperationStatus.succeeded,
-        result={"status": workspace.status},
-    )
-    return WorkspaceControlResponse(
-        workspace_id=workspace_id,
-        operation_id=operation.id,
-        status=WorkspaceStatus(workspace.status),
-        message="workspace cancellation requested",
-    )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.post("/stop", response_model=WorkspaceControlResponse)
 async def stop_workspace(
     workspace_id: str,
-    payload: WorkspaceControlRequest,
+    payload: WorkspaceReasonWithLegacyStopStackRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
-    repo = WorkspaceRepository(session)
-    operations = OperationRepository(session)
-    workspace = await _require_workspace(repo, workspace_id)
-    operation = await operations.create(
-        workspace_id=workspace_id,
-        operation_type=OperationType.stop,
-        status=OperationStatus.running,
-        payload=payload.model_dump(),
-    )
-    await _stop_project(workspace.compose_project_name)
-    if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
-        WorkspaceStatus(workspace.status),
-        WorkspaceStatus.cancelled,
-    ):
-        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_STOP")
-    else:
-        await repo.add_event(
-            workspace,
-            event_type="workspace.stack_stopped",
-            reason_code="OPERATOR_STOP",
-            payload=payload.model_dump(),
+    try:
+        return await _controls(session).stop_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
         )
-    await operations.finish(
-        operation,
-        status=OperationStatus.succeeded,
-        result={"status": workspace.status},
-    )
-    return WorkspaceControlResponse(
-        workspace_id=workspace_id,
-        operation_id=operation.id,
-        status=WorkspaceStatus(workspace.status),
-        message="workspace stack stopped",
-    )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/remonitor", response_model=WorkspaceControlResponse)
+async def remonitor_workspace(
+    workspace_id: str,
+    payload: WorkspaceReasonWithLegacyStopStackRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceControlResponse:
+    try:
+        return await _controls(session).remonitor_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/refresh",
+    response_model=OperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_workspace(
+    workspace_id: str,
+    payload: WorkspaceReasonWithLegacyRequestedTierRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> OperationResponse:
+    try:
+        operation = await _controls(session).request_refresh_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+        return OperationResponse.model_validate(operation)
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/validate",
+    response_model=OperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def validate_workspace(
+    workspace_id: str,
+    payload: WorkspaceOperationRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> OperationResponse:
+    try:
+        operation = await _controls(session).request_validate_workspace(
+            workspace_id,
+            reason=payload.reason,
+            requested_tier=payload.requested_tier,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+        return OperationResponse.model_validate(operation)
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/rebase",
+    response_model=OperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def rebase_workspace(
+    workspace_id: str,
+    payload: WorkspaceReasonWithLegacyRequestedTierRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> OperationResponse:
+    try:
+        operation = await _controls(session).request_rebase_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+        return OperationResponse.model_validate(operation)
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.delete("", response_model=WorkspaceControlResponse)
@@ -117,138 +181,111 @@ async def destroy_workspace(
     force: bool = False,
     remove_volumes: bool = True,
     remove_worktree: bool = True,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
-    del (
-        remove_volumes,
-        remove_worktree,
-    )  # cleanup currently removes both; flags reserve the API contract.
-    repo = WorkspaceRepository(session)
-    operations = OperationRepository(session)
-    workspace = await _require_workspace(repo, workspace_id)
-    current = WorkspaceStatus(workspace.status)
-    if _is_active(current) and not force:
+    try:
+        return await _controls(session).destroy_workspace(
+            workspace_id,
+            force=force,
+            remove_volumes=remove_volumes,
+            remove_worktree=remove_worktree,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+def _controls(session: AsyncSession) -> WorkspaceControlService:
+    return WorkspaceControlService(
+        session,
+        project_stopper=_stop_project,
+        cleaner_factory=_cleaner,
+    )
+
+
+def _http_error(exc: WorkspaceControlError) -> HTTPException:
+    if isinstance(exc, WorkspaceNotFoundError):
+        status_code = status.HTTP_404_NOT_FOUND
+    elif isinstance(
+        exc,
+        (
+            WorkspaceRemonitorMissingPrUrlError,
+            WorkspaceValidateMissingPrUrlError,
+            WorkspaceRebaseMissingPrUrlError,
+        ),
+    ):
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif isinstance(exc, WorkspaceRebaseMissingCandidateError):
+        status_code = status.HTTP_404_NOT_FOUND
+    elif isinstance(
+        exc,
+        (
+            ActiveWorkspaceDestroyError,
+            IdempotencyConflictError,
+            VersionConflictError,
+            WorkspaceRefreshStateError,
+            WorkspaceRemonitorStateError,
+            WorkspaceValidateStateError,
+            WorkspaceRebaseActiveConflictError,
+            WorkspaceRebaseStateError,
+        ),
+    ):
+        status_code = status.HTTP_409_CONFLICT
+    else:  # pragma: no cover - future control error subclasses
+        status_code = status.HTTP_409_CONFLICT
+    detail: dict[str, object] = {"error_code": exc.error_code, "message": exc.message}
+    if exc.detail is not None:
+        detail["detail"] = exc.detail
+    return HTTPException(
+        status_code=status_code,
+        detail=detail,
+    )
+
+
+def _require_idempotency_key(idempotency_key: str | None) -> str:
+    if idempotency_key is None or not idempotency_key.strip():
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "error_code": "WORKSPACE_ACTIVE",
-                "message": "Active workspaces require force=true before destroy.",
+                "error_code": "INVALID_REQUEST",
+                "message": "Idempotency-Key header is required for this endpoint.",
             },
         )
-    operation = await operations.create(
-        workspace_id=workspace_id,
-        operation_type=OperationType.destroy,
-        status=OperationStatus.running,
-        payload={"force": force},
-    )
-    if current == WorkspaceStatus.destroyed:
-        await operations.finish(operation, status=OperationStatus.succeeded)
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id=operation.id,
-            status=WorkspaceStatus.destroyed,
-            message="workspace already destroyed",
-        )
-    if _is_active(current) and WorkspaceStateMachine.can_transition(
-        current, WorkspaceStatus.cancelled
-    ):
-        await repo.transition(
-            workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_DESTROY"
-        )
-        current = WorkspaceStatus.cancelled
-    if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
-        await repo.transition(
-            workspace, to=WorkspaceStatus.destroying, reason_code="OPERATOR_DESTROY"
-        )
-    await session.flush()
-    cleaner = _cleaner()
-    failures = await cleaner.cleanup(
-        workspace_id=workspace_id,
-        repo_url=workspace.repo_url,
-        worktree_host_path=None,
-    )
-    if failures:
-        workspace.failure_reason = "cleanup_failure"
-        workspace.failure_message = ", ".join(failures)
-        if WorkspaceStateMachine.can_transition(
-            WorkspaceStatus(workspace.status), WorkspaceStatus.failed
-        ):
-            await repo.transition(
-                workspace, to=WorkspaceStatus.failed, reason_code="CLEANUP_FAILED"
-            )
-        await operations.finish(
-            operation,
-            status=OperationStatus.failed,
-            error_code="CLEANUP_FAILED",
-            error_message=", ".join(failures),
-        )
-    else:
-        if WorkspaceStateMachine.can_transition(
-            WorkspaceStatus(workspace.status), WorkspaceStatus.destroyed
-        ):
-            await repo.transition(workspace, to=WorkspaceStatus.destroyed, reason_code="DESTROYED")
-        await operations.finish(operation, status=OperationStatus.succeeded)
-    return WorkspaceControlResponse(
-        workspace_id=workspace_id,
-        operation_id=operation.id,
-        status=WorkspaceStatus(workspace.status),
-        message="workspace destroyed" if not failures else "workspace cleanup failed",
-    )
-
-
-async def _require_workspace(repo: WorkspaceRepository, workspace_id: str) -> Workspace:
-    workspace = await repo.get(workspace_id)
-    if workspace is None:
+    key = idempotency_key.strip()
+    if len(key) > _IDEMPOTENCY_KEY_MAX_LENGTH:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "Idempotency-Key header must be at most 128 characters.",
+            },
         )
-    return workspace
+    return key
 
 
-async def _stop_project(compose_project_name: str | None) -> None:
-    if not compose_project_name:
-        return
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
-        "ps",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={compose_project_name}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _stderr = await proc.communicate()
-    ids = [line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines() if line]
-    if not ids:
-        return
-    stop = await asyncio.create_subprocess_exec(
-        "docker",
-        "stop",
-        *ids,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await stop.communicate()
+def _parse_if_match(if_match: str | None) -> int | None:
+    if if_match is None:
+        return None
+
+    value = if_match.strip()
+    if value.startswith("W/"):
+        value = value[2:].strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = value[1:-1].strip()
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "If-Match must be a workspace version integer.",
+            },
+        ) from exc
 
 
-def _cleaner() -> WorkspaceCleaner:
-    settings = get_settings()
-    work_dir = Path(settings.work_dir)
-    template = Path(__file__).resolve().parents[4] / "docker" / "compose" / "workspace.base.yml.j2"
-    return WorkspaceCleaner(
-        git=GitManager(work_dir / "git"),
-        compose=ComposeManager(work_dir=work_dir / "compose", template_path=template),
-    )
-
-
-def _is_active(status_value: WorkspaceStatus) -> bool:
-    return status_value in {
-        WorkspaceStatus.requested,
-        WorkspaceStatus.provisioning,
-        WorkspaceStatus.ready,
-        WorkspaceStatus.running,
-        WorkspaceStatus.validating,
-        WorkspaceStatus.pushing,
-        WorkspaceStatus.monitoring_pr,
-    }
+_stop_project = stop_project_containers
+_cleaner = default_cleaner

@@ -1,6 +1,7 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Gemini). Built multi-arch for x86_64
-# and arm64 (DGX Spark target) via ``docker buildx build --platform=...``.
+# the coding CLIs (Codex, Claude Code, Gemini, OpenCode). Built multi-arch
+# for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
+# --platform=...``.
 #
 # Build locally:
 #   docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
@@ -69,7 +70,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Stage 2: Node.js (for coding CLIs which are all npm packages) ──────────
+# ── Stage 2: Docker CLI + Compose plugin ──────────────────────────────────
+ARG DOCKER_CE_CLI_VERSION=5:29.4.1-1~debian.12~bookworm
+ARG DOCKER_COMPOSE_PLUGIN_VERSION=5.1.3-1~debian.12~bookworm
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+      -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && . /etc/os-release \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+      > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
+        "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version \
+    && docker compose version
+
+# ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
+ARG GH_VERSION=2.92.0
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "gh=${GH_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version
+
+# ── Stage 4: Node.js (for coding CLIs which are all npm packages) ──────────
 ARG NODE_VERSION
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -77,24 +109,27 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && node --version \
     && npm --version
 
-# ── Stage 3: coding CLIs ──────────────────────────────────────────────────
+# ── Stage 5: coding CLIs ──────────────────────────────────────────────────
 #
 # Each CLI is pinned to a version. Bump via PR so we can verify the output
 # format hasn't drifted in the adapters.
-ARG CODEX_VERSION=latest
-ARG CLAUDE_CODE_VERSION=latest
-ARG GEMINI_VERSION=latest
+ARG CODEX_VERSION=0.130.0
+ARG CLAUDE_CODE_VERSION=2.1.143
+ARG GEMINI_VERSION=0.42.0
+ARG OPENCODE_VERSION=1.15.2
 
 RUN npm install -g --no-fund --no-audit \
       @openai/codex@${CODEX_VERSION} \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @google/gemini-cli@${GEMINI_VERSION} \
+      opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force \
     && codex --version || true \
     && claude --version || true \
-    && gemini --version || true
+    && gemini --version || true \
+    && opencode --version || true
 
-# ── Stage 4: Python tooling the agent may need inside the container ────────
+# ── Stage 6: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir \
         "alembic>=1.13" \
@@ -102,7 +137,7 @@ RUN python -m pip install --upgrade pip \
         "psycopg[binary]>=3.1" \
         "uv>=0.5"
 
-# ── Stage 5: non-root user + workspace mount point ─────────────────────────
+# ── Stage 7: non-root user + workspace mount point ─────────────────────────
 RUN useradd --create-home --shell /bin/bash agent \
     && mkdir -p /workspace \
     && chown -R agent:agent /workspace

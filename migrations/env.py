@@ -16,8 +16,8 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 # Import models so their tables are registered on Base.metadata for autogenerate.
 import awf.db.models  # noqa: F401
@@ -28,7 +28,7 @@ config = context.config
 
 # Populate sqlalchemy.url from AWF_DATABASE_URL so alembic doesn't need a hardcoded DSN.
 _settings = get_settings()
-config.set_main_option("sqlalchemy.url", _settings.database_url)
+config.set_main_option("sqlalchemy.url", _settings.database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -57,10 +57,36 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     """Async-friendly online runner."""
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    raw_url = config.get_main_option("sqlalchemy.url")
+    parsed_url = make_url(raw_url)
+    query = dict(parsed_url.query)
+    search_path = query.pop("awf_search_path", None)
+    null_pool = query.pop("awf_null_pool", None)
+    connect_timeout = query.pop("awf_connect_timeout", None)
+    connect_attempts = query.pop("awf_connect_attempts", None)
+    connect_retries = query.pop("awf_connect_retries", None)
+    connect_args = {}
+    if search_path is not None:
+        if isinstance(search_path, tuple):
+            search_path = search_path[0]
+        connect_args["server_settings"] = {"search_path": str(search_path)}
+    if connect_timeout is not None:
+        if isinstance(connect_timeout, tuple):
+            connect_timeout = connect_timeout[0]
+        connect_args["timeout"] = float(connect_timeout)
+    if (
+        search_path is not None
+        or null_pool is not None
+        or connect_timeout is not None
+        or connect_attempts is not None
+        or connect_retries is not None
+    ):
+        parsed_url = parsed_url.set(query=query)
+
+    connectable = create_async_engine(
+        parsed_url.render_as_string(hide_password=False),
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     async with connectable.connect() as connection:

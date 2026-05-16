@@ -1,0 +1,5 @@
+{
+  "status": "satisfied",
+  "summary": "Implementation matches the saved plan. All required files modified: src/awf/service/workspaces.py adds request_refresh_workspace and request_rebase_workspace façades with expected_version passthrough; src/awf/mcp/server.py registers awf_refresh_workspace and awf_rebase_workspace tools and adds optional expected_version to the 7 mutating control tools; docs/MCP_CLIENT_PARITY.md updates Refresh/Rebase rows from MCP missing/backlog to MCP partial and removes P1-mcp-refresh/P1-mcp-rebase backlog references; TODO/pre-gke-industrial-readiness.md marks the P1 slice complete with evidence. Contract tests in tests/unit/mcp/test_mcp_control_contracts.py cover tool registration/schema, success paths, replay/idempotency, version conflict, invalid-state errors, and auth-like failure mapping. tests/unit/mcp/test_mcp_server.py updated for expected_version schema assertions and control-service mock signatures.",
+  "gaps": []
+}

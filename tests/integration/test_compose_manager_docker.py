@@ -51,6 +51,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
+@pytest.mark.timeout(240)
 async def test_compose_up_waits_for_postgres_health_then_down_cleans_up(
     tmp_path: Path,
 ) -> None:
@@ -92,7 +93,7 @@ async def test_compose_up_waits_for_postgres_health_then_down_cleans_up(
         await manager._compose(  # noqa: SLF001 — intentional: testing the runner directly
             project_name,
             paths.compose_file,
-            ["up", "-d", "--wait"],
+            ["up", "-d", "--wait", "--wait-timeout", "120"],
             operation="up",
         )
 

@@ -1,0 +1,1487 @@
+"""Filesystem garbage collection for terminal service workspaces.
+
+This module only relieves disk pressure from per-workspace runtime directories.
+It deliberately does not delete control-plane rows, workspace events, or durable
+log streams.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from inspect import isawaitable
+from pathlib import Path
+from typing import Literal
+
+from sqlalchemy import and_, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
+
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
+from awf.service.secret_leases import (
+    TERMINAL_GC_REVOKE_REASON,
+    SecretLeaseService,
+    secret_lease_revocation_summary,
+)
+
+DEFAULT_MIN_AGE_HOURS = 168
+
+COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
+TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
+WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
+FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
+FAILED_WORKSPACE_NO_WORK = "FAILED_WORKSPACE_NO_WORK"
+COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
+COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
+WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
+
+PATH_DELETED = "PATH_DELETED"
+PATH_ALREADY_REMOVED = "PATH_ALREADY_REMOVED"
+PATH_DELETE_FAILED = "PATH_DELETE_FAILED"
+
+CLEANUP_DRY_RUN = "CLEANUP_DRY_RUN"
+CLEANUP_EXECUTION_SUCCEEDED = "CLEANUP_EXECUTION_SUCCEEDED"
+CLEANUP_EXECUTION_PARTIAL = "CLEANUP_EXECUTION_PARTIAL"
+
+WorkspaceCleanupExecutionStatus = Literal["dry_run", "succeeded", "partial"]
+WorkspaceCleanupPathStatus = Literal["planned", "deleted", "already_removed", "skipped", "failed"]
+
+TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.failed.value,
+        "superseded",
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.destroyed.value,
+    }
+)
+
+_FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
+_FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
+
+_RUNTIME_INSPECTOR = RuntimeInspector()
+
+PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
+    {
+        WorkspaceStatus.requested.value,
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+        WorkspaceStatus.destroying.value,
+    }
+)
+
+
+@dataclass(frozen=True)
+class WorkspaceGCPath:
+    """One filesystem target considered for workspace GC."""
+
+    kind: str
+    path: Path
+    exists: bool
+    estimated_bytes: int
+
+    def to_dict(
+        self,
+        *,
+        deleted: bool = False,
+        error: str | None = None,
+        status: str | None = None,
+        reason_code: str | None = None,
+    ) -> dict[str, object]:
+        resolved_status = status or ("already_removed" if not self.exists else "planned")
+        resolved_reason = reason_code or (
+            PATH_ALREADY_REMOVED if not self.exists else "PATH_PLANNED"
+        )
+        payload: dict[str, object] = {
+            "path": str(self.path),
+            "exists": self.exists,
+            "estimated_bytes": self.estimated_bytes,
+            "deleted": deleted,
+            "status": resolved_status,
+            "reason_code": resolved_reason,
+        }
+        if error is not None:
+            payload["error"] = error
+        return payload
+
+
+@dataclass(frozen=True)
+class WorkspaceGCPreserved:
+    """A workspace considered by policy but intentionally not cleaned."""
+
+    workspace_id: str
+    status: str
+    updated_at: datetime
+    age_hours: int
+    reason_code: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "workspace_id": self.workspace_id,
+            "status": self.status,
+            "updated_at": self.updated_at.isoformat(),
+            "age_hours": self.age_hours,
+            "reason_code": self.reason_code,
+        }
+
+
+@dataclass(frozen=True)
+class WorkspaceGCComposeTeardownResult:
+    """Structured outcome for optional compose teardown before filesystem deletion."""
+
+    status: Literal["succeeded", "failed", "skipped"]
+    reason_code: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"succeeded", "skipped"}
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class WorkspaceGCWorktreeRemoveResult:
+    """Structured outcome for optional git worktree removal before filesystem deletion."""
+
+    status: Literal["succeeded", "failed", "skipped"]
+    reason_code: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"succeeded", "skipped"}
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class WorkspaceGCPathOutcome:
+    """Structured execution outcome for one pressure-directory target."""
+
+    workspace_id: str
+    kind: str
+    path: Path
+    status: WorkspaceCleanupPathStatus
+    reason_code: str
+    deleted: bool = False
+    error: str | None = None
+    estimated_bytes: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "workspace_id": self.workspace_id,
+            "kind": self.kind,
+            "path": str(self.path),
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "deleted": self.deleted,
+            "estimated_bytes": self.estimated_bytes,
+        }
+        if self.error is not None:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class WorkspaceGCCandidate:
+    """A terminal workspace whose pressure directories are eligible for GC."""
+
+    workspace_id: str
+    status: str
+    updated_at: datetime
+    age_hours: int
+    reason_code: str
+    worktree: WorkspaceGCPath
+    compose: WorkspaceGCPath
+    auth: WorkspaceGCPath
+    compose_project_name: str | None = None
+    compose_file_path: str | None = None
+
+    @property
+    def total_estimated_bytes(self) -> int:
+        return (
+            self.worktree.estimated_bytes + self.compose.estimated_bytes + self.auth.estimated_bytes
+        )
+
+    def paths(self) -> Iterator[WorkspaceGCPath]:
+        yield self.worktree
+        yield self.compose
+        yield self.auth
+
+    def to_dict(
+        self,
+        *,
+        deleted_paths: set[Path] | None = None,
+        delete_errors: dict[tuple[str, Path], str] | None = None,
+        path_outcomes: dict[tuple[str, Path], WorkspaceGCPathOutcome] | None = None,
+        compose_teardown: WorkspaceGCComposeTeardownResult | None = None,
+        worktree_remove: WorkspaceGCWorktreeRemoveResult | None = None,
+    ) -> dict[str, object]:
+        deleted_paths = deleted_paths or set()
+        delete_errors = delete_errors or {}
+        path_outcomes = path_outcomes or {}
+        paths = {
+            item.kind: _path_payload_for_candidate(
+                item,
+                deleted_paths=deleted_paths,
+                delete_errors=delete_errors,
+                path_outcomes=path_outcomes,
+            )
+            for item in self.paths()
+        }
+        payload: dict[str, object] = {
+            "workspace_id": self.workspace_id,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "updated_at": self.updated_at.isoformat(),
+            "age_hours": self.age_hours,
+            "estimated_bytes": {
+                "worktree": self.worktree.estimated_bytes,
+                "compose": self.compose.estimated_bytes,
+                "auth": self.auth.estimated_bytes,
+                "total": self.total_estimated_bytes,
+            },
+            "paths": paths,
+        }
+        if compose_teardown is not None:
+            payload["compose_teardown"] = compose_teardown.to_dict()
+        if worktree_remove is not None:
+            payload["worktree_remove"] = worktree_remove.to_dict()
+        return payload
+
+
+WorkspaceGCComposeTeardown = Callable[
+    [WorkspaceGCCandidate],
+    WorkspaceGCComposeTeardownResult | Awaitable[WorkspaceGCComposeTeardownResult],
+]
+
+WorkspaceGCWorktreeRemove = Callable[
+    [WorkspaceGCCandidate],
+    WorkspaceGCWorktreeRemoveResult | Awaitable[WorkspaceGCWorktreeRemoveResult],
+]
+
+
+@dataclass(frozen=True)
+class WorkspaceGCPlan:
+    """Inspectable GC plan before deletion."""
+
+    work_dir: Path
+    min_age_hours: float
+    cutoff_at: datetime
+    include_statuses: tuple[str, ...]
+    exclude_statuses: tuple[str, ...]
+    candidates: list[WorkspaceGCCandidate]
+    preserved: list[WorkspaceGCPreserved]
+    cleanup_enabled: bool = True
+    default_policy: bool = True
+
+    @property
+    def total_estimated_bytes(self) -> int:
+        return sum(candidate.total_estimated_bytes for candidate in self.candidates)
+
+    @property
+    def preserved_count(self) -> int:
+        return len(self.preserved)
+
+    @property
+    def policy_eligible_statuses(self) -> tuple[str, ...]:
+        if self.default_policy:
+            if WorkspaceStatus.completed.value in self.include_statuses:
+                return (WorkspaceStatus.completed.value,)
+            return ()
+        eligible_statuses = set(self.include_statuses)
+        eligible_statuses &= set(TERMINAL_WORKSPACE_GC_STATUSES)
+        eligible_statuses -= set(PROTECTED_WORKSPACE_GC_STATUSES)
+        eligible_statuses -= set(self.exclude_statuses)
+        return tuple(sorted(eligible_statuses))
+
+    @property
+    def requires_pr_metadata(self) -> bool:
+        return self.default_policy and WorkspaceStatus.completed.value in self.include_statuses
+
+    @property
+    def requires_pr_merge(self) -> bool:
+        return self.default_policy and WorkspaceStatus.completed.value in self.include_statuses
+
+    @property
+    def preserves_failed_workspaces(self) -> bool:
+        return self.default_policy and WorkspaceStatus.failed.value in self.include_statuses
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "work_dir": str(self.work_dir),
+            "min_age_hours": self.min_age_hours,
+            "cutoff_at": self.cutoff_at.isoformat(),
+            "policy": {
+                "cleanup_enabled": self.cleanup_enabled,
+                "retention_hours": self.min_age_hours,
+                "eligible_statuses": list(self.policy_eligible_statuses),
+                "requires_pr_metadata": self.requires_pr_metadata,
+                "requires_pr_merge": self.requires_pr_merge,
+                "preserves_failed_workspaces": self.preserves_failed_workspaces,
+            },
+            "include_statuses": list(self.include_statuses),
+            "exclude_statuses": list(self.exclude_statuses),
+            "candidate_count": len(self.candidates),
+            "preserved_count": self.preserved_count,
+            "total_estimated_bytes": self.total_estimated_bytes,
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "preserved": [preserved.to_dict() for preserved in self.preserved],
+        }
+
+
+@dataclass(frozen=True)
+class WorkspaceGCDeleteError:
+    """One deletion failure captured without aborting the rest of the GC run."""
+
+    workspace_id: str
+    kind: str
+    path: Path
+    error: str
+    reason_code: str = PATH_DELETE_FAILED
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "workspace_id": self.workspace_id,
+            "kind": self.kind,
+            "path": str(self.path),
+            "reason_code": self.reason_code,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class WorkspaceGCResult:
+    """GC plan plus optional execution outcome."""
+
+    plan: WorkspaceGCPlan
+    dry_run: bool
+    deleted_paths: list[Path]
+    delete_errors: list[WorkspaceGCDeleteError]
+    path_outcomes: list[WorkspaceGCPathOutcome]
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult]
+    secret_lease_revocations: dict[str, dict[str, object]]
+    worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult]
+    reservation_releases: dict[str, dict[str, object]]
+    status: WorkspaceCleanupExecutionStatus
+    reason_code: str
+
+    def to_dict(self) -> dict[str, object]:
+        deleted_paths = set(self.deleted_paths)
+        delete_errors = {(error.kind, error.path): error.error for error in self.delete_errors}
+        path_outcomes = {(outcome.kind, outcome.path): outcome for outcome in self.path_outcomes}
+        payload = self.plan.to_dict()
+        payload.update(
+            {
+                "dry_run": self.dry_run,
+                "status": self.status,
+                "reason_code": self.reason_code,
+                "deleted_paths": [str(path) for path in self.deleted_paths],
+                "deleted_path_count": len(self.deleted_paths),
+                "delete_errors": [error.to_dict() for error in self.delete_errors],
+                "secret_leases": self.secret_lease_revocations,
+                "worktree_removes": {
+                    ws_id: result.to_dict() for ws_id, result in self.worktree_removes.items()
+                },
+                "reservation_releases": self.reservation_releases,
+            }
+        )
+        payload["candidates"] = [
+            candidate.to_dict(
+                deleted_paths=deleted_paths,
+                delete_errors=delete_errors,
+                path_outcomes=path_outcomes,
+                compose_teardown=self.compose_teardowns.get(candidate.workspace_id),
+                worktree_remove=self.worktree_removes.get(candidate.workspace_id),
+            )
+            for candidate in self.plan.candidates
+        ]
+        return payload
+
+
+async def plan_terminal_workspace_gc(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    limit: int | None = None,
+    include_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    cleanup_enabled: bool = True,
+    now: datetime | None = None,
+) -> WorkspaceGCPlan:
+    """Build a terminal-workspace filesystem cleanup plan.
+
+    Active and destroying workspaces are never eligible, even if explicitly
+    requested through ``include_statuses``.
+    """
+
+    current_time = _to_utc(now or datetime.now(UTC))
+    normalized_work_dir = Path(work_dir).expanduser()
+    cutoff_at = current_time - timedelta(hours=min_age_hours)
+    requested_statuses = _normalize_statuses(include_statuses)
+    excluded_statuses = _normalize_statuses(exclude_statuses) or set()
+    default_policy = requested_statuses is None
+    if requested_statuses is None:
+        eligible_statuses = {
+            WorkspaceStatus.completed.value,
+            WorkspaceStatus.failed.value,
+            "superseded",
+        }
+    else:
+        eligible_statuses = requested_statuses & set(TERMINAL_WORKSPACE_GC_STATUSES)
+    eligible_statuses -= excluded_statuses
+    eligible_statuses -= set(PROTECTED_WORKSPACE_GC_STATUSES)
+    plan_include_statuses = (
+        requested_statuses if requested_statuses is not None else eligible_statuses
+    )
+
+    if not eligible_statuses:
+        return WorkspaceGCPlan(
+            work_dir=normalized_work_dir,
+            min_age_hours=min_age_hours,
+            cutoff_at=cutoff_at,
+            include_statuses=tuple(sorted(plan_include_statuses)),
+            exclude_statuses=tuple(sorted(excluded_statuses)),
+            candidates=[],
+            preserved=[],
+            cleanup_enabled=cleanup_enabled,
+            default_policy=default_policy,
+        )
+
+    row_limit = None if limit is None else max(limit, 0)
+    candidate_predicate = _workspace_gc_candidate_predicate(
+        eligible_statuses=eligible_statuses,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
+    preserved_predicate = _workspace_gc_preserved_predicate(
+        eligible_statuses=eligible_statuses,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
+
+    candidate_rows: list[Workspace] = []
+    preserved_rows: list[Workspace] = []
+    async with session_factory() as session:
+        if candidate_predicate is not None:
+            candidate_stmt = (
+                select(Workspace)
+                .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(candidate_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                candidate_stmt = candidate_stmt.limit(row_limit)
+            candidate_rows = list((await session.execute(candidate_stmt)).scalars())
+
+        if preserved_predicate is not None:
+            preserved_stmt = (
+                select(Workspace)
+                .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(preserved_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                preserved_stmt = preserved_stmt.limit(row_limit)
+            preserved_rows = list((await session.execute(preserved_stmt)).scalars())
+
+    candidates: list[WorkspaceGCCandidate] = []
+    preserved: list[WorkspaceGCPreserved] = []
+    candidate_ids: set[str] = set()
+    for workspace in candidate_rows:
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
+            workspace,
+            work_dir=normalized_work_dir,
+            now=current_time,
+            cutoff_at=cutoff_at,
+            default_policy=default_policy,
+            cleanup_enabled=cleanup_enabled,
+        )
+        if isinstance(classification, WorkspaceGCCandidate):
+            candidates.append(classification)
+            candidate_ids.add(workspace.id)
+        elif classification is not None:
+            preserved.append(classification)
+    for workspace in preserved_rows:
+        if workspace.id in candidate_ids:
+            continue
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
+            workspace,
+            work_dir=normalized_work_dir,
+            now=current_time,
+            cutoff_at=cutoff_at,
+            default_policy=default_policy,
+            cleanup_enabled=cleanup_enabled,
+        )
+        if isinstance(classification, WorkspaceGCCandidate):
+            candidates.append(classification)
+            candidate_ids.add(workspace.id)
+        elif isinstance(classification, WorkspaceGCPreserved):
+            preserved.append(classification)
+    return WorkspaceGCPlan(
+        work_dir=normalized_work_dir,
+        min_age_hours=min_age_hours,
+        cutoff_at=cutoff_at,
+        include_statuses=tuple(sorted(plan_include_statuses)),
+        exclude_statuses=tuple(sorted(excluded_statuses)),
+        candidates=candidates,
+        preserved=preserved,
+        cleanup_enabled=cleanup_enabled,
+        default_policy=default_policy,
+    )
+
+
+def _workspace_gc_candidate_predicate(
+    *,
+    eligible_statuses: set[str],
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> ColumnElement[bool] | None:
+    if not cleanup_enabled:
+        return None
+    if default_policy:
+        if WorkspaceStatus.completed.value not in eligible_statuses:
+            return None
+        return and_(
+            Workspace.status == WorkspaceStatus.completed.value,
+            Workspace.updated_at <= cutoff_at,
+            _workspace_has_pr_metadata_predicate(),
+            _workspace_has_pr_merge_predicate(),
+        )
+    return and_(
+        Workspace.status.in_(sorted(eligible_statuses)),
+        Workspace.updated_at <= cutoff_at,
+    )
+
+
+def _workspace_gc_preserved_predicate(
+    *,
+    eligible_statuses: set[str],
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> ColumnElement[bool] | None:
+    if not cleanup_enabled:
+        return Workspace.status.in_(sorted(eligible_statuses))
+    if default_policy:
+        clauses: list[ColumnElement[bool]] = []
+        if WorkspaceStatus.failed.value in eligible_statuses:
+            clauses.append(Workspace.status == WorkspaceStatus.failed.value)
+        if "superseded" in eligible_statuses:
+            clauses.append(Workspace.status == "superseded")
+        if WorkspaceStatus.completed.value in eligible_statuses:
+            clauses.append(
+                and_(
+                    Workspace.status == WorkspaceStatus.completed.value,
+                    or_(
+                        _workspace_lacks_pr_metadata_predicate(),
+                        _workspace_pr_not_merged_predicate(),
+                        Workspace.updated_at > cutoff_at,
+                    ),
+                )
+            )
+        if not clauses:
+            return None
+        return or_(*clauses)
+    return and_(
+        Workspace.status.in_(sorted(eligible_statuses)),
+        Workspace.updated_at > cutoff_at,
+    )
+
+
+def _workspace_has_pr_metadata_predicate() -> ColumnElement[bool]:
+    return or_(
+        Workspace.pr_number.is_not(None),
+        and_(Workspace.pr_url.is_not(None), Workspace.pr_url != ""),
+    )
+
+
+def _workspace_lacks_pr_metadata_predicate() -> ColumnElement[bool]:
+    return and_(
+        Workspace.pr_number.is_(None),
+        or_(Workspace.pr_url.is_(None), Workspace.pr_url == ""),
+    )
+
+
+def _workspace_has_pr_merge_predicate() -> ColumnElement[bool]:
+    return Workspace.pr_merge_sha.is_not(None)
+
+
+def _workspace_pr_not_merged_predicate() -> ColumnElement[bool]:
+    return and_(
+        _workspace_has_pr_metadata_predicate(),
+        Workspace.pr_merge_sha.is_(None),
+    )
+
+
+async def run_terminal_workspace_gc(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    limit: int | None = None,
+    include_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    exclude_statuses: Iterable[WorkspaceStatus | str] | None = None,
+    execute: bool = False,
+    cleanup_enabled: bool = True,
+    compose_teardown: WorkspaceGCComposeTeardown | None = None,
+    worktree_remover: WorkspaceGCWorktreeRemove | None = None,
+    now: datetime | None = None,
+) -> WorkspaceGCResult:
+    """Plan terminal workspace GC and optionally delete selected directories."""
+
+    current_time = _to_utc(now or datetime.now(UTC))
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=min_age_hours,
+        limit=limit,
+        include_statuses=include_statuses,
+        exclude_statuses=exclude_statuses,
+        cleanup_enabled=cleanup_enabled,
+        now=current_time,
+    )
+    if not execute:
+        return _gc_result(
+            plan=plan,
+            dry_run=True,
+            deleted_paths=[],
+            delete_errors=[],
+            path_outcomes=[],
+            compose_teardowns={},
+            worktree_removes={},
+            reservation_releases={},
+        )
+
+    resolved_worktree_remover = _resolve_worktree_remover(
+        worktree_remover, session_factory, work_dir
+    )
+    secret_lease_revocations = await _revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        now=current_time,
+    )
+    (
+        deleted_paths,
+        delete_errors,
+        path_outcomes,
+        compose_teardowns,
+        worktree_removes,
+    ) = await _delete_gc_plan_paths(
+        plan,
+        compose_teardown=compose_teardown,
+        worktree_remover=resolved_worktree_remover,
+    )
+    reservation_releases = await _release_gc_reservations(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+    )
+    return _gc_result(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=deleted_paths,
+        delete_errors=delete_errors,
+        path_outcomes=path_outcomes,
+        compose_teardowns=compose_teardowns,
+        secret_lease_revocations=secret_lease_revocations,
+        worktree_removes=worktree_removes,
+        reservation_releases=reservation_releases,
+    )
+
+
+def _resolve_worktree_remover(
+    worktree_remover: WorkspaceGCWorktreeRemove | None,
+    session_factory: async_sessionmaker[AsyncSession],
+    work_dir: Path | str,
+) -> WorkspaceGCWorktreeRemove:
+    if worktree_remover is not None:
+        return worktree_remover
+    normalized = Path(work_dir).expanduser()
+
+    async def _default_remover(candidate: WorkspaceGCCandidate) -> WorkspaceGCWorktreeRemoveResult:
+        return await _default_worktree_remover(
+            candidate, session_factory=session_factory, work_dir=normalized
+        )
+
+    return _default_remover
+
+
+async def run_workspace_filesystem_gc(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    workspace_id: str,
+    execute: bool = False,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+    cleanup_enabled: bool = True,
+    compose_teardown: WorkspaceGCComposeTeardown | None = None,
+    worktree_remover: WorkspaceGCWorktreeRemove | None = None,
+    now: datetime | None = None,
+) -> WorkspaceGCResult:
+    """Plan or execute filesystem GC for one terminal workspace.
+
+    This is used by the PR monitor after a successful merge. It keeps the
+    durable workspace row, events, logs, and artifacts intact while removing
+    the checkout/auth/compose pressure directories for the single completed
+    workspace.
+    """
+
+    current_time = _to_utc(now or datetime.now(UTC))
+    normalized_work_dir = Path(work_dir).expanduser()
+    cutoff_at = current_time - timedelta(hours=min_age_hours)
+    resolved_worktree_remover = _resolve_worktree_remover(
+        worktree_remover, session_factory, work_dir
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+
+    candidates: list[WorkspaceGCCandidate] = []
+    preserved: list[WorkspaceGCPreserved] = []
+    include_statuses: tuple[str, ...] = ()
+    if workspace is not None:
+        include_statuses = (workspace.status,)
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
+            workspace,
+            work_dir=normalized_work_dir,
+            now=current_time,
+            cutoff_at=cutoff_at,
+            default_policy=True,
+            cleanup_enabled=cleanup_enabled,
+        )
+        if isinstance(classification, WorkspaceGCCandidate):
+            candidates.append(classification)
+        elif classification is not None:
+            preserved.append(classification)
+
+    plan = WorkspaceGCPlan(
+        work_dir=normalized_work_dir,
+        min_age_hours=min_age_hours,
+        cutoff_at=cutoff_at,
+        include_statuses=include_statuses,
+        exclude_statuses=(),
+        candidates=candidates,
+        preserved=preserved,
+        cleanup_enabled=cleanup_enabled,
+        default_policy=True,
+    )
+    if not execute:
+        return _gc_result(
+            plan=plan,
+            dry_run=True,
+            deleted_paths=[],
+            delete_errors=[],
+            path_outcomes=[],
+            compose_teardowns={},
+            worktree_removes={},
+            reservation_releases={},
+        )
+
+    secret_lease_revocations = await _revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        now=current_time,
+    )
+    (
+        deleted_paths,
+        delete_errors,
+        path_outcomes,
+        compose_teardowns,
+        worktree_removes,
+    ) = await _delete_gc_plan_paths(
+        plan,
+        compose_teardown=compose_teardown,
+        worktree_remover=resolved_worktree_remover,
+    )
+    reservation_releases = await _release_gc_reservations(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+    )
+    return _gc_result(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=deleted_paths,
+        delete_errors=delete_errors,
+        path_outcomes=path_outcomes,
+        compose_teardowns=compose_teardowns,
+        secret_lease_revocations=secret_lease_revocations,
+        worktree_removes=worktree_removes,
+        reservation_releases=reservation_releases,
+    )
+
+
+async def _revoke_gc_secret_leases(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_ids: list[str],
+    now: datetime,
+) -> dict[str, dict[str, object]]:
+    summaries: dict[str, dict[str, object]] = {}
+    if not workspace_ids:
+        return summaries
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        service = SecretLeaseService(session)
+        for workspace_id in workspace_ids:
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                continue
+            revoked = await service.revoke_workspace_secret_leases(
+                workspace,
+                now=now,
+                reason_code=TERMINAL_GC_REVOKE_REASON,
+            )
+            summaries[workspace_id] = secret_lease_revocation_summary(
+                revoked,
+                reason_code=TERMINAL_GC_REVOKE_REASON,
+            )
+        await session.commit()
+    return summaries
+
+
+async def _delete_gc_plan_paths(
+    plan: WorkspaceGCPlan,
+    *,
+    compose_teardown: WorkspaceGCComposeTeardown | None,
+    worktree_remover: WorkspaceGCWorktreeRemove | None,
+) -> tuple[
+    list[Path],
+    list[WorkspaceGCDeleteError],
+    list[WorkspaceGCPathOutcome],
+    dict[str, WorkspaceGCComposeTeardownResult],
+    dict[str, WorkspaceGCWorktreeRemoveResult],
+]:
+    deleted_paths: list[Path] = []
+    delete_errors: list[WorkspaceGCDeleteError] = []
+    path_outcomes: list[WorkspaceGCPathOutcome] = []
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult] = {}
+    worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] = {}
+    for candidate in plan.candidates:
+        teardown = await _run_compose_teardown(candidate, compose_teardown)
+        if teardown is not None:
+            compose_teardowns[candidate.workspace_id] = teardown
+            if not teardown.ok:
+                delete_errors.append(
+                    WorkspaceGCDeleteError(
+                        workspace_id=candidate.workspace_id,
+                        kind="compose_teardown",
+                        path=candidate.compose.path,
+                        error=teardown.error or teardown.reason_code,
+                        reason_code=teardown.reason_code,
+                    )
+                )
+                for target in candidate.paths():
+                    path_outcomes.append(
+                        WorkspaceGCPathOutcome(
+                            workspace_id=candidate.workspace_id,
+                            kind=target.kind,
+                            path=target.path,
+                            status="skipped",
+                            reason_code=teardown.reason_code,
+                            error=teardown.error,
+                            estimated_bytes=target.estimated_bytes,
+                        )
+                    )
+                continue
+        wt_remove = await _run_worktree_remove(candidate, worktree_remover)
+        if wt_remove is not None:
+            worktree_removes[candidate.workspace_id] = wt_remove
+            if not wt_remove.ok:
+                delete_errors.append(
+                    WorkspaceGCDeleteError(
+                        workspace_id=candidate.workspace_id,
+                        kind="worktree_remove",
+                        path=candidate.worktree.path,
+                        error=wt_remove.error or wt_remove.reason_code,
+                        reason_code=wt_remove.reason_code,
+                    )
+                )
+                path_outcomes.append(
+                    WorkspaceGCPathOutcome(
+                        workspace_id=candidate.workspace_id,
+                        kind=candidate.worktree.kind,
+                        path=candidate.worktree.path,
+                        status="skipped",
+                        reason_code=wt_remove.reason_code,
+                        error=wt_remove.error,
+                        estimated_bytes=candidate.worktree.estimated_bytes,
+                    )
+                )
+                for target in (candidate.compose, candidate.auth):
+                    outcome = await asyncio.to_thread(
+                        _delete_gc_path_outcome,
+                        candidate,
+                        target,
+                        work_dir=plan.work_dir,
+                    )
+                    path_outcomes.append(outcome)
+                    if outcome.deleted:
+                        deleted_paths.append(target.path)
+                    if outcome.error is not None:
+                        delete_errors.append(
+                            WorkspaceGCDeleteError(
+                                workspace_id=candidate.workspace_id,
+                                kind=target.kind,
+                                path=target.path,
+                                error=outcome.error,
+                                reason_code=outcome.reason_code,
+                            )
+                        )
+                continue
+        for target in candidate.paths():
+            outcome = await asyncio.to_thread(
+                _delete_gc_path_outcome,
+                candidate,
+                target,
+                work_dir=plan.work_dir,
+            )
+            path_outcomes.append(outcome)
+            if outcome.deleted:
+                deleted_paths.append(target.path)
+            if outcome.error is not None:
+                delete_errors.append(
+                    WorkspaceGCDeleteError(
+                        workspace_id=candidate.workspace_id,
+                        kind=target.kind,
+                        path=target.path,
+                        error=outcome.error,
+                        reason_code=outcome.reason_code,
+                    )
+                )
+    return deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes
+
+
+async def _run_compose_teardown(
+    candidate: WorkspaceGCCandidate,
+    compose_teardown: WorkspaceGCComposeTeardown | None,
+) -> WorkspaceGCComposeTeardownResult | None:
+    if compose_teardown is None:
+        return None
+    result = compose_teardown(candidate)
+    if isawaitable(result):
+        result = await result
+    return result
+
+
+async def _default_worktree_remover(
+    candidate: WorkspaceGCCandidate,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    work_dir: Path,
+) -> WorkspaceGCWorktreeRemoveResult:
+    from awf.node.git_manager import GitManager
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, candidate.workspace_id)
+    if workspace is None or not workspace.repo_url:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="NO_REPO_URL",
+        )
+    if candidate.worktree.path.exists() and not (candidate.worktree.path / ".git").exists():
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="WORKTREE_NOT_GIT_MANAGED",
+        )
+    git_manager = GitManager(work_dir / "git")
+    try:
+        await git_manager.remove_worktree(
+            workspace_id=candidate.workspace_id,
+            repo_url=workspace.repo_url,
+        )
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+    except Exception as exc:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error=str(exc)[:1000],
+        )
+
+
+async def _run_worktree_remove(
+    candidate: WorkspaceGCCandidate,
+    worktree_remover: WorkspaceGCWorktreeRemove | None,
+) -> WorkspaceGCWorktreeRemoveResult | None:
+    if worktree_remover is None:
+        return None
+    result = worktree_remover(candidate)
+    if isawaitable(result):
+        result = await result
+    return result
+
+
+async def _release_gc_reservations(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_ids: list[str],
+) -> dict[str, dict[str, object]]:
+    from awf.db.repositories import ResourceReservationRepository
+
+    summaries: dict[str, dict[str, object]] = {}
+    if not workspace_ids:
+        return summaries
+    for workspace_id in workspace_ids:
+        async with session_factory() as session:
+            repo = ResourceReservationRepository(session)
+            try:
+                released = await repo.release_active_for_workspace(workspace_id)
+                await session.commit()
+                summaries[workspace_id] = {
+                    "released_count": len(released),
+                    "reason_code": "TERMINAL_GC",
+                }
+            except Exception as exc:
+                await session.rollback()
+                summaries[workspace_id] = {
+                    "released_count": 0,
+                    "reason_code": "TERMINAL_GC",
+                    "error": str(exc),
+                }
+    return summaries
+
+
+def _delete_gc_path_outcome(
+    candidate: WorkspaceGCCandidate,
+    target: WorkspaceGCPath,
+    *,
+    work_dir: Path,
+) -> WorkspaceGCPathOutcome:
+    if not target.path.exists():
+        return WorkspaceGCPathOutcome(
+            workspace_id=candidate.workspace_id,
+            kind=target.kind,
+            path=target.path,
+            status="already_removed",
+            reason_code=PATH_ALREADY_REMOVED,
+            estimated_bytes=target.estimated_bytes,
+        )
+    deleted, error = _delete_gc_path(target, work_dir=work_dir)
+    if deleted:
+        return WorkspaceGCPathOutcome(
+            workspace_id=candidate.workspace_id,
+            kind=target.kind,
+            path=target.path,
+            status="deleted",
+            reason_code=PATH_DELETED,
+            deleted=True,
+            estimated_bytes=target.estimated_bytes,
+        )
+    return WorkspaceGCPathOutcome(
+        workspace_id=candidate.workspace_id,
+        kind=target.kind,
+        path=target.path,
+        status="failed",
+        reason_code=PATH_DELETE_FAILED,
+        error=error or "path was not deleted",
+        estimated_bytes=target.estimated_bytes,
+    )
+
+
+def _gc_result(
+    *,
+    plan: WorkspaceGCPlan,
+    dry_run: bool,
+    deleted_paths: list[Path],
+    delete_errors: list[WorkspaceGCDeleteError],
+    path_outcomes: list[WorkspaceGCPathOutcome],
+    compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
+    secret_lease_revocations: dict[str, dict[str, object]] | None = None,
+    worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] | None = None,
+    reservation_releases: dict[str, dict[str, object]] | None = None,
+) -> WorkspaceGCResult:
+    lease_revocations = secret_lease_revocations or {}
+    wt_removes = worktree_removes or {}
+    res_releases = reservation_releases or {}
+    if dry_run:
+        return WorkspaceGCResult(
+            plan=plan,
+            dry_run=True,
+            deleted_paths=deleted_paths,
+            delete_errors=delete_errors,
+            path_outcomes=path_outcomes,
+            compose_teardowns=compose_teardowns,
+            secret_lease_revocations=lease_revocations,
+            worktree_removes=wt_removes,
+            reservation_releases=res_releases,
+            status="dry_run",
+            reason_code=CLEANUP_DRY_RUN,
+        )
+    has_errors = bool(delete_errors) or any(
+        v.get("error") is not None for v in res_releases.values()
+    )
+    status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
+    return WorkspaceGCResult(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=deleted_paths,
+        delete_errors=delete_errors,
+        path_outcomes=path_outcomes,
+        compose_teardowns=compose_teardowns,
+        secret_lease_revocations=lease_revocations,
+        worktree_removes=wt_removes,
+        reservation_releases=res_releases,
+        status=status,
+        reason_code=(CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED),
+    )
+
+
+def _candidate_for_workspace(
+    workspace: Workspace,
+    *,
+    work_dir: Path,
+    now: datetime,
+    reason_code: str,
+) -> WorkspaceGCCandidate:
+    updated_at = _to_utc(workspace.updated_at)
+    age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
+    worktree_path = work_dir / "git" / "worktrees" / workspace.id
+    compose_path = (
+        Path(workspace.compose_file_path).expanduser().parent
+        if workspace.compose_file_path
+        else work_dir / "compose" / workspace.id
+    )
+    auth_path = work_dir / "auth" / workspace.id
+    return WorkspaceGCCandidate(
+        workspace_id=workspace.id,
+        status=workspace.status,
+        updated_at=updated_at,
+        age_hours=age_hours,
+        reason_code=reason_code,
+        worktree=_gc_path("worktree", worktree_path),
+        compose=_gc_path("compose", compose_path),
+        auth=_gc_path("auth", auth_path),
+        compose_project_name=workspace.compose_project_name,
+        compose_file_path=workspace.compose_file_path,
+    )
+
+
+def _classify_workspace_for_gc(
+    workspace: Workspace,
+    *,
+    work_dir: Path,
+    now: datetime,
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
+    if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
+        return None
+    if workspace.status not in TERMINAL_WORKSPACE_GC_STATUSES:
+        return None
+
+    updated_at = _to_utc(workspace.updated_at)
+    age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
+    if not cleanup_enabled:
+        return WorkspaceGCPreserved(
+            workspace_id=workspace.id,
+            status=workspace.status,
+            updated_at=updated_at,
+            age_hours=age_hours,
+            reason_code=WORKSPACE_CLEANUP_DISABLED,
+        )
+
+    if default_policy:
+        if workspace.status == WorkspaceStatus.failed.value:
+            if _failed_terminal_workspace_has_no_work(workspace):
+                if updated_at <= cutoff_at:
+                    return _candidate_for_workspace(
+                        workspace,
+                        work_dir=work_dir,
+                        now=now,
+                        reason_code=FAILED_WORKSPACE_NO_WORK,
+                    )
+                return WorkspaceGCPreserved(
+                    workspace_id=workspace.id,
+                    status=workspace.status,
+                    updated_at=updated_at,
+                    age_hours=age_hours,
+                    reason_code=WORKSPACE_WITHIN_RETENTION,
+                )
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+            )
+        if workspace.status == "superseded":
+            if _failed_terminal_workspace_has_no_work(workspace):
+                if updated_at <= cutoff_at:
+                    return _candidate_for_workspace(
+                        workspace,
+                        work_dir=work_dir,
+                        now=now,
+                        reason_code=FAILED_WORKSPACE_NO_WORK,
+                    )
+                return WorkspaceGCPreserved(
+                    workspace_id=workspace.id,
+                    status=workspace.status,
+                    updated_at=updated_at,
+                    age_hours=age_hours,
+                    reason_code=WORKSPACE_WITHIN_RETENTION,
+                )
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+            )
+        if workspace.status != WorkspaceStatus.completed.value:
+            return None
+        if not _has_pr_metadata(workspace):
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=COMPLETED_WORKSPACE_WITHOUT_PR,
+            )
+        if not _pr_has_merged(workspace):
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=COMPLETED_PR_NOT_MERGED,
+            )
+        if updated_at > cutoff_at:
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=WORKSPACE_WITHIN_RETENTION,
+            )
+        return _candidate_for_workspace(
+            workspace,
+            work_dir=work_dir,
+            now=now,
+            reason_code=COMPLETED_PR_RETENTION_EXPIRED,
+        )
+
+    if updated_at > cutoff_at:
+        return WorkspaceGCPreserved(
+            workspace_id=workspace.id,
+            status=workspace.status,
+            updated_at=updated_at,
+            age_hours=age_hours,
+            reason_code=WORKSPACE_WITHIN_RETENTION,
+        )
+    if (
+        workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
+        and workspace.compose_project_name is not None
+        and not _failed_terminal_workspace_has_no_work(workspace)
+    ):
+        return WorkspaceGCPreserved(
+            workspace_id=workspace.id,
+            status=workspace.status,
+            updated_at=updated_at,
+            age_hours=age_hours,
+            reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+        )
+
+    if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
+        return _candidate_for_workspace(
+            workspace,
+            work_dir=work_dir,
+            now=now,
+            reason_code=FAILED_WORKSPACE_NO_WORK,
+        )
+
+    reason_code = (
+        COMPLETED_PR_RETENTION_EXPIRED
+        if workspace.status == WorkspaceStatus.completed.value and _has_pr_metadata(workspace)
+        else TERMINAL_WORKSPACE_RETENTION_EXPIRED
+    )
+    return _candidate_for_workspace(
+        workspace,
+        work_dir=work_dir,
+        now=now,
+        reason_code=reason_code,
+    )
+
+
+def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
+    """Return True when a failed terminal workspace has no active agent work."""
+
+    compose_project_name = _compose_project_name_for_workspace(workspace)
+    if compose_project_name is None:
+        return False
+    try:
+        snapshot = asyncio.run(_RUNTIME_INSPECTOR.inspect(compose_project_name))
+    except Exception:
+        return False
+    return _snapshot_has_no_work(snapshot)
+
+
+def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:
+    return workspace.compose_project_name or None
+
+
+def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
+    if snapshot.stack_state == "unavailable":
+        return False
+    if not snapshot.services:
+        return False
+
+    agent_services = [
+        service for service in snapshot.services if (service.name or "").lower() == "agent"
+    ]
+    if not agent_services:
+        return False
+    return _agent_service_has_no_work(agent_services[0])
+
+
+def _agent_service_has_no_work(service: RuntimeService) -> bool:
+    if (service.state or "").lower() != "running":
+        return False
+    return bool(_container_command_is_idle(service.command))
+
+
+def _container_command_is_idle(command: str | None) -> bool:
+    if not command:
+        return False
+    command_text = command.lower()
+    return any(pattern in command_text for pattern in _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS)
+
+
+def _has_pr_metadata(workspace: Workspace) -> bool:
+    return bool(workspace.pr_url or workspace.pr_number)
+
+
+def _pr_has_merged(workspace: Workspace) -> bool:
+    return workspace.pr_merge_sha is not None
+
+
+def _path_payload_for_candidate(
+    item: WorkspaceGCPath,
+    *,
+    deleted_paths: set[Path],
+    delete_errors: dict[tuple[str, Path], str],
+    path_outcomes: dict[tuple[str, Path], WorkspaceGCPathOutcome],
+) -> dict[str, object]:
+    outcome = path_outcomes.get((item.kind, item.path))
+    if outcome is not None:
+        return item.to_dict(
+            deleted=outcome.deleted,
+            error=outcome.error,
+            status=outcome.status,
+            reason_code=outcome.reason_code,
+        )
+    error = delete_errors.get((item.kind, item.path))
+    return item.to_dict(
+        deleted=item.path in deleted_paths,
+        error=error,
+        status="failed" if error else None,
+        reason_code=PATH_DELETE_FAILED if error else None,
+    )
+
+
+def _gc_path(kind: str, path: Path) -> WorkspaceGCPath:
+    return WorkspaceGCPath(
+        kind=kind,
+        path=path,
+        exists=path.exists(),
+        estimated_bytes=_estimate_bytes(path),
+    )
+
+
+def _estimate_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _delete_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> tuple[bool, str | None]:
+    if not target.path.exists():
+        return False, None
+    if not _is_safe_gc_path(target, work_dir=work_dir):
+        return False, "path is outside the expected service GC roots"
+    if target.path.is_symlink():
+        return False, "refusing to delete symlink"
+    if not target.path.is_dir():
+        return False, "refusing to delete non-directory path"
+    try:
+        shutil.rmtree(target.path)
+    except OSError as exc:
+        return False, str(exc)
+    return True, None
+
+
+def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
+    roots = {
+        "worktree": work_dir / "git" / "worktrees",
+        "compose": work_dir / "compose",
+        "auth": work_dir / "auth",
+    }
+    root = roots.get(target.kind)
+    if root is None:
+        return False
+    try:
+        target.path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _normalize_statuses(
+    statuses: Iterable[WorkspaceStatus | str] | None,
+) -> set[str] | None:
+    if statuses is None:
+        return None
+    return {
+        status.value if isinstance(status, WorkspaceStatus) else str(status) for status in statuses
+    }
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

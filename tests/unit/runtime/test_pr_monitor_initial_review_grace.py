@@ -83,6 +83,40 @@ def test_initial_grace_uses_remaining_time_not_a_fresh_window() -> None:
 
 
 @pytest.mark.unit
+def test_existing_pr_scoped_started_key_survives_remonitor_reset() -> None:
+    state = MonitorState(started_at=1_500)
+    state.mark_addressed(_initial_review_grace_started_key(42), "1000.000000")
+
+    wait = _initial_review_grace_wait_seconds(
+        state,
+        pr_number=42,
+        now=1_500,
+        grace_seconds=900,
+        poll_interval_seconds=600,
+    )
+
+    assert wait == 400
+    assert state.threads_addressed_ids[_initial_review_grace_started_key(42)] == "1000.000000"
+
+
+@pytest.mark.unit
+def test_existing_pr_scoped_done_key_survives_remonitor_reset() -> None:
+    state = MonitorState(started_at=1_500)
+    state.mark_addressed(_initial_review_grace_done_key(42), "elapsed")
+
+    wait = _initial_review_grace_wait_seconds(
+        state,
+        pr_number=42,
+        now=1_500,
+        grace_seconds=900,
+        poll_interval_seconds=60,
+    )
+
+    assert wait == 0
+    assert _initial_review_grace_started_key(42) not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 def test_grace_does_not_restart_after_it_elapsed_once() -> None:
     state = MonitorState(started_at=1_000)
     first = _initial_review_grace_wait_seconds(

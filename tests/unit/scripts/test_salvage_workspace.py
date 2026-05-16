@@ -6,20 +6,22 @@ from CodeRabbit PR #2 feedback) and the ``_main`` CLI entry.
 
 from __future__ import annotations
 
+import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import base as _adapter_base
 from awf.adapters import registry as _registry  # noqa: F401 - populates registry
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_session_factory
+from awf.db.session import make_engine, make_session_factory
 from scripts import salvage_workspace
 from scripts.salvage_workspace import _install_noop_adapter_factory, _make_noop_factory
+from tests.postgres import postgres_test_url
 
 
 class TestClosureCapture:
@@ -55,6 +57,21 @@ class TestClosureCapture:
         assert claude_factory().name == AgentRuntime.claude_code
 
     @pytest.mark.unit
+    def test_factory_accepts_full_adapter_constructor_surface(self) -> None:
+        factory = _make_noop_factory(AgentRuntime.codex)
+
+        adapter = factory(
+            runner=None,
+            default_model=None,
+            default_effort=None,
+            log_store=None,
+            agent_wall_timeout_seconds=7200,
+            agent_idle_timeout_seconds=3600,
+        )
+
+        assert adapter.name == AgentRuntime.codex
+
+    @pytest.mark.unit
     async def test_factory_run_is_noop_with_success_message(self) -> None:
         """The adapter's ``run`` coroutine is what actually skips the
         agent. Must return exit 0 with the sentinel stdout so the
@@ -70,7 +87,7 @@ class TestClosureCapture:
         assert result.returncode == 0
         assert "skipping agent run" in result.stdout
         # _cli_args returns empty — this adapter never launches a CLI.
-        assert adapter._cli_args(prompt="x", model=None) == []
+        assert adapter._cli_args(model=None) == []
 
 
 # ── _main CLI ───────────────────────────────────────────────────────────────
@@ -105,10 +122,15 @@ class _FakeExecutor:
             await s.commit()
 
 
-async def _seed_salvage_workspace(db_path: Path, *, initial_status: str) -> str:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+@pytest.fixture(autouse=True)
+async def database_url(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
+    async with postgres_test_url() as url:
+        monkeypatch.setenv("AWF_DATABASE_URL", url)
+        yield url
+
+
+async def _seed_salvage_workspace(*, initial_status: str) -> str:
+    engine = make_engine(os.environ["AWF_DATABASE_URL"])
     factory = make_session_factory(engine)
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -146,7 +168,8 @@ class TestSalvageMain:
     async def test_happy_path_returns_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="failed")
+        ws_id = await _seed_salvage_workspace(initial_status="failed")
+        original_registry = dict(_adapter_base._REGISTRY)
 
         def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
             return _FakeExecutor(session_factory=kwargs["session_factory"])
@@ -158,8 +181,13 @@ class TestSalvageMain:
         monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *_a, **_k: object())
         monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
 
-        rc = await salvage_workspace._main(tmp_path, ws_id)
-        assert rc == 0
+        try:
+            rc = await salvage_workspace._main(tmp_path, ws_id)
+            assert rc == 0
+            assert original_registry == _adapter_base._REGISTRY
+        finally:
+            _adapter_base._REGISTRY.clear()
+            _adapter_base._REGISTRY.update(original_registry)
 
     @pytest.mark.unit
     async def test_missing_db_returns_two(self, tmp_path: Path) -> None:
@@ -168,7 +196,7 @@ class TestSalvageMain:
 
     @pytest.mark.unit
     async def test_missing_workspace_returns_two(self, tmp_path: Path) -> None:
-        await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="ready")
+        await _seed_salvage_workspace(initial_status="ready")
         rc = await salvage_workspace._main(tmp_path, "ws_nonexistent")
         assert rc == 2
 
@@ -178,7 +206,7 @@ class TestSalvageMain:
     ) -> None:
         """When the workspace is already ``ready`` the reset branch is
         skipped — the executor just picks it up."""
-        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="ready")
+        ws_id = await _seed_salvage_workspace(initial_status="ready")
         monkeypatch.setattr(
             salvage_workspace,
             "WorkspaceExecutor",
@@ -195,7 +223,7 @@ class TestSalvageMain:
     async def test_executor_failed_returns_one(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="failed")
+        ws_id = await _seed_salvage_workspace(initial_status="failed")
         monkeypatch.setattr(
             salvage_workspace,
             "WorkspaceExecutor",
@@ -221,7 +249,7 @@ class TestNoOpAdapterDirect:
         refactor doesn't silently remove a public API."""
         adapter = salvage_workspace._NoOpAdapter(runtime=AgentRuntime.codex)
         assert adapter.name == AgentRuntime.codex
-        assert adapter._cli_args(prompt="x", model=None) == []
+        assert adapter._cli_args(model=None) == []
         result = await adapter.run(
             compose_project="p",
             compose_file=Path("/tmp/c.yml"),

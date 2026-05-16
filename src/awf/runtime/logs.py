@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
+from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceLogStreamRepository
 
 
@@ -70,6 +72,27 @@ class LogBroadcaster:
         offset: int,
         data: str,
     ) -> None:
+        redacted_data = await asyncio.to_thread(redact_secrets, data)
+        self.publish_redacted(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source=source,
+            fd=fd,
+            offset=offset,
+            data=redacted_data,
+        )
+
+    def publish_redacted(
+        self,
+        *,
+        workspace_id: str,
+        stream_id: str,
+        source: str,
+        fd: str,
+        offset: int,
+        data: str,
+    ) -> None:
+        """Publish data that has already passed through redact_secrets."""
         frame = LogFrame(
             seq=next(self._seq),
             workspace_id=workspace_id,
@@ -86,6 +109,21 @@ class LogBroadcaster:
 
 
 LOG_BROADCASTER = LogBroadcaster()
+
+
+class _ComposeLogsProcess(Protocol):
+    stdout: asyncio.StreamReader | None
+    stderr: asyncio.StreamReader | None
+    returncode: int | None
+
+    def terminate(self) -> None: ...  # pragma: no cover - Protocol method declaration only.
+
+    def kill(self) -> None: ...  # pragma: no cover - Protocol method declaration only.
+
+    async def wait(self) -> int: ...  # pragma: no cover - Protocol method declaration only.
+
+
+_ComposeLogsProcessFactory = Callable[..., Awaitable[_ComposeLogsProcess]]
 
 
 class LogStore:
@@ -160,6 +198,46 @@ class LogStore:
             broadcaster=self._broadcaster,
         )
 
+    async def append_to_stream(
+        self,
+        *,
+        workspace_id: str,
+        stream_id: str,
+        source: str,
+        fd: str,
+        data: str,
+        close_after_append: bool = False,
+    ) -> None:
+        """Append data to an already indexed stream without opening new sinks."""
+        if not data:
+            return
+        stream_path = self._root / workspace_id / f"{_safe_stream_id(stream_id)}.log"
+        stream_path.parent.mkdir(parents=True, exist_ok=True)
+        stream_path.touch(exist_ok=True)
+        redacted_data = await asyncio.to_thread(redact_secrets, data)
+        encoded = redacted_data.encode("utf-8")
+        offset = await asyncio.to_thread(_append_log_bytes, stream_path, encoded)
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                repo = WorkspaceLogStreamRepository(session)
+                await repo.append_metadata(
+                    workspace_id=workspace_id,
+                    stream_id=stream_id,
+                    byte_delta=len(encoded),
+                    line_delta=redacted_data.count("\n"),
+                )
+                if close_after_append:
+                    await repo.close(workspace_id=workspace_id, stream_id=stream_id)
+                await session.commit()
+        self._broadcaster.publish_redacted(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source=source,
+            fd=fd,
+            offset=offset,
+            data=redacted_data,
+        )
+
     async def read(
         self,
         *,
@@ -167,7 +245,30 @@ class LogStore:
         offset: int,
         limit_bytes: int,
     ) -> tuple[str, int, bool]:
-        return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
+        return await read_log_chunk(
+            path=self._resolve_read_path(path),
+            offset=offset,
+            limit_bytes=limit_bytes,
+        )
+
+    def _resolve_read_path(self, path: Path) -> Path:
+        read_path = path if path.is_absolute() else self._root / path
+        root = self._root.resolve()
+        resolved = read_path.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("LogStore.read path must be within root") from None
+        return resolved
+
+
+async def read_log_chunk(
+    *,
+    path: Path,
+    offset: int,
+    limit_bytes: int,
+) -> tuple[str, int, bool]:
+    return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
 
 
 def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int, bool]:
@@ -188,6 +289,8 @@ async def stream_compose_service_logs(
     compose_project: str,
     compose_file: Path,
     log_store: LogStore,
+    process_factory: _ComposeLogsProcessFactory | None = None,
+    terminate_timeout_seconds: float = 5,
 ) -> None:
     """Tail compose service logs into durable workspace streams until cancelled."""
     sinks = await log_store.open_command_streams(
@@ -196,12 +299,13 @@ async def stream_compose_service_logs(
         source="service",
         name="Compose services",
     )
-    proc = await asyncio.create_subprocess_exec(
+    factory = process_factory or cast(_ComposeLogsProcessFactory, asyncio.create_subprocess_exec)
+    proc = await factory(
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         compose_project,
-        "--file",
+        "-f",
         str(compose_file),
         "logs",
         "--follow",
@@ -230,7 +334,7 @@ async def stream_compose_service_logs(
         if proc.returncode is None:
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=terminate_timeout_seconds)
             except TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -249,39 +353,72 @@ class WorkspaceLogSink:
     session_factory: async_sessionmaker[AsyncSession] | None
     broadcaster: LogBroadcaster
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _pending_data: str = field(default="", init=False, repr=False)
 
     async def write(self, data: str) -> None:
         if not data:
             return
-        encoded = data.encode("utf-8")
+        frame: tuple[int, str] | None = None
         async with self._write_lock:
-            offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
+            self._pending_data += data
+            raw_data = self._pop_complete_lines_locked()
+            if raw_data:
+                frame = await self._append_redacted_locked(raw_data)
+        if frame is not None:
+            await self._publish_frame(frame)
+
+    async def close(self) -> None:
+        frame: tuple[int, str] | None = None
+        async with self._write_lock:
+            if self._pending_data:
+                raw_data = self._pending_data
+                self._pending_data = ""
+                frame = await self._append_redacted_locked(raw_data)
             if self.session_factory is not None:
                 async with self.session_factory() as session:
                     repo = WorkspaceLogStreamRepository(session)
-                    await repo.append_metadata(
-                        workspace_id=self.workspace_id,
-                        stream_id=self.stream_id,
-                        byte_delta=len(encoded),
-                        line_delta=data.count("\n"),
-                    )
+                    await repo.close(workspace_id=self.workspace_id, stream_id=self.stream_id)
                     await session.commit()
-        await self.broadcaster.publish(
+        if frame is not None:
+            await self._publish_frame(frame)
+
+    def _pop_complete_lines_locked(self) -> str:
+        # Hold partial lines so token prefixes split across writes are redacted
+        # before any bytes are persisted or streamed.
+        last_newline = self._pending_data.rfind("\n")
+        if last_newline == -1:
+            return ""
+        split_at = last_newline + 1
+        raw_data = self._pending_data[:split_at]
+        self._pending_data = self._pending_data[split_at:]
+        return raw_data
+
+    async def _append_redacted_locked(self, raw_data: str) -> tuple[int, str]:
+        redacted_data = await asyncio.to_thread(redact_secrets, raw_data)
+        encoded = redacted_data.encode("utf-8")
+        offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
+        if self.session_factory is not None:
+            async with self.session_factory() as session:
+                repo = WorkspaceLogStreamRepository(session)
+                await repo.append_metadata(
+                    workspace_id=self.workspace_id,
+                    stream_id=self.stream_id,
+                    byte_delta=len(encoded),
+                    line_delta=redacted_data.count("\n"),
+                )
+                await session.commit()
+        return offset, redacted_data
+
+    async def _publish_frame(self, frame: tuple[int, str]) -> None:
+        offset, redacted_data = frame
+        self.broadcaster.publish_redacted(
             workspace_id=self.workspace_id,
             stream_id=self.stream_id,
             source=self.source,
             fd=self.fd,
             offset=offset,
-            data=data,
+            data=redacted_data,
         )
-
-    async def close(self) -> None:
-        if self.session_factory is None:
-            return
-        async with self.session_factory() as session:
-            repo = WorkspaceLogStreamRepository(session)
-            await repo.close(workspace_id=self.workspace_id, stream_id=self.stream_id)
-            await session.commit()
 
 
 def _append_log_bytes(path: Path, data: bytes) -> int:

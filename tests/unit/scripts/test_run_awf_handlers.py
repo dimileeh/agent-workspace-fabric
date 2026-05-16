@@ -35,12 +35,12 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
+from tests.postgres import postgres_test_engine, postgres_test_url
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -184,19 +184,19 @@ class _FakeRunner:
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'handlers.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
-async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -> None:
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+@pytest.fixture
+async def database_url(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
+    async with postgres_test_url() as url:
+        monkeypatch.setenv("AWF_DATABASE_URL", url)
+        yield url
+
+
+async def _seed_workspace_db(database_url: str, workspace_id: str = "ws_existing") -> None:
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
     try:
         async with factory() as session:
@@ -218,8 +218,8 @@ async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -
         await engine.dispose()
 
 
-async def _workspace_exists(db_path: Path, workspace_id: str = "ws_existing") -> bool:
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+async def _workspace_exists(database_url: str, workspace_id: str = "ws_existing") -> bool:
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
     try:
         async with factory() as session:
@@ -262,6 +262,11 @@ def patch_handlers(
 
     monkeypatch.setattr(run_awf, "ComposeManager", _compose_ctor)
     monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
+
+    async def _noop_stream_service_logs(**_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(run_awf, "_stream_service_logs_best_effort", _noop_stream_service_logs)
 
     executors: list[_FakeExecutor] = []
     monitors: list[_FakeMonitor] = []
@@ -378,6 +383,9 @@ class TestFeatureBranchPrHandler:
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.base_commit == "a" * 40
             assert ws.compose_project_name == f"awf_{ws_id}"
+            assert ws.compose_file_path == str(
+                tmp_path / "compose" / "compose" / ws_id / "compose.yml"
+            )
 
         # The FakeExecutor was constructed exactly once and drove one
         # workspace to completion.
@@ -561,6 +569,8 @@ class TestSyncReleasePrHandler:
             )
             assert ws.pr_number == 278
             assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/278"
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert isinstance(kwargs["log_store"], run_awf.LogStore)
 
     @pytest.mark.unit
     async def test_missing_pr_number_raises(
@@ -674,6 +684,8 @@ class TestSyncFeaturePrHandler:
                 "sync_feature_pr must push to the PR's head branch"
             )
             assert ws.pr_number == 277
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert isinstance(kwargs["log_store"], run_awf.LogStore)
 
     @pytest.mark.unit
     async def test_missing_source_branch_raises(
@@ -1038,18 +1050,12 @@ class TestMainEntry:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        database_url: str,
     ) -> None:
-        """A reused work dir must not silently replace ``awf.db``.
-
-        The API process may have this SQLite file open while an operator
-        launches another ``run_awf.py`` against the same work dir. If the
-        launcher unlinks the file, the API keeps serving the old anonymous
-        inode while the new run writes to a fresh DB path.
-        """
+        """A reused service database must preserve existing control-plane rows."""
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        db_path = work_dir / "awf.db"
-        await _seed_workspace_db(db_path)
+        await _seed_workspace_db(database_url)
 
         config = tmp_path / "tasks.json"
         config.write_text(
@@ -1085,18 +1091,18 @@ class TestMainEntry:
         await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
 
         assert saw_existing_row == [True]
-        assert await _workspace_exists(db_path)
+        assert await _workspace_exists(database_url)
 
     @pytest.mark.unit
-    async def test_main_resets_db_only_when_explicitly_requested(
+    async def test_main_reset_state_is_deprecated_noop(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        database_url: str,
     ) -> None:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        db_path = work_dir / "awf.db"
-        await _seed_workspace_db(db_path)
+        await _seed_workspace_db(database_url)
 
         config = tmp_path / "tasks.json"
         config.write_text("[]")
@@ -1116,7 +1122,7 @@ class TestMainEntry:
             reset_state=True,
         )
 
-        assert not await _workspace_exists(db_path)
+        assert await _workspace_exists(database_url)
 
 
 class TestBuildAuthMounts:
@@ -1126,6 +1132,8 @@ class TestBuildAuthMounts:
         (tmp_path / ".claude").mkdir()
         # .claude.json exists as a file
         (tmp_path / ".claude.json").write_text("{}")
+        (tmp_path / ".config" / "opencode").mkdir(parents=True)
+        (tmp_path / ".ollama").mkdir()
         (tmp_path / ".config" / "gh").mkdir(parents=True)
         (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
@@ -1138,6 +1146,8 @@ class TestBuildAuthMounts:
         assert "/home/agent/.config/gh" in targets
         assert "/home/agent/.config/gcloud" in targets
         assert "/home/agent/.gitconfig" in targets
+        assert "/home/agent/.config/opencode" not in targets
+        assert "/home/agent/.ollama" not in targets
         assert "/home/agent/.gemini" not in targets
         assert "/home/agent/.ssh" not in targets
 
@@ -1150,6 +1160,8 @@ class TestBuildAuthMounts:
         assertion."""
         for d in (".codex", ".claude", ".gemini"):
             (tmp_path / d).mkdir()
+        (tmp_path / ".config" / "opencode").mkdir(parents=True)
+        (tmp_path / ".ollama").mkdir()
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
         (tmp_path / ".config" / "gcloud").mkdir(parents=True)
@@ -1159,6 +1171,8 @@ class TestBuildAuthMounts:
         mounts = run_awf._build_auth_mounts(tmp_path)
         by_target = {m.target: m for m in mounts}
         assert "/home/agent/.codex" not in by_target
+        assert "/home/agent/.config/opencode" not in by_target
+        assert "/home/agent/.ollama" not in by_target
         assert by_target["/home/agent/.claude"].mode == "rw"
         assert by_target["/home/agent/.gemini"].mode == "rw"
         assert by_target["/home/agent/.config/gh"].mode == "ro"
@@ -1196,7 +1210,7 @@ class TestBuildAuthMounts:
         (host_codex / "auth.json").write_text('{"token": "redacted"}')
         (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
         (host_codex / "installation_id").write_text("install-123")
-        (host_codex / "logs_2.sqlite").write_text("do not copy")
+        (host_codex / "logs_2.db").write_text("do not copy")
         (host_codex / "sessions").mkdir()
         (host_codex / "rules").mkdir()
         (host_codex / "rules" / "default.rules").write_text("rule")
@@ -1222,7 +1236,7 @@ class TestBuildAuthMounts:
         assert (codex_home / "config.toml").read_text() == "model = 'gpt-5.5'\n"
         assert (codex_home / "installation_id").read_text() == "install-123"
         assert (codex_home / "rules" / "default.rules").read_text() == "rule"
-        assert not (codex_home / "logs_2.sqlite").exists()
+        assert not (codex_home / "logs_2.db").exists()
         assert not (codex_home / "sessions").exists()
         assert mounts[1] == base_mount
 
@@ -1245,6 +1259,51 @@ class TestBuildAuthMounts:
 
         assert mounts == (base_mount,)
 
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_seed_isolated_opencode_and_ollama_auth(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        host_home = tmp_path / "host"
+        host_opencode = host_home / ".config" / "opencode"
+        host_ollama = host_home / ".ollama"
+        host_opencode.mkdir(parents=True)
+        host_ollama.mkdir(parents=True)
+        (host_opencode / "opencode.json").write_text('{"model": "initial"}\n')
+        (host_ollama / "config.json").write_text('{"integrations": {}}\n')
+        (host_ollama / "id_ed25519").write_text("private-key\n")
+        (host_ollama / "models").mkdir()
+        (host_ollama / "models" / "large-blob").write_text("do not copy\n")
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        by_target = {m.target: m for m in mounts}
+        opencode_mount = by_target["/home/agent/.config/opencode"]
+        ollama_mount = by_target["/home/agent/.ollama"]
+        opencode_home = Path(opencode_mount.source)
+        ollama_home = Path(ollama_mount.source)
+        assert opencode_mount.mode == "rw"
+        assert ollama_mount.mode == "rw"
+        assert opencode_home == (
+            tmp_path / "work" / "auth" / "ws_test" / "opencode" / ".config" / "opencode"
+        )
+        assert ollama_home == tmp_path / "work" / "auth" / "ws_test" / "ollama" / ".ollama"
+        assert (opencode_home / "opencode.json").read_text() == '{"model": "initial"}\n'
+        assert (ollama_home / "config.json").read_text() == '{"integrations": {}}\n'
+        assert (ollama_home / "id_ed25519").read_text() == "private-key\n"
+        assert not (ollama_home / "models").exists()
+        assert by_target["/home/agent/.claude"] == base_mount
+
 
 class TestAgentEnvironmentWithHostAuth:
     @pytest.mark.unit
@@ -1252,15 +1311,40 @@ class TestAgentEnvironmentWithHostAuth:
         env = run_awf._agent_environment_with_host_auth(
             (("PYTHONUNBUFFERED", "1"),),
             host_env={
+                "OPENAI_API_KEY": "secret-codex",
                 "ANTHROPIC_API_KEY": "secret-anthropic",
                 "GEMINI_API_KEY": "secret-gemini",
+                "OLLAMA_API_KEY": "secret-ollama",
+                "AWF_GITHUB_TOKEN": "ghp_raw_secret",
             },
         )
 
         assert ("PYTHONUNBUFFERED", "1") in env
+        assert ("OPENAI_API_KEY", "${OPENAI_API_KEY}") in env
         assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
         assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
+        assert ("OLLAMA_API_KEY", "${OLLAMA_API_KEY}") in env
+        assert ("GH_TOKEN", "${AWF_GITHUB_TOKEN}") in env
+        assert ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}") in env
+        assert ("OPENAI_API_KEY", "secret-codex") not in env
         assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
+        assert ("OLLAMA_API_KEY", "secret-ollama") not in env
+        assert ("GH_TOKEN", "ghp_raw_secret") not in env
+        assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
+
+    @pytest.mark.unit
+    def test_accepts_standard_gh_token_as_compose_placeholder(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (),
+            host_env={
+                "GH_TOKEN": "ghp_raw_secret",
+            },
+        )
+
+        assert ("GH_TOKEN", "${GH_TOKEN}") in env
+        assert ("GITHUB_TOKEN", "${GH_TOKEN}") in env
+        assert ("GH_TOKEN", "ghp_raw_secret") not in env
+        assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
 
     @pytest.mark.unit
     def test_profile_env_wins_over_host_passthrough(self) -> None:

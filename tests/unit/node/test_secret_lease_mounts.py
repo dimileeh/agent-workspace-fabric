@@ -1,0 +1,713 @@
+"""Local profile-declared secret lease resolution tests."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from awf.node.compose_manager import AuthMount
+from awf.node.secret_mounts import (
+    LocalSecretLeaseMountResolver,
+    SecretLeaseResolutionError,
+)
+from awf.profiles.models import WorkspaceProfile
+
+
+def _profile(*secrets: dict[str, object]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "lease-profile",
+            "secrets": list(secrets),
+        }
+    )
+
+
+def _resolver(
+    tmp_path: Path,
+    *,
+    host_env: dict[str, str] | None = None,
+) -> LocalSecretLeaseMountResolver:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir(exist_ok=True)
+    return LocalSecretLeaseMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        host_env=host_env or {},
+    )
+
+
+@pytest.mark.unit
+def test_env_provider_exposes_placeholder_without_secret_value(tmp_path: Path) -> None:
+    raw_secret = "sk-live-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": raw_secret})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert resolution.mounts == ()
+    rendered = json.dumps(
+        {
+            "resolution": repr(resolution),
+            "metadata": resolution.metadata,
+        },
+        default=str,
+    )
+    assert raw_secret not in rendered
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["mount_count"] == 0
+    assert resolution.metadata["providers"] == ["env"]
+    assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
+
+
+@pytest.mark.unit
+def test_resolution_metadata_cannot_be_mutated_after_creation(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "optional-openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+                "required": False,
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    with pytest.raises(TypeError):
+        resolution.metadata["extra"] = "injected"
+    with pytest.raises(AttributeError):
+        resolution.metadata["providers"].append("injected")
+    with pytest.raises(TypeError):
+        resolution.metadata["omitted_optional"][0]["secret_name"] = "changed"
+
+
+@pytest.mark.unit
+def test_github_provider_prefers_awf_token_and_exposes_standard_placeholders(
+    tmp_path: Path,
+) -> None:
+    raw_secret = "ghp_do_not_render"
+    resolver = _resolver(
+        tmp_path,
+        host_env={
+            "AWF_GITHUB_TOKEN": raw_secret,
+            "GH_TOKEN": "lower-priority-token",
+            "GITHUB_TOKEN": "lowest-priority-token",
+        },
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "github",
+                "kind": "env",
+                "target": "GH_TOKEN",
+                "provider": "github",
+                "ref": "token",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (
+        ("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),
+        ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+    )
+    rendered = json.dumps(
+        {
+            "resolution": repr(resolution),
+            "metadata": resolution.metadata,
+        },
+        default=str,
+    )
+    assert raw_secret not in rendered
+    assert "lower-priority-token" not in rendered
+    assert resolution.satisfied_legacy_targets == frozenset()
+    assert resolution.satisfied_legacy_providers == frozenset({"github"})
+
+
+@pytest.mark.unit
+def test_github_provider_rejects_unrelated_env_target_without_secret_value(
+    tmp_path: Path,
+) -> None:
+    raw_secret = "ghp_do_not_render"
+    resolver = _resolver(tmp_path, host_env={"AWF_GITHUB_TOKEN": raw_secret})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "github",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "github",
+                    "ref": "token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_TARGET_MISMATCH"
+    assert raised.value.target == "OPENAI_API_KEY"
+    assert raw_secret not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_local_file_provider_produces_exact_read_only_mount(tmp_path: Path) -> None:
+    secret_file = tmp_path / "credentials.json"
+    secret_file.write_text('{"token": "do-not-render"}\n', encoding="utf-8")
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "gcp-credentials",
+                "kind": "mount",
+                "target": "/run/awf/secrets/gcp/credentials.json",
+                "provider": "host-file",
+                "ref": str(secret_file),
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.mounts == (
+        AuthMount(
+            source=str(secret_file),
+            target="/run/awf/secrets/gcp/credentials.json",
+            mode="ro",
+        ),
+    )
+    assert resolution.environment == ()
+    assert "do-not-render" not in json.dumps(resolution.metadata, default=str)
+    assert resolution.metadata["mount_count"] == 1
+    assert resolution.metadata["targets"] == ["/run/awf/secrets/gcp/credentials.json"]
+
+
+@pytest.mark.unit
+def test_local_file_provider_rejects_existing_directory_source(tmp_path: Path) -> None:
+    secret_directory = tmp_path / "credentials.d"
+    secret_directory.mkdir()
+    resolver = _resolver(tmp_path)
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "gcp-credentials",
+                    "kind": "mount",
+                    "target": "/run/awf/secrets/gcp/credentials.json",
+                    "provider": "host-file",
+                    "ref": str(secret_directory),
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_INVALID"
+    assert str(secret_directory) not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_local_auth_provider_mounts_known_read_only_host_auth_path(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    gh_config = host_home / ".config" / "gh"
+    gh_config.mkdir(parents=True)
+    resolver = LocalSecretLeaseMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        host_env={},
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "gh-config",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": ".config/gh",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.mounts == (
+        AuthMount(
+            source=str(gh_config),
+            target="/home/agent/.config/gh",
+            mode="ro",
+        ),
+    )
+    assert resolution.satisfied_legacy_targets == frozenset({"/home/agent/.config/gh"})
+    assert resolution.satisfied_legacy_providers == frozenset({"github"})
+    assert resolution.metadata["providers"] == ["local-auth"]
+    assert resolution.metadata["targets"] == ["/home/agent/.config/gh"]
+
+
+@pytest.mark.unit
+def test_optional_missing_source_is_omitted_with_sanitized_metadata(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "optional-openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+                "required": False,
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == ()
+    assert resolution.mounts == ()
+    assert resolution.metadata["omitted_optional_count"] == 1
+    assert resolution.metadata["omitted_optional"] == [
+        {
+            "secret_name": "optional-openai",
+            "provider": "env",
+            "target": "OPENAI_API_KEY",
+            "kind": "env",
+            "reason_code": "SECRET_LEASE_SOURCE_MISSING",
+        },
+    ]
+    assert "OPENAI_API_KEY" in json.dumps(resolution.metadata, default=str)
+    assert "env/OPENAI_API_KEY" not in json.dumps(resolution.metadata, default=str)
+
+
+@pytest.mark.unit
+def test_missing_required_source_raises_structured_error_without_ref(
+    tmp_path: Path,
+) -> None:
+    resolver = _resolver(tmp_path)
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "openai",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "env/OPENAI_API_KEY",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_MISSING"
+    assert raised.value.secret_name == "openai"
+    assert "env/OPENAI_API_KEY" not in str(raised.value)
+    assert "sk-" not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_unsupported_provider_raises_structured_error_without_ref(
+    tmp_path: Path,
+) -> None:
+    resolver = _resolver(tmp_path)
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "vault-token",
+                    "kind": "env",
+                    "target": "VAULT_TOKEN",
+                    "provider": "vault",
+                    "ref": "kv/data/prod/token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_PROVIDER_UNSUPPORTED"
+    assert raised.value.provider == "vault"
+    assert "kv/data/prod/token" not in str(raised.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ref", ["~", "${HOME}", "${AWF_HOST_HOME}", "/home/alice", "/Users/alice"])
+def test_broad_local_file_sources_are_rejected_without_echoing_ref(
+    tmp_path: Path,
+    ref: str,
+) -> None:
+    resolver = _resolver(tmp_path)
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "local-file",
+                    "kind": "mount",
+                    "target": "/run/awf/secrets/local-file",
+                    "provider": "local-file",
+                    "ref": ref,
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_TOO_BROAD"
+    assert ref not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_writable_declared_local_auth_mount_is_rejected(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    (host_home / ".config" / "gh").mkdir(parents=True)
+    resolver = LocalSecretLeaseMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        host_env={},
+    )
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "gh-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                    "mode": "rw",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_WRITABLE_UNSUPPORTED"
+
+
+@pytest.mark.unit
+def test_resolver_uses_os_environ_when_host_env_is_not_injected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-from-process-env")
+    resolver = LocalSecretLeaseMountResolver(
+        host_home=tmp_path / "host-home",
+        work_dir=tmp_path / "work",
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "OPENAI_API_KEY",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert "sk-live-from-process-env" not in repr(resolution)
+
+
+@pytest.mark.unit
+def test_unresolved_providerless_declarations_are_skipped_for_compatibility(
+    tmp_path: Path,
+) -> None:
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "metadata-only",
+                "kind": "env",
+                "target": "METADATA_ONLY",
+            },
+            {
+                "name": "ref-only",
+                "kind": "mount",
+                "target": "/run/awf/secrets/ref-only",
+                "ref": "metadata/ref",
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == ()
+    assert resolution.mounts == ()
+    assert resolution.metadata["skipped_unresolved_count"] == 2
+
+
+@pytest.mark.unit
+def test_duplicate_env_lease_placeholders_are_deduplicated(tmp_path: Path) -> None:
+    resolver = _resolver(
+        tmp_path,
+        host_env={"OPENAI_API_KEY": "sk-live-one", "CODEX_API_KEY": "sk-live-two"},
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "OPENAI_API_KEY",
+            },
+            {
+                "name": "codex",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "CODEX_API_KEY",
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert resolution.metadata["providers"] == ["env"]
+    assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("secret", "reason_code"),
+    [
+        (
+            {
+                "name": "env-as-mount",
+                "kind": "mount",
+                "target": "/run/awf/secrets/env",
+                "provider": "env",
+                "ref": "OPENAI_API_KEY",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "env-missing-ref",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "env-invalid-ref",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "not-valid/ref",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "github-as-mount",
+                "kind": "mount",
+                "target": "/run/awf/secrets/github",
+                "provider": "github",
+                "ref": "token",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "file-as-env",
+                "kind": "env",
+                "target": "FILE_SECRET",
+                "provider": "host-file",
+                "ref": "/var/lib/awf/secret",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "file-blank-ref",
+                "kind": "mount",
+                "target": "/run/awf/secrets/file",
+                "provider": "host-file",
+                "ref": " ",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "file-relative-ref",
+                "kind": "mount",
+                "target": "/run/awf/secrets/file",
+                "provider": "host-file",
+                "ref": "relative/secret",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "auth-as-env",
+                "kind": "env",
+                "target": "GH_CONFIG",
+                "provider": "local-auth",
+                "ref": ".config/gh",
+            },
+            "SECRET_LEASE_TARGET_KIND_MISMATCH",
+        ),
+        (
+            {
+                "name": "auth-missing-ref",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "auth-broad-ref",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": "~/secret",
+            },
+            "SECRET_LEASE_SOURCE_TOO_BROAD",
+        ),
+        (
+            {
+                "name": "auth-unknown-ref",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": ".docker",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "auth-double-prefixed-ref",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": "local-auth/auth/.config/gh",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
+                "name": "auth-target-mismatch",
+                "kind": "mount",
+                "target": "/home/agent/.ssh",
+                "provider": "local-auth",
+                "ref": ".config/gh",
+            },
+            "SECRET_LEASE_TARGET_MISMATCH",
+        ),
+    ],
+)
+def test_invalid_local_lease_shapes_raise_structured_errors(
+    tmp_path: Path,
+    secret: dict[str, object],
+    reason_code: str,
+) -> None:
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-live-do-not-render"})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(_profile(secret), workspace_id="ws_secret")
+
+    assert raised.value.reason_code == reason_code
+    assert "sk-live-do-not-render" not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_optional_missing_github_and_mount_sources_are_omitted(
+    tmp_path: Path,
+) -> None:
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "github",
+                "kind": "env",
+                "target": "GH_TOKEN",
+                "provider": "github",
+                "ref": "token",
+                "required": False,
+            },
+            {
+                "name": "host-file",
+                "kind": "mount",
+                "target": "/run/awf/secrets/file",
+                "provider": "host-file",
+                "ref": str(tmp_path / "missing-file"),
+                "required": False,
+            },
+            {
+                "name": "gh-config",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": ".config/gh",
+                "required": False,
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == ()
+    assert resolution.mounts == ()
+    assert resolution.metadata["omitted_optional_count"] == 3
+    assert [item["secret_name"] for item in resolution.metadata["omitted_optional"]] == [
+        "github",
+        "host-file",
+        "gh-config",
+    ]
+
+
+@pytest.mark.unit
+def test_local_auth_can_mount_known_ref_under_safe_secret_target(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    (host_home / ".ssh").mkdir(parents=True)
+    resolver = LocalSecretLeaseMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        host_env={},
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "ssh-secret",
+                "kind": "mount",
+                "target": "/run/awf/secrets/ssh",
+                "provider": "auth",
+                "ref": "auth/ssh",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.mounts == (
+        AuthMount(source=str(host_home / ".ssh"), target="/run/awf/secrets/ssh", mode="ro"),
+    )
+    assert resolution.satisfied_legacy_targets == frozenset()

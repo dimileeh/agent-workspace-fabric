@@ -1,0 +1,1 @@
+{"status":"satisfied","summary":"Implementation satisfies the saved plan: exhausted conformance is classified as PLAN_CONFORMANCE_UNSATISFIED with structured evidence, salvage details, retry prompt enrichment, failure-analysis/workspace exposure, and configurable planning default precedence. Focused tests plus ruff and mypy passed.","gaps":[]}

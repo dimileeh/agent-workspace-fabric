@@ -57,9 +57,12 @@ class TestUp:
         assert mock_exec.call_count == 1
         cmd = mock_exec.call_args[0]
         assert cmd[:2] == ("docker", "compose")
-        assert "--project-name" in cmd and spec.project_name() in cmd
-        assert "--file" in cmd
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == spec.project_name()
+        assert Path(env["COMPOSE_FILE"]).name == "compose.yml"
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
+        assert "--remove-orphans" in cmd
+        assert "--wait-timeout" in cmd and "300" in cmd
 
     @pytest.mark.unit
     async def test_up_without_wait_omits_wait_flag(
@@ -92,7 +95,29 @@ class TestUp:
         assert exc.value.operation == "up"
         assert exc.value.returncode == 1
         assert "daemon unreachable" in exc.value.stderr
-        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_up_retries_once_when_docker_compose_dispatch_drops_compose(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(tmp_path)
+        first = _mock_proc(
+            returncode=125,
+            stderr=(
+                b"unknown shorthand flag: 'd' in -d\n\nUsage:  docker [OPTIONS] COMMAND [ARG...]\n"
+            ),
+        )
+        second = _mock_proc(returncode=0)
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=[first, second],
+        ) as mock_exec:
+            await manager.up(spec, wait=True)
+
+        assert mock_exec.call_count == 2
+        assert mock_exec.call_args_list[0].args[:2] == ("docker", "compose")
+        assert mock_exec.call_args_list[1].args[:2] == ("docker", "compose")
 
     @pytest.mark.unit
     async def test_up_renders_compose_file_before_running(
@@ -108,6 +133,40 @@ class TestUp:
         assert paths.compose_file.exists()
         # Sanity check: the path we'd inspect from another call matches.
         assert paths.compose_file.name == "compose.yml"
+
+
+class TestEnsureProjectUp:
+    @pytest.mark.unit
+    async def test_uses_persisted_project_and_file_without_rendering(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        compose_file = tmp_path / "persisted-compose.yml"
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.ensure_project_up(
+                project_name="awf_persisted_ws",
+                compose_file=compose_file,
+                workspace_id="ws_persisted",
+                wait=True,
+            )
+
+        cmd = mock_exec.call_args[0]
+        assert cmd == (
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--remove-orphans",
+            "--wait",
+            "--wait-timeout",
+            "300",
+        )
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_persisted_ws"
+        assert env["COMPOSE_FILE"] == str(compose_file)
+        assert not (tmp_path / "work" / "compose" / "ws_persisted").exists()
 
 
 class TestDown:
@@ -137,6 +196,32 @@ class TestDown:
 
         cmd = mock_exec.call_args[0]
         assert "down" in cmd and "-v" in cmd
+        assert "--remove-orphans" in cmd
+
+    @pytest.mark.unit
+    async def test_down_project_uses_supplied_compose_file_path(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        compose_file = tmp_path / "custom-compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.down_project(
+                project_name="awf_ws_custom",
+                compose_file=compose_file,
+                workspace_id="ws_custom",
+                remove_volumes=True,
+            )
+
+        cmd = mock_exec.call_args[0]
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_ws_custom"
+        assert env["COMPOSE_FILE"] == str(compose_file)
+        assert "down" in cmd and "-v" in cmd
+        assert "--remove-orphans" in cmd
 
     @pytest.mark.unit
     async def test_down_without_volumes_omits_v(
@@ -168,3 +253,40 @@ class TestDown:
 
         assert exc.value.operation == "down"
         assert exc.value.returncode == 17
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_skips_empty_resource_sets(
+        self, manager: ComposeManager
+    ) -> None:
+        with (
+            patch.object(manager, "_docker_resource_ids", side_effect=[[], [], []]) as resource_ids,
+            patch.object(manager, "_docker") as docker,
+        ):
+            await manager.remove_project_by_label(
+                project_name="awf_ws_empty",
+                workspace_id="ws_empty",
+                remove_volumes=True,
+            )
+
+        assert resource_ids.call_count == 3
+        docker.assert_not_called()
+
+    @pytest.mark.unit
+    async def test_remove_project_by_label_can_preserve_volumes(
+        self, manager: ComposeManager
+    ) -> None:
+        with (
+            patch.object(
+                manager, "_docker_resource_ids", side_effect=[["container"], ["net"]]
+            ) as resource_ids,
+            patch.object(manager, "_docker") as docker,
+        ):
+            await manager.remove_project_by_label(
+                project_name="awf_ws_preserve",
+                workspace_id="ws_preserve",
+                remove_volumes=False,
+            )
+
+        assert resource_ids.call_count == 2
+        docker.assert_any_await(["rm", "-f", "container"], operation="rm")
+        docker.assert_any_await(["network", "rm", "net"], operation="network rm")

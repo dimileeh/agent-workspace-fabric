@@ -6,7 +6,7 @@ coverage.py doesn't instrument the async handler bodies correctly in
 that path (known limitation: httpx's ASGITransport runs the coroutine
 in a context that ``sys.settrace`` doesn't fully follow).
 
-This file calls the route functions DIRECTLY with an in-memory
+This file calls the route functions DIRECTLY with a PostgreSQL-backed
 session, which instruments cleanly. Same business logic, different
 coverage path. Tests in both files together give us end-to-end
 confidence plus instrumented line coverage."""
@@ -14,39 +14,47 @@ confidence plus instrumented line coverage."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import InterfaceError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.api.routes.workspaces as workspaces_route
 from awf.api.routes.workspaces import (
+    _list_workspace_responses,
     _payloads_match,
     create_workspace,
     get_workspace,
-    list_workspaces,
+    get_workspace_secret_leases,
 )
 from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
 )
-from awf.db.base import Base
+from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
-from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
-async def session(tmp_path: Path) -> AsyncIterator[AsyncSession]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'api.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = make_session_factory(engine)
-    async with factory() as s:
-        yield s
-        await s.commit()
-    await engine.dispose()
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+@pytest.fixture
+async def session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    async with session_factory() as s:
+        try:
+            yield s
+        finally:
+            await s.commit()
 
 
 def _payload(**overrides: object) -> WorkspaceCreateRequest:
@@ -63,17 +71,40 @@ def _payload(**overrides: object) -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
 
 
+def _route_settings() -> Settings:
+    return Settings(_env_file=None)
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+
+
 class TestCreateDirect:
     @pytest.mark.unit
     async def test_creates_new_workspace_without_idempotency(self, session: AsyncSession) -> None:
         result = await create_workspace(
             payload=_payload(),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(result, WorkspaceAcceptedResponse)
         assert result.workspace_id.startswith("ws_")
         assert result.version == 1
+
+    @pytest.mark.unit
+    async def test_secret_lease_route_missing_workspace_raises_structured_404(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await get_workspace_secret_leases("ws_missing", session=session)
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }
 
     @pytest.mark.unit
     async def test_replays_idempotent_match(self, session: AsyncSession) -> None:
@@ -83,6 +114,7 @@ class TestCreateDirect:
         first = await create_workspace(
             payload=payload,
             idempotency_key="IDEM-OK",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(first, WorkspaceAcceptedResponse)
@@ -90,6 +122,7 @@ class TestCreateDirect:
         second = await create_workspace(
             payload=payload,
             idempotency_key="IDEM-OK",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(second, WorkspaceAcceptedResponse)
@@ -102,11 +135,13 @@ class TestCreateDirect:
         await create_workspace(
             payload=_payload(task_title="first"),
             idempotency_key="IDEM-CONFLICT",
+            settings=_route_settings(),
             session=session,
         )
         result = await create_workspace(
             payload=_payload(task_title="second"),
             idempotency_key="IDEM-CONFLICT",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(result, JSONResponse)
@@ -119,21 +154,185 @@ class TestCreateDirect:
 
 class TestGetDirect:
     @pytest.mark.unit
-    async def test_returns_200_for_existing(self, session: AsyncSession) -> None:
+    async def test_returns_200_for_existing(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
         created = await create_workspace(
             payload=_payload(task_title="look-me-up"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
-        result = await get_workspace(created.workspace_id, session=session)
+        await session.commit()
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
         assert result.id == created.workspace_id
         assert result.task_title == "look-me-up"
 
     @pytest.mark.unit
-    async def test_raises_404_for_missing(self, session: AsyncSession) -> None:
+    async def test_route_uses_primary_workspace_response_helper(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="route helper coverage"),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        original = workspaces_route._get_workspace_response
+        calls = 0
+
+        async def _tracked_workspace_response(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            workspaces_route, "_get_workspace_response", _tracked_workspace_response
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert calls == 1
+        assert result.id == created.workspace_id
+        assert result.task_title == "route helper coverage"
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_transient_egress_retry_failure(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="transient audit cleanup"),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            assert workspace_id == created.workspace_id
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "transient audit cleanup"
+        assert result.egress_audit is None
+        assert calls == 2
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_egress_error(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="non-transient audit cleanup"),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            assert workspace_id == created.workspace_id
+            raise RuntimeError("audit lookup failed")
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "non-transient audit cleanup"
+        assert result.egress_audit is None
+        assert calls == 1
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_invalid_egress_audit_payload(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="invalid audit payload"),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        async def _invalid_audit_lookup(
+            workspace_id: str,
+            session_factory: async_sessionmaker[AsyncSession],
+        ) -> dict[str, object] | None:
+            del session_factory
+            assert workspace_id == created.workspace_id
+            return {"id": "audit_missing_required_fields"}
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "_retry_optional_egress_audit_lookup",
+            _invalid_audit_lookup,
+        )
+        caplog.set_level("WARNING", logger=workspaces_route.__name__)
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "invalid audit payload"
+        assert result.egress_audit is None
+        assert "egress audit model validation failed" in caplog.text
+
+    @pytest.mark.unit
+    async def test_raises_404_for_missing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
         with pytest.raises(HTTPException) as exc:
-            await get_workspace("ws_missing_id", session=session)
+            await get_workspace("ws_missing_id", session_factory=session_factory)
         assert exc.value.status_code == 404
         assert exc.value.detail["error_code"] == "NOT_FOUND"
 
@@ -144,16 +343,18 @@ class TestListDirect:
         await create_workspace(
             payload=_payload(task_title="a"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         await create_workspace(
             payload=_payload(task_title="b"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         # Flush so the query sees the inserts in the same session.
         await session.flush()
-        results = await list_workspaces(limit=10, session=session)
+        results = await _list_workspace_responses(session, limit=10)
         assert len(results) == 2
 
 
@@ -193,3 +394,59 @@ class TestPayloadsMatch:
             requires_database=False,
         )
         assert _payloads_match(ws, _payload(repo_url="r2")) is False
+
+    @pytest.mark.unit
+    async def test_mismatch_on_task_external_id(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            task_external_id="TASK-1",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+        )
+        assert (
+            _payloads_match(
+                ws,
+                _payload(
+                    repo_url="r",
+                    branch_base="b",
+                    task_title="t",
+                    task_prompt="p",
+                    task_external_id="TASK-2",
+                    test_commands=[],
+                ),
+            )
+            is False
+        )
+
+    @pytest.mark.unit
+    async def test_mismatch_on_env_profile(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            env_profile="profile-a",
+            test_commands=[],
+            requires_database=False,
+        )
+        assert (
+            _payloads_match(
+                ws,
+                _payload(
+                    repo_url="r",
+                    branch_base="b",
+                    task_title="t",
+                    task_prompt="p",
+                    env_profile="profile-b",
+                    test_commands=[],
+                ),
+            )
+            is False
+        )

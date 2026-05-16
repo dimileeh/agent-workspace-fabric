@@ -1,6 +1,6 @@
 """Integration tests for PullRequestMonitorRunner.
 
-'Integration' here means: real SQLAlchemy (in-memory SQLite), the real
+'Integration' here means: real SQLAlchemy against PostgreSQL, the real
 decision core (``decide``), the real prompt templates, and a real
 ``GitHubClient`` — but backed by ``FakeCommandRunner`` and a tiny fake
 adapter so no subprocesses spawn. Tests drive full loops end-to-end.
@@ -9,6 +9,7 @@ adapter so no subprocesses spawn. Tests drive full loops end-to-end.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,16 +20,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
-from awf.runtime.pr_monitor import MonitorConfig
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor import (
+    MonitorConfig,
+    MonitorState,
+    ReviewThread,
+    _mark_review_thread_addressed,
+)
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
+    _initial_review_grace_started_key,
     _parse_verdict,
 )
+from tests.postgres import postgres_test_engine
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -40,17 +52,22 @@ class FakeAdapter(AgentAdapter):
     runtime = AgentRuntime.claude_code
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    workspace_ids: list[str | None] = field(default_factory=list)
 
     def __init__(self) -> None:  # type: ignore[override]
         super().__init__(runner=None)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
+        self.workspace_ids = []
+
+    def get_provider(self, model: str | None) -> str:
+        return "fake"
 
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
+    def _cli_args(self, *, model: str | None) -> list[str]:
         return []
 
     def queue(self, *, stdout: str = "", returncode: int = 0, raise_error: bool = False) -> None:
@@ -59,9 +76,17 @@ class FakeAdapter(AgentAdapter):
             self._queued[-1] = AgentRunResult(returncode=returncode, stdout=stdout, stderr="err")
 
     async def run(  # type: ignore[override]
-        self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None = None,
+        workspace_id: str | None = None,
+        log_source: str = "agent",
     ) -> AgentRunResult:
         self.calls.append(prompt)
+        self.workspace_ids.append(workspace_id)
         if not self._queued:
             return AgentRunResult(returncode=0, stdout="fixed it", stderr="")
         r = self._queued.pop(0)
@@ -90,6 +115,7 @@ def _pr_payload(
     *,
     closed: bool = False,
     merged: bool = False,
+    merge_commit_sha: str = "mergecommit1234567890",
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
@@ -109,6 +135,7 @@ def _pr_payload(
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
+                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
@@ -127,14 +154,9 @@ def _pr_payload(
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -156,9 +178,12 @@ async def _seed_monitoring_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     agent: str = "claude_code",
+    repo_url: str = "git@github.com:dimileeh/aira-web.git",
     pr_number: int = 42,
     branch_name: str | None = None,
     remote_push_branch: str | None = None,
+    task_kind: str = "feature_branch_pr",
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     """Insert a workspace already in ``monitoring_pr`` state.
 
@@ -170,14 +195,35 @@ async def _seed_monitoring_workspace(
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo_url=repo_url,
             branch_base="development",
             task_title="monitor test",
             task_prompt="x",
             agent=agent,
             test_commands=["pytest -q"],
             requires_database=False,
+            task_kind=task_kind,
+            task_policy=task_policy or {},
         )
+        attempt = await TaskAttemptRepository(s).create_for_workspace(
+            task=await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            ),
+            workspace=ws,
+        )
+        ws.branch_name = branch_name or f"awf/{ws.id}"
+        ws.remote_push_branch = remote_push_branch or ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
+        ws.pr_number = pr_number
         # Walk requested → provisioning → ready → running → validating → pushing → monitoring_pr
         for target in (
             WorkspaceStatus.provisioning,
@@ -188,12 +234,22 @@ async def _seed_monitoring_workspace(
             WorkspaceStatus.monitoring_pr,
         ):
             await repo.transition(ws, to=target, reason_code="X")
-        ws.branch_name = branch_name or f"awf/{ws.id}"
-        ws.remote_push_branch = remote_push_branch or ws.branch_name
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
-        ws.pr_number = pr_number
+        validation_repo = ValidationRunRepository(s)
+        validation_run = await validation_repo.start(
+            workspace_id=ws.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=ws.base_commit,
+            target_branch=ws.remote_push_branch,
+            target_head_sha="abc123",
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
         await s.commit()
         return ws.id
 
@@ -220,6 +276,7 @@ def _make_runner(
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
@@ -464,7 +521,7 @@ class TestMergeBlockedFallsBackToNotify:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_merge_sha is None
+            assert ws.pr_merge_sha == "mergecommit1234567890"
         # gh pr comment was invoked with the human-attention body.
         comment_args = next(c.args for c in cmd.calls if c.args[:3] == ["gh", "pr", "comment"])
         body = comment_args[comment_args.index("--body") + 1]
@@ -578,6 +635,82 @@ class TestAddressComments:
             assert ws.monitor_threads_addressed["T1"] == "fix_committed"
         assert len(adapter.calls) == 1
         assert "T1" in adapter.calls[0]
+
+    @pytest.mark.unit
+    async def test_adopted_fork_pr_pushes_comment_fix_to_head_repository(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(
+            factory,
+            repo_url="git@github.com:base/aira-web.git",
+            branch_name="feature-sync/ws_fork",
+            remote_push_branch="fix/fork-review",
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "base/aira-web",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/base/aira-web/pull/42",
+                    "head_ref": "fix/fork-review",
+                    "head_repo_slug": "contributor/aira-web",
+                    "head_repo_url": "https://github.com/contributor/aira-web.git",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        thread = {
+            "id": "T_fork",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "rename", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
+        adapter.queue(stdout="fixed in commit abc")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
+        cmd.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"resolveReviewThread": {"thread": {"id": "T_fork", "isResolved": True}}}}
+            ),
+        )
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        assert len(push_calls) == 1
+        assert "git@github.com:contributor/aira-web.git" in push_calls[0].args
+        assert "HEAD:refs/heads/fix/fork-review" in push_calls[0].args
+        assert "origin" not in push_calls[0].args[push_calls[0].args.index("push") + 1 :]
 
     @pytest.mark.unit
     async def test_false_positive_verdict_does_not_trigger_resolve_mutation(
@@ -1238,7 +1371,18 @@ class TestStatePersistence:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            ws.monitor_threads_addressed = {"T1": "fix_committed"}
+            state = MonitorState()
+            _mark_review_thread_addressed(
+                state,
+                ReviewThread(
+                    thread_id="T1",
+                    path="a",
+                    line=1,
+                    body_excerpt="",
+                ),
+                "fix_committed",
+            )
+            ws.monitor_threads_addressed = dict(state.threads_addressed_ids)
             await s.commit()
         thread = {
             "id": "T1",
@@ -1347,7 +1491,7 @@ class TestGitHubApiError:
 
 class TestAgentRunErrorResilience:
     @pytest.mark.unit
-    async def test_cli_crash_during_address_thread_defers(
+    async def test_cli_crash_during_address_thread_records_agent_failed(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1355,8 +1499,8 @@ class TestAgentRunErrorResilience:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """CLI process dies mid-address — monitor logs + records 'defer'
-        rather than aborting the whole workspace."""
+        """CLI process dies mid-address — monitor logs + records a retryable
+        agent failure rather than aborting the whole workspace."""
         ws_id = await _seed_monitoring_workspace(factory)
         thread = {
             "id": "T_crash",
@@ -1373,7 +1517,7 @@ class TestAgentRunErrorResilience:
         adapter.queue(returncode=2, raise_error=True)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         cmd.queue_result(returncode=0)  # push (maybe nothing, still called)
-        # Iter 2: thread addressed-as-defer in state → Merge gate.
+        # Iter 2: thread addressed-as-agent-failed in state remains retryable.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
@@ -1394,7 +1538,7 @@ class TestAgentRunErrorResilience:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.monitor_threads_addressed.get("T_crash") == "defer"
+            assert ws.monitor_threads_addressed.get("T_crash") == "agent_failed"
 
     @pytest.mark.unit
     async def test_cli_crash_during_sync_base_continues_to_push(
@@ -1481,7 +1625,7 @@ class TestAgentRunErrorResilience:
 
 class TestBaseBehindEdges:
     @pytest.mark.unit
-    async def test_rev_list_error_treats_base_as_up_to_date(
+    async def test_rev_list_error_fails_monitor_instead_of_assuming_up_to_date(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1489,14 +1633,10 @@ class TestBaseBehindEdges:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Failed rev-list (e.g. origin/<base> not yet fetched) should not
-        trip the monitor — we just get base_behind=0 and carry on."""
+        """Failed rev-list means AWF cannot trust local base freshness."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=1, stderr="unknown revision")  # base-behind fails
-        cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR green
-        cmd.queue_result(returncode=0)  # merge
-        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -1512,10 +1652,12 @@ class TestBaseBehindEdges:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_message is not None
+            assert "unknown revision" in ws.failure_message
 
     @pytest.mark.unit
-    async def test_rev_list_garbage_output_treats_base_as_up_to_date(
+    async def test_rev_list_garbage_output_fails_monitor_instead_of_assuming_zero(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1526,9 +1668,6 @@ class TestBaseBehindEdges:
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="not-a-number\n")  # garbage
-        cmd.queue_result(returncode=0, stdout=_pr_payload())
-        cmd.queue_result(returncode=0)
-        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -1544,7 +1683,9 @@ class TestBaseBehindEdges:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_message is not None
+            assert "not-a-number" in ws.failure_message
 
 
 class TestResumePreservesMonitorStartedAt:
@@ -1783,7 +1924,7 @@ class TestMonitorDbHelpers:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Some DB backends (SQLite with certain dialect settings) return
+        """Some DB drivers return
         naive datetimes. The loader must treat them as UTC so elapsed
         math doesn't go sideways."""
         from datetime import datetime as _dt
@@ -1809,6 +1950,122 @@ class TestMonitorDbHelpers:
             # If tzinfo wasn't applied, we'd have gotten a naive/aware
             # subtract TypeError — reaching here proves the branch ran.
             assert state.iter_count == 0
+
+    @pytest.mark.unit
+    async def test_load_state_converts_wall_clock_grace_marker_to_monotonic(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_wall = _dt.now(_UTC) - timedelta(minutes=10)
+        started_key = _initial_review_grace_started_key(42)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_threads_addressed = {started_key: f"{started_wall.timestamp():.6f}"}
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            state = runner._load_state(ws)
+
+        started_monotonic = float(state.threads_addressed_ids[started_key])
+        expected_elapsed_before = (_dt.now(_UTC) - started_wall).total_seconds()
+        actual_elapsed = time.monotonic() - started_monotonic
+        expected_elapsed_after = (_dt.now(_UTC) - started_wall).total_seconds()
+        assert expected_elapsed_before - 2 <= actual_elapsed <= expected_elapsed_after + 2
+
+    @pytest.mark.unit
+    async def test_load_state_rebases_legacy_grace_marker_from_monitor_started_at(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_wall = _dt.now(_UTC) - timedelta(minutes=10)
+        started_key = _initial_review_grace_started_key(42)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_started_at = started_wall
+            ws.monitor_threads_addressed = {started_key: "1000.000000"}
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            state = runner._load_state(ws)
+
+        started_monotonic = float(state.threads_addressed_ids[started_key])
+        expected_elapsed_before = (_dt.now(_UTC) - started_wall).total_seconds()
+        actual_elapsed = time.monotonic() - started_monotonic
+        expected_elapsed_after = (_dt.now(_UTC) - started_wall).total_seconds()
+        assert expected_elapsed_before - 2 <= actual_elapsed <= expected_elapsed_after + 2
+
+    @pytest.mark.unit
+    async def test_persist_state_writes_wall_clock_grace_marker(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_key = _initial_review_grace_started_key(42)
+        started_monotonic = time.monotonic() - 300
+        state = MonitorState(
+            threads_addressed_ids={started_key: f"{started_monotonic:.6f}"},
+            started_at=time.monotonic(),
+        )
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+
+        await runner._persist_state(ws_id, state)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            started_wall = float(ws.monitor_threads_addressed[started_key])
+        assert started_wall > 1_000_000_000
+        elapsed = time.time() - started_wall
+        assert elapsed >= 300
+        assert elapsed < 360
 
 
 class TestCompleteWorkspaceTearsDownComposeStack:
@@ -1852,7 +2109,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         ]
         assert len(teardown_calls) == 1
         args = teardown_calls[0].args
-        assert "--project-name" in args and "awf_ws_test" in args
+        assert "-p" in args and "awf_ws_test" in args
         assert "--remove-orphans" in args
         assert "--volumes" in args
 

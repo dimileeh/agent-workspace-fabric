@@ -61,6 +61,39 @@ class _SpawnCapture:
         return _Dummy()
 
 
+class _ServiceResponse:
+    def __init__(self, *, status_code: int, payload: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or json.dumps(payload or {})
+
+    def json(self) -> dict:
+        if self._payload is None:
+            raise ValueError("response is not JSON")
+        return self._payload
+
+
+class _AsyncClientCapture:
+    def __init__(self, response: _ServiceResponse) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+        self.timeout = None
+
+    def factory(self, *, timeout: float):
+        self.timeout = timeout
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    async def post(self, url: str, *, json: dict, headers: dict):
+        self.calls.append({"url": url, "json": json, "headers": headers})
+        return self.response
+
+
 class TestParseArgs:
     @pytest.mark.unit
     def test_required_args_are_enforced(self) -> None:
@@ -219,6 +252,130 @@ class TestOrchestrateAttachHappyPath:
         task = json.loads(spec_path.read_text())[0]
         assert len(task["companions"]) == 1
         assert task["companions"][0]["name"] == "backend"
+
+
+class TestServiceManagedAdoptionPath:
+    @pytest.mark.unit
+    async def test_maps_repo_pr_payload_and_bearer_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _AsyncClientCapture(
+            _ServiceResponse(
+                status_code=202,
+                payload={"workspace_id": "ws_adopt", "status": "requested"},
+            )
+        )
+        monkeypatch.setattr(cli.httpx, "AsyncClient", client.factory)
+
+        exit_code = await cli.orchestrate_service_adoption(
+            repo_url="dimileeh/aira-web",
+            pr_number=277,
+            pr_url=None,
+            agent="claude_code",
+            auto_merge=False,
+            companions_path=None,
+            work_dir=tmp_path,
+            base_url="http://awf.local/",
+            api_token="token-secret",
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert client.timeout == 30.0
+        assert client.calls == [
+            {
+                "url": "http://awf.local/v1/workspaces/adopt-pr",
+                "json": {
+                    "repo_url": None,
+                    "repo_slug": "dimileeh/aira-web",
+                    "pr_number": 277,
+                    "pr_url": None,
+                    "agent": "claude_code",
+                    "profile_ref": "auto",
+                    "profile": None,
+                    "auto_merge": False,
+                    "initial_review_grace_period_seconds": None,
+                    "task_title": None,
+                    "task_prompt": None,
+                    "reason": "legacy attach-feature-pr-monitor wrapper",
+                },
+                "headers": {"Authorization": "Bearer token-secret"},
+            }
+        ]
+        assert "ws_adopt" in captured.out
+        assert "token-secret" not in captured.out
+        assert "token-secret" not in captured.err
+
+    @pytest.mark.unit
+    async def test_maps_pr_url_without_repo_fields(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        client = _AsyncClientCapture(
+            _ServiceResponse(status_code=202, payload={"workspace_id": "ws_adopt"})
+        )
+        monkeypatch.setattr(cli.httpx, "AsyncClient", client.factory)
+
+        exit_code = await cli.orchestrate_service_adoption(
+            repo_url=None,
+            pr_number=None,
+            pr_url="https://github.com/dimileeh/aira-web/pull/277",
+            agent="codex",
+            auto_merge=True,
+            companions_path=None,
+            work_dir=tmp_path,
+            base_url=None,
+            api_token=None,
+        )
+
+        assert exit_code == 0
+        assert client.calls[0]["url"] == "http://localhost:8000/v1/workspaces/adopt-pr"
+        assert client.calls[0]["json"]["repo_url"] is None
+        assert client.calls[0]["json"]["repo_slug"] is None
+        assert client.calls[0]["json"]["pr_number"] is None
+        assert client.calls[0]["json"]["pr_url"] == (
+            "https://github.com/dimileeh/aira-web/pull/277"
+        )
+        assert client.calls[0]["json"]["auto_merge"] is True
+        assert client.calls[0]["headers"] == {}
+
+    @pytest.mark.unit
+    async def test_reports_api_error_without_leaking_bearer_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = _AsyncClientCapture(
+            _ServiceResponse(
+                status_code=409,
+                text='{"error_code":"PR_ALREADY_CLOSED","message":"closed"}',
+            )
+        )
+        monkeypatch.setattr(cli.httpx, "AsyncClient", client.factory)
+
+        exit_code = await cli.orchestrate_service_adoption(
+            repo_url="dimileeh/aira-web",
+            pr_number=277,
+            pr_url=None,
+            agent="codex",
+            auto_merge=True,
+            companions_path=None,
+            work_dir=tmp_path,
+            base_url="http://awf.local",
+            api_token="token-secret",
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "AWF adoption failed (409)" in captured.err
+        assert "PR_ALREADY_CLOSED" in captured.err
+        assert "token-secret" not in captured.err
+        assert captured.out == ""
 
 
 class TestIdempotency:

@@ -1,0 +1,30 @@
+Validation evidence for ws_55a183c8dcba4dd480bd374d
+(Quiet Successful OpenCode/Ollama Fallback Readiness)
+
+Commands run on 2026-05-09:
+
+1. Pre-fix TDD red-run evidence
+   - Base commit under test: 864027b5d7dc9928451224de4307e5a8fdfb3306
+   - Method: exported the pre-fix commit to a temporary directory and overlaid
+     only the current tests/unit/service/test_provider_readiness.py file.
+   - Command:
+     PYTHONPATH=<temp>/src:<temp> /workspace/.venv/bin/python -m pytest
+     tests/unit/service/test_provider_readiness.py -q -k
+     opencode_default_host_gateway_falls_back_to_localhost
+   - Result: failed as expected, 1 failed and 98 deselected in 1.17s.
+   - Failure proved the regression: the successful fallback test still saw
+     provider_readiness.ollama_probe_exception in caplog on the pre-fix code,
+     including a traceback for RuntimeError: nodename nor servname provided.
+
+2. uv run --python 3.12 --extra dev pytest tests/unit/service/test_provider_readiness.py -q -k "ollama or opencode"
+   - Result: 19 passed, 80 deselected in 1.58s.
+   - Evidence: focused provider-readiness coverage includes OpenCode/Ollama
+     default host.docker.internal to localhost fallback, recovered failure debug
+     redaction, all-candidates-fail OLLAMA_HOST_UNREACHABLE detail, and terminal
+     exception logging.
+
+3. uv run --python 3.12 --extra dev ruff check src/awf/service/provider_readiness.py tests/unit/service/test_provider_readiness.py
+   - Result: All checks passed.
+
+Gap closed: the pre-fix regression failure and the requested post-fix pytest
+and ruff gates were run and recorded for this workspace.

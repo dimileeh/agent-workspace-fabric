@@ -18,10 +18,16 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.repositories import (
+    OperationRepository,
+    WorkspaceEventRepository,
+    WorkspaceLogStreamRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_session_factory
+from awf.runtime.logs import LogStore
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -34,14 +40,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -103,6 +104,268 @@ class TestMonitorActionLogging:
         assert entry["unresolved_threads"] == 0
         assert entry["unresolved_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
+        async with factory() as s:
+            operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
+            attempt_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.merge_attempt",
+                limit=10,
+            )
+            result_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.merge_result",
+                limit=10,
+            )
+        merge_operation = next(
+            op
+            for op in operations
+            if op.type == "monitor_state"
+            and isinstance(op.payload, dict)
+            and op.payload.get("action") == "merge"
+        )
+        assert len(attempt_events) == 1
+        assert attempt_events[0].payload == {
+            "schema": "control_audit.v1",
+            "actor": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "merge",
+            "outcome": "attempted",
+            "reason_code": "MERGE",
+            "operation_id": merge_operation.id,
+            "operation_type": "monitor_state",
+            "pr_number": 42,
+            "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+            "source_head_sha": "abc1234567890def",
+            "source_base_sha": "a" * 40,
+            "target_branch": "development",
+            "remote_branch": f"awf/{ws_id}",
+            "branch_name": f"awf/{ws_id}",
+        }
+        assert len(result_events) == 1
+        assert result_events[0].payload == {
+            **attempt_events[0].payload,
+            "outcome": "succeeded",
+            "evidence": {"merge_sha": "MERGESHA"},
+        }
+
+    @pytest.mark.unit
+    async def test_monitor_writes_durable_monitor_log_stream(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            log_store=log_store,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        assert monitor_stream.source == "monitor"
+        assert monitor_stream.kind == "stdout"
+        assert monitor_stream.line_count >= 3
+        log_text = Path(monitor_stream.path).read_text()
+        assert '"event": "monitor.start"' in log_text
+        assert '"event": "monitor.action"' in log_text
+        assert '"action": "Merge"' in log_text
+
+    @pytest.mark.unit
+    async def test_pre_merge_settle_emits_started_and_completed_logs(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        # Initial monitor poll is green.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        # Pre-merge settle recheck is still green.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            pre_merge_settle_seconds=5,
+            log_store=log_store,
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        event_names = [record.get("event") for record in captured]
+        entered_index = event_names.index("monitor.merge_critical_section_entered")
+        started_index = event_names.index("monitor.pre_merge_settle_started")
+        completed_index = event_names.index("monitor.pre_merge_settle_completed")
+        assert entered_index < started_index < completed_index
+        started = captured[started_index]
+        completed = captured[completed_index]
+        for record in (started, completed):
+            assert record["workspace_id"] == ws_id
+            assert record["pr_number"] == 42
+            assert record["base_branch"] == "development"
+            assert record["head_sha"] == "abc1234567890def"
+            assert record["wait_seconds"] == 5
+        assert isinstance(completed["elapsed_seconds"], (int, float))
+        assert completed["elapsed_seconds"] >= 0
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        durable_records = [
+            json.loads(line)
+            for line in Path(monitor_stream.path).read_text().splitlines()
+            if line.strip()
+        ]
+        durable_events = [record.get("event") for record in durable_records]
+        durable_entered_index = durable_events.index("monitor.merge_critical_section_entered")
+        durable_started_index = durable_events.index("monitor.pre_merge_settle_started")
+        durable_completed_index = durable_events.index("monitor.pre_merge_settle_completed")
+        assert durable_entered_index < durable_started_index < durable_completed_index
+        durable_started = durable_records[durable_started_index]
+        durable_completed = durable_records[durable_completed_index]
+        for record in (durable_started, durable_completed):
+            assert record["workspace_id"] == ws_id
+            assert record["pr_number"] == 42
+            assert record["base_branch"] == "development"
+            assert record["head_sha"] == "abc1234567890def"
+            assert record["wait_seconds"] == 5
+        assert isinstance(durable_completed["elapsed_seconds"], (int, float))
+        assert durable_completed["elapsed_seconds"] >= 0
+
+    @pytest.mark.unit
+    async def test_recovery_operation_log_indexing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_recov", author="reviewer")
+        # Outer iter 1
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed it")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
+        # Outer iter 2: clean -> Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")
+
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        adapter._log_store = log_store
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            log_store=log_store,
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            recovery_stream = next(
+                (stream for stream in streams if stream.source == "recovery"), None
+            )
+            operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
+            push_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.git_push",
+                limit=10,
+            )
+            resolution_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.comment_resolution",
+                limit=10,
+            )
+        assert recovery_stream is not None, (
+            f"Expected a stream with source='recovery'. Streams: {[(s.stream_id, s.source) for s in streams]}. Calls: {[c.args for c in cmd.calls]}"
+        )
+        assert recovery_stream.kind == "stdout"
+        comment_operation = next(op for op in operations if op.type == "comment_repair")
+        comment_push = next(
+            event
+            for event in push_events
+            if event.payload is not None and event.payload["action"] == "comment_repair_push"
+        )
+        assert comment_push.payload == {
+            "schema": "control_audit.v1",
+            "actor": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "comment_repair_push",
+            "outcome": "succeeded",
+            "reason_code": "COMMENT_REPAIR",
+            "operation_id": comment_operation.id,
+            "operation_type": "comment_repair",
+            "pr_number": 42,
+            "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+            "source_head_sha": "head2",
+            "source_base_sha": "a" * 40,
+            "target_branch": "development",
+            "remote_branch": f"awf/{ws_id}",
+            "branch_name": f"awf/{ws_id}",
+            "evidence": {"log_stream_refs": {"monitor": "monitor.log"}},
+        }
+        assert len(resolution_events) == 1
+        assert resolution_events[0].payload is not None
+        assert resolution_events[0].payload["action"] == "resolve_thread"
+        assert resolution_events[0].payload["outcome"] == "succeeded"
+        assert resolution_events[0].payload["operation_id"] == comment_operation.id
+        assert resolution_events[0].payload["evidence"] == {
+            "thread_ids": ["T_recov"],
+            "resolved_thread_count": 1,
+            "log_stream_refs": {"monitor": "monitor.log"},
+        }
+        assert "tiny nit" not in repr(resolution_events[0].payload)
 
     @pytest.mark.unit
     async def test_notify_human_action_emits_log_line(
@@ -195,6 +458,7 @@ class TestMonitorActionLogging:
         assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
         assert len(adapter.calls) == 1
         assert "late actionable review" in adapter.calls[0]
+        assert adapter.workspace_ids == [ws_id]
         assert sleep_fn.calls == [60, 30]
         comment_calls = [
             call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
@@ -206,7 +470,7 @@ class TestMonitorActionLogging:
             assert ws.status == WorkspaceStatus.completed.value
 
     @pytest.mark.unit
-    async def test_policy_blocker_waits_alive_and_addresses_later_comments(
+    async def test_bot_issue_feedback_stays_alive_and_addresses_later_comments(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -229,12 +493,18 @@ class TestMonitorActionLogging:
             author="gemini-code-assist",
             body="new review feedback after AWF notified human",
         )
-        # Poll 1: only a non-code policy blocker exists, so AWF notifies.
+        # Poll 1: a review-bot issue comment is routed to the agent instead
+        # of being semantically classified by AWF.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        cmd.queue_result(returncode=0)  # gh pr comment
-        # Poll 2: actionable comments arrive after the notification.
+        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        cmd.queue_result(
+            returncode=0,
+            stdout=pr_payload(comments=[blocking_comment]),
+        )  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # Poll 2: later actionable comments are still handled.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(
@@ -242,7 +512,7 @@ class TestMonitorActionLogging:
             stdout=pr_payload(comments=[blocking_comment], threads=[late_thread]),
         )
         adapter.queue(stdout="fixed")
-        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
         cmd.queue_result(returncode=0)  # resolveReviewThread
@@ -266,12 +536,13 @@ class TestMonitorActionLogging:
             )
 
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
-        assert len(adapter.calls) == 1
-        assert "new review feedback after AWF notified human" in adapter.calls[0]
+        assert actions == ["AddressComments", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 2
+        assert "Trigger review before merging" in adapter.calls[0]
+        assert "new review feedback after AWF notified human" in adapter.calls[1]
 
     @pytest.mark.unit
-    async def test_non_actionable_review_disabled_comment_waits_for_initial_grace(
+    async def test_review_disabled_comment_routes_to_agent_before_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -292,8 +563,11 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
-        # Keep the test finite by simulating an external merge while AWF waits
-        # out the initial review grace window.
+        adapter.queue(stdout="FALSE POSITIVE: disabled-review status only")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # Keep the test finite by simulating an external merge after AWF
+        # packages the comment for the agent.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
@@ -315,15 +589,17 @@ class TestMonitorActionLogging:
             )
 
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["Merge", "ShortCircuitCompleted"]
-        assert sleep_fn.calls == [60]
+        assert actions == ["AddressComments", "ShortCircuitCompleted"]
+        assert sleep_fn.calls == [30]
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        assert len(adapter.calls) == 1
+        assert "Auto reviews are disabled" in adapter.calls[0]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_merge_sha is None
+            assert ws.pr_merge_sha == "mergecommit1234567890"
 
     @pytest.mark.unit
     async def test_short_circuit_completed_emits_log_line(
@@ -622,13 +898,16 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())
-        # Final quiet-window recheck sees late bot/checklist feedback.
+        # Final quiet-window recheck sees late bot feedback, which is
+        # routed to the agent instead of human notification.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        cmd.queue_result(returncode=0)  # gh pr comment from NotifyHuman
-        # The monitor stays alive after NotifyHuman; finish by observing an
-        # external merge on the next poll.
+        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # The monitor stays alive after the review-comment fix cycle; finish
+        # by observing an external merge on the next poll.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
@@ -649,20 +928,167 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
 
-        assert sleep_fn.calls == [90, 60]
+        assert sleep_fn.calls == [90, 30]
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["Merge", "NotifyHuman", "ShortCircuitCompleted"]
-        comment_calls = [
-            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
-        ]
-        assert len(comment_calls) == 1
-        body = comment_calls[0][comment_calls[0].index("--body") + 1]
-        assert "needs human attention" in body
-        assert "review was skipped" in body
-        assert "All 5 AWF gates are green" not in body
+        assert actions == ["Merge", "AddressComments", "ShortCircuitCompleted"]
+        assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        assert len(adapter.calls) == 1
+        assert "Trigger review before merging" in adapter.calls[0]
         assert any(
             r.get("event") == "monitor.pre_merge_recheck_changed_action"
-            and r.get("fresh_action") == "NotifyHuman"
+            and r.get("fresh_action") == "AddressComments"
             for r in captured
         )
+
+
+class TestMonitorDirtyWorktreeSalvage:
+    @pytest.mark.unit
+    async def test_comment_agent_failure_with_dirty_changes_is_committed_and_resolved(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_dirty", author="gemini-code-assist")
+        worktrees_root = tmp_path / "worktrees"
+        (worktrees_root / ws_id).mkdir(parents=True)
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="changed files but failed before summary", returncode=1)
+        cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
+        cmd.queue_result(returncode=0)  # git add -A
+        cmd.queue_result(returncode=1)  # git diff --cached --quiet
+        cmd.queue_result(returncode=0)  # git commit
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
+        cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+        cmd.queue_result(returncode=0, stdout="src/foo.py\n")  # pre-push protected-scope diff
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge sha
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=worktrees_root,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        commit_calls = [
+            call.args
+            for call in cmd.calls
+            if len(call.args) >= 5
+            and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
+        ]
+        assert commit_calls
+        assert any(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls)
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["AddressComments", "Merge"]
+        assert any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)
+
+    @pytest.mark.unit
+    async def test_comment_repair_gets_scope_correction_before_committing_protected_file(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            workspace.owned_paths = ["tests/integration/**"]
+            await session.commit()
+
+        thread = thread_node(
+            tid="T_workflow",
+            author="chatgpt-codex-connector",
+            path="tests/integration/test_workspace_agent_git_in_workspace.py",
+            body=(
+                "This test silently skips when awf-agent-runtime:latest is "
+                "absent. Make the test self-sufficient or wire CI to provide "
+                "the image."
+            ),
+        )
+        worktrees_root = tmp_path / "worktrees"
+        (worktrees_root / ws_id).mkdir(parents=True)
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed by editing CI")
+        cmd.queue_result(
+            returncode=0,
+            stdout=(
+                " M .github/workflows/ci.yml\n"
+                " M tests/integration/test_workspace_agent_git_in_workspace.py\n"
+            ),
+        )  # dirty check after first repair
+        adapter.queue(stdout="removed workflow edit; fixed test instead")
+        cmd.queue_result(
+            returncode=0,
+            stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
+        )  # dirty check after scope correction
+        cmd.queue_result(returncode=0)  # git add -A
+        cmd.queue_result(returncode=1)  # git diff --cached --quiet
+        cmd.queue_result(returncode=0)  # git commit
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
+        cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+        cmd.queue_result(
+            returncode=0,
+            stdout="tests/integration/test_workspace_agent_git_in_workspace.py\n",
+        )  # pre-push protected-scope diff
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge sha
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=worktrees_root,
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        assert len(adapter.calls) == 2
+        assert "outside this workspace's declared owned_paths" in adapter.calls[1]
+        assert ".github/workflows/ci.yml" in adapter.calls[1]
+        commit_calls = [
+            call.args
+            for call in cmd.calls
+            if len(call.args) >= 5
+            and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_workflow"]
+        ]
+        assert len(commit_calls) == 1

@@ -8,12 +8,69 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.profiles.models import WorkspaceProfile
+from awf.common.callback_events import is_valid_callback_subscription_event_type
+from awf.common.callback_targets import (
+    is_public_callback_target_host,
+    validate_callback_target_url_port,
+)
+from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
+from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
+
+OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
+MergeBlockerReason = Literal[
+    "ready_to_merge_or_waiting_for_github",
+    "manual_merge_required",
+    "waiting_for_monitor",
+    "waiting_for_older_candidate",
+    "workspace_not_terminal",
+    "completed",
+    "failed_or_cancelled",
+    "not_canonical",
+    "policy_blocked",
+    "stale",
+]
+MergeCandidateStatus = Literal["open", "merged", "closed"]
+MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
+ValidationTier = Literal[1, 2, 3]
+ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
+ValidationFreshnessStatus = Literal["fresh", "stale", "unknown", "unavailable"]
+ValidationIdentitySource = Literal["persisted", "legacy_fallback"]
+AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
+WorkspaceLifecycleStageStatus = Literal[
+    "pending",
+    "active",
+    "completed",
+    "terminal_skipped",
+]
+LlmUsageStatus = Literal["available", "unavailable"]
+WorkspaceOverlapGraphQueueState = Literal["queued", "running"]
+WorkspaceOverlapGraphSeverity = Literal["advisory"]
+WorkspaceOverlapGraphReasonCode = Literal["OWNED_PATH_OVERLAP_RISK"]
+WorkspaceOverlapPathMatchReasonCode = Literal[
+    "OWNED_PATH_EXACT_MATCH",
+    "OWNED_PATH_ANCESTOR_MATCH",
+    "OWNED_PATH_WILDCARD_MATCH",
+]
+CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
+NetworkPosture = Literal["offline", "restricted", "open"]
+
+_MAX_LOG_STREAM_REF_DEPTH = 64
+
+
+class MergeCandidateReadinessResponse(BaseModel):
+    ready: bool
+    manual_merge_required: bool
+    waiting_for_monitor: bool
+    failed_or_cancelled: bool
+    completed: bool
+    not_canonical: bool
+    stale: bool
+    stale_reason: str | None = None
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -45,6 +102,45 @@ class WorkspaceV2Repo(BaseModel):
     base_branch: Annotated[str, Field(default="main", min_length=1, max_length=256)]
 
 
+class WorkspaceProviderFallbackTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    agent: AgentRuntime
+    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class WorkspaceProviderRecoveryCircuitBreakerPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    failure_threshold: int = Field(default=2, ge=1, le=100)
+    cooldown_seconds: int = Field(default=900, ge=1, le=86400)
+
+
+class WorkspaceProviderRecoveryPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fallbacks: list[WorkspaceProviderFallbackTarget] = Field(
+        default_factory=list,
+        max_length=16,
+    )
+    max_fallback_attempts: int | None = Field(default=None, ge=0, le=16)
+    max_same_provider_retries: int = Field(default=1, ge=0, le=16)
+    cooldown_seconds: int = Field(default=300, ge=1, le=86400)
+    backoff_seconds: int | None = Field(default=None, ge=1, le=86400)
+    retry_after_cap_seconds: int = Field(default=3600, ge=1, le=86400)
+    circuit_breaker: WorkspaceProviderRecoveryCircuitBreakerPolicy | None = None
+
+
+class WorkspaceLaunchPreflight(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider_readiness_override: bool = False
+    provider_readiness_override_reason: Annotated[
+        str | None, Field(default=None, max_length=512)
+    ] = None
+
+
 class WorkspaceV2Task(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -52,7 +148,20 @@ class WorkspaceV2Task(BaseModel):
     prompt: Annotated[str, Field(min_length=1, max_length=16384)]
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
+    task_class: TaskClass | None = None
+    priority: int = Field(default=0, ge=0, le=100)
+    human_boost: int = Field(default=0, ge=0, le=5)
+    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
+    out_of_scope_changes: OutOfScopeChangePolicy | None = None
+    auto_merge: bool = True
+    initial_review_grace_period_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=86400,
+    )
+    provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
 
 
 class WorkspaceV2Workspace(BaseModel):
@@ -74,6 +183,11 @@ class WorkspaceV2Resources(BaseModel):
 
     cpu: float | None = Field(default=None, gt=0)
     memory: Annotated[str | None, Field(default=None, max_length=32)]
+    steady_state_cpu_cores: float | None = Field(default=None, gt=0)
+    steady_state_memory_gb: float | None = Field(default=None, gt=0)
+    peak_cpu_cores: float | None = Field(default=None, gt=0)
+    peak_memory_gb: float | None = Field(default=None, gt=0)
+    disk_mb: int | None = Field(default=None, gt=0)
 
 
 class WorkspaceCreateV2Request(BaseModel):
@@ -90,6 +204,407 @@ class WorkspaceCreateV2Request(BaseModel):
     resources: WorkspaceV2Resources = Field(
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
     )
+    preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
+
+
+class PullRequestMonitorAdoptionRequest(BaseModel):
+    """Input for adopting an already-open GitHub PR into AWF monitoring."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    pr_number: int | None = Field(default=None, ge=1)
+    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
+    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
+    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
+    profile: WorkspaceProfile | None = None
+    auto_merge: bool = True
+    initial_review_grace_period_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=86400,
+    )
+    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    task_prompt: Annotated[
+        str | None,
+        Field(default=None, min_length=1, max_length=16384),
+    ] = None
+    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
+
+
+class PullRequestMonitorAdoptionResponse(BaseModel):
+    """Response for the supported existing-PR adoption flow."""
+
+    workspace_id: str
+    status: WorkspaceStatus | str
+    version: int
+    task_id: str | None = None
+    attempt_id: str | None = None
+    candidate_id: str | None = None
+
+    repo_slug: str
+    repo_url: str
+    pr_number: int
+    pr_url: str
+    head_ref: str
+    base_ref: str
+    head_sha: str | None = None
+    base_sha: str | None = None
+    auto_merge: bool
+    monitor_policy: dict[str, Any] = Field(default_factory=dict)
+    attached_existing: bool
+    validation_provenance: ValidationFreshnessSummaryResponse = Field(
+        default_factory=lambda: ValidationFreshnessSummaryResponse()
+    )
+    status_url: str
+    events_url: str
+    logs_url: str
+
+
+class QueueDecisionSummaryResponse(BaseModel):
+    id: str
+    decision: str
+    reason_code: str
+    class_priority: int
+    computed_priority: int
+    age_boost: int
+    retry_bonus: int
+    resource_summary: dict[str, Any]
+    overlap_risk_summary: dict[str, Any]
+    score_summary: dict[str, Any] = Field(default_factory=dict)
+    decided_at: datetime
+
+
+class ResourceReservationSummaryResponse(BaseModel):
+    id: str
+    node_id: str
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int | None
+    dind_slots: int
+    phase: str
+    reserved_at: datetime
+    released_at: datetime | None
+
+
+PolicyFindingSeverity = Literal["warning", "blocking"]
+PolicyFindingStatus = Literal["active", "resolved"]
+PolicyFindingReasonCode = Literal[
+    "OUT_OF_SCOPE_CHANGE",
+    "SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL",
+    "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",
+    "SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST",
+    "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",
+]
+
+
+class PolicyFindingResponse(BaseModel):
+    """Public projection of a structured workspace policy finding."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    candidate_id: str | None
+    attempt_id: str | None
+    task_id: str | None
+    reason_code: PolicyFindingReasonCode
+    severity: PolicyFindingSeverity
+    subject_path: str | None
+    explanation: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    status: PolicyFindingStatus
+    detected_at: datetime
+    resolved_at: datetime | None
+
+
+class WorkspaceLifecycleStageResponse(BaseModel):
+    stage: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: int | None = None
+    status: WorkspaceLifecycleStageStatus
+
+
+class WorkspaceLlmUsageSummaryResponse(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_estimate: float | None = None
+    currency: str | None = None
+    status: LlmUsageStatus = "unavailable"
+    source: str = "none"
+    reason: str | None = "usage_not_reported"
+
+
+class WorkspacePricingMetadataResponse(BaseModel):
+    provider: str
+    model: str
+    currency: str
+    unit: str
+    price_per_unit: float | None = None
+    timestamp: datetime
+    version: int | None = None
+    is_current: bool
+
+
+class WorkspaceRecoveryCurrentOperationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    type: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None = None
+    payload: dict[str, Any] | None = None
+
+
+class WorkspaceRecoverySummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    from_state: str | None = None
+    to_state: str | None = None
+    reason_code: str | None = None
+    action: str | None = None
+    recovery_mode: str | None = None
+    started_at: datetime
+    current_operation: WorkspaceRecoveryCurrentOperationResponse | None = None
+    summary: str
+    payload: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
+
+
+class ValidationRunSummaryResponse(BaseModel):
+    validation_run_id: str
+    attempt_id: str | None = None
+    tier: ValidationTier
+    command_set_hash: str
+    base_commit: str | None = None
+    base_sha: str | None = None
+    workspace_head_sha: str | None = None
+    target_branch: str | None = None
+    target_head_sha: str | None = None
+    current_target_head_sha: str | None = None
+    profile_name: str | None = None
+    profile_version: int | None = None
+    profile_source: str | None = None
+    resolved_profile_digest: str | None = None
+    environment_identity_digest: str | None = None
+    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
+    identity_source: ValidationIdentitySource = "legacy_fallback"
+    status: ValidationProvenanceStatus
+    reason_code: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    fresh_for_target: bool | None = None
+    freshness_status: ValidationFreshnessStatus = "unknown"
+    freshness_reason_code: str | None = None
+    retry_count: int = 0
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
+    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    failing_test_node_ids: list[str] = Field(default_factory=list)
+    failing_test_evidence: list[str] = Field(default_factory=list)
+
+
+class ValidationFreshnessSummaryResponse(BaseModel):
+    required_tier: ValidationTier | None = None
+    latest_satisfied_tier: ValidationTier | None = None
+    freshness_status: ValidationFreshnessStatus = "unknown"
+    reason_code: str | None = None
+    current_target_head_sha: str | None = None
+    latest_validation: ValidationRunSummaryResponse | None = None
+
+
+class WorkspaceRuntimeHealthResponse(BaseModel):
+    status: Literal["ok", "stranded", "unavailable"]
+    reason_code: str
+    decision: Literal[
+        "none",
+        "fail_workspace",
+        "remonitor_workspace",
+        "defer_retry_policy",
+        "preserve_runtime",
+    ]
+    message: str
+    services: list[dict[str, str]] = Field(default_factory=list)
+
+
+class WorkspaceSecretLeaseResponse(BaseModel):
+    lease_id: str
+    secret_name: str
+    kind: str
+    target: str
+    status: str
+    provider: str | None = None
+    ref_digest: str | None = None
+    issued_at: datetime
+    mounted_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class WorkspaceSecretLeaseListResponse(BaseModel):
+    items: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
+
+
+class WorkspaceAppEndpointHealthResponse(BaseModel):
+    path: str
+    method: Literal["GET", "HEAD"]
+    expected_status: int
+    internal_url: str
+
+
+class WorkspaceAppEndpointResponse(BaseModel):
+    name: str
+    service: str
+    scheme: Literal["http", "https"]
+    port: int
+    path: str
+    internal_url: str
+    visibility: Literal["agent", "validation", "console"]
+    health: WorkspaceAppEndpointHealthResponse | None = None
+
+
+class WorkspaceFailureConformanceResponse(BaseModel):
+    summary: str | None = None
+    gaps: list[str] = Field(default_factory=list)
+    reason_code: str | None = None
+    report_reason_code: str | None = None
+    iterations_used: int | None = None
+    max_iterations: int | None = None
+    plan_path: str | None = None
+    report_path: str | None = None
+
+
+class WorkspaceFailureSalvageResponse(BaseModel):
+    hint: str | None = None
+    worktree_path: str | None = None
+    branch_name: str | None = None
+    remote_push_branch: str | None = None
+
+
+class WorkspaceFailurePlanningScopeResponse(BaseModel):
+    scope_phase: str | None = None
+    required_paths: list[str] = Field(default_factory=list)
+    offending_paths: list[str] = Field(default_factory=list)
+    offending_commands: list[str] = Field(default_factory=list)
+    recommended_action: str | None = None
+    recovery_strategy: str | None = None
+    salvage_policy: str | None = None
+    plan_artifact: str | None = None
+    fallback_model: dict[str, Any] | None = None
+
+
+class FallbackTargetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    agent: str
+    provider: str | None = None
+    model: str
+
+
+class ProviderRecoveryStateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    action: Literal["retry", "fallback", "terminal"] | None = None
+    reason_code: str | None = None
+    source_provider: str | None = None
+    source_model: str | None = None
+    retry_attempt_number: int | None = None
+    fallback_attempt_number: int | None = None
+    cooldown_until: datetime | None = None
+    next_eligible_at: datetime | None = None
+    fallback_target: FallbackTargetResponse | None = None
+    source_workspace_id: str | None = None
+    source_attempt_id: str | None = None
+    recommended_action: str | None = None
+    terminal: bool | None = None
+
+
+class WorkspaceFailureDetailsResponse(BaseModel):
+    reason_code: str | None = None
+    message: str | None = None
+    conformance: WorkspaceFailureConformanceResponse | None = None
+    salvage: WorkspaceFailureSalvageResponse | None = None
+    planning_scope: WorkspaceFailurePlanningScopeResponse | None = None
+    provider: str | None = None
+    model: str | None = None
+    retryable: bool | None = None
+    recommended_action: str | None = None
+    recovery_strategy: str | None = None
+    salvage_policy: str | None = None
+    fallback_model: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
+    failure_type: str | None = None
+    retry_after_seconds: int | None = None
+    cooldown_seconds: int | None = None
+    failure_fingerprint: str | None = None
+    fallback_allowed: bool | None = None
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
+
+
+class CoordinationOverlapResponse(BaseModel):
+    workspace_id: str
+    existing_path: str
+    requested_path: str
+    match_reason_code: str | None = None
+    explanation: str | None = None
+
+
+class WorkspaceCoordinationWarningResponse(BaseModel):
+    warning_code: str
+    message: str
+    severity: WorkspaceOverlapGraphSeverity = "advisory"
+    blocks_launch: bool = False
+    workspace_ids: list[str] = Field(default_factory=list)
+    overlaps: list[CoordinationOverlapResponse] = Field(default_factory=list)
+    stale_policy_context: dict[str, str] = Field(default_factory=dict)
+    overlap_count: int = 0
+    overlaps_truncated: bool = False
+
+
+class ProviderReadinessCredentialSourceResponse(BaseModel):
+    type: str | None = None
+    signal: str | None = None
+    credential_scope: str | None = None
+    isolation: str | None = None
+
+
+class ProviderReadinessPreflightResponse(BaseModel):
+    provider: str
+    agent: str
+    model: str | None = None
+    model_source: str | None = None
+    readiness_status: str
+    auth_status: str
+    auth_source: str
+    credential_scope: str | None = None
+    isolation: str | None = None
+    probe_status: str
+    reason_code: str
+    message: str
+    override_required: bool
+    override_requested: bool = False
+    override_used: bool
+    override_reason: str | None = None
+    blocks_launch: bool
+    checked_at: datetime
+    credential_sources: list[ProviderReadinessCredentialSourceResponse] = Field(
+        default_factory=list
+    )
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    probe_detail: str | None = None
+    source_workspace_id: str | None = None
 
 
 class WorkspaceResponse(BaseModel):
@@ -101,6 +616,11 @@ class WorkspaceResponse(BaseModel):
     status: WorkspaceStatus
     version: int
 
+    subphase: str | None = None
+    last_activity_at: datetime | None = None
+    last_log_at: datetime | None = None
+    is_stale_running: bool = False
+
     repo_url: str
     branch_base: str
     branch_name: str | None
@@ -109,25 +629,96 @@ class WorkspaceResponse(BaseModel):
     task_title: str
     task_prompt: str
     task_external_id: str | None
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    task_policy: dict[str, Any] = Field(default_factory=dict)
+    auto_merge: bool
+    initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime
+    agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
     env_profile: str | None
     profile_ref: str | None
     requested_profile: dict[str, Any] | None
     resolved_profile: dict[str, Any] | None
+    network_posture: NetworkPosture | None = None
 
     test_commands: list[str]
     requires_database: bool
 
     node_id: str | None
     compose_project_name: str | None
+    compose_file_path: str | None
 
     pr_url: str | None
     failure_reason: str | None
     failure_message: str | None
+    failure_details: WorkspaceFailureDetailsResponse | None = None
+
+    latest_queue_decision: QueueDecisionSummaryResponse | None = None
+    active_resource_reservation: ResourceReservationSummaryResponse | None = None
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
+    policy_findings: list[PolicyFindingResponse] = Field(
+        default_factory=list,
+        validation_alias="active_policy_findings",
+    )
+    lifecycle: list[WorkspaceLifecycleStageResponse] = Field(default_factory=list)
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
+    )
+    pricing: WorkspacePricingMetadataResponse | None = None
+    recovery: WorkspaceRecoverySummaryResponse | None = None
+    validation_provenance: ValidationFreshnessSummaryResponse = Field(
+        default_factory=lambda: ValidationFreshnessSummaryResponse()
+    )
+    runtime_health: WorkspaceRuntimeHealthResponse | None = None
+    secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
+    app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
+    egress_audit: EgressAuditRecordResponse | None = None
 
     created_at: datetime
     updated_at: datetime
+
+
+class EgressAuditRecordResponse(BaseModel):
+    """Immutable evidence of a workspace egress policy enforcement decision."""
+
+    id: str
+    workspace_id: str
+    attempt_id: str | None = None
+    policy_posture: str
+    decision: str
+    destination_category: str
+    reason_code: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    enforced_at: datetime
+    created_at: datetime
+
+
+class OwnedPathOverlapResponse(BaseModel):
+    workspace_id: str
+    existing_path: str
+    requested_path: str
+
+
+class WorkspaceLockOverlapRiskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    overlapping_workspace_id: str
+    overlapping_owned_path: str
+    owned_path: str
+
+
+class WorkspaceWarningResponse(BaseModel):
+    warning_code: str
+    message: str
+    workspace_ids: list[str] = Field(default_factory=list)
+    overlaps: list[OwnedPathOverlapResponse] = Field(default_factory=list)
 
 
 class WorkspaceAcceptedResponse(BaseModel):
@@ -143,6 +734,21 @@ class WorkspaceAcceptedResponse(BaseModel):
     status_url: str
     events_url: str
     accepted_at: datetime
+    warnings: list[WorkspaceWarningResponse] = Field(default_factory=list)
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
+
+
+class WorkspaceRetryResponse(BaseModel):
+    """202 Accepted payload for retrying a terminal workspace."""
+
+    source_workspace_id: str
+    new_workspace_id: str
+    operation_id: str
+    status: WorkspaceStatus
+    attempt_number: int
+    status_url: str
+    events_url: str
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
 
 
 class WorkspaceEventResponse(BaseModel):
@@ -166,17 +772,39 @@ class WorkspaceEventListResponse(BaseModel):
     items: list[WorkspaceEventResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class TaskResponse(BaseModel):
     """Workspace-backed task row for operator consoles."""
 
     task_id: str
+    attempt_id: str | None = None
+    attempt_number: int | None = None
+    parent_attempt_id: str | None = None
+    redispatch_from_attempt_id: str | None = None
+    superseded_by_attempt_id: str | None = None
+    is_canonical_for_merge: bool | None = None
+    canonical_attempt_id: str | None = None
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    readiness: MergeCandidateReadinessResponse | None = None
     workspace_id: str
     title: str
     repo_url: str
     base_branch: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
     agent: AgentRuntime
+    agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
+    )
+    pricing: WorkspacePricingMetadataResponse | None = None
     status: WorkspaceStatus
     pr_url: str | None
     failure_reason: str | None
@@ -188,17 +816,70 @@ class TaskListResponse(BaseModel):
     items: list[TaskResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class TaskAttemptResponse(BaseModel):
+    attempt_id: str
+    task_id: str
+    workspace_id: str
+    attempt_number: int
+    parent_attempt_id: str | None
+    redispatch_from_attempt_id: str | None
+    superseded_by_attempt_id: str | None
+    is_canonical_for_merge: bool
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    readiness: MergeCandidateReadinessResponse | None = None
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    pr_url: str | None
+    failure_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskAttemptListResponse(BaseModel):
+    task_id: str
+    task_ref: str
+    items: list[TaskAttemptResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceOverviewResponse(BaseModel):
     workspace_id: str
     task_id: str
     title: str
+    task_prompt: str
     repo_url: str
     base_branch: str
     branch_name: str | None
+    task_class: TaskClass | None
+    owned_paths: list[str]
     agent: AgentRuntime
+    agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
+    network_posture: NetworkPosture | None = None
+    lifecycle: list[WorkspaceLifecycleStageResponse] = Field(default_factory=list)
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
+    )
+    pricing: WorkspacePricingMetadataResponse | None = None
+    recovery: WorkspaceRecoverySummaryResponse | None = None
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
     status: WorkspaceStatus
+
+    subphase: str | None = None
+    last_activity_at: datetime | None = None
+    last_log_at: datetime | None = None
+    is_stale_running: bool = False
     current_phase: str
     active_operation: str | None
     last_event: WorkspaceEventResponse | None
@@ -213,6 +894,199 @@ class WorkspaceOverviewListResponse(BaseModel):
     items: list[WorkspaceOverviewResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+StaleReasonStatus = Literal["active", "resolved"]
+StaleReasonCode = Literal[
+    "STALE_TARGET_ADVANCED",
+    "STALE_OVERLAP",
+    "STALE_DEPENDENCY",
+    "STALE_BUILD_CONFIG",
+    "STALE_SCHEMA",
+    "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+]
+StaleReasonTrigger = Literal[
+    "target_advanced",
+    "path_overlap",
+    "schema_changed",
+    "dependency_changed",
+    "build_config_changed",
+    "plan_artifact_overlap",
+]
+StaleReasonSeverity = Literal["blocking", "advisory"]
+
+
+class StaleReasonResponse(BaseModel):
+    """Public projection of one ``stale_reasons`` row."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    candidate_id: str | None
+    attempt_id: str | None
+    task_id: str | None
+    trigger_type: StaleReasonTrigger
+    trigger_ref: str | None
+    reason_code: StaleReasonCode
+    explanation: str
+    status: StaleReasonStatus
+    severity: StaleReasonSeverity
+    blocks_merge: bool
+    detected_at: datetime
+    resolved_at: datetime | None
+
+
+class StaleReasonListResponse(BaseModel):
+    items: list[StaleReasonResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class MergeQueueBlockerResponse(BaseModel):
+    candidate_id: str
+    workspace_id: str
+    attempt_id: str
+    task_id: str
+    title: str
+    pr_url: str
+    pr_number: int | None
+    status: WorkspaceStatus
+    blocker_state: MergeQueueBlockerState
+    reason_code: str
+
+
+class MergeQueueItemResponse(BaseModel):
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    close_reason: str | None = None
+    attempt_id: str | None = None
+    task_id: str
+    workspace_id: str
+    title: str
+    repo_url: str
+    base_branch: str
+    branch_name: str | None
+    pr_url: str
+    status: WorkspaceStatus
+    auto_merge: bool
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    created_at: datetime
+    updated_at: datetime
+    merged_at: datetime | None = None
+    last_event: WorkspaceEventResponse | None
+    merge_blocker_reason: MergeBlockerReason
+    required_next_action: str | None = None
+    required_validation_tier: ValidationTier | None = None
+    latest_satisfied_validation_tier: ValidationTier | None = None
+    validation_freshness_status: ValidationFreshnessStatus = "unknown"
+    validation_reason_code: str | None = None
+    readiness: MergeCandidateReadinessResponse | None = None
+    canonical: bool
+    queue_blockers: list[MergeQueueBlockerResponse] = Field(default_factory=list)
+    latest_validation: ValidationRunSummaryResponse | None = None
+    stale_reasons: list[StaleReasonResponse] = Field(default_factory=list)
+    policy_findings: list[PolicyFindingResponse] = Field(default_factory=list)
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
+
+
+class MergeQueueListResponse(BaseModel):
+    items: list[MergeQueueItemResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class WorkspaceLockResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workspace_id: str
+    title: str
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    repo_url: str
+    branch_base: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    overlap_risks: list[WorkspaceLockOverlapRiskResponse] = Field(default_factory=list)
+    pr_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceLockListResponse(BaseModel):
+    items: list[WorkspaceLockResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class WorkspaceOverlapGraphNodeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workspace_id: str
+    title: str
+    status: WorkspaceStatus
+    queue_state: WorkspaceOverlapGraphQueueState
+    repo_url: str
+    branch_base: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceOverlapPathMatchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    left_workspace_id: str
+    left_owned_path: str
+    right_workspace_id: str
+    right_owned_path: str
+    match_reason_code: WorkspaceOverlapPathMatchReasonCode
+    explanation: str
+
+
+class WorkspaceOverlapGraphEdgeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    left_workspace_id: str
+    right_workspace_id: str
+    repo_url: str
+    branch_base: str
+    reason_code: WorkspaceOverlapGraphReasonCode
+    severity: WorkspaceOverlapGraphSeverity
+    blocks_launch: bool
+    affected_workspace_ids: list[str]
+    path_match_count: int
+    path_matches_truncated: bool
+    path_matches: list[WorkspaceOverlapPathMatchResponse]
+
+
+class WorkspaceOverlapGraphSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    node_count: int
+    queued_count: int
+    running_count: int
+    edge_count: int
+    affected_workspace_count: int
+    has_more: bool
+
+
+class WorkspaceOverlapGraphResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    nodes: list[WorkspaceOverlapGraphNodeResponse]
+    edges: list[WorkspaceOverlapGraphEdgeResponse]
+    summary: WorkspaceOverlapGraphSummaryResponse
 
 
 class RuntimeServiceResponse(BaseModel):
@@ -234,6 +1108,8 @@ class WorkspaceRuntimeResponse(BaseModel):
     logs_available: bool
     control_available: bool
     reason: str | None = None
+    runtime_health: WorkspaceRuntimeHealthResponse | None = None
+    app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
 
 
 class WorkspaceLogStreamResponse(BaseModel):
@@ -254,6 +1130,8 @@ class WorkspaceLogListResponse(BaseModel):
     items: list[WorkspaceLogStreamResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceLogReadResponse(BaseModel):
@@ -262,6 +1140,91 @@ class WorkspaceLogReadResponse(BaseModel):
     next_offset: int
     eof: bool
     data: str
+
+
+class WorkspaceArtifactResponse(BaseModel):
+    artifact_id: str
+    workspace_id: str
+    name: str
+    relative_path: str
+    path: str
+    kind: str
+    size_bytes: int
+    modified_at: datetime
+
+
+class WorkspaceArtifactListResponse(BaseModel):
+    items: list[WorkspaceArtifactResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class WorkspaceArtifactReadResponse(BaseModel):
+    """Bounded artifact bytes + metadata returned by ``awf_read_workspace_artifact``."""
+
+    workspace_id: str
+    relative_path: str
+    name: str
+    content_type: str
+    size_bytes: int
+    content: str
+    """Base64-encoded artifact bytes (standard alphabet, no line breaks)."""
+
+
+class ValidationProvenanceItemResponse(BaseModel):
+    validation_run_id: str | None = None
+    workspace_id: str
+    attempt_id: str | None = None
+    tier: ValidationTier | None = None
+    command_set_hash: str | None = None
+    phase: str
+    command_index: int
+    command: str | None
+    stream_ids: dict[str, str | None]
+    stdout_byte_count: int
+    stdout_line_count: int
+    stderr_byte_count: int
+    stderr_line_count: int
+    opened_at: datetime
+    closed_at: datetime | None
+    status: ValidationProvenanceStatus
+    reason_code: str | None = None
+    base_commit: str | None
+    base_sha: str | None = None
+    workspace_head_sha: str | None = None
+    branch_name: str | None
+    target_branch: str | None = None
+    target_head_sha: str | None = None
+    current_target_head_sha: str | None = None
+    profile_name: str | None = None
+    profile_version: int | None = None
+    profile_source: str | None = None
+    resolved_profile_digest: str | None = None
+    environment_identity_digest: str | None = None
+    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
+    identity_source: ValidationIdentitySource = "legacy_fallback"
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    fresh_for_target: bool | None = None
+    retry_count: int = 0
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
+    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    failing_test_node_ids: list[str] = Field(default_factory=list)
+    failing_test_evidence: list[str] = Field(default_factory=list)
+
+
+class ValidationProvenanceListResponse(BaseModel):
+    items: list[ValidationProvenanceItemResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class OperationResponse(BaseModel):
@@ -279,24 +1242,257 @@ class OperationResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    owner: str | None = None
+    source: str | None = None
+    action: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    source_head_sha: str | None = None
+    source_base_sha: str | None = None
+    reason: str | None = None
+    reason_code: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    log_stream_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def populate_audit_fields(self) -> OperationResponse:
+        payload = self.payload if isinstance(self.payload, dict) else {}
+        result = self.result if isinstance(self.result, dict) else {}
+        self.owner = self.owner or _first_str(payload, result, key="owner")
+        self.source = self.source or _first_str(payload, result, key="source")
+        self.action = self.action or _first_str(payload, result, key="action")
+        self.pr_number = self.pr_number or _first_int(payload, result, key="pr_number")
+        self.pr_url = self.pr_url or _first_str(payload, result, key="pr_url")
+        self.source_head_sha = self.source_head_sha or _first_str(
+            payload, result, key="source_head_sha"
+        )
+        self.source_base_sha = self.source_base_sha or _first_str(
+            payload, result, key="source_base_sha"
+        )
+        self.reason = self.reason or _first_str(payload, result, key="reason")
+        self.reason_code = self.reason_code or _first_str(payload, result, key="reason_code")
+        self.failure_code = (
+            self.failure_code
+            or _first_str(result, payload, key="failure_code")
+            or _first_str(result, payload, key="error_code")
+            or self.error_code
+        )
+        self.failure_message = (
+            self.failure_message
+            or _first_str(result, payload, key="failure_message")
+            or _first_str(result, payload, key="error_message")
+            or self.error_message
+        )
+        refs = _merge_log_stream_refs(
+            self.log_stream_refs,
+            _operation_log_stream_refs(payload, result),
+        )
+        self.log_stream_refs = refs
+        self.log_stream_ids = _log_stream_ids(self.log_stream_refs)
+        return self
+
+
+def _first_str(*sources: dict[str, Any], key: str) -> str | None:
+    for source in sources:
+        value = source.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _first_int(*sources: dict[str, Any], key: str) -> int | None:
+    for source in sources:
+        value = source.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _operation_log_stream_refs(
+    *sources: dict[str, Any],
+) -> dict[str, Any]:
+    refs: dict[str, Any] = {}
+    for source in sources:
+        value = source.get("log_stream_refs")
+        if isinstance(value, dict):
+            refs = _merge_log_stream_refs(refs, value)
+    return refs
+
+
+def _merge_log_stream_refs(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    refs = dict(existing)
+    for key, value in incoming.items():
+        if key in refs:
+            refs[key] = _merge_log_stream_ref_value(refs[key], value)
+        else:
+            refs[key] = value
+    return refs
+
+
+def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
+    if existing == incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        return _merge_log_stream_refs(existing, incoming)
+
+    values = list(existing) if isinstance(existing, list) else [existing]
+    incoming_values = incoming if isinstance(incoming, list) else [incoming]
+    for value in incoming_values:
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _log_stream_ids(value: Any) -> list[str]:
+    ids: set[str] = set()
+
+    def collect(item: Any, depth: int = 0) -> None:
+        if depth > _MAX_LOG_STREAM_REF_DEPTH:
+            return
+        if isinstance(item, str):
+            ids.add(item)
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                collect(child, depth + 1)
+            return
+        if isinstance(item, list | tuple):
+            for child in item:
+                collect(child, depth + 1)
+
+    collect(value)
+    return sorted(ids)
 
 
 class OperationListResponse(BaseModel):
     items: list[OperationResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
-class WorkspaceControlRequest(BaseModel):
+class CallbackSubscriptionCreateRequest(BaseModel):
+    """Register an external callback target for sanitized AWF event envelopes."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: Annotated[str, Field(min_length=1, max_length=128)]
+    target_url: Annotated[str, Field(min_length=1, max_length=2048)]
+    event_types: list[CallbackEventType] = Field(min_length=1, max_length=64)
+    enabled: bool = True
+    timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 10
+    max_attempts: Annotated[int, Field(ge=1, le=20)] = 3
+    initial_backoff_seconds: Annotated[int, Field(ge=1, le=3600)] = 5
+
+    @field_validator("target_url")
+    @classmethod
+    def validate_target_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("target_url must use http or https")
+        if not parsed.hostname:
+            raise ValueError("target_url must include a host")
+        validate_callback_target_url_port(parsed)
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("target_url must not include userinfo credentials")
+        if parsed.fragment:
+            raise ValueError("target_url must not include a fragment")
+        if not is_public_callback_target_host(parsed.hostname):
+            raise ValueError("target_url must use a public host")
+        return value
+
+    @field_validator("event_types")
+    @classmethod
+    def validate_event_types(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in value:
+            event_type = item.strip()
+            if not is_valid_callback_subscription_event_type(event_type):
+                raise ValueError(
+                    "event_types must be public callback event names or public wildcards"
+                )
+            if event_type not in seen:
+                seen.add(event_type)
+                normalized.append(event_type)
+        return normalized
+
+
+class CallbackSubscriptionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    target_url: str
+    event_types: list[str]
+    enabled: bool
+    timeout_seconds: int
+    max_attempts: int
+    initial_backoff_seconds: int
+    created_at: datetime
+    updated_at: datetime
+    disabled_at: datetime | None = None
+
+
+class CallbackSubscriptionListResponse(BaseModel):
+    items: list[CallbackSubscriptionResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
+class WorkspaceReasonRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
+
+
+class _WorkspaceReasonCompatibilityRequest(WorkspaceReasonRequest):
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_ignored_legacy_body_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or not cls._ignored_legacy_body_fields:
+            return data
+        return {
+            field_name: value
+            for field_name, value in data.items()
+            if field_name not in cls._ignored_legacy_body_fields
+        }
+
+
+class WorkspaceReasonWithLegacyStopStackRequest(_WorkspaceReasonCompatibilityRequest):
+    """Reason-only request that still accepts the deprecated no-op ``stop_stack`` field."""
+
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset({"stop_stack"})
+
+
+class WorkspaceReasonWithLegacyRequestedTierRequest(_WorkspaceReasonCompatibilityRequest):
+    """Reason-only request that still accepts deprecated no-op ``requested_tier``."""
+
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset({"requested_tier"})
+
+
+class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
+
+
+class WorkspaceOperationRequest(WorkspaceReasonRequest):
+    requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
 
 
 class WorkspaceControlResponse(BaseModel):
     workspace_id: str
     operation_id: str
+    operation_status: OperationStatus
     status: WorkspaceStatus
     message: str
 
@@ -309,4 +1505,16 @@ class ErrorResponse(BaseModel):
 
     error_code: str
     message: str
-    detail: dict[str, str] | None = None
+    detail: dict[str, Any] | None = None
+
+
+class HTTPExceptionErrorResponse(BaseModel):
+    """FastAPI ``HTTPException`` envelope for structured API errors."""
+
+    detail: ErrorResponse
+
+
+class HttpExceptionErrorResponse(BaseModel):
+    """FastAPI HTTPException envelope carrying AWF's structured error detail."""
+
+    detail: ErrorResponse

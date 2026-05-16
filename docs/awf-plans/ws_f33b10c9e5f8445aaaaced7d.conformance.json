@@ -1,0 +1,5 @@
+{
+  "status": "satisfied",
+  "summary": "The implementation correctly introduces a dismissible embedded `WorkspaceInspector` drawer for selected workspace details. It correctly uses a 'ghost' variant for inner panels to satisfy the 'no cards inside cards' requirement. The sliding drawer overlay avoids reflowing the global dashboard (no jumping). The `selectedId` state is synced with URL search params for deep linking. Comprehensive Playwright tests cover opening, closing, URL persistence, and responsive layout behavior. All validation commands (lint, typecheck, playwright) pass.",
+  "gaps": []
+}

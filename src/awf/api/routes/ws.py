@@ -10,22 +10,23 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import require_api_token
-from awf.api.schemas import WorkspaceEventResponse, WorkspaceResponse
+from awf.api.deps import require_websocket_api_token
+from awf.api.schemas import WorkspaceEventResponse
 from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
 from awf.runtime.events import WORKSPACE_EVENT_BROADCASTER, WorkspaceEventFrame
-from awf.runtime.logs import LOG_BROADCASTER, LogFrame, LogStore
+from awf.runtime.logs import LOG_BROADCASTER, LogFrame, read_log_chunk
+from awf.service.workspaces import workspace_response
 
 router = APIRouter(tags=["workspace-streams"])
 
 
 @router.websocket(
     "/v1/workspaces/{workspace_id}/ws",
-    dependencies=[Depends(require_api_token)],
+    dependencies=[Depends(require_websocket_api_token)],
 )
 async def workspace_socket(
     websocket: WebSocket,
@@ -95,7 +96,7 @@ async def _send_initial_state(
     tail_bytes: int,
 ) -> bool:
     async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace = await WorkspaceRepository(session).get_with_operations(workspace_id)
         if workspace is None:
             await websocket.send_json(
                 {"type": "error", "error_code": "NOT_FOUND", "message": "workspace not found"}
@@ -105,7 +106,7 @@ async def _send_initial_state(
         await websocket.send_json(
             {
                 "type": "snapshot",
-                "workspace": WorkspaceResponse.model_validate(workspace).model_dump(mode="json"),
+                "workspace": workspace_response(workspace).model_dump(mode="json"),
             }
         )
         if "events" in selected:
@@ -123,7 +124,7 @@ async def _send_initial_state(
                         ),
                     }
                 )
-        if {"agent", "validation", "services"} & selected:
+        if selected - {"events"}:
             streams = await WorkspaceLogStreamRepository(session).list_for_workspace(workspace_id)
             for stream in streams:
                 if not _stream_selected(stream.source, selected):
@@ -132,7 +133,7 @@ async def _send_initial_state(
                 if not path.is_file():
                     continue
                 offset = max(stream.byte_count - tail_bytes, 0)
-                data, next_offset, _eof = await LogStore(root=path.parent).read(
+                data, next_offset, _eof = await read_log_chunk(
                     path=path,
                     offset=offset,
                     limit_bytes=tail_bytes,

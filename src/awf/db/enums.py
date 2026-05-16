@@ -61,9 +61,37 @@ class OperationType(StrEnum):
     start = "start"
     validate = "validate"
     push = "push"
+    refresh = "refresh"
+    rebase = "rebase"
+    retry = "retry"
     cancel = "cancel"
     stop = "stop"
+    remonitor = "remonitor"
+    sync_base = "sync_base"
+    comment_repair = "comment_repair"
+    ci_repair = "ci_repair"
+    human_wait = "human_wait"
+    monitor_state = "monitor_state"
+    adopt_pr = "adopt_pr"
     destroy = "destroy"
+
+
+class CallbackDeliveryStatus(StrEnum):
+    """Lifecycle status for an outbound external callback delivery."""
+
+    pending = "pending"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class CallbackEventKind(StrEnum):
+    """Top-level callback event source category."""
+
+    workspace = "workspace"
+    merge = "merge"
+    operation = "operation"
 
 
 class FailureReason(StrEnum):
@@ -109,6 +137,23 @@ class TaskKind(StrEnum):
     PR is kept current via the monitor's SyncBase cycle as more feature
     branches land on development."""
 
+    sync_feature_pr = "sync_feature_pr"
+    """Adopt an already-open feature PR into AWF's service monitor.
+    Provisioning checks out the PR head ref and the executor skips the
+    original coding-agent, validation, push, and PR-create path before
+    handing the workspace to the normal PR monitor."""
+
+
+class TaskClass(StrEnum):
+    """PRD task policy class used by scheduling, validation, and overlap risk."""
+
+    docs_task = "docs_task"
+    test_task = "test_task"
+    refactor_task = "refactor_task"
+    migration_task = "migration_task"
+    dependency_task = "dependency_task"
+    build_config_task = "build_config_task"
+
 
 class AgentRuntime(StrEnum):
     """Which coding CLI should execute the task inside the workspace.
@@ -126,3 +171,14 @@ class AgentRuntime(StrEnum):
 
     gemini = "gemini"
     """Google Gemini CLI — ``gemini --yolo``."""
+
+    opencode = "opencode"
+    """OpenCode CLI — ``opencode run`` with an AWF-managed provider config."""
+
+
+class EgressDecision(StrEnum):
+    """Per-workspace egress enforcement outcome recorded in audit evidence."""
+
+    allow = "allow"
+    deny = "deny"
+    deferred = "deferred"

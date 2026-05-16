@@ -18,10 +18,9 @@ Design notes:
   ignores ``state.iter_count`` entirely — the counter exists for
   structured-log context, not as a terminal gate. Bumping happens in
   the runner after an action executes.
-* **Thread dedup is the caller's problem**. ``decide`` returns a
-  ``batch`` of threads on ``AddressComments`` consisting *only* of threads
-  whose IDs are absent from ``state.threads_addressed_ids``. If every
-  thread is already addressed, ``decide`` skips to the other gates.
+* **Thread dedup is the caller's problem**. The runner drops stale
+  addressed-state when fetched review-thread/comment evidence changes,
+  then ``decide`` skips only the still-current addressed items.
 * **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
   exactly one place: when all 5 gates are green it returns
   ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
@@ -31,8 +30,12 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -81,12 +84,37 @@ class CheckState(StrEnum):
     NEUTRAL = "NEUTRAL"
 
 
+DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = (
+    "greptile-apps",
+    "chatgpt-codex-connector",
+)
+
+
+@dataclass(frozen=True)
+class ReviewThreadComment:
+    """One comment inside an inline review thread.
+
+    PR review threads can contain the original bot finding plus follow-up
+    replies from humans, bots, or AWF itself. The monitor sends this full
+    conversation to the coding agent as evidence instead of deciding locally
+    which reply is semantically important.
+    """
+
+    comment_id: str | None
+    body: str
+    author: str | None = None
+    created_at: datetime | None = None
+    url: str | None = None
+    viewer_did_author: bool = False
+
+
 @dataclass(frozen=True)
 class ReviewThread:
     """An inline (file + line) review thread.
 
     The GraphQL id is the node ID used with ``resolveReviewThread``.
-    ``body_excerpt`` is short (~400 chars) so prompts stay small.
+    ``body_excerpt`` is short (~400 chars) for legacy call sites; prompts
+    prefer ``comments`` when GitHub supplied the full thread history.
     """
 
     thread_id: str
@@ -95,11 +123,14 @@ class ReviewThread:
     body_excerpt: str
     author: str | None = None
     is_resolved: bool = False
+    comments: tuple[ReviewThreadComment, ...] = ()
+    url: str | None = None
+    is_outdated: bool = False
 
 
 @dataclass(frozen=True)
 class ReviewComment:
-    """A review-level (outside-diff) comment — CodeRabbit summary, etc.
+    """A review-level (outside-diff) comment.
 
     No file/line anchor. Still must be resolved under the review-comment
     gate unless it represents a policy blocker.
@@ -110,9 +141,13 @@ class ReviewComment:
     author: str | None = None
     is_resolved: bool = False
     blocks_merge: bool = False
-    """True for policy/checklist comments that the coding CLI cannot
-    resolve by editing code, for example a bot saying review was skipped
-    and exposing an unchecked "trigger review" task."""
+    """Reserved for non-textual policy blockers supplied by future providers."""
+    body: str | None = None
+    url: str | None = None
+    created_at: datetime | None = None
+    state: str | None = None
+    source_kind: str = "review"
+    viewer_did_author: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +157,28 @@ class CheckFailure:
     name: str
     conclusion: str  # FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED
     log_excerpt: str  # tail of the failing step's log, truncated
+    run_id: str | None = None
+    failing_commands: tuple[str, ...] = ()
+    test_node_ids: tuple[str, ...] = ()
+    assertion_snippets: tuple[str, ...] = ()
+    error_summaries: tuple[str, ...] = ()
+    suggested_repro_commands: tuple[str, ...] = ()
+    evidence_warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CheckTiming:
+    """Timing and link metadata for an individual GitHub check/status context."""
+
+    name: str
+    status: str | None = None
+    conclusion: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    details_url: str | None = None
+    app_slug: str | None = None
+    app_name: str | None = None
+    creator_login: str | None = None
 
 
 @dataclass(frozen=True)
@@ -148,8 +205,11 @@ class PRStatus:
     shipped PR #335 / #336 as "ready to merge" when they were BEHIND)."""
 
     ci_failures: tuple[CheckFailure, ...] = ()
+    checks: tuple[CheckTiming, ...] = ()
+    changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False
+    merge_commit_sha: str | None = None
 
 
 # ── State — small, serialisable, lives on the workspace row ────────────────
@@ -165,7 +225,11 @@ class MonitorState:
 
     iter_count: int = 0
     last_push_sha: str | None = None  # SHA at the time of last push
-    # thread_id → one of: "fix_committed" / "false_positive" / "defer"
+    sync_base_no_progress_signature: str | None = None
+    sync_base_no_progress_count: int = 0
+    # thread/comment id → one of:
+    # "fix_committed" / "false_positive" / "defer" / "agent_failed";
+    # reserved "__review_*_body_hash__:<id>" keys track addressed evidence.
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
 
@@ -200,6 +264,29 @@ class MonitorConfig:
     post comments shortly after checks first turn green; merging on the
     first green snapshot can race those reviewers."""
 
+    non_check_reviewer_settle_seconds: float = 900.0
+    """Per-head quiet-period wait for configured async reviewers that do
+    not expose a GitHub-visible check/status. Set to 0 to disable."""
+
+    non_check_reviewer_logins: tuple[str, ...] = DEFAULT_NON_CHECK_REVIEWER_LOGINS
+    """Reviewer logins that are known to post async comments without a
+    reliable GitHub-visible check/status on every head SHA."""
+
+    stale_pending_check_warning_seconds: float = 900.0
+    """Warn operators when an individual pending/in-progress check has
+    exceeded this age. This is observability only; pending checks still
+    block merge through the ordinary WaitForCI path."""
+
+    max_no_progress_sync_base_attempts: int = 3
+    """Abort or move to still-actionable review feedback after this many
+    consecutive no-op SyncBase attempts for the same PR snapshot. This
+    prevents stale git mirrors or unreproducible GitHub DIRTY states from
+    burning monitor iterations forever."""
+
+    ci_transient_rerun_max_attempts: int = 2
+    """Maximum deterministic GitHub reruns for the same transient CI
+    failure signature before falling back to agent CI repair."""
+
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────
 
@@ -215,6 +302,9 @@ class AbortReason(StrEnum):
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
     merge_conflict_unresolvable = "merge_conflict_unresolvable"
+    merge_conflict_not_reproduced = "merge_conflict_not_reproduced"
+    base_sync_no_progress = "base_sync_no_progress"
+    stale = "stale"
     """GitHub reports mergeStateStatus == DIRTY after every other gate is
     clean — git can't auto-resolve and the CLI already had its chance."""
 
@@ -235,6 +325,13 @@ class AddressComments:
 @dataclass(frozen=True)
 class ReportCiFailure:
     """Re-invoke the CLI with logs of the failing checks."""
+
+    failures: tuple[CheckFailure, ...]
+
+
+@dataclass(frozen=True)
+class RerunTransientCI:
+    """Ask GitHub to rerun failed jobs for infra-like CI failures."""
 
     failures: tuple[CheckFailure, ...]
 
@@ -265,6 +362,8 @@ class NotifyHuman:
     notifications while the workspace remains alive.
     """
 
+    message: str | None = None
+
 
 @dataclass(frozen=True)
 class ShortCircuitCompleted:
@@ -281,6 +380,7 @@ class Abort:
 MonitorAction = (
     AddressComments
     | ReportCiFailure
+    | RerunTransientCI
     | SyncBase
     | WaitForCI
     | Merge
@@ -315,6 +415,293 @@ def _is_bot_author(login: str | None) -> bool:
     return login in BOT_REVIEWER_LOGINS or login.endswith("[bot]")
 
 
+def _needs_comment_attention(verdict: str | None) -> bool:
+    """Return True when an unresolved PR comment still needs the agent.
+
+    ``agent_failed`` is deliberately not treated as addressed. PR #35
+    showed why: Codex exited non-zero while handling a Gemini review
+    thread, left the worktree dirty, and the old decision core then let
+    the PR merge because bot defers do not block. Agent failure is not a
+    reviewer defer; it means AWF still owes the thread another attempt.
+    """
+
+    return verdict is None or verdict == "agent_failed"
+
+
+def _review_thread_body_state_key(thread_id: str) -> str:
+    return f"__review_thread_body_hash__:{thread_id}"
+
+
+def _review_thread_resolution_body(thread: ReviewThread) -> str:
+    if thread.comments:
+        payload = [
+            {
+                "author": comment.author,
+                "body": comment.body,
+                "comment_id": comment.comment_id,
+                "created_at": (
+                    comment.created_at.isoformat() if comment.created_at is not None else None
+                ),
+            }
+            for comment in thread.comments
+        ]
+    else:
+        payload = [
+            {
+                "author": thread.author,
+                "body": thread.body_excerpt,
+                "comment_id": None,
+                "created_at": None,
+            }
+        ]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _review_thread_body_hash(thread: ReviewThread) -> str:
+    return hashlib.sha256(_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+
+
+def _mark_review_thread_addressed(
+    state: MonitorState,
+    thread: ReviewThread,
+    verdict: str,
+) -> None:
+    state.mark_addressed(thread.thread_id, verdict)
+    state.mark_addressed(
+        _review_thread_body_state_key(thread.thread_id),
+        _review_thread_body_hash(thread),
+    )
+
+
+def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if _needs_comment_attention(verdict):
+        return True
+    return state.threads_addressed_ids.get(
+        _review_thread_body_state_key(thread.thread_id)
+    ) != _review_thread_body_hash(thread)
+
+
+def _is_bot_review_thread(thread: ReviewThread) -> bool:
+    authors = (
+        [comment.author for comment in thread.comments] if thread.comments else [thread.author]
+    )
+    return all(_is_bot_author(author) for author in authors)
+
+
+def _agent_can_triage_review_comment(comment: ReviewComment) -> bool:
+    if not comment.blocks_merge:
+        return True
+    return comment.source_kind == "issue" and _is_bot_author(comment.author)
+
+
+def sync_base_no_progress_signature(status: PRStatus) -> str:
+    """Stable identity for a SyncBase snapshot that made no local progress."""
+
+    mergeable = status.mergeable.value
+    merge_state = status.merge_state_status.value if status.merge_state_status else "UNKNOWN"
+    return f"{status.head_sha}|{mergeable}|{merge_state}|base_behind={status.base_behind_count}"
+
+
+def _sync_base_no_progress_exhausted(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    return (
+        config.max_no_progress_sync_base_attempts > 0
+        and state.sync_base_no_progress_signature == sync_base_no_progress_signature(status)
+        and state.sync_base_no_progress_count >= config.max_no_progress_sync_base_attempts
+    )
+
+
+_CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
+
+_CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
+
+_CI_CODE_FAILURE_MARKERS = (
+    "failed test",
+    "pytest failed",
+    "assertionerror",
+    "assert failed",
+    "coverage failure",
+    "fail-under",
+    "typecheck",
+    "type check",
+    "would reformat:",
+    "found lint errors",
+    "found type errors",
+    "syntaxerror",
+    "traceback (most recent call last)",
+)
+
+_CI_CODE_FAILURE_PATTERNS = (
+    re.compile(r"(?m)^[^\n:]+:\d+:\d+:\s+[A-Z]\d{3}\b"),
+    re.compile(r"(?m)^[^\n:]+:\d+:\s+error:\s+.+\[[a-z0-9-]+\]"),
+    re.compile(r"\b(?:ruff|mypy|eslint)\b[^\n]*\b(?:failed|found|would reformat|errors?)\b"),
+)
+
+_CI_TRANSIENT_FAILURE_MARKERS = (
+    "timed_out",
+    "http status server error",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "500 internal server",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again",
+    "timed out waiting for",
+    "timeout awaiting",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "recv failure",
+    "tls handshake timeout",
+    "failed to download",
+    "network is unreachable",
+    "runner has received a shutdown signal",
+    "lost communication with the server",
+)
+_CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
+    {
+        "ci-required",
+        "required-ci",
+        "required checks",
+        "required-checks",
+    }
+)
+_CI_REQUIRED_ROLLUP_FAILURE_MARKERS = (
+    "a required ci job did not pass",
+    "required ci job did not pass",
+)
+
+
+def _ci_transient_rerun_state_key(
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> str:
+    """Stable retry-budget key for one PR head/failing-run signature.
+
+    The key deliberately excludes free-form log text. A rerun can produce
+    slightly different infrastructure wording while still representing the
+    same failing workflow run on the same PR head.
+    """
+
+    signature = json.dumps(
+        [
+            (failure.run_id or "", failure.name, failure.conclusion)
+            for failure in sorted(
+                failures,
+                key=lambda item: (item.run_id or "", item.name, item.conclusion),
+            )
+        ],
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    return f"{_CI_TRANSIENT_RERUN_KEY_PREFIX}{head_sha}:{digest}"
+
+
+def _ci_transient_rerun_count(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+    legacy_failures: tuple[CheckFailure, ...] | None = None,
+) -> int:
+    keys = [_ci_transient_rerun_state_key(head_sha, failures)]
+    if legacy_failures is not None and legacy_failures != failures:
+        keys.append(_ci_transient_rerun_state_key(head_sha, legacy_failures))
+    return max(_ci_transient_rerun_count_for_key(state, key) for key in keys)
+
+
+def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
+    raw_count = state.threads_addressed_ids.get(key, "0")
+    try:
+        return int(raw_count)
+    except ValueError:
+        return 0
+
+
+def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
+    log_text = failure.log_excerpt.lower()
+    if _has_structured_code_failure_evidence(failure):
+        return False
+    if not log_text.strip():
+        return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
+    if _looks_like_code_failure_text(log_text):
+        return False
+    return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+
+
+def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
+    name = failure.name.strip().lower()
+    if name in _CI_REQUIRED_ROLLUP_CHECK_NAMES:
+        return True
+    log_text = failure.log_excerpt.lower()
+    return any(marker in log_text for marker in _CI_REQUIRED_ROLLUP_FAILURE_MARKERS)
+
+
+def _ci_transient_rerun_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+    return tuple(
+        failure
+        for failure in status.ci_failures
+        if not _looks_like_required_ci_rollup_failure(failure)
+    )
+
+
+def _has_structured_code_failure_evidence(failure: CheckFailure) -> bool:
+    if failure.test_node_ids or failure.assertion_snippets:
+        return True
+    return _looks_like_code_failure_text("\n".join(failure.error_summaries).lower())
+
+
+def _looks_like_code_failure_text(text: str) -> bool:
+    if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
+        return True
+    return any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS)
+
+
+def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
+    return failure.conclusion.upper() in _CI_FAILED_JOB_RERUN_CONCLUSIONS
+
+
+def _should_rerun_transient_ci(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    if config.ci_transient_rerun_max_attempts <= 0:
+        return False
+    if not status.ci_failures:
+        return False
+    rerun_failures = _ci_transient_rerun_failures(status)
+    if not rerun_failures:
+        return False
+    if any(not failure.run_id for failure in rerun_failures):
+        return False
+    if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
+        return False
+    if not all(_looks_like_transient_ci_failure(failure) for failure in rerun_failures):
+        return False
+    return (
+        _ci_transient_rerun_count(
+            state,
+            head_sha=status.head_sha,
+            failures=rerun_failures,
+            legacy_failures=status.ci_failures,
+        )
+        < config.ci_transient_rerun_max_attempts
+    )
+
+
 # ── The decision function ──────────────────────────────────────────────────
 
 
@@ -337,10 +724,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-        Policy/checklist blockers are excluded from this batch because
-        the coding CLI cannot fix them.
-    3.  Policy/checklist blockers that cannot be code-fixed →
-        NotifyHuman.
+        Review comments are routed to the coding agent so it can record a
+        fix, false-positive, or defer verdict against the current evidence.
+    3.  Reserved policy blockers → NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
     5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
@@ -370,9 +756,22 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
 
+    # Pre-compute actionable comments so a no-progress DIRTY loop can break
+    # back to review repair instead of starving new feedback forever.
+    new_threads = tuple(
+        t
+        for t in status.unresolved_inline_threads
+        if _needs_comment_attention(state.threads_addressed_ids.get(t.thread_id))
+    )
+    new_reviews = tuple(
+        c
+        for c in status.unresolved_review_comments
+        if _agent_can_triage_review_comment(c)
+        and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
+    )
+
     # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
-    # PR with an active bot-review fleet (Greptile/CodeRabbit/Bugbot/
-    # Codex/etc.) every push triggers a new wave of comments —
+    # PR with an active bot-review fleet every push triggers a new wave of comments —
     # AddressComments would fire every single iteration and we'd never
     # integrate base updates, leaving the PR stuck on BEHIND
     # indefinitely. SyncBase only adds a merge commit; the feature work
@@ -397,22 +796,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         MergeStateStatus.BEHIND,
         MergeStateStatus.DIRTY,
     ):
+        if _sync_base_no_progress_exhausted(status, state, config):
+            if status.merge_state_status == MergeStateStatus.DIRTY and (new_threads or new_reviews):
+                return AddressComments(threads=new_threads, review_comments=new_reviews)
+            if status.merge_state_status == MergeStateStatus.DIRTY:
+                return Abort(reason=AbortReason.merge_conflict_not_reproduced)
+            return Abort(reason=AbortReason.base_sync_no_progress)
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
-    # Policy/checklist blockers remain visible to the merge gate, but are
-    # not sent to the coding CLI: no code edit can click a review-bot
-    # "Trigger review" checkbox or change organization review settings.
-    new_threads = tuple(
-        t
-        for t in status.unresolved_inline_threads
-        if t.thread_id not in state.threads_addressed_ids
-    )
-    new_reviews = tuple(
-        c
-        for c in status.unresolved_review_comments
-        if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
-    )
+    # Review comments get one agent pass so the monitor records whether the
+    # agent fixed, rejected, or deferred them.
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
@@ -422,7 +816,14 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # an external action rather than a code edit. The runner posts a single
     # human-attention comment and keeps polling so later code-review comments
     # are still handled.
-    if any(c.blocks_merge for c in status.unresolved_review_comments):
+    if any(
+        c.blocks_merge
+        and (
+            _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
+            or state.threads_addressed_ids.get(c.comment_id) == "defer"
+        )
+        for c in status.unresolved_review_comments
+    ):
         return NotifyHuman()
 
     # 4. CI failures.
@@ -433,6 +834,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             # grab ``gh run view --log-failed`` on its end; we still hand
             # off a ReportCiFailure action.
             return ReportCiFailure(failures=())
+        if _should_rerun_transient_ci(status, state, config):
+            return RerunTransientCI(failures=_ci_transient_rerun_failures(status))
         return ReportCiFailure(failures=status.ci_failures)
 
     # 5. CI still running, or GitHub is still computing state → passive wait.
@@ -461,6 +864,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # comment fixes; contrast with BEHIND/DIRTY (step 1) which must run
     # first to break the push→comment→push loop.
     if status.mergeable == MergeableState.CONFLICTING:
+        if _sync_base_no_progress_exhausted(status, state, config):
+            return Abort(reason=AbortReason.merge_conflict_not_reproduced)
         return SyncBase()
 
     # 7. Branch protection / required-review blocker → hand off to human
@@ -481,15 +886,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # the thread has been addressed. Originally this gate blocked the
     # merge on ANY defer regardless of author, and PR 342 sat for 4
     # hours because Greptile's P1 nit kept returning "defer" on every
-    # iteration. Bot reviewers (Greptile, CodeRabbit, Gemini, Cursor
-    # Bugbot, Codex-connector, etc.) post advisory feedback only —
+    # iteration. Bot reviewers post advisory feedback only —
     # they cannot themselves mark threads resolved, so their deferred
     # nits would linger forever. Humans still block: a maintainer who
     # opens a thread expects their question answered before the merge
-    # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
-    # feedback still disappears from the merge gate".
+    # fires.
     has_human_defer = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_author(t.author)
+        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_review_thread(t)
         for t in status.unresolved_inline_threads
     ) or any(
         state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)

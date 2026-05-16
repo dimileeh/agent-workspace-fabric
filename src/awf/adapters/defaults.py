@@ -12,7 +12,10 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
         AgentRuntime.claude_code: AgentDefaults(model="claude-opus-4-7", effort="xhigh"),
         AgentRuntime.codex: AgentDefaults(model="gpt-5.5", effort="xhigh"),
-        AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro", effort="xhigh"),
+        # Gemini CLI 0.39+ documents Gemini 3.1 Pro Preview as the direct
+        # Pro-class model ID when the account has access.
+        AgentRuntime.gemini: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
+        AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
     }
 )
 

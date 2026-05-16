@@ -33,12 +33,14 @@ ENV/
 
 # Testing
 .pytest_cache/
+.playwright-cli/
 .coverage
 .coverage.*
 htmlcov/
 .tox/
 .hypothesis/
 coverage.xml
+test-results/
 *.cover
 .cache/
 
@@ -64,6 +66,8 @@ workspaces/
 *.db
 *.sqlite
 *.sqlite3
+/comments.json
+/reviews.json
 
 # Docker
 .dockerignore.bak
@@ -72,3 +76,5 @@ workspaces/
 # keep migration files; ignore local db dumps only
 *.dump
 *.sql.bak
+query.json
+*.log

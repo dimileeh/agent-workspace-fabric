@@ -1,7 +1,7 @@
 """initial workspaces operations events
 
 Revision ID: 135102b9a037
-Revises: 
+Revises:
 Create Date: 2026-04-21 21:16:06.601566+00:00
 
 """

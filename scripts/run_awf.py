@@ -49,7 +49,6 @@ from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -60,7 +59,11 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
 )
 from awf.node.git_manager import GitManager
-from awf.profiles.compose import profile_agent_environment, profile_services
+from awf.profiles.compose import (
+    agent_environment_with_github_token,
+    profile_agent_environment,
+    profile_services,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.registry import aira_profile
 from awf.profiles.resolver import resolve_workspace_profile
@@ -71,8 +74,20 @@ from awf.runtime.validation import ValidationRunner
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO_ROOT / "docker" / "compose" / "workspace.base.yml.j2"
+_OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
 
 _AGENT_AUTH_ENV_VARS = (
+    # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
+    # when present; these keep local shells compatible without writing values.
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "OPENAI_PROJECT_ID",
     # Claude Code portable/API-key auth. Host claude.ai OAuth can live in
     # macOS Keychain, which is not available inside a Linux container.
     "ANTHROPIC_API_KEY",
@@ -92,6 +107,10 @@ _AGENT_AUTH_ENV_VARS = (
     "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_CLOUD_ACCESS_TOKEN",
+    # OpenCode via Ollama/Ollama Cloud.
+    "AWF_OPENCODE_OLLAMA_BASE_URL",
+    "OLLAMA_HOST",
+    "OLLAMA_API_KEY",
 )
 
 # Central defaults used for every AWF-spawned agent CLI.
@@ -257,9 +276,12 @@ def _build_auth_mounts(
 
     Mount mode notes:
     - Codex is intentionally absent here. A live host ``~/.codex`` contains
-      logs, SQLite state, session files, and locks that collide with Codex
-      Desktop. Each workspace gets an isolated Codex home via
-      ``_workspace_auth_mounts`` instead.
+      logs, session files, and locks that collide with Codex Desktop. Each
+      workspace gets an isolated Codex home via ``_workspace_auth_mounts``
+      instead.
+    - OpenCode and Ollama are also intentionally absent here. Their writable
+      config/auth state is seeded per workspace so agent runs cannot mutate
+      the operator's live home directory.
     - ``.claude`` and ``.gemini`` are ``rw`` because each CLI writes its model
       cache / token-refresh state inside its home directory; a read-only mount
       breaks session initialization.
@@ -327,6 +349,15 @@ def _workspace_auth_mounts(
                 mode="rw",
             ),
         )
+    isolated_mounts = _prepare_isolated_opencode_auth(
+        host_home=(host_home or Path(os.environ["HOME"])),
+        target_root=work_dir / "auth" / workspace_id / "opencode",
+    )
+    isolated_mounts += _prepare_isolated_ollama_auth(
+        host_home=(host_home or Path(os.environ["HOME"])),
+        target_root=work_dir / "auth" / workspace_id / "ollama",
+    )
+    mounts[0:0] = list(isolated_mounts)
     return tuple(mounts)
 
 
@@ -353,6 +384,55 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
     return target_root
 
 
+def _prepare_isolated_opencode_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    source = host_home / ".config" / "opencode"
+    target = target_root / ".config" / "opencode"
+    if not source.is_dir():
+        return ()
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.copytree(source, target)
+
+    return (
+        AuthMount(
+            source=str(target),
+            target="/home/agent/.config/opencode",
+            mode="rw",
+        ),
+    )
+
+
+def _prepare_isolated_ollama_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    source = host_home / ".ollama"
+    target = target_root / ".ollama"
+    if not source.is_dir():
+        return ()
+
+    target.mkdir(parents=True, exist_ok=True)
+    for filename in _OLLAMA_AUTH_FILES:
+        src = source / filename
+        dst = target / filename
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
+
+    return (
+        AuthMount(
+            source=str(target),
+            target="/home/agent/.ollama",
+            mode="rw",
+        ),
+    )
+
+
 def _agent_environment_with_host_auth(
     base_environment: tuple[tuple[str, str], ...],
     host_env: Mapping[str, str] | None = None,
@@ -371,7 +451,7 @@ def _agent_environment_with_host_auth(
         if name not in existing and source_env.get(name):
             merged.append((name, f"${{{name}}}"))
             existing.add(name)
-    return tuple(merged)
+    return agent_environment_with_github_token(tuple(merged), host_env=source_env)
 
 
 def _profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:
@@ -758,7 +838,7 @@ async def _run_task(
         # everywhere — harmless extra KB for tasks that don't need the extension.
         agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
-        services=profile_services(profile),
+        services=profile_services(profile, base_path=layout.worktree_path),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
@@ -788,6 +868,7 @@ async def _run_task(
             repo = WorkspaceRepository(s)
             persisted = await repo.get(ws_id)
             assert persisted is not None
+            persisted.compose_file_path = str(compose_file)
             await repo.transition(persisted, to=WorkspaceStatus.ready, reason_code="STACK_READY")
             await s.commit()
 
@@ -796,7 +877,10 @@ async def _run_task(
         # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
         gh = GitHubClient(runner)
 
-        def _monitor_factory(adapter: AgentAdapter) -> Any:
+        def _monitor_factory(
+            adapter: AgentAdapter,
+            monitor_profile: WorkspaceProfile = profile,
+        ) -> Any:
             factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
             return factory(
                 session_factory=session_factory,
@@ -806,8 +890,13 @@ async def _run_task(
                 worktrees_root=work_dir / "git" / "worktrees",
                 artifacts_root=work_dir / "artifacts",
                 initial_review_grace_period_seconds=_initial_review_grace_period_seconds(
-                    cfg, profile
+                    cfg, monitor_profile
                 ),
+                non_check_reviewer_settle_seconds=(
+                    monitor_profile.monitor.non_check_reviewer_settle_seconds
+                ),
+                non_check_reviewer_logins=monitor_profile.monitor.non_check_reviewer_logins,
+                log_store=log_store,
             )
 
         executor = WorkspaceExecutor(
@@ -881,6 +970,7 @@ async def _run_sync_release_pr(
     runner = AsyncioSubprocessRunner()
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+    log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
 
     # Step 1: workspace row. For a release-sync, branch_name is the
     # source branch (not an awf/ws_X feature branch) because the
@@ -988,7 +1078,7 @@ async def _run_sync_release_pr(
         worktree_host_path=layout.worktree_path,
         agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
-        services=profile_services(profile),
+        services=profile_services(profile, base_path=layout.worktree_path),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
@@ -997,7 +1087,12 @@ async def _run_sync_release_pr(
         companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
-    await compose.up(spec, wait=True)
+    compose_paths = await compose.up(spec, wait=True)
+    compose_file = getattr(
+        compose_paths,
+        "compose_file",
+        work_dir / "compose" / "compose" / ws_id / "compose.yml",
+    )
     print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
 
     # Step 5: walk the state machine directly to monitoring_pr —
@@ -1006,6 +1101,7 @@ async def _run_sync_release_pr(
         repo = WorkspaceRepository(s)
         persisted = await repo.get(ws_id)
         assert persisted is not None
+        persisted.compose_file_path = str(compose_file)
         for to_state, reason in [
             (WorkspaceStatus.ready, "SYNC_STACK_READY"),
             (WorkspaceStatus.running, "SYNC_SKIP_AGENT"),
@@ -1024,6 +1120,7 @@ async def _run_sync_release_pr(
         agent_runtime,
         runner=runner,
         defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+        log_store=log_store,
     )
     gh = GitHubClient(runner)
     monitor = build_release_pr_monitor(
@@ -1034,12 +1131,14 @@ async def _run_sync_release_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
+        non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
+        log_store=log_store,
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
         flush=True,
     )
-    compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
     await monitor.run(
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",
@@ -1109,6 +1208,7 @@ async def _run_sync_feature_pr(
     runner = AsyncioSubprocessRunner()
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+    log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
 
     # Step 1: workspace row.
     async with session_factory() as s:
@@ -1215,7 +1315,7 @@ async def _run_sync_feature_pr(
         worktree_host_path=layout.worktree_path,
         agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
-        services=profile_services(profile),
+        services=profile_services(profile, base_path=layout.worktree_path),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
@@ -1224,7 +1324,12 @@ async def _run_sync_feature_pr(
         companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
-    await compose.up(spec, wait=True)
+    compose_paths = await compose.up(spec, wait=True)
+    compose_file = getattr(
+        compose_paths,
+        "compose_file",
+        work_dir / "compose" / "compose" / ws_id / "compose.yml",
+    )
     print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
 
     # Step 5: walk the state machine directly to monitoring_pr — the
@@ -1233,6 +1338,7 @@ async def _run_sync_feature_pr(
         repo = WorkspaceRepository(s)
         persisted = await repo.get(ws_id)
         assert persisted is not None
+        persisted.compose_file_path = str(compose_file)
         for to_state, reason in [
             (WorkspaceStatus.ready, "SYNC_STACK_READY"),
             (WorkspaceStatus.running, "SYNC_SKIP_AGENT"),
@@ -1251,6 +1357,7 @@ async def _run_sync_feature_pr(
         agent_runtime,
         runner=runner,
         defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+        log_store=log_store,
     )
     gh = GitHubClient(runner)
     factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
@@ -1262,13 +1369,15 @@ async def _run_sync_feature_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
+        non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
+        log_store=log_store,
     )
     print(
         f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "
         f"#{cfg.pr_number} (auto_merge={cfg.auto_merge}) ...",
         flush=True,
     )
-    compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
     await monitor.run(
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",
@@ -1326,35 +1435,6 @@ def print_defer_summary(*, artifacts_root: Path, out: IO[str]) -> None:
         out.write(f"  {ws_id}: {count} {noun} — {author} on {locator}\n")
 
 
-_ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    # (table, column, SQL fragment). Additive only — safe to apply in
-    # any order because ``ALTER TABLE ADD COLUMN`` is idempotent when
-    # gated on the PRAGMA check below.
-    ("workspaces", "remote_push_branch", "VARCHAR(256)"),
-    ("workspaces", "profile_ref", "VARCHAR(128)"),
-    ("workspaces", "requested_profile", "JSON"),
-    ("workspaces", "resolved_profile", "JSON"),
-)
-
-
-def _add_missing_columns(connection: Any) -> None:
-    """Idempotently add columns that later migrations introduced to an
-    existing SQLite DB.
-
-    Driven from ``_ADDITIVE_MIGRATIONS`` rather than Alembic because
-    local ``run_awf.py`` workspaces are a dev convenience that predates
-    the alembic setup for the runtime DB. Production DBs get proper
-    migrations; this path keeps long-lived local run directories
-    resumable without dropping state."""
-    import sqlalchemy as _sa
-
-    inspector = _sa.inspect(connection)
-    for table, column, sql_type in _ADDITIVE_MIGRATIONS:
-        existing = {c["name"] for c in inspector.get_columns(table)}
-        if column not in existing:
-            connection.execute(_sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
-
-
 async def _main(
     config_path: Path,
     work_dir: Path,
@@ -1382,20 +1462,13 @@ async def _main(
     ).stdout.strip()
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    db_path = work_dir / "awf.db"
-    if db_path.exists() and reset_state:
-        print(f"Resetting AWF run database at {db_path}", flush=True)
-        db_path.unlink()
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # ``create_all`` creates tables but never alters existing ones.
-        # When a persisted local SQLite DB predates newer code, columns
-        # added by later migrations (e.g. ``remote_push_branch`` in
-        # b2c3d4e5f6a1) are missing and the first write fails. Apply
-        # additive column migrations manually here so operators can
-        # resume an old run_awf workspace without dropping state.
-        await conn.run_sync(_add_missing_columns)
+    if reset_state:
+        print("--reset-state is ignored for PostgreSQL-backed run state", flush=True)
+    database_url = os.environ.get(
+        "AWF_DATABASE_URL",
+        "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+    )
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
 
     try:
@@ -1458,7 +1531,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reset-state",
         action="store_true",
-        help="Delete and recreate awf.db before launching tasks in this work dir.",
+        help="Deprecated no-op; PostgreSQL state is managed by migrations and retention cleanup.",
     )
     args = parser.parse_args()
     if args.keep_state and args.reset_state:

@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
+
+_GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+AGENT_RUNTIME_UID = 1000
+AGENT_RUNTIME_GID = 1000
+_GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 
 
 class GitOperationError(Exception):
@@ -74,6 +81,13 @@ class WorktreeLayout:
     branch_name: str
 
 
+@dataclass(frozen=True)
+class _ChownTarget:
+    path: Path
+    recursive: bool
+    directories_only: bool = False
+
+
 class GitManager:
     """Manages bare mirrors and per-workspace worktrees on the local filesystem."""
 
@@ -99,10 +113,20 @@ class GitManager:
         weakref.WeakKeyDictionary()
     )
 
-    def __init__(self, work_dir: Path) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        env: Mapping[str, str] | None = None,
+        worktree_owner_uid: int | None = None,
+        worktree_owner_gid: int | None = None,
+    ) -> None:
         self._work_dir = work_dir
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
+        self._env = {**os.environ, **env} if env is not None else None
+        self._worktree_owner_uid = worktree_owner_uid
+        self._worktree_owner_gid = worktree_owner_gid
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
@@ -238,6 +262,9 @@ class GitManager:
     ) -> WorktreeLayout:
         """Create a fresh worktree for ``workspace_id`` at a new branch off ``base_branch``.
 
+        ``base_branch`` is normally a branch name. Adopted GitHub PR workspaces
+        may pass ``refs/pull/<number>/head`` to check out the exact PR head.
+
         Raises ``GitOperationError`` with a specific reason code if:
         - the base branch doesn't exist (``GIT_BASE_BRANCH_MISSING``)
         - the worktree path already exists (``GIT_WORKTREE_ALREADY_EXISTS``)
@@ -268,11 +295,23 @@ class GitManager:
         # see the latest server tip even across long-running sessions, and
         # so ``remote update --prune`` (which prunes only tracking refs
         # under the new refspec) never targets the worktree's own branch.
-        tracking_ref = f"origin/{base_branch}"
+        tracking_ref, fetch_refspec = _checkout_tracking_ref(base_branch)
 
         lock = self._lock_for_mirror(mirror_path)
         async with lock:
             try:
+                if fetch_refspec is not None:
+                    await self._run(
+                        [
+                            "git",
+                            "--git-dir",
+                            str(mirror_path),
+                            "fetch",
+                            "origin",
+                            fetch_refspec,
+                        ],
+                        operation="mirror.fetch_checkout_ref",
+                    )
                 await self._run(
                     [
                         "git",
@@ -307,6 +346,11 @@ class GitManager:
                 ],
                 operation="worktree.add",
             )
+
+        await self._prepare_agent_writable_worktree(
+            layout_mirror=mirror_path,
+            worktree_path=worktree_path,
+        )
 
         return WorktreeLayout(
             mirror_path=mirror_path,
@@ -385,6 +429,7 @@ class GitManager:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._env,
         )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -401,8 +446,37 @@ class GitManager:
             )
         return GitResult(returncode=proc.returncode, stdout=stdout, stderr=stderr)
 
+    async def _prepare_agent_writable_worktree(
+        self,
+        *,
+        layout_mirror: Path,
+        worktree_path: Path,
+    ) -> None:
+        """Make a root-created linked worktree usable by the agent-runtime user."""
+        if self._worktree_owner_uid is None or self._worktree_owner_gid is None:
+            return
+        if os.geteuid() != 0:
+            return
+        await asyncio.to_thread(
+            repair_agent_writable_worktree,
+            layout_mirror,
+            worktree_path,
+            self._worktree_owner_uid,
+            self._worktree_owner_gid,
+        )
+
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _checkout_tracking_ref(base_branch: str) -> tuple[str, str | None]:
+    pull_ref = _GITHUB_PULL_HEAD_REF.fullmatch(base_branch)
+    if pull_ref is None:
+        return f"origin/{base_branch}", None
+
+    pr_number = pull_ref.group(1)
+    tracking_ref = f"refs/remotes/origin/pull/{pr_number}/head"
+    return tracking_ref, f"+refs/pull/{pr_number}/head:{tracking_ref}"
 
 
 def _slugify_repo(repo_url: str) -> str:
@@ -415,3 +489,128 @@ def _slugify_repo(repo_url: str) -> str:
     if tail.endswith(".git"):
         tail = tail[:-4]
     return _SLUG_RE.sub("-", tail) or "repo"
+
+
+def _agent_writable_git_targets(
+    *,
+    layout_mirror: Path,
+    worktree_path: Path,
+) -> tuple[_ChownTarget, ...]:
+    targets = [_ChownTarget(worktree_path, recursive=True)]
+    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is not None:
+        targets.append(_ChownTarget(linked_git_dir, recursive=True))
+    targets.append(_ChownTarget(layout_mirror, recursive=False))
+    objects = layout_mirror / "objects"
+    if objects.exists():
+        # Git's object database is special: loose object files are normally
+        # read-only and only need to be readable, while the fanout directories
+        # must be writable so the agent can add new objects. Recursively
+        # chowning object files breaks on Docker Desktop/macOS when a host file
+        # lacks Docker ownership metadata and appears as unwritable root:root in
+        # the control-plane container. Linux still gets writable object dirs.
+        targets.append(_ChownTarget(objects, recursive=True, directories_only=True))
+    # Linked worktrees install hooks in the shared bare mirror; setup commands
+    # such as ``pre-commit install`` must be able to write there.
+    for child in ("hooks", "refs", "logs"):
+        candidate = layout_mirror / child
+        if candidate.exists():
+            targets.append(_ChownTarget(candidate, recursive=True))
+    worktrees = layout_mirror / "worktrees"
+    if worktrees.exists():
+        targets.append(_ChownTarget(worktrees, recursive=False))
+    return tuple(targets)
+
+
+def repair_agent_writable_worktree(
+    layout_mirror: Path | None,
+    worktree_path: Path,
+    uid: int = AGENT_RUNTIME_UID,
+    gid: int = AGENT_RUNTIME_GID,
+) -> None:
+    """Repair linked-worktree Git ownership for the agent-runtime user.
+
+    The mirror object DB is intentionally repaired in directories-only mode:
+    loose object files and pack files may be immutable through Docker Desktop
+    on macOS, while fanout directories must be writable on Linux so the agent
+    can add new objects.
+    """
+    if os.geteuid() != 0:
+        return
+    mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
+    if mirror is None:
+        targets = [_ChownTarget(worktree_path, recursive=True)]
+        linked_git_dir = _linked_worktree_git_dir(worktree_path)
+        if linked_git_dir is not None:
+            targets.append(_ChownTarget(linked_git_dir, recursive=True))
+    else:
+        targets = list(
+            _agent_writable_git_targets(
+                layout_mirror=mirror,
+                worktree_path=worktree_path,
+            )
+        )
+    _chown_targets(tuple(targets), uid, gid)
+
+
+def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
+    """Return the bare mirror path backing a linked worktree, when discoverable."""
+    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None:
+        return None
+    commondir = linked_git_dir / "commondir"
+    if commondir.is_file():
+        try:
+            raw = commondir.read_text(encoding="utf-8").strip()
+        except OSError:
+            raw = ""
+        if raw:
+            common = Path(raw)
+            if not common.is_absolute():
+                common = linked_git_dir / common
+            return common.resolve()
+    return linked_git_dir.parent.parent.resolve()
+
+
+def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    git_file = worktree_path / ".git"
+    if not git_file.is_file():
+        return None
+    try:
+        content = git_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir: "
+    if not content.startswith(prefix):
+        return None
+    git_dir = Path(content.removeprefix(prefix).strip())
+    if not git_dir.is_absolute():
+        git_dir = (worktree_path / git_dir).resolve()
+    return git_dir
+
+
+def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
+    seen: set[tuple[Path, bool, bool]] = set()
+    for target in targets:
+        resolved = target.path.resolve()
+        key = (resolved, target.recursive, target.directories_only)
+        if key in seen or not target.path.exists():
+            continue
+        seen.add(key)
+        if target.recursive:
+            _chown_tree(target.path, uid, gid, directories_only=target.directories_only)
+        else:
+            os.chown(target.path, uid, gid)
+
+
+def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
+    os.chown(path, uid, gid)
+    if not path.is_dir():
+        return
+    for root, dirs, files in os.walk(path):
+        for name in dirs:
+            os.chown(Path(root) / name, uid, gid)
+        if directories_only:
+            continue
+        for name in files:
+            os.chown(Path(root) / name, uid, gid)

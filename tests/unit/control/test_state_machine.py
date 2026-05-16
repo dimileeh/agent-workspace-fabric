@@ -141,6 +141,36 @@ class TestTerminalDetection:
     def test_non_terminal(self, state: WorkspaceStatus) -> None:
         assert not WorkspaceStateMachine.is_terminal(state)
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "state",
+        [
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.destroyed,
+            WorkspaceStatus.destroying,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.completed,
+        ],
+    )
+    def test_callback_terminal(self, state: WorkspaceStatus) -> None:
+        assert WorkspaceStateMachine.is_callback_terminal(state)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "state",
+        [
+            WorkspaceStatus.requested,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ],
+    )
+    def test_not_callback_terminal(self, state: WorkspaceStatus) -> None:
+        assert not WorkspaceStateMachine.is_callback_terminal(state)
+
 
 class TestAllowedFromState:
     """Operators query: 'what can happen next from state X?' for UI + CLI affordances."""
@@ -149,6 +179,7 @@ class TestAllowedFromState:
     def test_allowed_next_from_requested(self) -> None:
         assert WorkspaceStateMachine.allowed_next(WorkspaceStatus.requested) == {
             WorkspaceStatus.provisioning,
+            WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
 

@@ -9,15 +9,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import (
     WorkspaceLogListResponse,
     WorkspaceLogReadResponse,
     WorkspaceLogStreamResponse,
 )
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
-from awf.runtime.logs import LogStore
+from awf.runtime.logs import read_log_chunk
 
-router = APIRouter(prefix="/v1/workspaces/{workspace_id}/logs", tags=["logs"])
+router = APIRouter(
+    prefix="/v1/workspaces/{workspace_id}/logs",
+    tags=["logs"],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 
 
 @router.get(
@@ -32,7 +37,9 @@ async def list_workspace_logs(
     await _require_workspace(session, workspace_id)
     rows = await WorkspaceLogStreamRepository(session).list_for_workspace(workspace_id)
     return WorkspaceLogListResponse(
-        items=[WorkspaceLogStreamResponse.model_validate(row) for row in rows]
+        items=[WorkspaceLogStreamResponse.model_validate(row) for row in rows],
+        limit=len(rows),
+        cursor=None,
     )
 
 
@@ -67,7 +74,7 @@ async def read_workspace_log(
                 "message": f"Log file is missing for stream {stream_id}",
             },
         )
-    data, next_offset, eof = await LogStore(root=path.parent).read(
+    data, next_offset, eof = await read_log_chunk(
         path=path,
         offset=offset,
         limit_bytes=limit_bytes,
