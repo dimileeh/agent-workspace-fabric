@@ -1838,7 +1838,12 @@ class TestFetchFailingCheckLogs:
             "tests/unit/b/test_two.py::TestTwo::test_beta",
         )
         assert len(failure.test_node_ids) == 6
-        assert failure.suggested_repro_commands == ()
+        selected = failure.test_node_ids[:5]
+        quoted = " ".join(shlex.quote(node_id) for node_id in selected)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {quoted} -q",
+        )
+        assert "tests/unit/f/test_six.py::test_zeta" not in failure.suggested_repro_commands[0]
 
     @pytest.mark.unit
     async def test_builds_focused_command_from_detected_pytest_command(self) -> None:
@@ -1909,7 +1914,11 @@ class TestFetchFailingCheckLogs:
 
         failure = failures[0]
         assert failure.failing_commands == ()
-        assert failure.suggested_repro_commands == ()
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/runtime/test_prompt.py::test_one -q",
+        )
+        assert "echo owned" not in failure.suggested_repro_commands[0]
 
     @pytest.mark.unit
     async def test_quotes_parametrized_pytest_node_ids_in_focused_command(self) -> None:
@@ -1920,7 +1929,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 431,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -1943,10 +1952,11 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {shlex.quote(node_id)} -q",
         )
-        assert failure.suggested_repro_commands == ()
 
     @pytest.mark.unit
     async def test_quotes_parametrized_pytest_node_ids_from_non_failed_lines(self) -> None:
@@ -1957,7 +1967,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 432,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -1980,10 +1990,11 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {shlex.quote(node_id)} -q",
         )
-        assert failure.suggested_repro_commands == ()
 
     @pytest.mark.unit
     async def test_preserves_pytest_param_ids_containing_failure_delimiter_text(self) -> None:
@@ -1994,7 +2005,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 433,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -2017,8 +2028,11 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == ("tests/unit/runtime/test_prompt.py::test_handles[a - b]",)
-        assert failure.suggested_repro_commands == ()
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[a - b]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {shlex.quote(node_id)} -q",
+        )
 
     @pytest.mark.unit
     async def test_preserves_significant_whitespace_in_pytest_param_ids(self) -> None:
@@ -2029,7 +2043,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 434,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -2052,10 +2066,11 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad  value]",
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad  value]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {shlex.quote(node_id)} -q",
         )
-        assert failure.suggested_repro_commands == ()
 
     @pytest.mark.unit
     async def test_extracts_long_pytest_param_id_before_truncating_display_lines(self) -> None:
