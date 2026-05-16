@@ -91,6 +91,35 @@ test("summarizeCoordinationWarnings reports truncation", () => {
   assert.match(summary.detail, /\+1 more/);
 });
 
+test("summarizeCoordinationWarnings tolerates legacy partial warning payloads", () => {
+  const summary = summarizeCoordinationWarnings([
+    {
+      warning_code: "OWNED_PATH_OVERLAP_RISK",
+      message: "Owned paths overlap active workspaces.",
+      severity: "advisory",
+      blocks_launch: false,
+      overlap_count: 0,
+      overlaps_truncated: false,
+    },
+    {
+      warning_code: "OWNED_PATH_OVERLAP_RISK",
+      message: "Owned paths overlap active workspaces.",
+      severity: "advisory",
+      blocks_launch: false,
+      overlaps: [{ workspace_id: "ws_overlap" }],
+      stale_policy_context: {},
+      overlap_count: 1,
+      overlaps_truncated: false,
+    },
+  ]);
+
+  assert.equal(summary.count, 2);
+  assert.equal(summary.label, "2 advisory overlaps");
+  assert.match(summary.detail, /^OWNED_PATH_OVERLAP_RISK \/ unknown work/);
+  assert.match(summary.detail, /OWNED_PATH_OVERLAP_RISK \/ ws_overlap/);
+  assert.doesNotMatch(summary.detail, /undefined/);
+});
+
 test("summarizeCoordinationWarnings uses a generic label for mixed warning severities", () => {
   const summary = summarizeCoordinationWarnings([
     {

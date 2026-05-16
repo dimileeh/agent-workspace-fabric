@@ -81,11 +81,13 @@ function coordinationWarningSeverity(warning: WorkspaceCoordinationWarning | und
 }
 
 function formatCoordinationWarningDetail(warning: WorkspaceCoordinationWarning): string {
-  const overlap = warning.overlaps[0] ?? null;
-  const workspaceId = warning.workspace_ids[0] ?? overlap?.workspace_id ?? "unknown workspace";
-  const pathDetail = overlap
+  const overlaps = Array.isArray(warning.overlaps) ? warning.overlaps : [];
+  const workspaceIds = Array.isArray(warning.workspace_ids) ? warning.workspace_ids : [];
+  const overlap = overlaps[0] ?? null;
+  const workspaceId = workspaceIds[0] ?? overlap?.workspace_id ?? "unknown workspace";
+  const pathDetail = overlap?.existing_path && overlap.requested_path
     ? `${compactId(workspaceId, 12)} ${overlap.existing_path} -> ${overlap.requested_path}`
     : compactId(workspaceId, 12);
-  const staleReason = warning.stale_policy_context.stale_reason_code;
+  const staleReason = warning.stale_policy_context?.stale_reason_code;
   return [warning.warning_code, pathDetail, staleReason].filter(Boolean).join(" / ");
 }
