@@ -1843,6 +1843,54 @@ class TestFetchFailingCheckLogs:
         assert failure.suggested_repro_commands == ()
 
     @pytest.mark.unit
+    async def test_extracts_multiple_pytest_failures_with_supplied_fallback_command(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 4300,
+                        "name": "any-provider-check",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/a/test_one.py::test_alpha - AssertionError: alpha\n"
+                "FAILED tests/unit/b/test_two.py::TestTwo::test_beta - AssertionError: beta\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            pytest_fallback_commands=(
+                "ruff check .",
+                "uv run --python 3.12 --extra dev pytest --cov=awf",
+            ),
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (
+            "tests/unit/a/test_one.py::test_alpha",
+            "tests/unit/b/test_two.py::TestTwo::test_beta",
+        )
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/a/test_one.py::test_alpha "
+            "tests/unit/b/test_two.py::TestTwo::test_beta -q",
+        )
+
+    @pytest.mark.unit
     async def test_builds_focused_command_from_detected_pytest_command(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

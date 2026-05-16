@@ -843,6 +843,13 @@ class PullRequestMonitorRunner:
             await repo.add_events(ws, events=events)
             await s.commit()
 
+    async def _workspace_test_commands(self, workspace_id: str) -> tuple[str, ...]:
+        async with self._deps.session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            if ws is None:
+                return ()
+            return tuple(command for command in ws.test_commands if isinstance(command, str))
+
     async def _provider_recovery_suppresses_cli(self, workspace_id: str) -> bool:
         now = datetime.now(UTC)
         async with self._deps.session_factory() as s:
@@ -5659,10 +5666,12 @@ class PullRequestMonitorRunner:
             repo=repo, pr_number=pr_number, base_behind_count=base_behind
         )
         if status.check_state.value == "FAILURE":
+            pytest_fallback_commands = await self._workspace_test_commands(workspace_id)
             failures = await self._deps.gh.fetch_failing_check_logs(
                 repo=repo,
                 pr_number=pr_number,
                 head_sha=status.head_sha,
+                pytest_fallback_commands=pytest_fallback_commands,
             )
             status = _with_ci_failures(status, failures)
         return status

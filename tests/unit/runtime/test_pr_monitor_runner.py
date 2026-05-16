@@ -10,7 +10,7 @@ specific merge-gate branch without running the full monitor integration loop.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -250,7 +250,7 @@ class _CapturingGH:
     def __init__(self, status: PRStatus | None = None) -> None:
         self.status = status or _green_status()
         self.base_behind_counts: list[int] = []
-        self.failing_log_requests: list[tuple[RepoRef, int, str]] = []
+        self.failing_log_requests: list[tuple[RepoRef, int, str, tuple[str, ...]]] = []
         self.posted_comments: list[tuple[RepoRef, int, str]] = []
         self.post_errors: list[GitHubClientError] = []
 
@@ -271,8 +271,11 @@ class _CapturingGH:
         repo: RepoRef,
         pr_number: int,
         head_sha: str,
+        pytest_fallback_commands: Sequence[str] = (),
     ) -> tuple[CheckFailure, ...]:
-        self.failing_log_requests.append((repo, pr_number, head_sha))
+        self.failing_log_requests.append(
+            (repo, pr_number, head_sha, tuple(pytest_fallback_commands))
+        )
         return ()
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
@@ -2854,6 +2857,52 @@ async def test_fetch_status_repairs_orphaned_broken_awf_ref_before_counting_base
         "fetch",
         "origin",
         "+refs/heads/development:refs/remotes/origin/development",
+    ]
+
+
+@pytest.mark.unit
+async def test_fetch_status_supplies_workspace_test_commands_to_ci_log_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        test_commands=[
+            "ruff check .",
+            "uv run --python 3.12 --extra dev pytest --cov=awf --cov-fail-under=99",
+        ],
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _CapturingGH(status=replace(_green_status(), check_state=CheckState.FAILURE))
+    runner._deps.gh = gh  # type: ignore[assignment]
+    repo = RepoRef(owner="dimileeh", name="aira-web")
+
+    await runner._fetch_status_for_decision(
+        repo=repo,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+
+    assert gh.failing_log_requests == [
+        (
+            repo,
+            42,
+            "abc1234567890def",
+            (
+                "ruff check .",
+                "uv run --python 3.12 --extra dev pytest --cov=awf --cov-fail-under=99",
+            ),
+        )
     ]
 
 

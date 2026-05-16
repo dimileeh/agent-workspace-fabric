@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -897,6 +898,7 @@ class GitHubClient:
         pr_number: int,  # noqa: ARG002 - kept for API consistency with other PR-scoped calls
         head_sha: str,
         log_tail_chars: int = 3000,
+        pytest_fallback_commands: Sequence[str] = (),
     ) -> tuple[CheckFailure, ...]:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 
@@ -952,6 +954,7 @@ class GitHubClient:
             evidence = extract_ci_failure_evidence(
                 raw_log_text,
                 check_name=run_name,
+                pytest_fallback_commands=pytest_fallback_commands,
             )
             failures.append(
                 CheckFailure(

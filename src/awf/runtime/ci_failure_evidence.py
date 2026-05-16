@@ -52,6 +52,7 @@ def extract_ci_failure_evidence(
     log_text: str,
     *,
     check_name: str,
+    pytest_fallback_commands: Iterable[str] = (),
 ) -> CiFailureEvidence:
     """Return focused, redacted repair evidence from a failed CI log."""
 
@@ -71,6 +72,7 @@ def extract_ci_failure_evidence(
     suggested_repro_commands = _suggest_repro_commands(
         test_node_ids=test_nodes,
         failing_commands=failing_commands,
+        pytest_fallback_commands=pytest_fallback_commands,
     )
     return CiFailureEvidence(
         failing_commands=tuple(failing_commands),
@@ -162,9 +164,12 @@ def _suggest_repro_commands(
     *,
     test_node_ids: list[str],
     failing_commands: list[str],
+    pytest_fallback_commands: Iterable[str] = (),
 ) -> list[str]:
     if test_node_ids:
         command = _pytest_repro_command(failing_commands)
+        if command is None:
+            command = _pytest_repro_command(pytest_fallback_commands)
         if command is None:
             return []
         selected = test_node_ids[:_MAX_REPRO_NODES]
