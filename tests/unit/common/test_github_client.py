@@ -1840,7 +1840,11 @@ class TestFetchFailingCheckLogs:
             "tests/unit/b/test_two.py::TestTwo::test_beta",
         )
         assert len(failure.test_node_ids) == 6
-        assert failure.suggested_repro_commands == ()
+        selected = failure.test_node_ids[:5]
+        quoted = " ".join(shlex.quote(node_id) for node_id in selected)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {quoted} -q",
+        )
 
     @pytest.mark.unit
     async def test_extracts_multiple_pytest_failures_with_supplied_fallback_command(
@@ -1959,7 +1963,10 @@ class TestFetchFailingCheckLogs:
 
         failure = failures[0]
         assert failure.failing_commands == ()
-        assert failure.suggested_repro_commands == ()
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/runtime/test_prompt.py::test_one -q",
+        )
 
     @pytest.mark.unit
     async def test_quotes_parametrized_pytest_node_ids_in_focused_command(self) -> None:

@@ -34,6 +34,7 @@ _MAX_COMMANDS = 5
 _MAX_SNIPPETS = 8
 _MAX_SUMMARIES = 8
 _MAX_LINE_CHARS = 500
+_DEFAULT_PYTEST_REPRO_COMMAND = "uv run --python 3.12 --extra dev pytest"
 
 
 @dataclass(frozen=True)
@@ -171,7 +172,7 @@ def _suggest_repro_commands(
         if command is None:
             command = _pytest_repro_command(pytest_fallback_commands)
         if command is None:
-            return []
+            command = _DEFAULT_PYTEST_REPRO_COMMAND
         selected = test_node_ids[:_MAX_REPRO_NODES]
         quoted = " ".join(shlex.quote(node_id) for node_id in selected)
         return [f"{command} {quoted} -q"]

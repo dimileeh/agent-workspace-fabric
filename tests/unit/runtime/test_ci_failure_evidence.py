@@ -40,7 +40,7 @@ def test_ci_failure_evidence_ignores_run_steps_without_supported_commands() -> N
 
 
 @pytest.mark.unit
-def test_ci_failure_evidence_does_not_suggest_repro_when_pytest_command_is_unavailable() -> None:
+def test_ci_failure_evidence_suggests_generic_repro_when_pytest_command_is_unavailable() -> None:
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
         "\n".join(
             [
@@ -61,7 +61,9 @@ def test_ci_failure_evidence_does_not_suggest_repro_when_pytest_command_is_unava
     )
     assert evidence.failing_commands == ()
     assert evidence.test_node_ids == ("tests/unit/test_example.py::test_failure",)
-    assert evidence.suggested_repro_commands == ()
+    assert evidence.suggested_repro_commands == (
+        "uv run --python 3.12 --extra dev pytest tests/unit/test_example.py::test_failure -q",
+    )
     assert any("AssertionError" in snippet for snippet in evidence.assertion_snippets)
     assert "fatal: repository not found" in evidence.error_summaries
 
@@ -127,7 +129,6 @@ def test_ci_failure_evidence_fallback_bounds_and_quotes_multiple_node_ids() -> N
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
         "\n".join(f"FAILED {node_id} - AssertionError: boom" for node_id in node_ids),
         check_name="provider-neutral-check",
-        pytest_fallback_commands=("uv run --python 3.12 --extra dev pytest tests/unit",),
     )
 
     selected = node_ids[: ci_failure_evidence._MAX_REPRO_NODES]  # noqa: SLF001
