@@ -83,8 +83,11 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
-        assert environment["AWF_DATABASE_URL"].startswith("postgresql+asyncpg://")
-        assert "@postgres:5432/" in environment["AWF_DATABASE_URL"]
+        assert environment["AWF_DATABASE_URL"] == (
+            "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:?set "
+            "AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+        )
+        assert "awf_dev" not in environment["AWF_DATABASE_URL"]
         assert environment["AWF_WORK_DIR"] == expected_work_dir
         assert environment["AWF_HOST_HOME"] == expected_host_home
         assert (
@@ -110,6 +113,13 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
             "${AWF_LOCAL_CAPACITY_DIND_SLOTS:-}"
         )
         assert environment["SSH_AUTH_SOCK"] == expected_ssh_auth_sock_target
+
+    postgres = services["postgres"]
+    assert postgres["environment"]["POSTGRES_PASSWORD"] == (
+        "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
+    )
+    assert "awf_dev" not in yaml.safe_dump(postgres["environment"])
+    assert postgres["ports"] == ["127.0.0.1:5433:5432"]
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
