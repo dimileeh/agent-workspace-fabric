@@ -7810,24 +7810,37 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
         TaskClass.build_config_task.value,
     }:
         task_class_tier = 2
-    operation_tier = _successful_validate_operation_tier(workspace) or 1
+    operation_tier = _validate_operation_requested_tier(workspace) or 1
     return max(profile_tier, task_class_tier, operation_tier)
 
 
-def _successful_validate_operation_tier(workspace: Workspace) -> int | None:
+def _validate_operation_requested_tier(workspace: Workspace) -> int | None:
     tiers: list[int] = []
     operations = getattr(workspace, "operations", None) or []
     for operation in operations:
-        if getattr(operation, "type", None) != OperationType.validate.value:
+        operation_type = getattr(operation, "type", None)
+        if isinstance(operation_type, OperationType):
+            operation_type = operation_type.value
+        if operation_type != OperationType.validate.value:
             continue
-        if getattr(operation, "status", None) != OperationStatus.succeeded.value:
+
+        operation_status = getattr(operation, "status", None)
+        if isinstance(operation_status, OperationStatus):
+            operation_status = operation_status.value
+        metadata: tuple[object, ...]
+        if operation_status == OperationStatus.succeeded.value:
+            metadata = (
+                getattr(operation, "result", None),
+                getattr(operation, "payload", None),
+            )
+        elif operation_status in _RECOVERY_ACTIVE_OPERATION_STATUSES:
+            metadata = (getattr(operation, "payload", None),)
+        else:
             continue
+
         operation_tiers = [
             tier
-            for tier in (
-                _requested_tier_from_metadata(getattr(operation, "result", None)),
-                _requested_tier_from_metadata(getattr(operation, "payload", None)),
-            )
+            for tier in (_requested_tier_from_metadata(item) for item in metadata)
             if tier is not None
         ]
         operation_max = max(operation_tiers, default=None)
