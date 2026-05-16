@@ -10,7 +10,7 @@ specific merge-gate branch without running the full monitor integration loop.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -210,6 +210,11 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
     )
 
 
+class _CommandIterable:
+    def __iter__(self) -> Iterator[object]:
+        return iter(("pytest -q", object(), "ruff check ."))
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("raw_test_commands", "expected"),
@@ -219,6 +224,7 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
         ({"command": "pytest -q"}, ()),
         (["ruff check .", 123, "pytest -q"], ("ruff check .", "pytest -q")),
         (("mypy src/awf", object()), ("mypy src/awf",)),
+        (_CommandIterable(), ("pytest -q", "ruff check .")),
     ],
 )
 async def test_workspace_test_commands_ignores_null_and_malformed_shapes(

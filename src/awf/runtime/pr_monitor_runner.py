@@ -849,7 +849,11 @@ class PullRequestMonitorRunner:
             if ws is None:
                 return ()
             raw_test_commands: object = ws.test_commands
-            if not isinstance(raw_test_commands, (list, tuple)):
+            if (
+                not raw_test_commands
+                or isinstance(raw_test_commands, (str, bytes, bytearray, Mapping))
+                or not isinstance(raw_test_commands, Iterable)
+            ):
                 return ()
             return tuple(command for command in raw_test_commands if isinstance(command, str))
 
