@@ -231,7 +231,7 @@ local provider state without mutating the operator's live config.
 
 For local service mode, these host paths must be visible to the worker at their
 host absolute paths. `docker/compose/local-service.yml` does this by mounting
-only the listed credential paths read-only into the control-plane containers;
+only the listed credential paths read-only into the API and worker containers;
 the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 `rules/`, plus OpenCode config and Ollama auth files, into
 `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/...` before

@@ -65,7 +65,8 @@ can drive the host Docker daemon for per-workspace stacks.
 
 ### SSH And Auth Mounts
 
-The control plane mounts the operator's SSH-agent socket and a curated set of
+The control plane mounts the operator's SSH-agent socket into each
+control-plane service. API and worker also opt in to a curated set of
 read-only credential paths:
 
 - `${AWF_HOST_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}}`
@@ -78,9 +79,10 @@ read-only credential paths:
   reads the forwarder directly.
 - The read-only host-home credential mounts (`~/.gitconfig`, `~/.ssh`,
   `~/.config/gh`, `~/.config/gcloud`, `~/.codex`, `~/.claude`,
-  `~/.claude.json`, `~/.gemini`, `~/.config/opencode`, `~/.ollama`) work for
-  both root and non-root because read-only access only needs file mode bits
-  to allow other-readable.
+  `~/.claude.json`, `~/.gemini`, `~/.config/opencode`, `~/.ollama`) are
+  granted only to the API and worker services. They work for both root and
+  non-root because read-only access only needs file mode bits to allow
+  other-readable.
 - Per-workspace seeded auth directories (`work_dir/auth/<workspace_id>/...`)
   are copied from the read-only host-home sources and then chowned to the
   agent UID by `src/awf/node/auth_mounts.py:_chown_workspace_auth_sources`

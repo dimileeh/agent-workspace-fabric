@@ -60,14 +60,25 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_host_home}/.config/opencode:{expected_host_home}/.config/opencode:ro",
         f"{expected_host_home}/.ollama:{expected_host_home}/.ollama:ro",
     }
+    expected_base_mounts = {
+        "/var/run/docker.sock:/var/run/docker.sock",
+        f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}",
+        f"{expected_work_dir}:{expected_work_dir}",
+    }
+    shared_volumes = data["x-awf-service"]["volumes"]
+    assert expected_base_mounts.issubset(set(shared_volumes))
+    assert expected_auth_mounts.isdisjoint(set(shared_volumes))
+
+    migrate_volumes = services["migrate"]["volumes"]
+    assert expected_base_mounts.issubset(set(migrate_volumes))
+    assert expected_auth_mounts.isdisjoint(set(migrate_volumes))
+
     for service_name in ("api", "worker"):
         volumes = services[service_name]["volumes"]
         assert "../..:/app" not in volumes
         assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
         assert services[service_name]["extra_hosts"] == ["host.docker.internal:host-gateway"]
-        assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
-        assert f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}" in volumes
-        assert f"{expected_work_dir}:{expected_work_dir}" in volumes
+        assert expected_base_mounts.issubset(set(volumes))
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"

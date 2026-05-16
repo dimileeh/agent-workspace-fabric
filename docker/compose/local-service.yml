@@ -1,5 +1,17 @@
 name: awf-local-service
 
+x-awf-auth-volumes:
+  - &awf-gh-auth ${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro
+  - &awf-gcloud-auth ${AWF_HOST_HOME:-${HOME}}/.config/gcloud:${AWF_HOST_HOME:-${HOME}}/.config/gcloud:ro
+  - &awf-gitconfig-auth ${AWF_HOST_HOME:-${HOME}}/.gitconfig:${AWF_HOST_HOME:-${HOME}}/.gitconfig:ro
+  - &awf-ssh-auth ${AWF_HOST_HOME:-${HOME}}/.ssh:${AWF_HOST_HOME:-${HOME}}/.ssh:ro
+  - &awf-codex-auth ${AWF_HOST_HOME:-${HOME}}/.codex:${AWF_HOST_HOME:-${HOME}}/.codex:ro
+  - &awf-claude-dir-auth ${AWF_HOST_HOME:-${HOME}}/.claude:${AWF_HOST_HOME:-${HOME}}/.claude:ro
+  - &awf-claude-file-auth ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
+  - &awf-gemini-auth ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
+  - &awf-opencode-auth ${AWF_HOST_HOME:-${HOME}}/.config/opencode:${AWF_HOST_HOME:-${HOME}}/.config/opencode:ro
+  - &awf-ollama-auth ${AWF_HOST_HOME:-${HOME}}/.ollama:${AWF_HOST_HOME:-${HOME}}/.ollama:ro
+
 # api/worker/migrate run as root inside the container by design. The control
 # plane needs root to use the host Docker socket, the forwarded SSH-agent
 # socket, and to chown per-workspace worktrees to UID/GID 1000 so the
@@ -12,19 +24,9 @@ x-awf-service: &awf-service
   image: awf-control-plane:local
   working_dir: /app
   volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
-    - ${AWF_HOST_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}}:/run/host-services/ssh-auth.sock
-    - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
-    - ${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.config/gcloud:${AWF_HOST_HOME:-${HOME}}/.config/gcloud:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.gitconfig:${AWF_HOST_HOME:-${HOME}}/.gitconfig:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.ssh:${AWF_HOST_HOME:-${HOME}}/.ssh:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.codex:${AWF_HOST_HOME:-${HOME}}/.codex:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.claude:${AWF_HOST_HOME:-${HOME}}/.claude:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.config/opencode:${AWF_HOST_HOME:-${HOME}}/.config/opencode:ro
-    - ${AWF_HOST_HOME:-${HOME}}/.ollama:${AWF_HOST_HOME:-${HOME}}/.ollama:ro
+    - &awf-docker-sock /var/run/docker.sock:/var/run/docker.sock
+    - &awf-service-ssh-agent ${AWF_HOST_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}}:/run/host-services/ssh-auth.sock
+    - &awf-host-work-dir ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
   extra_hosts:
     - "host.docker.internal:host-gateway"
   environment: &awf-environment
@@ -117,6 +119,20 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - *awf-docker-sock
+      - *awf-service-ssh-agent
+      - *awf-host-work-dir
+      - *awf-gh-auth
+      - *awf-gcloud-auth
+      - *awf-gitconfig-auth
+      - *awf-ssh-auth
+      - *awf-codex-auth
+      - *awf-claude-dir-auth
+      - *awf-claude-file-auth
+      - *awf-gemini-auth
+      - *awf-opencode-auth
+      - *awf-ollama-auth
     ports:
       - "8000:8000"
     command: sh -c "awf serve --host 0.0.0.0 --port 8000"
@@ -128,6 +144,20 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - *awf-docker-sock
+      - *awf-service-ssh-agent
+      - *awf-host-work-dir
+      - *awf-gh-auth
+      - *awf-gcloud-auth
+      - *awf-gitconfig-auth
+      - *awf-ssh-auth
+      - *awf-codex-auth
+      - *awf-claude-dir-auth
+      - *awf-claude-file-auth
+      - *awf-gemini-auth
+      - *awf-opencode-auth
+      - *awf-ollama-auth
     command: sh -c "awf worker"
 
   ollama-bridge:
