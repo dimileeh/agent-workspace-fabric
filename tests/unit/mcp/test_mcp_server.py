@@ -10,6 +10,7 @@ harness) against a throwaway PostgreSQL. This validates:
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,7 +27,12 @@ from awf.api.schemas import (
 from awf.common.config import Settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    SecretLeaseIssue,
+    SecretLeaseRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
@@ -1863,6 +1869,50 @@ class TestGetAndList:
         assert fetched is not None
         assert fetched["id"] == ws_id  # type: ignore[index]
         assert fetched["status"] == "requested"  # type: ignore[index]
+
+    @pytest.mark.unit
+    async def test_get_workspace_includes_issued_secret_leases(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+        raw_ref = "sk-live-do-not-appear-in-mcp"
+        now = datetime(2026, 5, 16, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            await SecretLeaseRepository(session).issue_declared_leases(
+                workspace,
+                leases=[
+                    SecretLeaseIssue(
+                        secret_name="api-token",
+                        kind="env",
+                        target="API_TOKEN",
+                        mode="ro",
+                        required=True,
+                        provider="vault",
+                        ref_digest="sha256:" + "8" * 64,
+                        expires_at=now + timedelta(hours=1),
+                        issue_metadata={
+                            "profile": "api",
+                            "declaration_index": 0,
+                            "raw_ref": raw_ref,
+                        },
+                    )
+                ],
+                now=now,
+            )
+            await session.commit()
+
+        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
+
+        assert isinstance(fetched, dict)
+        assert fetched["secret_leases"][0]["secret_name"] == "api-token"
+        assert fetched["secret_leases"][0]["status"] == "issued"
+        assert fetched["secret_leases"][0]["ref_digest"] == "sha256:" + "8" * 64
+        assert raw_ref not in json.dumps(fetched)
 
     @pytest.mark.unit
     async def test_get_unknown_id_returns_none(self, mcp) -> None:  # type: ignore[no-untyped-def]

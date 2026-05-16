@@ -556,9 +556,9 @@ class WorkspaceService:
             return result
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
-        """Fetch a workspace by ID including validation provenance and egress audit."""
+        """Fetch a workspace by ID including validation, egress, and secret lease status."""
         async with self._factory() as s:
-            ws = await WorkspaceRepository(s).get_with_operations(workspace_id)
+            ws = await WorkspaceRepository(s).get_with_secret_leases(workspace_id)
             if ws is None:
                 return None
             validation_runs = await ValidationRunRepository(s).list_for_workspace(workspace_id)
