@@ -11,7 +11,7 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import structlog.testing
@@ -45,8 +45,44 @@ _ORIGINAL_RESOLVE_CALLBACK_TARGET_IP_ADDRESSES = (
 
 
 @pytest.mark.unit
-def test_callback_service_persisted_key_replay_uses_primary_replay_path() -> None:
-    assert CallbackService.replay_existing_for_persisted_key is CallbackService.replay_existing
+async def test_callback_service_persisted_key_replay_is_explicit_locked_replay_path() -> None:
+    assert CallbackService.replay_existing_for_persisted_key is not CallbackService.replay_existing
+    assert (
+        CallbackService.replay_existing_for_persisted_key.__name__
+        == "replay_existing_for_persisted_key"
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    class _RecordingCallbackService(CallbackService):
+        async def _replay_existing_locked(
+            self,
+            payload: CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> None:
+            calls.append((idempotency_key, payload.name))
+
+    service = _RecordingCallbackService(
+        cast(Any, object()),
+        settings=Settings(_env_file=None, api_token="callback-test-token"),
+    )
+    payload = CallbackSubscriptionCreateRequest(
+        name="operator-console",
+        target_url="https://operator.example.com/awf/events",
+        event_types=["workspace.*"],
+    )
+
+    await service.replay_existing(payload, idempotency_key="primary-replay")
+    await service.replay_existing_for_persisted_key(
+        payload,
+        idempotency_key="persisted-key-replay",
+    )
+
+    assert calls == [
+        ("primary-replay", "operator-console"),
+        ("persisted-key-replay", "operator-console"),
+    ]
 
 
 @pytest.fixture

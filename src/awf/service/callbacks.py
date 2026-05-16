@@ -289,8 +289,14 @@ class CallbackService:
         """Acquire advisory lock, fetch durable idempotency row, and return it or None."""
         return await self._replay_existing_locked(payload, idempotency_key=idempotency_key)
 
-    # Use the same lock-and-fetch path for pre- and post-admission replay callers.
-    replay_existing_for_persisted_key = replay_existing
+    async def replay_existing_for_persisted_key(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscription | None:
+        """Replay persisted keys for pre-admission callers using the locked path."""
+        return await self._replay_existing_locked(payload, idempotency_key=idempotency_key)
 
     async def _replay_existing_locked(
         self,

@@ -215,6 +215,10 @@ async def register_callback(
             return response
         raise _idempotency_replay_unavailable()
 
+    # This durable probe intentionally uses its own short session before admission:
+    # cold persisted idempotency replays must bypass the rate gate. Fresh requests
+    # may miss here and re-check after admission before create_idempotent takes
+    # the final advisory lock for the insert.
     response = await _callback_durable_replay_response_for_persisted_key(
         service,
         replay_cache,
