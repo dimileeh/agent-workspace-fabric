@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.requests import Request
 
+import awf.api.request_admission as request_admission
 import awf.api.routes.workspaces as workspaces_route
 import awf.db.resilience as db_resilience
 import awf.service.workspace_observability as workspace_observability
@@ -94,6 +96,19 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
+_STABLE_REQUEST_ADMISSION_CLOCK = 1000.0
+
+
+def _unique_idempotency_key(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
+def _install_stable_request_admission_limiter(state: object) -> None:
+    setattr(
+        state,
+        request_admission._LIMITER_STATE_KEY,  # noqa: SLF001
+        request_admission.RequestAdmissionLimiter(clock=lambda: _STABLE_REQUEST_ADMISSION_CLOCK),
+    )
 
 
 @pytest.mark.unit
@@ -122,6 +137,7 @@ async def client(
 ) -> AsyncIterator[AsyncClient]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     app.state.workspace_admission_disk_check = lambda settings: _disk_check(
         free_bytes=settings.min_free_disk_bytes + 1,
         threshold_bytes=settings.min_free_disk_bytes,
@@ -474,17 +490,15 @@ def _disk_check(
 
 
 def _request_with_disk_check() -> SimpleNamespace:
-    return SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                workspace_admission_disk_check=lambda settings: _disk_check(
-                    free_bytes=settings.min_free_disk_bytes + 1,
-                    threshold_bytes=settings.min_free_disk_bytes,
-                    ok=True,
-                )
-            )
+    state = SimpleNamespace(
+        workspace_admission_disk_check=lambda settings: _disk_check(
+            free_bytes=settings.min_free_disk_bytes + 1,
+            threshold_bytes=settings.min_free_disk_bytes,
+            ok=True,
         )
     )
+    _install_stable_request_admission_limiter(state)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
 def _workspace_request_without_app_state() -> Request:
@@ -589,6 +603,7 @@ def _assert_usage_unavailable(row: dict[str, Any]) -> None:
 async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     app.state.workspace_admission_disk_check = lambda settings: _disk_check(
         free_bytes=settings.min_free_disk_bytes + 1,
         threshold_bytes=settings.min_free_disk_bytes,
@@ -1863,21 +1878,23 @@ class TestCreateWorkspaceV2DiskPressure:
             limit=1
         )
         payload = _v2_body(title="idempotent rate limit replay")
+        replay_key = _unique_idempotency_key("rate-limit-v2-replay")
+        fresh_key = _unique_idempotency_key("rate-limit-v2-fresh")
 
         first = await client.post(
             "/v2/workspaces",
             json=payload,
-            headers={"Idempotency-Key": "rate-limit-v2-replay"},
+            headers={"Idempotency-Key": replay_key},
         )
         replay = await client.post(
             "/v2/workspaces",
             json=payload,
-            headers={"Idempotency-Key": "rate-limit-v2-replay"},
+            headers={"Idempotency-Key": replay_key},
         )
         fresh = await client.post(
             "/v2/workspaces",
             json=_v2_body(title="fresh key bounded"),
-            headers={"Idempotency-Key": "rate-limit-v2-fresh"},
+            headers={"Idempotency-Key": fresh_key},
         )
         listed = await client.get("/v1/workspaces")
 
@@ -2514,8 +2531,12 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     async def test_v2_warm_cache_replay_uses_durable_auto_profile_match(
         self,
         client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        headers = {"Idempotency-Key": "v2-null-profile-then-omitted-workspace"}
+        _set_codex_auth_env(monkeypatch)
+        headers = {
+            "Idempotency-Key": _unique_idempotency_key("v2-null-profile-then-omitted-workspace")
+        }
         initial_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
         initial_payload["workspace"] = {"profile_ref": None, "profile": None}
         replay_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
