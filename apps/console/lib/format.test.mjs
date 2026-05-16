@@ -115,6 +115,35 @@ test("renderLogEntries reverses message order inside chunks in desc mode", () =>
   assert.equal(rendered, "[stamp] agent.stdout\nthird\nsecond\nfirst");
 });
 
+test("renderLogEntries reverses large chunks without split-based line materialization", () => {
+  const lines = Array.from({ length: 1_000 }, (_, index) => `line ${index}`);
+  const originalSplit = String.prototype.split;
+  String.prototype.split = function splitGuard(separator, limit) {
+    if (separator === "\n" && String(this).startsWith("line 0\nline 1\n")) {
+      throw new Error("log reversal should not split large chunks");
+    }
+    return Reflect.apply(originalSplit, this, [separator, limit]);
+  };
+
+  try {
+    const rendered = renderLogEntries(
+      [
+        {
+          streamId: "agent.stdout",
+          fd: null,
+          data: `${lines.join("\n")}\n`,
+          occurredAt: "stamp",
+        },
+      ],
+      "desc",
+    );
+
+    assert.equal(rendered, `[stamp] agent.stdout\n${lines.toReversed().join("\n")}`);
+  } finally {
+    String.prototype.split = originalSplit;
+  }
+});
+
 test("renderLogEntries leaves chunk ordering to the caller", () => {
   const rendered = renderLogEntries(
     [

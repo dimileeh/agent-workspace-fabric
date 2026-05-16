@@ -228,7 +228,27 @@ function orderLogData(data: string, direction: LogSortDirection): string {
   if (direction === "asc" || !trimmed) {
     return trimmed;
   }
-  return trimmed.split("\n").reverse().join("\n");
+  return reverseLogLines(trimmed);
+}
+
+function reverseLogLines(data: string): string {
+  let reversed = "";
+  let wroteLine = false;
+  let end = data.length;
+
+  while (true) {
+    const lineStart = end > 0 ? data.lastIndexOf("\n", end - 1) : -1;
+    if (wroteLine) {
+      reversed += "\n";
+    }
+    reversed += data.slice(lineStart + 1, end);
+    wroteLine = true;
+
+    if (lineStart === -1) {
+      return reversed;
+    }
+    end = lineStart;
+  }
 }
 
 function formatLogStamp(value: string): string {
