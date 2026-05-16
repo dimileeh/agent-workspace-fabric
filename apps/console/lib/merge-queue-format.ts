@@ -107,7 +107,7 @@ export function requiredNextActionTone(
   if (action !== null && action !== undefined) {
     return requiredNextActions[action]?.tone ?? "neutral";
   }
-  return requiredNextActionFallbacks[blockerReason]?.tone ?? "good";
+  return requiredNextActionFallbacks[blockerReason]?.tone ?? "neutral";
 }
 
 export function formatMergeBlockerReason(reason: MergeBlockerReason): string {
@@ -371,10 +371,12 @@ const requiredNextActions: Partial<Record<string, RequiredNextActionDefinition>>
 };
 
 const requiredNextActionFallbacks: Partial<Record<MergeBlockerReason, RequiredNextActionDefinition>> = {
+  ready_to_merge_or_waiting_for_github: { label: "none", tone: "good" },
   manual_merge_required: { label: "manual merge", tone: "warn" },
   waiting_for_monitor: { label: "wait for monitor", tone: "warn" },
   waiting_for_older_candidate: { label: "wait for queue", tone: "warn" },
   workspace_not_terminal: { label: "wait for workspace", tone: "neutral" },
+  completed: { label: "none", tone: "good" },
   failed_or_cancelled: { label: "inspect failure", tone: "bad" },
   not_canonical: { label: "superseded", tone: "bad" },
   policy_blocked: { label: "resolve policy", tone: "bad" },
