@@ -36,6 +36,10 @@ def _settings(tmp_path: Path) -> ServiceSettings:
     )
 
 
+def _source_checkout_root() -> Path:
+    return Path(bootstrap.__file__).resolve().parents[3]
+
+
 @pytest.fixture(autouse=True)
 def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda: {})
@@ -115,6 +119,7 @@ def test_bootstrap_stage_runner_does_not_block_event_loop(tmp_path: Path) -> Non
 @pytest.mark.unit
 def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
     calls: list[list[str]] = []
+    source_root = _source_checkout_root()
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -140,14 +145,14 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
             "-t",
             "awf-agent-runtime:latest",
             "-f",
-            "docker/agent-runtime.Dockerfile",
-            ".",
+            str(source_root / "docker/agent-runtime.Dockerfile"),
+            str(source_root),
         ],
         [
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            str(source_root / "docker/compose/local-service.yml"),
             "up",
             "-d",
             "--build",
@@ -157,7 +162,7 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            str(source_root / "docker/compose/local-service.yml"),
             "up",
             "--build",
             "--force-recreate",
@@ -167,7 +172,7 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            str(source_root / "docker/compose/local-service.yml"),
             "up",
             "-d",
             "--build",
@@ -210,6 +215,7 @@ def test_bootstrap_passes_compose_env_file_when_available(
 
     assert result.service_status["status"] == "ok"
     assert "--env-file" not in calls[0]
+    source_root = _source_checkout_root()
     for call in calls[1:]:
         assert call[:6] == [
             "docker",
@@ -217,8 +223,84 @@ def test_bootstrap_passes_compose_env_file_when_available(
             "--env-file",
             str(compose_env_file),
             "-f",
-            "docker/compose/local-service.yml",
+            str(source_root / "docker/compose/local-service.yml"),
         ]
+
+
+@pytest.mark.unit
+def test_bootstrap_resolves_source_assets_when_called_outside_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    source_root = _source_checkout_root()
+    outside_cwd = tmp_path / "outside"
+    outside_cwd.mkdir()
+    monkeypatch.chdir(outside_cwd)
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls[0] == [
+        "docker",
+        "build",
+        "-t",
+        "awf-agent-runtime:latest",
+        "-f",
+        str(source_root / "docker/agent-runtime.Dockerfile"),
+        str(source_root),
+    ]
+    assert calls[1][:4] == [
+        "docker",
+        "compose",
+        "-f",
+        str(source_root / "docker/compose/local-service.yml"),
+    ]
+
+
+@pytest.mark.unit
+def test_bootstrap_fails_clearly_when_source_assets_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    isolated_root = tmp_path / "installed-package"
+    isolated_root.mkdir()
+    monkeypatch.setattr(
+        bootstrap,
+        "_bootstrap_asset_root_candidates",
+        lambda: (isolated_root,),
+    )
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+                run_subprocess=lambda *_args, **_kwargs: pytest.fail(
+                    "bootstrap should fail before invoking Docker"
+                ),
+                status_collector=_ok_status_collector,
+                sleep=_no_sleep,
+                monotonic=lambda: 0.0,
+            )
+        )
+
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND"
+    assert "source checkout" in exc_info.value.message
+    assert "docker/agent-runtime.Dockerfile" in exc_info.value.message
 
 
 @pytest.mark.unit
@@ -226,6 +308,7 @@ def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
     tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
+    source_root = _source_checkout_root()
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -252,7 +335,7 @@ def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
         "docker",
         "compose",
         "-f",
-        "docker/compose/local-service.yml",
+        str(source_root / "docker/compose/local-service.yml"),
         "up",
         "-d",
         "--build",
@@ -503,7 +586,11 @@ def test_bootstrap_compose_failure_stops_with_stage_context(tmp_path: Path) -> N
             )
         )
 
-    assert [call[-1] for call in calls] == [".", "postgres", "migrate"]
+    assert [Path(calls[0][-1]), calls[1][-1], calls[2][-1]] == [
+        _source_checkout_root(),
+        "postgres",
+        "migrate",
+    ]
     assert status_calls == 0
     assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_STAGE_FAILED"
     assert exc_info.value.stage == "migrate"
@@ -618,6 +705,7 @@ def test_run_subprocess_delegates_to_subprocess_run(
 @pytest.mark.unit
 def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) -> None:
     calls: list[list[str]] = []
+    compose_file = str(_source_checkout_root() / "docker/compose/local-service.yml")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -644,7 +732,7 @@ def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) 
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            compose_file,
             "up",
             "-d",
             "--build",
@@ -654,7 +742,7 @@ def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) 
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            compose_file,
             "up",
             "--build",
             "--force-recreate",
@@ -664,7 +752,7 @@ def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) 
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            compose_file,
             "up",
             "-d",
             "--build",

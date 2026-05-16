@@ -157,6 +157,14 @@ class _BootstrapStage:
     command: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _BootstrapAssets:
+    root: Path | None
+    agent_runtime_dockerfile: Path | None
+    compose_file: Path
+    compose_env_file: Path | None
+
+
 async def run_service_bootstrap(
     settings: ServiceSettings,
     *,
@@ -205,8 +213,14 @@ def _bootstrap_stages(
     compose_file: Path,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[_BootstrapStage, ...]:
+    assets = _resolve_bootstrap_assets(
+        compose_file,
+        require_agent_runtime=not options.skip_agent_runtime_build,
+    )
     stages: list[_BootstrapStage] = []
     if not options.skip_agent_runtime_build:
+        if assets.root is None or assets.agent_runtime_dockerfile is None:  # pragma: no cover
+            raise _bootstrap_assets_not_found_error(compose_file)
         stages.append(
             _BootstrapStage(
                 "agent_runtime_build",
@@ -216,13 +230,13 @@ def _bootstrap_stages(
                     "-t",
                     settings.agent_runtime_image,
                     "-f",
-                    str(AGENT_RUNTIME_DOCKERFILE),
-                    ".",
+                    str(assets.agent_runtime_dockerfile),
+                    str(assets.root),
                 ),
             )
         )
 
-    compose = _compose_command(compose_file)
+    compose = _compose_command(assets.compose_file, compose_env_file=assets.compose_env_file)
     stages.extend(
         [
             _BootstrapStage(
@@ -259,10 +273,110 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     }
 
 
-def _compose_command(compose_file: Path) -> tuple[str, ...]:
-    args = ["docker", "compose"]
+def _resolve_bootstrap_assets(
+    compose_file: Path,
+    *,
+    require_agent_runtime: bool,
+) -> _BootstrapAssets:
+    asset_root = _resolve_bootstrap_asset_root()
+    default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE
+
+    if default_compose:
+        if asset_root is None:
+            raise _bootstrap_assets_not_found_error(compose_file)
+        resolved_compose_file = asset_root / LOCAL_SERVICE_COMPOSE_FILE
+    else:
+        resolved_compose_file = _resolve_user_path(compose_file)
+
+    agent_runtime_dockerfile: Path | None = None
+    if require_agent_runtime:
+        if asset_root is None:
+            raise _bootstrap_assets_not_found_error(compose_file)
+        agent_runtime_dockerfile = asset_root / AGENT_RUNTIME_DOCKERFILE
+
+    return _BootstrapAssets(
+        root=asset_root,
+        agent_runtime_dockerfile=agent_runtime_dockerfile,
+        compose_file=resolved_compose_file,
+        compose_env_file=_resolve_compose_env_file(asset_root),
+    )
+
+
+def _resolve_bootstrap_asset_root() -> Path | None:
+    for candidate in _bootstrap_asset_root_candidates():
+        if _is_bootstrap_asset_root(candidate):
+            return candidate
+    return None
+
+
+def _bootstrap_asset_root_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    cwd = Path.cwd().resolve()
+    candidates.extend((cwd, *cwd.parents))
+    module_file = Path(__file__).resolve()
+    candidates.extend(module_file.parents)
+
+    deduplicated: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduplicated.append(candidate)
+    return tuple(deduplicated)
+
+
+def _is_bootstrap_asset_root(candidate: Path) -> bool:
+    return (
+        candidate.is_dir()
+        and (candidate / AGENT_RUNTIME_DOCKERFILE).is_file()
+        and (candidate / LOCAL_SERVICE_COMPOSE_FILE).is_file()
+        and (candidate / "docker/control-plane.Dockerfile").is_file()
+        and (candidate / "pyproject.toml").is_file()
+        and (candidate / "src/awf/__init__.py").is_file()
+    )
+
+
+def _resolve_user_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return expanded.resolve()
+
+
+def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
+    if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
+    if asset_root is not None:
+        candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        if candidate.exists():
+            return candidate
     if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
-        args.extend(["--env-file", str(LOCAL_SERVICE_COMPOSE_ENV_FILE)])
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE.resolve()
+    return None
+
+
+def _bootstrap_assets_not_found_error(compose_file: Path) -> ServiceBootstrapError:
+    return ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND",
+        message=(
+            "Cannot resolve AWF bootstrap assets for local service startup. "
+            "Run awf service bootstrap from an AWF source checkout that contains "
+            f"{AGENT_RUNTIME_DOCKERFILE} and {LOCAL_SERVICE_COMPOSE_FILE}, or install "
+            "an AWF package that explicitly supports bundled bootstrap assets. "
+            f"Required default compose file: {compose_file}."
+        ),
+    )
+
+
+def _compose_command(
+    compose_file: Path,
+    *,
+    compose_env_file: Path | None = None,
+) -> tuple[str, ...]:
+    args = ["docker", "compose"]
+    if compose_env_file is not None:
+        args.extend(["--env-file", str(compose_env_file)])
     args.extend(["-f", str(compose_file)])
     return tuple(args)
 
