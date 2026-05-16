@@ -258,6 +258,62 @@ async def test_sensitive_controls_require_idempotency_key(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "action",
+    ["cancel", "stop", "destroy", "remonitor", "refresh", "validate", "rebase"],
+)
+async def test_sensitive_controls_reject_idempotency_key_over_database_limit(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": "k" * 129,
+    }
+
+    if action in {"cancel", "stop", "destroy"}:
+        response = await _call_control(client, "ws_missing", action, headers=headers)
+    else:
+        body: dict[str, object] = {"reason": "operator recovery"}
+        if action == "validate":
+            body["requested_tier"] = 2
+        response = await client.post(
+            f"/v1/workspaces/ws_missing/{action}",
+            json=body,
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_REQUEST",
+        "message": "Idempotency-Key header must be at most 128 characters.",
+    }
+
+
+@pytest.mark.unit
+async def test_recovery_operation_accepts_idempotency_key_at_database_limit(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.ready,
+    )
+    key = "k" * 128
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/refresh",
+        json={"reason": "stale policy"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": key},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["idempotency_key"] == key
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop", "destroy"])
 async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
     client: AsyncClient,

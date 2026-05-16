@@ -41,6 +41,7 @@ router = APIRouter(
     dependencies=[Depends(require_api_token)],
     responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
+_IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 
 @router.post("/cancel", response_model=WorkspaceControlResponse)
@@ -253,7 +254,16 @@ def _require_idempotency_key(idempotency_key: str | None) -> str:
                 "message": "Idempotency-Key header is required for this endpoint.",
             },
         )
-    return idempotency_key.strip()
+    key = idempotency_key.strip()
+    if len(key) > _IDEMPOTENCY_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "Idempotency-Key header must be at most 128 characters.",
+            },
+        )
+    return key
 
 
 def _parse_if_match(if_match: str | None) -> int | None:

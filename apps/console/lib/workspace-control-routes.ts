@@ -20,7 +20,7 @@ const actionPaths: Record<AwfControlAction, string> = {
 
 const invalidRequestStatus = 400;
 const maxReasonLength = 1024;
-const maxIdempotencyKeyLength = 200;
+const maxIdempotencyKeyLength = 128;
 
 export async function handleWorkspaceControlRoute(
   action: AwfControlAction,
@@ -141,7 +141,7 @@ function idempotencyKey(
     return { ok: true, value: `console:${randomUUID()}` };
   }
   if (candidate.length > maxIdempotencyKeyLength) {
-    return { ok: false, message: "idempotency_key must be 200 characters or fewer." };
+    return { ok: false, message: "idempotency_key must be 128 characters or fewer." };
   }
   return { ok: true, value: candidate };
 }

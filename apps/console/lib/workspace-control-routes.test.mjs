@@ -221,6 +221,28 @@ test("BFF rejects invalid revalidate tier before proxying", async () => {
   });
 });
 
+test("BFF rejects idempotency keys longer than AWF control storage limit", async () => {
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return jsonResponse({});
+  };
+
+  const response = await handleWorkspaceControlRoute(
+    "refresh",
+    "ws_123",
+    jsonRequest({ idempotency_key: "k".repeat(129) }),
+  );
+
+  assert.equal(called, false);
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error_code: "INVALID_REQUEST",
+    message: "idempotency_key must be 128 characters or fewer.",
+  });
+});
+
 function jsonRequest(body, headers = {}) {
   return new Request("https://console.example.test/operator", {
     method: "POST",
