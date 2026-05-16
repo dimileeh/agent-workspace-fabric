@@ -78,7 +78,6 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | Codex / `gpt-5.5` | monitoring_pr | Clean retry opened PR [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) on 2026-05-15. GitHub checks are rerunning after earlier full-coverage failure evidence; leave the monitor active so it can finish repair/merge. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`. |
 
 ### Reschedule Required Slices
 
@@ -95,6 +94,8 @@ under Failed / Superseded Slices for root-cause history.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Test Coverage And Quality Gates | Add fallback focused repro commands for CI pytest evidence | `ws_a1b0d9e586c644d1ba4b5d60` | [#258](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/258) | merged | Completed and merged 2026-05-16 with GitHub CI green. PR #256 dogfood showed GitHub CI evidence can contain failing pytest node IDs while `suggested_repro_commands` remains empty; this slice adds generic bounded fallback repro commands without hardcoding AWF check names or asking agents to rediscover known failures through broad local coverage. |
+| P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) | merged | Clean retry completed and merged 2026-05-16 with GitHub CI green. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`; the final monitor repair addressed request-admission/idempotency ordering and coverage gaps before merge. |
 | P1 Security, Secrets, And Egress Policy | Complete low-risk security cleanup audit | `ws_7bad4fd57a2b4995acc9292a` | [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257) | merged | Completed and merged 2026-05-15 with GitHub CI green. Scope was intentionally narrow: replace fragile SQL interval interpolation, reduce selected 409/error internal field leakage, and prove doctor known-secret sets are redaction-only. |
 | P1 Security, Secrets, And Egress Policy | Add production configuration footgun guardrails | `ws_084580a1fa544b95bcbcab98` | [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255) | merged | Clean retry completed and merged 2026-05-15 with GitHub CI green. Replaced cancelled `ws_6f426618098f4361be6e4354`, whose stale worker image ignored `validation.strategy.final_gate: none` and entered repeated local full-coverage repair loops. |
 | P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_60589ae904754135b70e6e9f` | [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249) | merged | Monitor-only adoption completed and merged 2026-05-15 with GitHub CI green. Replaced failed Spark workspace `ws_e56b535618c649cdb5a60999`, which hit Codex Spark capacity during PR comment repair and stale-active terminalization before the local provider-recovery guard. |
@@ -575,6 +576,18 @@ under Failed / Superseded Slices for root-cause history.
   [#241](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/241)
   merged 2026-05-14 and feeds structured, redacted GitHub Actions failure
   evidence plus focused repro commands into PR-monitor repair prompts.
+- [x] Add fallback focused repro commands when CI evidence has pytest node IDs
+  but no extractable pytest command prefix. Regression source: PR #256 /
+  `ws_8b76839898f1400abc16ad08` extracted two failing pytest node IDs from
+  GitHub Actions full-coverage evidence, but the PR-monitor payload still had
+  `suggested_repro_commands=[]`. Acceptance: when failed CI logs yield pytest
+  node IDs but command extraction cannot identify a pytest invocation, AWF
+  synthesizes a bounded, shell-quoted fallback command such as
+  `uv run --python 3.12 --extra dev pytest <nodes> -q`; the fallback remains
+  provider/check-name neutral, does not request broad local full coverage to
+  rediscover known failures, and is covered by focused extractor/prompt tests.
+  Evidence: PR [#258](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/258)
+  merged 2026-05-16 via monitor workspace `ws_a1b0d9e586c644d1ba4b5d60`.
 
 ## P1: Validation Runtime Performance
 
@@ -629,7 +642,7 @@ and production configuration footguns.
   `require_api_token`.
   Evidence: PR [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249)
   merged 2026-05-15 via monitor workspace `ws_60589ae904754135b70e6e9f`.
-- [ ] Add bounded request admission for workspace creation and callback
+- [x] Add bounded request admission for workspace creation and callback
   registration. Acceptance: workspace create and callback register endpoints
   enforce per-token or safe local fallback rate limits; burst exhaustion returns
   structured operator-visible reason codes/events; and idempotency replay cannot
@@ -637,6 +650,8 @@ and production configuration footguns.
   evaluated together with the auth posture slice: unauthenticated local-dev
   exceptions, if retained, still need bounded admission so repeated create or
   callback requests cannot exhaust Docker, Git mirrors, disk, or database rows.
+  Evidence: PR [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256)
+  merged 2026-05-16 via monitor workspace `ws_8b76839898f1400abc16ad08`.
 - [x] Add production configuration footgun guardrails. Acceptance: local dev
   defaults remain usable, but production/network-facing mode fails fast when
   `AWF_DATABASE_URL` or security-sensitive callback/auth settings use bundled
