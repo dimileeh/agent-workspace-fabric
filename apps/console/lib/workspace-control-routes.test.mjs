@@ -32,17 +32,18 @@ test("remonitor BFF posts with server token and idempotency key", async () => {
     });
   };
 
-  const response = await handleWorkspaceControlRoute(
-    "remonitor",
-    "ws_123",
-    jsonRequest({
+  const request = jsonRequest(
+    {
       reason: "resume PR monitor",
       workspace_version: 7,
       idempotency_key: "browser-idem",
       ignored: "must not forward",
-    }),
+    },
     { cookie: "console-session=browser" },
   );
+  assert.equal(request.headers.get("cookie"), "console-session=browser");
+
+  const response = await handleWorkspaceControlRoute("remonitor", "ws_123", request);
 
   const responseText = await response.text();
   assert.equal(response.status, 200);
