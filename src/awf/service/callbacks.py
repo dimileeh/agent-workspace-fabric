@@ -39,6 +39,7 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories import (
+    DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
     CallbackDeliveryRepository,
     CallbackIdempotencyConflictError,
     CallbackSubscriptionRepository,
@@ -300,13 +301,19 @@ class CallbackService:
 
     async def get_idempotency_request_hash(self, idempotency_key: str) -> str | None:
         async with self._factory() as session:
-            repo = CallbackSubscriptionRepository(session)
-            await repo.acquire_idempotency_key_lock(idempotency_key)
-            return await repo.get_idempotency_request_hash(idempotency_key)
+            return await CallbackSubscriptionRepository(session).get_idempotency_request_hash(
+                idempotency_key
+            )
 
-    async def list_idempotency_replay_keys(self) -> list[tuple[str, str]]:
+    async def list_idempotency_replay_keys(
+        self,
+        *,
+        limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    ) -> list[tuple[str, str]]:
         async with self._factory() as session:
-            return await CallbackSubscriptionRepository(session).list_idempotency_replay_keys()
+            return await CallbackSubscriptionRepository(session).list_idempotency_replay_keys(
+                limit=limit
+            )
 
     async def list(
         self,

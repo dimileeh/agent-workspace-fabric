@@ -485,7 +485,7 @@ async def test_register_callback_cold_db_replay_does_not_spend_fresh_quota(
 
 
 @pytest.mark.unit
-async def test_register_callback_rate_limited_replay_locks_before_durable_lookup(
+async def test_register_callback_rate_limited_replay_reads_durable_hash_without_advisory_lock(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -537,8 +537,8 @@ async def test_register_callback_rate_limited_replay_locks_before_durable_lookup
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
     assert calls[:2] == [
-        "lock:callback-inflight-rate-limit-replay",
         "hash:callback-inflight-rate-limit-replay",
+        "lock:callback-inflight-rate-limit-replay",
     ]
 
 

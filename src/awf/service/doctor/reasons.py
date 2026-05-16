@@ -60,6 +60,47 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service logs",
         "docs/REASON_CATALOG.md#api_unreachable",
     ),
+    "WORKSPACE_CREATE_RATE_LIMITED": _ReasonText(
+        "AWF rejected a workspace creation request because the request-admission rate limit was exhausted.",
+        (
+            "Wait for the response's `Retry-After` delay, reduce workspace creation "
+            "concurrency, or replay the original request with the same idempotency "
+            "key and body when recovering from a lost response."
+        ),
+        (
+            "Too many `POST /v1/workspaces` or `POST /v2/workspaces` requests arrived "
+            "for the same bearer-token or client-host identity within one admission window."
+        ),
+        "awf workspace list",
+        "docs/REASON_CATALOG.md#workspace_create_rate_limited",
+    ),
+    "CALLBACK_REGISTER_RATE_LIMITED": _ReasonText(
+        "AWF rejected a callback registration request because the request-admission rate limit was exhausted.",
+        (
+            "Wait for the response's `Retry-After` delay, reduce registration "
+            "concurrency, or replay the original request with the same idempotency "
+            "key and body when recovering from a lost response."
+        ),
+        (
+            "Too many `POST /v1/callbacks` requests arrived for the same bearer-token "
+            "or client-host identity within one admission window."
+        ),
+        "awf service logs",
+        "docs/REASON_CATALOG.md#callback_register_rate_limited",
+    ),
+    "IDEMPOTENCY_REPLAY_UNAVAILABLE": _ReasonText(
+        "AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.",
+        (
+            "Retry the exact original request if this is transient; use a fresh "
+            "idempotency key only when intentionally creating a new resource."
+        ),
+        (
+            "The in-memory replay response was evicted and the durable workspace "
+            "or callback subscription record is no longer available."
+        ),
+        "awf service logs",
+        "docs/REASON_CATALOG.md#idempotency_replay_unavailable",
+    ),
     "WORKER_RUNNING": _ReasonText(
         "AWF worker container is running.",
         "No action required.",

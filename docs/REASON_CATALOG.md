@@ -30,6 +30,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#callback_delivery_budget_exceeded](#callback_delivery_budget_exceeded)
 
+### CALLBACK_REGISTER_RATE_LIMITED
+**Problem:** AWF rejected a callback registration request because the request-admission rate limit was exhausted.
+**Likely Cause:** Too many `POST /v1/callbacks` requests arrived for the same bearer-token or client-host identity within one admission window.
+**Operator Fix:** Wait for the response's `Retry-After` delay, reduce registration concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
+**Related Command:** `awf service logs`
+**Docs Link:** [docs/REASON_CATALOG.md#callback_register_rate_limited](#callback_register_rate_limited)
+
 ### CALLBACK_TARGET_INVALID
 **Problem:** AWF refused to send an outbound callback because the stored callback target failed delivery-time validation.
 **Likely Cause:** The target URL no longer resolves to public addresses, uses a disallowed scheme or host, includes unsafe URL components, or violates the configured callback HTTPS/host allowlist policy.
@@ -169,6 +176,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the workspace monitor log and run `git fsck` on the AWF mirror. If AWF reports a repaired orphan ref, restart or remonitor the workspace; otherwise repair GitHub/network access before retrying.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#git_fetch_base_failed](#git_fetch_base_failed)
+
+### IDEMPOTENCY_REPLAY_UNAVAILABLE
+**Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
+**Likely Cause:** The in-memory replay response was evicted and the durable workspace or callback subscription record is no longer available.
+**Operator Fix:** Retry the exact original request if this is transient; use a fresh idempotency key only when intentionally creating a new resource.
+**Related Command:** `awf service logs`
+**Docs Link:** [docs/REASON_CATALOG.md#idempotency_replay_unavailable](#idempotency_replay_unavailable)
 
 ### INSUFFICIENT_DISK
 **Problem:** Free disk is below the configured AWF threshold.
@@ -400,3 +414,10 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect worker logs with awf service logs --service worker.
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#worker_unhealthy](#worker_unhealthy)
+
+### WORKSPACE_CREATE_RATE_LIMITED
+**Problem:** AWF rejected a workspace creation request because the request-admission rate limit was exhausted.
+**Likely Cause:** Too many `POST /v1/workspaces` or `POST /v2/workspaces` requests arrived for the same bearer-token or client-host identity within one admission window.
+**Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
+**Related Command:** `awf workspace list`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)

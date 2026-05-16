@@ -370,11 +370,9 @@ async def _callback_durable_replay_response_for_persisted_key(
         request_hash=durable_request_hash,
     )
     try:
-        known_replay_key = replay_key_cache.matches(payload, idempotency_key=idempotency_key)
+        replay_key_cache.matches(payload, idempotency_key=idempotency_key)
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
-    if not known_replay_key:
-        return None
     response = await _callback_durable_replay_response(
         service,
         replay_cache,

@@ -983,6 +983,47 @@ class TestIdempotency:
         assert await repo.get_by_idempotency_key("never-used") is None
 
     @pytest.mark.unit
+    async def test_list_idempotency_replay_keys_is_bounded(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        base_time = datetime(2026, 1, 1, tzinfo=UTC)
+        null_key_workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="null key",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            idempotency_key=None,
+        )
+        null_key_workspace.created_at = base_time - timedelta(seconds=1)
+        for index, idempotency_key in enumerate(
+            [
+                "idem-replay-bound-a",
+                "idem-replay-bound-b",
+                "idem-replay-bound-c",
+            ],
+        ):
+            workspace = await repo.create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="development",
+                task_title=f"bounded replay key {index}",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=idempotency_key,
+            )
+            workspace.created_at = base_time + timedelta(seconds=index)
+        await session.commit()
+
+        assert await repo.list_idempotency_replay_keys(limit=2) == [
+            "idem-replay-bound-a",
+            "idem-replay-bound-b",
+        ]
+
+    @pytest.mark.unit
     async def test_list_idempotency_key_family_returns_exact_and_generation_keys(
         self,
         session: AsyncSession,

@@ -162,6 +162,33 @@ async def test_subscription_repository_lists_idempotency_replay_keys(
 
 
 @pytest.mark.unit
+async def test_subscription_repository_lists_idempotency_replay_keys_with_limit(
+    session: AsyncSession,
+) -> None:
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    for index, (idempotency_key, request_hash) in enumerate(
+        [
+            ("idem-replay-list-limit-a", "hash-replay-list-limit-a"),
+            ("idem-replay-list-limit-b", "hash-replay-list-limit-b"),
+            ("idem-replay-list-limit-c", "hash-replay-list-limit-c"),
+        ],
+    ):
+        subscription = await _subscription(
+            session,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        subscription.created_at = base_time + timedelta(seconds=index)
+    await session.commit()
+    repo = CallbackSubscriptionRepository(session)
+
+    assert await repo.list_idempotency_replay_keys(limit=2) == [
+        ("idem-replay-list-limit-a", "hash-replay-list-limit-a"),
+        ("idem-replay-list-limit-b", "hash-replay-list-limit-b"),
+    ]
+
+
+@pytest.mark.unit
 async def test_subscription_repository_gets_idempotency_request_hash_by_key(
     session: AsyncSession,
 ) -> None:

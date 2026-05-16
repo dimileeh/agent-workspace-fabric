@@ -142,6 +142,7 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 )
+DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
 OWNED_PATH_WILDCARD_MATCH_REASON: Final = "OWNED_PATH_WILDCARD_MATCH"
@@ -2738,11 +2739,18 @@ class WorkspaceRepository:
         stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
-    async def list_idempotency_replay_keys(self) -> builtins.list[str]:
+    async def list_idempotency_replay_keys(
+        self,
+        *,
+        limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    ) -> builtins.list[str]:
+        if limit <= 0:
+            return []
         stmt = (
             select(Workspace.idempotency_key)
             .where(Workspace.idempotency_key.is_not(None))
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+            .limit(limit)
         )
         return [key for key in (await self._session.execute(stmt)).scalars().all() if key]
 
@@ -4649,12 +4657,20 @@ class CallbackSubscriptionRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def list_idempotency_replay_keys(self) -> builtins.list[tuple[str, str]]:
-        stmt = select(
-            CallbackSubscription.idempotency_key, CallbackSubscription.request_hash
-        ).order_by(
-            CallbackSubscription.created_at.asc(),
-            CallbackSubscription.id.asc(),
+    async def list_idempotency_replay_keys(
+        self,
+        *,
+        limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    ) -> builtins.list[tuple[str, str]]:
+        if limit <= 0:
+            return []
+        stmt = (
+            select(CallbackSubscription.idempotency_key, CallbackSubscription.request_hash)
+            .order_by(
+                CallbackSubscription.created_at.asc(),
+                CallbackSubscription.id.asc(),
+            )
+            .limit(limit)
         )
         return [(key, request_hash) for key, request_hash in (await self._session.execute(stmt))]
 
