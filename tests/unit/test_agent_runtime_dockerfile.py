@@ -44,6 +44,14 @@ def test_agent_runtime_installs_docker_compose_plugin() -> None:
 def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
+    assert "ARG CODEX_VERSION=0.130.0" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.143" in dockerfile
+    assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
+    assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
+    assert "ARG CODEX_VERSION=latest" not in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=latest" not in dockerfile
+    assert "ARG GEMINI_VERSION=latest" not in dockerfile
+    assert "ARG OPENCODE_VERSION=latest" not in dockerfile
     assert "@openai/codex@${CODEX_VERSION}" in dockerfile
     assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
     assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile

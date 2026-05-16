@@ -113,10 +113,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # Each CLI is pinned to a version. Bump via PR so we can verify the output
 # format hasn't drifted in the adapters.
-ARG CODEX_VERSION=latest
-ARG CLAUDE_CODE_VERSION=latest
-ARG GEMINI_VERSION=latest
-ARG OPENCODE_VERSION=latest
+ARG CODEX_VERSION=0.130.0
+ARG CLAUDE_CODE_VERSION=2.1.143
+ARG GEMINI_VERSION=0.42.0
+ARG OPENCODE_VERSION=1.15.2
 
 RUN npm install -g --no-fund --no-audit \
       @openai/codex@${CODEX_VERSION} \
