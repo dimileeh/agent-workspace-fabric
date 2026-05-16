@@ -33,6 +33,7 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
 )
+from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -70,6 +71,10 @@ def _payload(**overrides: object) -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
 
 
+def _route_settings() -> Settings:
+    return Settings(_env_file=None)
+
+
 def _closed_connection_error() -> InterfaceError:
     return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
@@ -80,6 +85,7 @@ class TestCreateDirect:
         result = await create_workspace(
             payload=_payload(),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(result, WorkspaceAcceptedResponse)
@@ -108,6 +114,7 @@ class TestCreateDirect:
         first = await create_workspace(
             payload=payload,
             idempotency_key="IDEM-OK",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(first, WorkspaceAcceptedResponse)
@@ -115,6 +122,7 @@ class TestCreateDirect:
         second = await create_workspace(
             payload=payload,
             idempotency_key="IDEM-OK",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(second, WorkspaceAcceptedResponse)
@@ -127,11 +135,13 @@ class TestCreateDirect:
         await create_workspace(
             payload=_payload(task_title="first"),
             idempotency_key="IDEM-CONFLICT",
+            settings=_route_settings(),
             session=session,
         )
         result = await create_workspace(
             payload=_payload(task_title="second"),
             idempotency_key="IDEM-CONFLICT",
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(result, JSONResponse)
@@ -152,6 +162,7 @@ class TestGetDirect:
         created = await create_workspace(
             payload=_payload(task_title="look-me-up"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
@@ -172,6 +183,7 @@ class TestGetDirect:
         created = await create_workspace(
             payload=_payload(task_title="route helper coverage"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
@@ -205,6 +217,7 @@ class TestGetDirect:
         created = await create_workspace(
             payload=_payload(task_title="transient audit cleanup"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
@@ -244,6 +257,7 @@ class TestGetDirect:
         created = await create_workspace(
             payload=_payload(task_title="non-transient audit cleanup"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
@@ -284,6 +298,7 @@ class TestGetDirect:
         created = await create_workspace(
             payload=_payload(task_title="invalid audit payload"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
@@ -328,11 +343,13 @@ class TestListDirect:
         await create_workspace(
             payload=_payload(task_title="a"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         await create_workspace(
             payload=_payload(task_title="b"),
             idempotency_key=None,
+            settings=_route_settings(),
             session=session,
         )
         # Flush so the query sees the inserts in the same session.

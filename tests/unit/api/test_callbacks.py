@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from pydantic import ValidationError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from starlette.requests import Request
 
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
+from awf.api.routes import callbacks as callbacks_route
 from awf.common import callback_targets
 from awf.common.config import Settings, get_settings
+from awf.db.repositories import CallbackSubscriptionRepository
 from awf.db.session import make_session_factory
 
 _CALLBACK_TOKEN = "callback-secret"
@@ -41,6 +47,75 @@ async def _subscription_count(engine: AsyncEngine) -> int:
         )
 
 
+def _callback_request_admission_settings(*, limit: int = 1) -> Settings:
+    return Settings(
+        _env_file=None,
+        api_token=_CALLBACK_TOKEN,
+        callbacks_enabled=True,
+        request_admission_window_seconds=60,
+        workspace_create_rate_limit_count=20,
+        callback_register_rate_limit_count=limit,
+    )
+
+
+def _direct_callback_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/callbacks",
+            "headers": [],
+            "client": ("198.51.100.42", 42100),
+            "app": FastAPI(),
+        }
+    )
+
+
+def _callback_request_without_app_state() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/callbacks",
+            "headers": [],
+            "client": ("198.51.100.43", 42100),
+        }
+    )
+
+
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.enters = 0
+        self.exits = 0
+
+    def __enter__(self) -> None:
+        self.enters += 1
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.exits += 1
+
+
+def _assert_callback_rate_limited(
+    response: Response,
+    *,
+    identity_type: str,
+    expected_limit: int = 1,
+) -> None:
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
+    assert body["message"] == "Callback registration request rate limit exceeded."
+    detail = body["detail"]
+    assert detail["reason_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
+    assert detail["endpoint_family"] == "callback_register"
+    assert detail["identity_type"] == identity_type
+    assert detail["identity_digest"]
+    assert detail["limit"] == expected_limit
+    assert detail["window_seconds"] == 60
+    assert detail["retry_after_seconds"] > 0
+    assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
+
+
 def _authorized_headers(
     *,
     idempotency_key: str | None = None,
@@ -54,12 +129,54 @@ def _authorized_headers(
     return headers
 
 
+def _callback_payload(**overrides: object) -> api_schemas.CallbackSubscriptionCreateRequest:
+    return api_schemas.CallbackSubscriptionCreateRequest.model_validate(
+        {
+            **_VALID_BODY,
+            **overrides,
+        }
+    )
+
+
+def _callback_response(response_id: str) -> api_schemas.CallbackSubscriptionResponse:
+    now = datetime.now(UTC)
+    return api_schemas.CallbackSubscriptionResponse(
+        id=response_id,
+        name="operator-console",
+        target_url="https://operator.example.com/awf/events",
+        event_types=["workspace.*", "merge.*", "operation.*"],
+        enabled=True,
+        timeout_seconds=10,
+        max_attempts=3,
+        initial_backoff_seconds=5,
+        created_at=now,
+        updated_at=now,
+        disabled_at=None,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _configure_api_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWF_API_TOKEN", _CALLBACK_TOKEN)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_register_callback_direct_call_uses_default_settings_dependency(
+    engine: AsyncEngine,
+) -> None:
+    response = await callbacks_route.register_callback(
+        api_schemas.CallbackSubscriptionCreateRequest.model_validate(_VALID_BODY),
+        _direct_callback_request(),
+        idempotency_key="callback-direct-default-settings",
+        session_factory=make_session_factory(engine),
+    )
+
+    assert isinstance(response, api_schemas.CallbackSubscriptionResponse)
+    assert response.id.startswith("cb_")
+    assert await _subscription_count(engine) == 1
 
 
 @pytest.fixture
@@ -132,6 +249,517 @@ async def test_register_callback_persists_safe_public_contract(
     assert "secret" not in body
     assert "headers" not in body
     assert "authorization" not in body
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_burst_after_configured_limit(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "callback-rate-first"},
+        headers=_authorized_headers(idempotency_key="callback-rate-first"),
+    )
+    rejected = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-rate-second",
+            "target_url": "https://operator.example.com/awf/events-2",
+        },
+        headers=_authorized_headers(idempotency_key="callback-rate-second"),
+    )
+
+    assert first.status_code == 201
+    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_miss(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    persisted_probe_keys: list[str] = []
+    locked_replay_keys: list[str] = []
+    original_persisted_probe = (
+        callbacks_route.CallbackService.replay_existing_for_persisted_key_in_session
+    )
+    original_locked_replay = callbacks_route.CallbackService.replay_existing_in_locked_session
+
+    async def fail_list_idempotency_replay_keys(
+        _self: callbacks_route.CallbackService,
+    ) -> list[tuple[str, str]]:
+        raise AssertionError("fresh over-limit callbacks must not scan all replay keys")
+
+    async def fail_detached_replay_existing(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        raise AssertionError(f"fresh callback path must keep {idempotency_key} in-session")
+
+    async def tracked_persisted_probe(
+        self: callbacks_route.CallbackService,
+        session: AsyncSession,
+        payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        persisted_probe_keys.append(idempotency_key)
+        return await original_persisted_probe(
+            self,
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    async def tracked_locked_replay(
+        self: callbacks_route.CallbackService,
+        session: AsyncSession,
+        payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> object:
+        locked_replay_keys.append(idempotency_key)
+        return await original_locked_replay(
+            self,
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing",
+        fail_detached_replay_existing,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing_for_persisted_key_in_session",
+        tracked_persisted_probe,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "replay_existing_in_locked_session",
+        tracked_locked_replay,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "list_idempotency_replay_keys",
+        fail_list_idempotency_replay_keys,
+    )
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "callback-replay-read-first"},
+        headers=_authorized_headers(idempotency_key="callback-replay-read-first"),
+    )
+    rejected = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-replay-read-second",
+            "target_url": "https://operator.example.com/awf/events-2",
+        },
+        headers=_authorized_headers(idempotency_key="callback-replay-read-second"),
+    )
+
+    assert first.status_code == 201
+    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
+    assert persisted_probe_keys == [
+        "callback-replay-read-first",
+        "callback-replay-read-second",
+    ]
+    assert locked_replay_keys == [
+        "callback-replay-read-first",
+        "callback-replay-read-second",
+    ]
+
+
+@pytest.mark.unit
+async def test_register_callback_fresh_path_acquires_one_idempotency_lock(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=10)
+    idempotency_key = "callback-fresh-single-lock"
+    lock_keys: list[str] = []
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        lock_keys.append(key)
+        await original_lock(self, key)
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-fresh-single-lock",
+            "target_url": "https://operator.example.com/awf/fresh-single-lock",
+        },
+        headers=_authorized_headers(idempotency_key=idempotency_key),
+    )
+
+    assert response.status_code == 201
+    assert lock_keys == [idempotency_key]
+
+
+@pytest.mark.unit
+async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(idempotency_key="callback-rate-replay"),
+    )
+    replay = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(idempotency_key="callback-rate-replay"),
+    )
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-rate-fresh",
+            "target_url": "https://operator.example.com/awf/fresh",
+        },
+        headers=_authorized_headers(idempotency_key="callback-rate-fresh"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_db_replay_bypasses_limit_when_replay_cache_is_cold(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = _authorized_headers(idempotency_key="callback-db-rate-replay")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-db-rate-fresh",
+            "target_url": "https://operator.example.com/awf/db-fresh",
+        },
+        headers=_authorized_headers(idempotency_key="callback-db-rate-fresh"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_db_replay_bypasses_limit_when_replay_caches_are_cold(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = _authorized_headers(idempotency_key="callback-db-cold-rate-replay")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-db-cold-rate-fresh",
+            "target_url": "https://operator.example.com/awf/db-cold-fresh",
+        },
+        headers=_authorized_headers(idempotency_key="callback-db-cold-rate-fresh"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_cold_db_replay_does_not_spend_fresh_quota(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=2)
+    headers = _authorized_headers(idempotency_key="callback-cold-replay-quota")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    second_fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-cold-replay-quota-second",
+            "target_url": "https://operator.example.com/awf/cold-replay-second",
+        },
+        headers=_authorized_headers(idempotency_key="callback-cold-replay-quota-second"),
+    )
+    third_fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-cold-replay-quota-third",
+            "target_url": "https://operator.example.com/awf/cold-replay-third",
+        },
+        headers=_authorized_headers(idempotency_key="callback-cold-replay-quota-third"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert second_fresh.status_code == 201
+    _assert_callback_rate_limited(
+        third_fresh,
+        identity_type="bearer_token",
+        expected_limit=2,
+    )
+    assert await _subscription_count(engine) == 2
+
+
+@pytest.mark.unit
+async def test_register_callback_cold_replay_locks_before_durable_lookup(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = _authorized_headers(idempotency_key="callback-inflight-rate-limit-replay")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    assert first.status_code == 201
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+
+    calls: list[str] = []
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+    original_lookup = CallbackSubscriptionRepository.get_by_idempotency_key
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        calls.append(f"lock:{key}")
+        await original_lock(self, key)
+
+    async def tracked_lookup(
+        self: CallbackSubscriptionRepository,
+        key: str,
+    ) -> object | None:
+        calls.append(f"lookup:{key}")
+        return await original_lookup(self, key)
+
+    async def fail_hash_lookup(
+        _self: CallbackSubscriptionRepository,
+        _key: str,
+    ) -> str | None:
+        raise AssertionError("cold replay must not use a pre-lock hash probe")
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "get_by_idempotency_key",
+        tracked_lookup,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "get_idempotency_request_hash",
+        fail_hash_lookup,
+    )
+
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert calls[:2] == [
+        "lock:callback-inflight-rate-limit-replay",
+        "lookup:callback-inflight-rate-limit-replay",
+    ]
+
+
+@pytest.mark.unit
+async def test_callback_registration_locks_idempotency_key_before_lookup(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    idempotency_key = "callback-create-locks-before-lookup"
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+    original_lookup = CallbackSubscriptionRepository.get_by_idempotency_key
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        calls.append(f"lock:{key}")
+        await original_lock(self, key)
+
+    async def tracked_lookup(
+        self: CallbackSubscriptionRepository,
+        key: str,
+    ) -> object | None:
+        calls.append(f"lookup:{key}")
+        return await original_lookup(self, key)
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "get_by_idempotency_key",
+        tracked_lookup,
+    )
+    service = callbacks_route.CallbackService(
+        make_session_factory(engine),
+        settings=_callback_request_admission_settings(limit=10),
+    )
+
+    subscription = await service.register(
+        _callback_payload(
+            name="callback-create-lock",
+            target_url="https://operator.example.com/awf/create-lock",
+        ),
+        idempotency_key=idempotency_key,
+    )
+
+    assert subscription.id.startswith("cb_")
+    assert calls[:2] == [
+        f"lock:{idempotency_key}",
+        f"lookup:{idempotency_key}",
+    ]
+
+
+@pytest.mark.unit
+async def test_register_callback_uses_verified_bearer_identity_for_rate_limit(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "verified-identity-first"},
+        headers=_authorized_headers(idempotency_key="callback-verified-identity-first"),
+    )
+    second = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "verified-identity-second",
+            "target_url": "https://operator.example.com/awf/verified-second",
+        },
+        headers=_authorized_headers(idempotency_key="callback-verified-identity-second"),
+    )
+
+    assert first.status_code == 201
+    _assert_callback_rate_limited(second, identity_type="bearer_token")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_rotated_invalid_bearer_before_rate_limit(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "token-a-first"},
+        headers=_authorized_headers(idempotency_key="callback-token-a-first"),
+    )
+    second_token = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "token-b-first",
+            "target_url": "https://operator.example.com/awf/token-b",
+        },
+        headers={
+            "Authorization": "Bearer callback-other-token",
+            "Idempotency-Key": "callback-token-b-first",
+        },
+    )
+
+    assert first.status_code == 201
+    assert second_token.status_code == 401
+    assert second_token.json()["detail"]["error_code"] == "UNAUTHORIZED"
+    assert await _subscription_count(engine) == 1
+    payload = json.dumps(second_token.json())
+    assert _CALLBACK_TOKEN not in payload
+    assert f"Bearer {_CALLBACK_TOKEN}" not in payload
+    assert "callback-other-token" not in payload
+    assert "Bearer callback-other-token" not in payload
 
 
 @pytest.mark.unit
@@ -460,6 +1088,241 @@ async def test_register_callback_idempotent_replay_returns_original_without_dupl
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
     assert after_count == before_count == 1
+
+
+@pytest.mark.unit
+def test_callback_replay_cache_without_app_state_is_request_local() -> None:
+    request = SimpleNamespace()
+
+    cache = callbacks_route._callback_idempotency_replay_cache(request)
+
+    assert callbacks_route._callback_idempotency_replay_cache(request) is cache
+    assert callbacks_route._callback_idempotency_replay_cache(SimpleNamespace()) is not cache
+    assert callbacks_route._callback_idempotency_replay_cache(None) is not (
+        callbacks_route._callback_idempotency_replay_cache(None)
+    )
+
+
+@pytest.mark.unit
+def test_callback_replay_cache_real_request_without_app_state_fails_loudly() -> None:
+    request = _callback_request_without_app_state()
+
+    with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+        callbacks_route._callback_idempotency_replay_cache(request)
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_without_app_state_is_request_local() -> None:
+    request = SimpleNamespace()
+
+    cache = callbacks_route._callback_idempotency_replay_key_cache(request)
+
+    assert callbacks_route._callback_idempotency_replay_key_cache(request) is cache
+    assert callbacks_route._callback_idempotency_replay_key_cache(SimpleNamespace()) is not cache
+    assert callbacks_route._callback_idempotency_replay_key_cache(None) is not (
+        callbacks_route._callback_idempotency_replay_key_cache(None)
+    )
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_real_request_without_app_state_fails_loudly() -> None:
+    request = _callback_request_without_app_state()
+
+    with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+        callbacks_route._callback_idempotency_replay_key_cache(request)
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_app_state_is_bounded() -> None:
+    request = _direct_callback_request()
+    cache = callbacks_route._callback_idempotency_replay_key_cache(request)
+    payload = _callback_payload(
+        name="callback-key-app-state-bound",
+        target_url="https://operator.example.com/awf/key-app-state-bound",
+    )
+    max_entries = callbacks_route._CALLBACK_REPLAY_KEY_CACHE_MAX_ENTRIES  # noqa: SLF001
+
+    for index in range(max_entries + 1):
+        cache.remember(payload, idempotency_key=f"callback-app-state-key-{index}")
+
+    newest_key = f"callback-app-state-key-{max_entries}"
+    assert cache.matches(payload, idempotency_key="callback-app-state-key-0") is False
+    assert cache.matches(payload, idempotency_key=newest_key) is True
+
+
+@pytest.mark.unit
+def test_callback_replay_caches_lock_composite_lru_operations() -> None:
+    replay_cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)  # noqa: SLF001
+    replay_lock = _TrackingLock()
+    replay_cache._lock = replay_lock  # noqa: SLF001
+    replay_payload = _callback_payload(
+        name="callback-replay-locked",
+        target_url="https://operator.example.com/awf/replay-locked",
+    )
+    replay_cache.remember(
+        replay_payload,
+        idempotency_key="callback-replay-locked",
+        response=_callback_response("cb_replay_locked"),
+    )
+    assert replay_cache.replay(replay_payload, idempotency_key="callback-replay-locked")
+    assert replay_lock.enters == 2
+    assert replay_lock.exits == 2
+
+    key_cache = callbacks_route._CallbackIdempotencyReplayKeyCache(max_entries=2)  # noqa: SLF001
+    key_lock = _TrackingLock()
+    key_cache._lock = key_lock  # noqa: SLF001
+    key_payload = _callback_payload(
+        name="callback-key-locked",
+        target_url="https://operator.example.com/awf/key-locked",
+    )
+    key_cache.remember(key_payload, idempotency_key="callback-key-locked")
+    assert key_cache.matches(key_payload, idempotency_key="callback-key-locked") is True
+    assert key_lock.enters == 2
+    assert key_lock.exits == 2
+
+
+@pytest.mark.unit
+def test_callback_replay_conflict_does_not_promote_lru_entry() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)
+    first_payload = _callback_payload(
+        name="callback-lru-first",
+        target_url="https://operator.example.com/awf/lru-first",
+    )
+    second_payload = _callback_payload(
+        name="callback-lru-second",
+        target_url="https://operator.example.com/awf/lru-second",
+    )
+    cache.remember(
+        first_payload,
+        idempotency_key="callback-lru-first",
+        response=_callback_response("cb_lru_first"),
+    )
+    cache.remember(
+        second_payload,
+        idempotency_key="callback-lru-second",
+        response=_callback_response("cb_lru_second"),
+    )
+
+    with pytest.raises(callbacks_route.CallbackIdempotencyConflictError):
+        cache.replay(
+            _callback_payload(
+                name="callback-lru-first",
+                target_url="https://operator.example.com/awf/lru-conflict",
+            ),
+            idempotency_key="callback-lru-first",
+        )
+
+    third_payload = _callback_payload(
+        name="callback-lru-third",
+        target_url="https://operator.example.com/awf/lru-third",
+    )
+    cache.remember(
+        third_payload,
+        idempotency_key="callback-lru-third",
+        response=_callback_response("cb_lru_third"),
+    )
+
+    assert cache.replay(second_payload, idempotency_key="callback-lru-second") is not None
+    assert cache.replay(first_payload, idempotency_key="callback-lru-first") is None
+
+
+@pytest.mark.unit
+def test_callback_replay_key_conflict_does_not_promote_lru_entry() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayKeyCache(max_entries=2)
+    first_payload = _callback_payload(
+        name="callback-key-lru-first",
+        target_url="https://operator.example.com/awf/key-lru-first",
+    )
+    second_payload = _callback_payload(
+        name="callback-key-lru-second",
+        target_url="https://operator.example.com/awf/key-lru-second",
+    )
+    cache.remember(first_payload, idempotency_key="callback-key-lru-first")
+    cache.remember(second_payload, idempotency_key="callback-key-lru-second")
+
+    with pytest.raises(callbacks_route.CallbackIdempotencyConflictError):
+        cache.matches(
+            _callback_payload(
+                name="callback-key-lru-first",
+                target_url="https://operator.example.com/awf/key-lru-conflict",
+            ),
+            idempotency_key="callback-key-lru-first",
+        )
+
+    third_payload = _callback_payload(
+        name="callback-key-lru-third",
+        target_url="https://operator.example.com/awf/key-lru-third",
+    )
+    cache.remember(third_payload, idempotency_key="callback-key-lru-third")
+
+    assert cache.matches(second_payload, idempotency_key="callback-key-lru-second") is True
+    assert cache.matches(first_payload, idempotency_key="callback-key-lru-first") is False
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_default_retains_keys_past_response_cache_limit() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayKeyCache()
+    payload = _callback_payload(
+        name="callback-key-default-retain",
+        target_url="https://operator.example.com/awf/key-default-retain",
+    )
+
+    for index in range(callbacks_route._CALLBACK_REPLAY_CACHE_MAX_ENTRIES + 1):  # noqa: SLF001
+        cache.remember(payload, idempotency_key=f"callback-default-key-{index}")
+
+    assert cache.matches(payload, idempotency_key="callback-default-key-0") is True
+
+
+@pytest.mark.unit
+async def test_register_callback_known_replay_key_db_miss_returns_conflict_without_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _direct_callback_request()
+    payload = _callback_payload(
+        name="callback-known-missing",
+        target_url="https://operator.example.com/awf/known-missing",
+    )
+    idempotency_key = "callback-known-missing-key"
+    callbacks_route._callback_idempotency_replay_key_cache(request).remember(  # noqa: SLF001
+        payload,
+        idempotency_key=idempotency_key,
+    )
+    replay_keys: list[str] = []
+    register_keys: list[str] = []
+
+    async def missing_replay(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        replay_keys.append(idempotency_key)
+
+    async def fail_register(
+        _self: callbacks_route.CallbackService,
+        _payload: api_schemas.CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        register_keys.append(idempotency_key)
+        raise AssertionError("known replay-key durable miss must not register a callback")
+
+    monkeypatch.setattr(callbacks_route.CallbackService, "replay_existing", missing_replay)
+    monkeypatch.setattr(callbacks_route.CallbackService, "register", fail_register)
+
+    with pytest.raises(callbacks_route.HTTPException) as exc_info:
+        await callbacks_route.register_callback(
+            payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            session_factory=object(),  # type: ignore[arg-type]
+            settings=_callback_request_admission_settings(limit=10),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error_code"] == "IDEMPOTENCY_REPLAY_UNAVAILABLE"
+    assert replay_keys == [idempotency_key]
+    assert register_keys == []
 
 
 @pytest.mark.unit

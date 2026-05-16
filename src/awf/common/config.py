@@ -93,12 +93,13 @@ def settings_guardrails(
     env: RuntimeEnv,
     database_url: str,
     api_token: str | None,
-    callbacks_enabled: bool,
 ) -> tuple[ProductionSettingsDiagnostic, ...]:
     """Return production-only settings diagnostics without side effects.
 
     Local and CI defaults intentionally remain usable. This helper treats only
     ``AWF_ENV=prod`` as production for the current local-first guardrail slice.
+    Callback registration is safe in production once the API token guardrail
+    passes because callback routes enforce bearer-token authentication.
     """
 
     if env != "prod":
@@ -124,22 +125,6 @@ def settings_guardrails(
     token_diagnostic = _api_token_diagnostic(api_token)
     if token_diagnostic is not None:
         diagnostics.append(token_diagnostic)
-
-    if callbacks_enabled:
-        diagnostics.append(
-            ProductionSettingsDiagnostic(
-                code="production_callbacks_disabled_until_auth",
-                field="AWF_CALLBACKS_ENABLED",
-                message=(
-                    "Callback registration is enabled, but callback routes do not "
-                    "yet enforce AWF API bearer token authentication."
-                ),
-                remediation=(
-                    "Disable AWF_CALLBACKS_ENABLED in production until callback "
-                    "route authentication is implemented."
-                ),
-            )
-        )
 
     return tuple(diagnostics)
 
@@ -294,6 +279,30 @@ class Settings(BaseSettings):
     callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
     callback_delivery_max_attempts: int = Field(default=3, ge=1, le=20)
     callback_delivery_initial_backoff_seconds: int = Field(default=5, ge=1, le=3600)
+    request_admission_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=3600,
+        description="Fixed-window size for request-level admission limits.",
+    )
+    workspace_create_rate_limit_count: int = Field(
+        default=120,
+        ge=1,
+        description=(
+            "Maximum fresh workspace creation requests admitted per request identity "
+            "within one request_admission_window_seconds window. This quota is "
+            "shared by POST /v1/workspaces and POST /v2/workspaces because both "
+            "routes create workspaces."
+        ),
+    )
+    callback_register_rate_limit_count: int = Field(
+        default=240,
+        ge=1,
+        description=(
+            "Maximum fresh callback registration requests admitted per request identity "
+            "within one request_admission_window_seconds window."
+        ),
+    )
 
     # Database (control-plane)
     database_url: str = Field(
@@ -473,7 +482,6 @@ def validate_production_settings(
         env=settings.env,
         database_url=database_url if database_url is not None else settings.database_url,
         api_token=settings.api_token,
-        callbacks_enabled=settings.callbacks_enabled,
     )
     if diagnostics:
         raise ProductionSettingsError(diagnostics)

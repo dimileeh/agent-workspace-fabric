@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,7 +22,9 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import Request
 
+import awf.api.request_admission as request_admission
 import awf.api.routes.workspaces as workspaces_route
 import awf.db.resilience as db_resilience
 import awf.service.workspace_observability as workspace_observability
@@ -93,6 +96,19 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
+_STABLE_REQUEST_ADMISSION_CLOCK = 1000.0
+
+
+def _unique_idempotency_key(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
+def _install_stable_request_admission_limiter(state: object) -> None:
+    setattr(
+        state,
+        request_admission._LIMITER_STATE_KEY,  # noqa: SLF001
+        request_admission.RequestAdmissionLimiter(clock=lambda: _STABLE_REQUEST_ADMISSION_CLOCK),
+    )
 
 
 @pytest.mark.unit
@@ -121,6 +137,7 @@ async def client(
 ) -> AsyncIterator[AsyncClient]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     app.state.workspace_admission_disk_check = lambda settings: _disk_check(
         free_bytes=settings.min_free_disk_bytes + 1,
         threshold_bytes=settings.min_free_disk_bytes,
@@ -473,17 +490,39 @@ def _disk_check(
 
 
 def _request_with_disk_check() -> SimpleNamespace:
-    return SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                workspace_admission_disk_check=lambda settings: _disk_check(
-                    free_bytes=settings.min_free_disk_bytes + 1,
-                    threshold_bytes=settings.min_free_disk_bytes,
-                    ok=True,
-                )
-            )
+    state = SimpleNamespace(
+        workspace_admission_disk_check=lambda settings: _disk_check(
+            free_bytes=settings.min_free_disk_bytes + 1,
+            threshold_bytes=settings.min_free_disk_bytes,
+            ok=True,
         )
     )
+    _install_stable_request_admission_limiter(state)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+def _workspace_request_without_app_state() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/workspaces",
+            "headers": [],
+            "client": ("198.51.100.52", 42100),
+        }
+    )
+
+
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.enters = 0
+        self.exits = 0
+
+    def __enter__(self) -> None:
+        self.enters += 1
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.exits += 1
 
 
 def _provider_preflight_settings(tmp_path: Any) -> Settings:
@@ -493,6 +532,42 @@ def _provider_preflight_settings(tmp_path: Any) -> Settings:
         work_dir=str(tmp_path),
         min_free_disk_bytes=0,
         docker_host="",
+    )
+
+
+def _workspace_request_admission_settings(*, limit: int = 1) -> Settings:
+    return Settings(
+        _env_file=None,
+        api_token=_WORKSPACE_API_TOKEN,
+        request_admission_window_seconds=60,
+        workspace_create_rate_limit_count=limit,
+        callback_register_rate_limit_count=20,
+    )
+
+
+def _assert_workspace_rate_limited(response: Any) -> None:
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+    assert body["message"] == "Workspace creation request rate limit exceeded."
+    detail = body["detail"]
+    assert detail["reason_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+    assert detail["endpoint_family"] == "workspace_create"
+    assert detail["identity_type"] == "bearer_token"
+    assert detail["identity_digest"]
+    assert detail["limit"] == 1
+    assert detail["window_seconds"] == 60
+    assert detail["retry_after_seconds"] > 0
+    assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
+    assert _WORKSPACE_API_TOKEN not in json.dumps(body)
+    assert _WORKSPACE_AUTH_HEADER not in json.dumps(body)
+
+
+def _clear_workspace_create_replay_key_cache(app: Any) -> None:
+    setattr(
+        app.state,
+        workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        workspaces_route._new_workspace_create_idempotency_replay_key_cache(),  # noqa: SLF001
     )
 
 
@@ -528,6 +603,7 @@ def _assert_usage_unavailable(row: dict[str, Any]) -> None:
 async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     app.state.workspace_admission_disk_check = lambda settings: _disk_check(
         free_bytes=settings.min_free_disk_bytes + 1,
         threshold_bytes=settings.min_free_disk_bytes,
@@ -749,6 +825,659 @@ async def _insert_validation_run(
 
 class TestCreateWorkspace:
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "first_body", "second_body", "first_key", "second_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "fresh key db first v1"},
+                {**_MINIMAL_BODY, "task_title": "fresh key db second v1"},
+                "workspace-fresh-db-first-v1",
+                "workspace-fresh-db-second-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="fresh key db first v2"),
+                _v2_body(title="fresh key db second v2"),
+                "workspace-fresh-db-first-v2",
+                "workspace-fresh-db-second-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limit_checks_fresh_idempotency_key_before_exact_durable_replay_miss(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        first_body: dict[str, object],
+        second_body: dict[str, object],
+        first_key: str,
+        second_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        calls: list[str] = []
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        probe_keys: list[str] = []
+        list_calls = 0
+        original_check = getattr(workspaces_route, "check_request_async", None)
+        original_lock = WorkspaceRepository.acquire_idempotency_key_lock
+        original_lookup = WorkspaceRepository.get_by_idempotency_key
+
+        async def tracked_check_request_async(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("check")
+            if original_check is None:
+                raise AssertionError("workspace routes must import check_request_async")
+            return await original_check(*_args, **_kwargs)
+
+        async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
+            lock_keys.append(key)
+            await original_lock(self, key)
+
+        async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
+            calls.append(f"lookup:{key}")
+            lookup_keys.append(key)
+            return await original_lookup(self, key)
+
+        async def tracked_probe(self: WorkspaceRepository, key: str) -> bool:
+            probe_keys.append(key)
+            raise AssertionError("rate-limited replays must not trust a pre-lock probe")
+
+        async def fail_list_replay_keys(_self: WorkspaceRepository) -> list[str]:
+            nonlocal list_calls
+            list_calls += 1
+            raise AssertionError("fresh rejected keys must not trigger full-table replay warmup")
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "acquire_idempotency_key_lock",
+            tracked_lock,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "get_by_idempotency_key",
+            tracked_lookup,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "has_idempotency_key",
+            tracked_probe,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_idempotency_replay_keys",
+            fail_list_replay_keys,
+        )
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            tracked_check_request_async,
+            raising=False,
+        )
+
+        first = await client.post(
+            path,
+            json=first_body,
+            headers={"Idempotency-Key": first_key},
+        )
+        rejected = await client.post(
+            path,
+            json=second_body,
+            headers={"Idempotency-Key": second_key},
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+        assert lock_keys == [first_key, second_key]
+        assert lookup_keys == [first_key, second_key]
+        assert calls[:3] == ["check", f"lock:{first_key}", f"lookup:{first_key}"]
+        assert calls[3:6] == ["check", f"lock:{second_key}", f"lookup:{second_key}"]
+        assert probe_keys == []
+        assert list_calls == 0
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "post-denial replay v1"}
+                ),
+                "workspace-post-denial-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="post-denial replay v2")),
+                "workspace-post-denial-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_workspace_create_uses_post_denial_durable_replay(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        created_at = datetime(2026, 5, 15, tzinfo=UTC)
+        if isinstance(payload, WorkspaceCreateRequest):
+            existing = SimpleNamespace(
+                id="ws_post_denial_replay_v1",
+                status=WorkspaceStatus.requested.value,
+                version=7,
+                created_at=created_at,
+                repo_url=payload.repo_url,
+                branch_base=payload.branch_base,
+                task_title=payload.task_title,
+                task_prompt=payload.task_prompt,
+                task_external_id=payload.task_external_id,
+                agent=payload.agent.value,
+                env_profile=payload.env_profile,
+                test_commands=list(payload.test_commands),
+                requires_database=payload.requires_database,
+                task_attempt=None,
+            )
+        else:
+            existing = SimpleNamespace(
+                id="ws_post_denial_replay_v2",
+                status=WorkspaceStatus.requested.value,
+                version=8,
+                created_at=created_at,
+                repo_url=payload.repo.url,
+                branch_base=payload.repo.base_branch,
+                task_title=payload.task.title,
+                task_prompt=payload.task.prompt,
+                task_external_id=payload.task.external_id,
+                task_class=None,
+                owned_paths=[],
+                task_policy={"resource_reservation_request": {}},
+                auto_merge=payload.task.auto_merge,
+                initial_review_grace_period_seconds=(
+                    payload.task.initial_review_grace_period_seconds
+                ),
+                agent=payload.task.agent.value,
+                task_kind=payload.task.kind,
+                profile_ref=payload.workspace.profile_ref,
+                requested_profile=None,
+                resolved_profile=None,
+                test_commands=list(payload.validation.commands),
+                task_attempt=object(),
+                events=[],
+            )
+        calls: list[str] = []
+        lookups = 0
+
+        async def allowed_preview(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("check")
+            return workspaces_route.RequestAdmissionDecision(allowed=True, metadata={})
+
+        async def denied_admission(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("admit")
+            return workspaces_route.RequestAdmissionDecision(
+                allowed=False,
+                metadata={
+                    "reason_code": "WORKSPACE_CREATE_RATE_LIMITED",
+                    "endpoint_family": "workspace_create",
+                    "identity_type": "client_host",
+                    "identity_digest": "redacted",
+                    "limit": 1,
+                    "window_seconds": 60,
+                    "remaining": 0,
+                    "retry_after_seconds": 7,
+                },
+            )
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
+
+        async def replay_after_denial(
+            _self: WorkspaceRepository,
+            key: str,
+        ) -> object | None:
+            nonlocal lookups
+            lookups += 1
+            calls.append(f"lookup:{key}:{lookups}")
+            return None if lookups == 1 else existing
+
+        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError("post-denial durable replay must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("post-denial durable replay must not create a workspace")
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            allowed_preview,
+            raising=False,
+        )
+        monkeypatch.setattr(workspaces_route, "admit_request_async", denied_admission)
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", replay_after_denial)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+        assert calls == [
+            "check",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}:1",
+            "admit",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}:2",
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "fresh retry after v1"}
+                ),
+                "workspace-refresh-retry-after-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="fresh retry after v2")),
+                "workspace-refresh-retry-after-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_workspace_create_refreshes_preview_after_durable_miss(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        calls: list[str] = []
+        retry_after_values = [60, 2]
+
+        def denied_decision(retry_after_seconds: int) -> workspaces_route.RequestAdmissionDecision:
+            return workspaces_route.RequestAdmissionDecision(
+                allowed=False,
+                metadata={
+                    "reason_code": "WORKSPACE_CREATE_RATE_LIMITED",
+                    "endpoint_family": "workspace_create",
+                    "identity_type": "client_host",
+                    "identity_digest": "redacted",
+                    "limit": 1,
+                    "window_seconds": 60,
+                    "remaining": 0,
+                    "retry_after_seconds": retry_after_seconds,
+                },
+            )
+
+        async def denied_preview(
+            *_args: Any, **_kwargs: Any
+        ) -> workspaces_route.RequestAdmissionDecision:
+            calls.append("check")
+            return denied_decision(retry_after_values.pop(0))
+
+        async def fail_admit(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("stale denied previews must refresh before admission")
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lock:{key}")
+
+        async def missing_replay(_self: WorkspaceRepository, key: str) -> None:
+            calls.append(f"lookup:{key}")
+
+        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
+            raise AssertionError("rate-limited request must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("rate-limited request must not create a workspace")
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "check_request_async",
+            denied_preview,
+            raising=False,
+        )
+        monkeypatch.setattr(workspaces_route, "admit_request_async", fail_admit)
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", missing_replay)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=1),
+                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+            )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 429
+        body = json.loads(response.body.decode())
+        assert body["detail"]["retry_after_seconds"] == 2
+        assert response.headers["Retry-After"] == "2"
+        assert calls == [
+            "check",
+            f"lock:{idempotency_key}",
+            f"lookup:{idempotency_key}",
+            "check",
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "cache loss replay v1"},
+                "workspace-cache-loss-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="cache loss replay v2"),
+                "workspace-cache-loss-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_cold_cache_persisted_idempotency_replay_bypasses_exhausted_rate_limit(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        original_lock = WorkspaceRepository.acquire_idempotency_key_lock
+        original_lookup = WorkspaceRepository.get_by_idempotency_key
+
+        async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+            await original_lock(self, key)
+
+        async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
+            lookup_keys.append(key)
+            return await original_lookup(self, key)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "acquire_idempotency_key_lock",
+            tracked_lock,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "get_by_idempotency_key",
+            tracked_lookup,
+        )
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        _clear_workspace_create_replay_key_cache(app)
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert lock_keys == [idempotency_key, idempotency_key]
+        assert lookup_keys == [idempotency_key, idempotency_key]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "payload", "fresh_payload", "replay_key", "fresh_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "cold replay quota v1"},
+                {**_MINIMAL_BODY, "task_title": "fresh after cold replay v1"},
+                "workspace-cold-replay-quota-v1",
+                "workspace-fresh-after-cold-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="cold replay quota v2"),
+                _v2_body(title="fresh after cold replay v2"),
+                "workspace-cold-replay-quota-v2",
+                "workspace-fresh-after-cold-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_cold_idempotency_replay_with_remaining_quota_does_not_spend_fresh_slot(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        path: str,
+        payload: dict[str, object],
+        fresh_payload: dict[str, object],
+        replay_key: str,
+        fresh_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=2
+        )
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        _clear_workspace_create_replay_key_cache(app)
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        fresh = await client.post(
+            path,
+            json=fresh_payload,
+            headers={"Idempotency-Key": fresh_key},
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert fresh.status_code == 202
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "in-flight over quota replay v1"},
+                "workspace-inflight-rate-limit-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="in-flight over quota replay v2"),
+                "workspace-inflight-rate-limit-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_rate_limited_duplicate_unknown_key_uses_durable_replay_when_cache_misses(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        probe_keys: list[str] = []
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        assert first.status_code == 202
+        _clear_workspace_create_replay_key_cache(app)
+
+        async def stale_pre_lock_probe(_self: WorkspaceRepository, key: str) -> bool:
+            probe_keys.append(key)
+            return False
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "has_idempotency_key",
+            stale_pre_lock_probe,
+        )
+
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert probe_keys == []
+
+    @pytest.mark.unit
+    async def test_rejects_v1_create_burst_after_configured_limit(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "rate limit first v1"},
+        )
+        rejected = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "rate limit second v1"},
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
+    async def test_v1_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        payload = {**_MINIMAL_BODY, "task_title": "idempotent rate limit replay v1"}
+
+        first = await client.post(
+            "/v1/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v1-replay"},
+        )
+        replay = await client.post(
+            "/v1/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v1-replay"},
+        )
+        fresh = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "fresh key bounded v1"},
+            headers={"Idempotency-Key": "rate-limit-v1-fresh"},
+        )
+        listed = await client.get("/v1/workspaces")
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(fresh)
+        assert len(listed.json()) == 1
+
+    @pytest.mark.unit
+    async def test_v1_and_v2_create_share_workspace_create_rate_limit_bucket(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "shared bucket first v1"},
+        )
+        rejected = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="shared bucket second v2"),
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
     async def test_returns_202_with_workspace_id(self, client: AsyncClient) -> None:
         response = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         assert response.status_code == 202
@@ -760,6 +1489,280 @@ class TestCreateWorkspace:
         assert body["status_url"] == f"/v1/workspaces/{body['workspace_id']}"
         assert body["events_url"] == f"/v1/workspaces/{body['workspace_id']}/events"
         assert "accepted_at" in body
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_without_app_state_is_request_local(self) -> None:
+        request = SimpleNamespace()
+
+        cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+
+        assert (
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                request
+            )
+            is cache
+        )
+        assert (
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                SimpleNamespace()
+            )
+            is not cache
+        )
+        assert workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            None
+        ) is not workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            None
+        )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_real_request_without_app_state_fails_loudly(
+        self,
+    ) -> None:
+        request = _workspace_request_without_app_state()
+
+        with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+            workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+                request
+            )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_app_state_is_bounded(self) -> None:
+        request = _request_with_disk_check()
+        cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "bounded workspace replay key"}
+        )
+        max_entries = workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES  # noqa: SLF001
+
+        for index in range(max_entries + 1):
+            cache.remember(
+                payload,
+                idempotency_key=f"workspace-app-state-key-{index}",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+
+        newest_key = f"workspace-app-state-key-{max_entries}"
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key="workspace-app-state-key-0",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is False
+        )
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key=newest_key,
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is True
+        )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_default_retains_keys_past_response_cache_limit(
+        self,
+    ) -> None:
+        cache = workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache()  # noqa: SLF001
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "default retain workspace replay key"}
+        )
+
+        for index in range(
+            workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES + 1  # noqa: SLF001
+        ):
+            cache.remember(
+                payload,
+                idempotency_key=f"workspace-default-key-{index}",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key="workspace-default-key-0",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is True
+        )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_locks_composite_lru_operations(self) -> None:
+        cache = workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache()  # noqa: SLF001
+        lock = _TrackingLock()
+        cache._lock = lock  # noqa: SLF001
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "locked workspace replay key"}
+        )
+
+        cache.remember(
+            payload,
+            idempotency_key="workspace-locked-key",
+            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+        )
+        matched = cache.matches(
+            payload,
+            idempotency_key="workspace-locked-key",
+            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+        )
+
+        assert matched is True
+        assert lock.enters == 2
+        assert lock.exits == 2
+
+    @pytest.mark.unit
+    async def test_v1_cache_hash_conflict_uses_durable_replay_before_conflict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "durable replay after stale cache hash"}
+        )
+        idempotency_key = "workspace-v1-stale-cache-hash"
+        replay_key_cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        replay_key_cache.remember_hash(
+            idempotency_key=idempotency_key,
+            request_hash="stale-cache-hash",
+        )
+        existing = SimpleNamespace(
+            id="ws_v1_stale_hash_replay",
+            status=WorkspaceStatus.requested.value,
+            version=3,
+            created_at=datetime(2026, 5, 15, tzinfo=UTC),
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            agent=payload.agent.value,
+            env_profile=payload.env_profile,
+            test_commands=list(payload.test_commands),
+            requires_database=payload.requires_database,
+            task_attempt=None,
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        create_calls: list[str | None] = []
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> object:
+            lookup_keys.append(key)
+            return existing
+
+        async def fail_create(_self: WorkspaceRepository, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("durable replay must not create a new workspace")
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_create)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+        assert lock_keys == [idempotency_key]
+        assert lookup_keys == [idempotency_key]
+        assert create_calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("api_version", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "v1",
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "known missing replay v1"}
+                ),
+                "known-missing-workspace-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "v2",
+                WorkspaceCreateV2Request.model_validate(_v2_body(title="known missing replay v2")),
+                "known-missing-workspace-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_known_replay_key_db_miss_returns_conflict_without_create(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        api_version: str,
+        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        idempotency_key: str,
+    ) -> None:
+        request = _request_with_disk_check()
+        replay_key_cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        replay_key_cache.remember(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=api_version,
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        create_calls: list[str | None] = []
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> None:
+            lookup_keys.append(key)
+
+        async def fail_v1_create(_self: WorkspaceRepository, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("known replay-key durable miss must not create a workspace")
+
+        async def fail_v2_create(*_args: object, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("known replay-key durable miss must not create a workspace")
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+
+        session = SimpleNamespace(info={}, bind=None)
+        if api_version == "v1":
+            response = await workspaces_route.create_workspace(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=10),
+                session=session,  # type: ignore[arg-type]
+            )
+        else:
+            response = await workspaces_route.create_workspace_v2(
+                payload,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                settings=_workspace_request_admission_settings(limit=10),
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 409
+        assert json.loads(response.body)["error_code"] == "IDEMPOTENCY_REPLAY_UNAVAILABLE"
+        assert lock_keys == [idempotency_key]
+        assert lookup_keys == [idempotency_key]
+        assert create_calls == []
 
     @pytest.mark.unit
     async def test_rejects_empty_task_prompt(self, client: AsyncClient) -> None:
@@ -790,11 +1793,13 @@ class TestCreateWorkspace:
             first = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
             replay = await workspaces_route.create_workspace(
                 payload,
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
             conflict = await workspaces_route.create_workspace(
@@ -802,6 +1807,7 @@ class TestCreateWorkspace:
                     {**_MINIMAL_BODY, "task_title": "Changed direct replay"}
                 ),
                 idempotency_key="direct-v1-replay",
+                settings=Settings(_env_file=None),
                 session=session,
             )
 
@@ -814,6 +1820,90 @@ class TestCreateWorkspace:
 
 
 class TestCreateWorkspaceV2DiskPressure:
+    @pytest.mark.unit
+    async def test_rejects_v2_create_burst_after_configured_limit(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post("/v2/workspaces", json=_v2_body(title="rate limit first v2"))
+        rejected = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="rate limit second v2"),
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
+    async def test_v2_create_rate_limit_rejects_before_disk_admission(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        disk_checks = 0
+
+        def admission_check(settings: Settings) -> DiskCheck:
+            nonlocal disk_checks
+            disk_checks += 1
+            return _disk_check(
+                free_bytes=settings.min_free_disk_bytes + 1,
+                threshold_bytes=settings.min_free_disk_bytes,
+                ok=True,
+            )
+
+        app.state.workspace_admission_disk_check = admission_check
+
+        first = await client.post("/v2/workspaces", json=_v2_body(title="disk first"))
+        rejected = await client.post("/v2/workspaces", json=_v2_body(title="disk second"))
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+        assert disk_checks == 1
+
+    @pytest.mark.unit
+    async def test_v2_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        payload = _v2_body(title="idempotent rate limit replay")
+        replay_key = _unique_idempotency_key("rate-limit-v2-replay")
+        fresh_key = _unique_idempotency_key("rate-limit-v2-fresh")
+
+        first = await client.post(
+            "/v2/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        replay = await client.post(
+            "/v2/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": replay_key},
+        )
+        fresh = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="fresh key bounded"),
+            headers={"Idempotency-Key": fresh_key},
+        )
+        listed = await client.get("/v1/workspaces")
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(fresh)
+        assert len(listed.json()) == 1
+
     @pytest.mark.unit
     async def test_default_disk_admission_checks_configured_work_dir(
         self,
@@ -1436,6 +2526,28 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert isinstance(resource_conflict, JSONResponse)
         assert resource_conflict.status_code == 409
         assert json.loads(resource_conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_v2_warm_cache_replay_uses_durable_auto_profile_match(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_codex_auth_env(monkeypatch)
+        headers = {
+            "Idempotency-Key": _unique_idempotency_key("v2-null-profile-then-omitted-workspace")
+        }
+        initial_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
+        initial_payload["workspace"] = {"profile_ref": None, "profile": None}
+        replay_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
+        replay_payload.pop("workspace")
+
+        first = await client.post("/v2/workspaces", json=initial_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_scope(

@@ -12,6 +12,15 @@ WWW_AUTHENTICATE_HEADER: dict[str, Any] = {
         "schema": {"type": "string"},
     }
 }
+RETRY_AFTER_HEADER: dict[str, Any] = {
+    "Retry-After": {
+        "description": (
+            "Backoff value clients should use before retrying; either delta-seconds "
+            "or an HTTP-date as defined by RFC 7231."
+        ),
+        "schema": {"type": "string"},
+    }
+}
 
 API_TOKEN_UNAUTHORIZED_RESPONSE: dict[str, Any] = {
     "model": HttpExceptionErrorResponse,
@@ -25,6 +34,11 @@ API_TOKEN_SERVICE_UNAVAILABLE_RESPONSE: dict[str, Any] = {
 SERVICE_UNAVAILABLE_ERROR_RESPONSE: dict[str, Any] = {
     "model": ErrorResponse,
     "description": "Service Unavailable",
+}
+RATE_LIMITED_ERROR_RESPONSE: dict[str, Any] = {
+    "model": ErrorResponse,
+    "description": "Too Many Requests",
+    "headers": RETRY_AFTER_HEADER,
 }
 PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE: dict[str, Any] = {
     "description": "Service Unavailable",

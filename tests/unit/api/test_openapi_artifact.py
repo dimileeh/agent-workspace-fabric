@@ -25,6 +25,13 @@ _WWW_AUTHENTICATE_HEADER = {
     "description": "Bearer challenge for the API token.",
     "schema": {"type": "string"},
 }
+_RETRY_AFTER_HEADER = {
+    "description": (
+        "Backoff value clients should use before retrying; either delta-seconds "
+        "or an HTTP-date as defined by RFC 7231."
+    ),
+    "schema": {"type": "string"},
+}
 _HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorResponse"
 _CALLBACK_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HTTPExceptionErrorResponse"
 _ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
@@ -322,6 +329,27 @@ def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dic
         _HTTP_EXCEPTION_ERROR_RESPONSE_REF,
         _RELEASE_READINESS_RESPONSE_REF,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/v1/callbacks"),
+        ("post", "/v1/workspaces"),
+        ("post", "/v2/workspaces"),
+    ],
+)
+def test_rate_limited_posts_document_retry_after_header(
+    openapi_spec: dict,
+    method: str,
+    path: str,
+) -> None:
+    response = openapi_spec["paths"][path][method]["responses"]["429"]
+
+    assert response["description"] == "Too Many Requests"
+    assert response["content"]["application/json"]["schema"]["$ref"] == _ERROR_RESPONSE_REF
+    assert response.get("headers", {}).get("Retry-After") == _RETRY_AFTER_HEADER
 
 
 def _schema_refs(schema: dict) -> set[str]:

@@ -142,6 +142,7 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 )
+DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
 OWNED_PATH_WILDCARD_MATCH_REASON: Final = "OWNED_PATH_WILDCARD_MATCH"
@@ -2734,6 +2735,30 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def has_idempotency_key(self, key: str) -> bool:
+        stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def list_idempotency_replay_keys(
+        self,
+        *,
+        limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    ) -> builtins.list[str]:
+        """Return a bounded replay-key sample for non-request-path cache support.
+
+        Fresh request admission paths use exact-key probes instead of this helper
+        so over-limit requests cannot trigger broad replay-key warmups.
+        """
+        if limit <= 0:
+            return []
+        stmt = (
+            select(Workspace.idempotency_key)
+            .where(Workspace.idempotency_key.is_not(None))
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+            .limit(limit)
+        )
+        return [key for key in (await self._session.execute(stmt)).scalars().all() if key]
+
     async def list_idempotency_key_family(self, logical_key: str) -> builtins.list[str]:
         generation_pattern = f"{_escape_like_pattern(logical_key)}:g%"
         stmt = (
@@ -4446,6 +4471,14 @@ def _operation_idempotency_advisory_lock_key(key: str) -> int:
     return unsigned
 
 
+def _callback_subscription_idempotency_advisory_lock_key(key: str) -> int:
+    digest = hashlib.sha256(f"awf:callback-subscription-idempotency\x00{key}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def _workspace_idempotency_advisory_lock_key(key: str) -> int:
     digest = hashlib.sha256(f"awf:workspace-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
@@ -4544,6 +4577,14 @@ class CallbackSubscriptionRepository:
         self._session = session
         self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
+    async def acquire_idempotency_key_lock(self, key: str) -> None:
+        """Serialize callback subscription idempotency decisions."""
+        lock_key = _callback_subscription_idempotency_advisory_lock_key(key)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
     async def create_idempotent(
         self,
         *,
@@ -4556,7 +4597,10 @@ class CallbackSubscriptionRepository:
         initial_backoff_seconds: int,
         idempotency_key: str,
         request_hash: str,
+        acquire_lock: bool = True,
     ) -> tuple[CallbackSubscription, bool]:
+        if acquire_lock:
+            await self.acquire_idempotency_key_lock(idempotency_key)
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             if existing.request_hash != request_hash:
@@ -4613,6 +4657,34 @@ class CallbackSubscriptionRepository:
     async def get_by_idempotency_key(self, key: str) -> CallbackSubscription | None:
         stmt = select(CallbackSubscription).where(CallbackSubscription.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_idempotency_request_hash(self, key: str) -> str | None:
+        stmt = select(CallbackSubscription.request_hash).where(
+            CallbackSubscription.idempotency_key == key
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_idempotency_replay_keys(
+        self,
+        *,
+        limit: int = DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    ) -> builtins.list[tuple[str, str]]:
+        """Return bounded callback replay keys for non-request-path cache support."""
+        if limit <= 0:
+            return []
+        stmt = (
+            select(CallbackSubscription.idempotency_key, CallbackSubscription.request_hash)
+            .where(
+                CallbackSubscription.idempotency_key.is_not(None),
+                CallbackSubscription.request_hash.is_not(None),
+            )
+            .order_by(
+                CallbackSubscription.created_at.asc(),
+                CallbackSubscription.id.asc(),
+            )
+            .limit(limit)
+        )
+        return [(key, request_hash) for key, request_hash in (await self._session.execute(stmt))]
 
     async def list(
         self,

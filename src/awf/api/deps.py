@@ -10,7 +10,7 @@ from __future__ import annotations
 import hmac
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Final, cast
 
 from fastapi import (
     Depends,
@@ -25,12 +25,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import JSONResponse
 
+from awf.api.auth_context import mark_bearer_auth_verified
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.resilience import invalidate_or_rollback_session
 
 _log = get_logger(__name__)
 _api_token_bearer = HTTPBearer(auto_error=False, scheme_name="bearerAuth")
+_DIRECT_REQUEST_DEFAULT: Final[Request] = cast(Request, None)
 
 
 @dataclass(frozen=True)
@@ -98,18 +100,27 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
             )
 
 
+def resolve_settings_dependency(settings: object) -> Settings:
+    """Resolve explicit settings or FastAPI's direct-call dependency sentinel."""
+    if isinstance(settings, Settings):
+        return settings
+    return get_settings()
+
+
 def require_api_token(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
         Security(_api_token_bearer),
     ] = None,
     settings: Settings = Depends(get_settings),
+    request: Request = _DIRECT_REQUEST_DEFAULT,
 ) -> None:
     """Require the local AWF bearer token for sensitive operator APIs."""
     _require_authorization_header(
         _authorization_header_value(credentials),
         settings=settings,
     )
+    mark_bearer_auth_verified(request)
 
 
 async def require_websocket_api_token(
