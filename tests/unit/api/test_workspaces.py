@@ -831,7 +831,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limit_rejects_fresh_idempotency_key_with_lock_scoped_replay_check(
+    async def test_rate_limit_rejects_fresh_idempotency_key_before_durable_replay_miss(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -903,8 +903,8 @@ class TestCreateWorkspace:
 
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
-        assert lock_keys == [first_key, second_key]
-        assert lookup_keys == [first_key, second_key]
+        assert lock_keys == [first_key]
+        assert lookup_keys == [first_key]
         assert probe_keys == []
         assert list_calls == 0
 
@@ -926,9 +926,10 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_idempotency_replay_survives_cache_loss_when_rate_limited(
+    async def test_unknown_cold_idempotency_key_is_rate_limited_before_durable_replay(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
+        monkeypatch: pytest.MonkeyPatch,
         path: str,
         payload: dict[str, object],
         idempotency_key: str,
@@ -936,6 +937,29 @@ class TestCreateWorkspace:
         app, client = disk_app_and_client
         app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
             limit=1
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        original_lock = WorkspaceRepository.acquire_idempotency_key_lock
+        original_lookup = WorkspaceRepository.get_by_idempotency_key
+
+        async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+            await original_lock(self, key)
+
+        async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
+            lookup_keys.append(key)
+            return await original_lookup(self, key)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "acquire_idempotency_key_lock",
+            tracked_lock,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "get_by_idempotency_key",
+            tracked_lookup,
         )
 
         first = await client.post(
@@ -951,8 +975,9 @@ class TestCreateWorkspace:
         )
 
         assert first.status_code == 202
-        assert replay.status_code == 202
-        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(replay)
+        assert lock_keys == [idempotency_key]
+        assert lookup_keys == [idempotency_key]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1030,7 +1055,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limited_duplicate_idempotency_key_waits_on_replay_lock_when_probe_misses(
+    async def test_rate_limited_duplicate_unknown_key_does_not_probe_when_cache_misses(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -1068,8 +1093,7 @@ class TestCreateWorkspace:
             headers={"Idempotency-Key": idempotency_key},
         )
 
-        assert replay.status_code == 202
-        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(replay)
         assert probe_keys == []
 
     @pytest.mark.unit

@@ -357,6 +357,60 @@ async def test_admit_request_async_uses_worker_thread_for_limiter_admission(
 
 
 @pytest.mark.unit
+async def test_check_request_async_uses_worker_thread_without_consuming_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        func: object,
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append((func, args, kwargs))
+        assert callable(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(request_admission.asyncio, "to_thread", fake_to_thread)
+    request = SimpleNamespace(
+        headers=Headers({}),
+        client=SimpleNamespace(host="203.0.113.42"),
+    )
+
+    decision = await request_admission.check_request_async(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+    admitted = request_admission.admit_request(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+    rejected = request_admission.admit_request(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+
+    assert decision.allowed is True
+    assert admitted.allowed is True
+    assert rejected.allowed is False
+    assert len(calls) == 1
+    func, _args, kwargs = calls[0]
+    assert getattr(func, "__name__", "") == "check"
+    assert kwargs["endpoint_family"] == WORKSPACE_CREATE_ENDPOINT_FAMILY
+    assert kwargs["reason_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+
+
+@pytest.mark.unit
 def test_request_admission_limiter_prunes_once_per_window() -> None:
     now = 60.0
 

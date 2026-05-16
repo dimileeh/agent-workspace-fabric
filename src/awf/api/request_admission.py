@@ -141,6 +141,56 @@ class RequestAdmissionLimiter:
                 ),
             )
 
+    def check(
+        self,
+        *,
+        endpoint_family: str,
+        identity: RequestAdmissionIdentity,
+        limit: int,
+        window_seconds: int,
+        reason_code: str,
+    ) -> RequestAdmissionDecision:
+        """Return the current admission decision without consuming quota."""
+        if limit < 1:
+            raise ValueError("request admission limit must be at least 1")
+        if window_seconds < 1:
+            raise ValueError("request admission window must be at least 1 second")
+
+        with self._lock:
+            now = self._clock()
+            window_index = int(now // window_seconds)
+            key = (
+                endpoint_family,
+                identity.identity_type,
+                identity.identity_digest,
+                window_seconds,
+                window_index,
+            )
+            self._prune_locked(
+                window_seconds=window_seconds,
+                current_window=window_index,
+                now=now,
+            )
+
+            current_count = self._buckets.get(key, 0)
+            allowed = current_count < limit
+            return RequestAdmissionDecision(
+                allowed=allowed,
+                metadata=_metadata(
+                    endpoint_family=endpoint_family,
+                    identity=identity,
+                    limit=limit,
+                    window_seconds=window_seconds,
+                    remaining=max(limit - current_count, 0) if allowed else 0,
+                    retry_after_seconds=_retry_after_seconds(
+                        now=now,
+                        window_seconds=window_seconds,
+                        window_index=window_index,
+                    ),
+                    reason_code=reason_code,
+                ),
+            )
+
     def _prune_locked(self, *, window_seconds: int, current_window: int, now: float) -> None:
         last_pruned_window = self._last_pruned_windows.get(window_seconds)
         if last_pruned_window is not None and current_window <= last_pruned_window:
@@ -229,6 +279,31 @@ async def admit_request_async(
     limiter = request_admission_limiter(request)
     return await asyncio.to_thread(
         limiter.admit,
+        endpoint_family=endpoint_family,
+        identity=identity,
+        limit=limit,
+        window_seconds=window_seconds,
+        reason_code=reason_code,
+    )
+
+
+async def check_request_async(
+    request: Request | object | None,
+    *,
+    endpoint_family: str,
+    limit: int,
+    window_seconds: int,
+    reason_code: str,
+) -> RequestAdmissionDecision:
+    _warn_no_request_limiter_bypass(
+        request,
+        endpoint_family=endpoint_family,
+        reason_code=reason_code,
+    )
+    identity = extract_request_identity(request, endpoint_family=endpoint_family)
+    limiter = request_admission_limiter(request)
+    return await asyncio.to_thread(
+        limiter.check,
         endpoint_family=endpoint_family,
         identity=identity,
         limit=limit,
@@ -386,6 +461,7 @@ __all__ = [
     "RequestAdmissionLimiter",
     "admit_request",
     "admit_request_async",
+    "check_request_async",
     "extract_request_identity",
     "request_app_state",
     "request_admission_limiter",
