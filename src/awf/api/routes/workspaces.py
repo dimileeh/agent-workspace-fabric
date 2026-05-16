@@ -172,6 +172,9 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
             if idempotency_key not in self._entries:
                 return False
             request_hash = self._entries[idempotency_key]
+            # None is a durable-conflict sentinel, not a wildcard success. Later
+            # requests for the key bypass admission only to re-check under the DB
+            # advisory lock and return the authoritative conflict response.
             if request_hash is not None and request_hash != payload_hash:
                 raise _WorkspaceCreateIdempotencyConflictError
             self._entries.move_to_end(idempotency_key)

@@ -287,6 +287,8 @@ class CallbackService:
         idempotency_key: str,
     ) -> CallbackSubscription | None:
         """Acquire advisory lock, fetch durable idempotency row, and return it or None."""
+        # Keep this normal replay seam separate from the persisted-key pre-admission
+        # seam so tests can patch one phase without masking the other.
         return await self._replay_existing_locked(payload, idempotency_key=idempotency_key)
 
     async def replay_existing_for_persisted_key(
@@ -296,6 +298,8 @@ class CallbackService:
         idempotency_key: str,
     ) -> CallbackSubscription | None:
         """Replay persisted keys for pre-admission callers using the locked path."""
+        # This delegates today, but the distinct method preserves the intended
+        # divergence point for pre-admission persisted-key replay policy.
         return await self._replay_existing_locked(payload, idempotency_key=idempotency_key)
 
     async def _replay_existing_locked(
