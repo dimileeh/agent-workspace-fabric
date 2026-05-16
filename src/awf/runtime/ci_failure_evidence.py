@@ -49,6 +49,12 @@ class CiFailureEvidence:
     evidence_warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ShellToken:
+    value: str
+    end_index: int
+
+
 def extract_ci_failure_evidence(
     log_text: str,
     *,
@@ -182,15 +188,63 @@ def _suggest_repro_commands(
 def _pytest_repro_command(failing_commands: Iterable[str]) -> str | None:
     for command in failing_commands:
         try:
-            parts = shlex.split(command)
+            tokens = _shell_tokens(command)
         except ValueError:
             continue
-        for index, part in enumerate(parts):
-            if part == "pytest":
-                return shlex.join(parts[: index + 1])
-            if part == "-m" and index + 1 < len(parts) and parts[index + 1] == "pytest":
-                return shlex.join(parts[: index + 2])
+        for index, token in enumerate(tokens):
+            if token.value == "pytest":
+                return command[: token.end_index].strip()
+            if (
+                token.value == "-m"
+                and index + 1 < len(tokens)
+                and tokens[index + 1].value == "pytest"
+            ):
+                return command[: tokens[index + 1].end_index].strip()
     return None
+
+
+def _shell_tokens(command: str) -> list[_ShellToken]:
+    tokens: list[_ShellToken] = []
+    value: list[str] = []
+    token_started = False
+    quote: str | None = None
+    escape = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escape:
+            value.append(char)
+            escape = False
+            index += 1
+            continue
+        if quote is None and char.isspace():
+            if token_started:
+                tokens.append(_ShellToken(value="".join(value), end_index=index))
+                value = []
+                token_started = False
+            index += 1
+            continue
+        if not token_started:
+            token_started = True
+        if quote is None and char == "\\":
+            escape = True
+            index += 1
+            continue
+        if char in ("'", '"') and (quote is None or quote == char):
+            quote = None if quote == char else char
+            index += 1
+            continue
+        if quote == '"' and char == "\\":
+            escape = True
+            index += 1
+            continue
+        value.append(char)
+        index += 1
+    if escape or quote is not None:
+        raise ValueError
+    if token_started:
+        tokens.append(_ShellToken(value="".join(value), end_index=len(command)))
+    return tokens
 
 
 def _dedupe(items: Iterable[str]) -> list[str]:

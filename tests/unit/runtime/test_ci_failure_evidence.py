@@ -116,6 +116,21 @@ def test_ci_failure_evidence_falls_back_to_configured_pytest_for_node_ids_withou
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_shell_setup_in_fallback_pytest_command() -> None:
+    node_id = "tests/test_api.py::test_handles_request"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        f"FAILED {node_id} - AssertionError: boom\n",
+        check_name="api",
+        pytest_fallback_commands=("cd services/api && pytest --maxfail=1",),
+    )
+
+    assert evidence.failing_commands == ()
+    assert evidence.test_node_ids == (node_id,)
+    assert evidence.suggested_repro_commands == (f"cd services/api && pytest {node_id} -q",)
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_fallback_bounds_and_quotes_multiple_node_ids() -> None:
     node_ids = [
         "tests/unit/a/test_one.py::test_alpha",
