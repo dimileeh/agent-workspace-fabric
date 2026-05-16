@@ -374,10 +374,14 @@ If you installed `awf` outside the source tree, inspect those containers directl
 ```bash
 export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
 docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
-docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=api" --format "{{.ID}}" | head -n 1)
-docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=worker" --format "{{.ID}}" | head -n 1)
-docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=migrate" --format "{{.ID}}" | head -n 1)
-docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=postgres" --format "{{.ID}}" | head -n 1)
+api_id="$(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=api" --format "{{.ID}}" | head -n 1)"
+[ -n "${api_id}" ] && docker logs -f "${api_id}" || echo "api container not found"
+worker_id="$(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=worker" --format "{{.ID}}" | head -n 1)"
+[ -n "${worker_id}" ] && docker logs -f "${worker_id}" || echo "worker container not found"
+migrate_id="$(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=migrate" --format "{{.ID}}" | head -n 1)"
+[ -n "${migrate_id}" ] && docker logs -f "${migrate_id}" || echo "migrate container not found"
+postgres_id="$(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=postgres" --format "{{.ID}}" | head -n 1)"
+[ -n "${postgres_id}" ] && docker logs -f "${postgres_id}" || echo "postgres container not found"
 ```
 
 Workspace-level logs:

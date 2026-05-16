@@ -2,7 +2,7 @@
 
 > **Note:** For a quick, step-by-step introduction, see the [Quickstart](QUICKSTART.md).
 
-### Prerequisites
+## Prerequisites
 
 Install:
 

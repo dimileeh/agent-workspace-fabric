@@ -25,6 +25,19 @@ test("fallbackLifecycleStages marks terminal successors skipped", () => {
   assert.equal(stages.completed, "terminal_skipped");
 });
 
+test("fallbackLifecycleStages skips all stages for unknown terminal source", () => {
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("failed", "unknown_legacy_stage").map((stage) => [
+      stage.stage,
+      stage.status,
+    ]),
+  );
+
+  assert.equal(stages.requested, "terminal_skipped");
+  assert.equal(stages.provisioning, "terminal_skipped");
+  assert.equal(stages.completed, "terminal_skipped");
+});
+
 test("fallbackLifecycleStages preserves active non-terminal status", () => {
   const stages = Object.fromEntries(
     fallbackLifecycleStages("validating").map((stage) => [stage.stage, stage.status]),

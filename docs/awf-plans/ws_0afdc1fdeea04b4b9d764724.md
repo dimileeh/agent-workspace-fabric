@@ -121,7 +121,7 @@ The post-execution / post-compare checks already use `_changed_paths` (porcelain
 
 ## Commit Message
 
-```
+```text
 fix(executor): planning guard now detects committed plans
 
 Root cause: _run_agent_task_with_optional_planning only checked

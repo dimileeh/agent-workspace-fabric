@@ -670,12 +670,8 @@ curl "http://localhost:8000/v1/metrics/slo?since_hours=168"
 
 ## Secret Leases
 
-List declared secret lease status for a workspace. Auth required.
-
-```bash
-curl -H "Authorization: Bearer $AWF_API_TOKEN" \
-  "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
-```
+See [Secret lease status (operator metadata)](#secret-lease-status-operator-metadata)
+for the canonical `/v1/workspaces/{id}/secret-leases` endpoint documentation.
 
 ---
 

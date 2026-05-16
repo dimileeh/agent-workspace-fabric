@@ -156,6 +156,57 @@ test("summarizeCoordinationWarnings uses a generic label for mixed warning sever
   assert.equal(summary.label, "2 coordination warnings");
 });
 
+test("summarizeCoordinationWarnings labels shared non-advisory severities", () => {
+  const summary = summarizeCoordinationWarnings([
+    {
+      warning_code: "EXCLUSIVE_LOCK_CONFLICT",
+      message: "An exclusive coordination lock conflicts with this workspace.",
+      severity: "blocking",
+      blocks_launch: true,
+      workspace_ids: ["ws_blocked"],
+      overlaps: [],
+      stale_policy_context: {},
+      overlap_count: 0,
+      overlaps_truncated: false,
+    },
+  ]);
+
+  assert.equal(summary.count, 1);
+  assert.equal(summary.label, "1 blocking coordination warning");
+  assert.equal(summary.detail, "EXCLUSIVE_LOCK_CONFLICT / ws_blocked");
+});
+
+test("summarizeVisibleCoordinationWarnings handles missing nested fields with overflow", () => {
+  const summary = summarizeVisibleCoordinationWarnings(
+    [
+      {
+        warning_code: "OWNED_PATH_OVERLAP_RISK",
+        message: "Owned paths overlap active workspaces.",
+        severity: "advisory",
+        blocks_launch: false,
+        overlap_count: 0,
+        overlaps_truncated: false,
+      },
+      {
+        warning_code: "EXCLUSIVE_LOCK_CONFLICT",
+        message: "An exclusive coordination lock conflicts with this workspace.",
+        severity: "blocking",
+        blocks_launch: true,
+        workspace_ids: ["ws_blocked"],
+        overlap_count: 0,
+        overlaps_truncated: false,
+      },
+    ],
+    "running",
+    { maxWarnings: 1 },
+  );
+
+  assert.equal(summary.count, 2);
+  assert.equal(summary.label, "2 coordination warnings");
+  assert.equal(summary.overflowCount, 1);
+  assert.equal(summary.detail, "OWNED_PATH_OVERLAP_RISK / unknown work…pace; +1 more");
+});
+
 test("summarizeVisibleCoordinationWarnings hides advisory overlaps for completed workspaces", () => {
   const warnings = [
     {

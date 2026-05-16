@@ -44,6 +44,7 @@ test("dashboard hides llm usage metrics when unavailable", async ({ page }) => {
   // Input/Output/Total should NOT be visible.
   await expect(page.getByText("Input")).not.toBeVisible();
   await expect(page.getByText("Output")).not.toBeVisible();
+  await expect(page.getByText("Total")).not.toBeVisible();
 });
 
 async function waitForConsoleReady(page: Page) {

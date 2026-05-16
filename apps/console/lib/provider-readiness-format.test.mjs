@@ -129,3 +129,19 @@ test("formatProviderReadinessRetryError includes blocked provider model and reas
     "PROVIDER_READINESS_PRECHECK_FAILED: Selected provider readiness blocked workspace launch. claude_code/claude-opus-4-7 readiness blocked; auth fail via not_observed; probe skipped; reason CLAUDE_AUTH_MISSING.",
   );
 });
+
+test("providerReadinessPreflightFromError rejects partial preflight payloads", () => {
+  assert.equal(
+    providerReadinessPreflightFromError({
+      provider_readiness_preflight: {
+        provider: "claude_code",
+        readiness_status: "blocked",
+        auth_status: "fail",
+        auth_source: "not_observed",
+        probe_status: "skipped",
+        reason_code: "CLAUDE_AUTH_MISSING",
+      },
+    }),
+    null,
+  );
+});

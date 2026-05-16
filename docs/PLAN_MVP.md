@@ -200,7 +200,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | `src/awf/node/provisioner.py` | Orchestrates git + compose for one workspace |
 | `src/awf/node/cleanup.py` | Compose down + volume removal + event emit |
 | `src/awf/adapters/base.py` | AgentAdapter Protocol + registry |
-| ` src/awf/adapters/codex.py` | First adapter (Codex — most mature headless coding CLI) |
+| `src/awf/adapters/codex.py` | First adapter (Codex — most mature headless coding CLI) |
 | `src/awf/runtime/validation.py` | Runs `test_commands` inside container, captures artifacts/logs |
 | `src/awf/runtime/pr_creator.py` | `git push` + `gh pr create --base development` |
 | `src/awf/cli/main.py` | Typer CLI mirroring REST API |
@@ -222,7 +222,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | 1 | **Scaffold repo + API skeleton** | `pyproject.toml`, FastAPI app, Pydantic schemas, Alembic init, Postgres schema for workspaces/operations/events. `curl POST /v1/workspaces` returns a workspace_id in `requested` state. | `pyproject.toml`, `src/awf/api/**`, `src/awf/db/**`, `migrations/versions/0001_initial.py` |
 | 2 | **Git worktree manager** | Bare mirror creation + worktree creation from base SHA. Workspace advances `requested → provisioning → ready` with a real checkout on disk. | `src/awf/node/git_manager.py`, `src/awf/control/worker.py` |
 | 3 | **Compose provisioner + Postgres sidecar** | Jinja2 template renders, `docker compose up` launches agent + Postgres, health-check waits for Postgres readiness. Workspace `ready` event emitted only once DB is reachable. | `docker/compose/workspace.base.yml.j2`, `src/awf/node/compose_manager.py`, `src/awf/node/provisioner.py` |
-| 4 | **Codex adapter (first)** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, ` src/awf/adapters/codex.py` |
+| 4 | **Codex adapter (first)** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, `src/awf/adapters/codex.py` |
 | 5 | **Validation runner** | Executes `test_commands` inside container against workspace-local Postgres (Alembic migrate + pytest). Captures logs + artifacts. Workspace transitions `running → validating → pushing` on pass, `failed` on fail. | `src/awf/runtime/validation.py`, `src/awf/runtime/artifacts.py` |
 | 6 | **PR creator + cleanup** | `git push` + `gh pr create --base development`. `DELETE /v1/workspaces/{id}` runs compose down + volume removal. Full lifecycle returns a real PR URL; no orphaned containers after destroy. | `src/awf/runtime/pr_creator.py`, `src/awf/node/cleanup.py` |
 | 7 | **MCP server surface** | Expose `awf_create_workspace`, `awf_get_workspace`, `awf_wait_for_workspace`, `awf_cancel_workspace`, `awf_list_workspaces` as MCP tools. A Claude Code session can invoke `awf_create_workspace` and get a PR back. | `src/awf/mcp/server.py` |

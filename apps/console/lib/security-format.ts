@@ -147,7 +147,7 @@ export function summarizeProviderCredentialReadiness(
   }
 
   let leased = 0;
-  const missingProviders: string[] = [];
+  const missingProvidersSet = new Set<string>();
 
   for (const secret of secrets) {
     const key = `${secret.name}\0${secret.kind}\0${secret.target}`;
@@ -156,11 +156,10 @@ export function summarizeProviderCredentialReadiness(
       leased++;
     } else {
       const missing = secret.provider ?? secret.name;
-      if (!missingProviders.includes(missing)) {
-        missingProviders.push(missing);
-      }
+      missingProvidersSet.add(missing);
     }
   }
+  const missingProviders = Array.from(missingProvidersSet);
   const label =
     missingProviders.length > 0
       ? `${leased}/${declared} — missing providers`

@@ -24,8 +24,10 @@ The overall report includes `status` (ok/warn/fail), `project`, `mode`
 Smoke reports probe configured console URLs before reporting
 `SMOKE_CONSOLE_READY`. When `AWF_CONSOLE_URL` is not set, they infer and probe
 the default local console URL, `http://localhost:3000`. Start it with
-`npm --prefix apps/console run dev` when the `console_links` phase reports
-`SMOKE_CONSOLE_UNAVAILABLE`.
+`npm --prefix apps/console run dev` from an AWF source checkout when the
+`console_links` phase reports `SMOKE_CONSOLE_UNAVAILABLE`. Installed-CLI users
+should start the console through their installed setup rather than this
+source-checkout-specific npm command.
 
 ## Options
 

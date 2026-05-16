@@ -108,7 +108,10 @@ export function providerReadinessPreflightFromError(
     typeof candidate.auth_status === "string" &&
     typeof candidate.auth_source === "string" &&
     typeof candidate.probe_status === "string" &&
-    typeof candidate.reason_code === "string"
+    typeof candidate.reason_code === "string" &&
+    typeof candidate.blocks_launch === "boolean" &&
+    typeof candidate.override_used === "boolean" &&
+    typeof candidate.checked_at === "string"
   ) {
     return candidate as ProviderReadinessPreflight;
   }

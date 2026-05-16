@@ -7,6 +7,7 @@ import {
   extractProfileSecurity,
   formatHostHomeMountPolicy,
   summarizeEgressStatus,
+  summarizeProviderCredentialReadiness,
 } from "./security-format.ts";
 
 test("extractHostHomeAuthMountPolicy returns unavailable when policy is missing", () => {
@@ -102,4 +103,34 @@ test("extractProfileSecurity returns unavailable host_home_auth_mounts when miss
   const result = extractProfileSecurity({});
   assert.equal(result.host_home_auth_mounts.mode, "unavailable");
   assert.equal(result.egress.mode, "unavailable");
+});
+
+test("summarizeProviderCredentialReadiness deduplicates missing providers", () => {
+  const result = summarizeProviderCredentialReadiness(
+    [
+      {
+        name: "github-token",
+        target: "GH_TOKEN",
+        kind: "env",
+        mode: "ro",
+        required: true,
+        provider: "github",
+      },
+      {
+        name: "github-cli-config",
+        target: "/home/agent/.config/gh",
+        kind: "mount",
+        mode: "ro",
+        required: true,
+        provider: "github",
+      },
+    ],
+    [],
+  );
+
+  assert.equal(result.declared, 2);
+  assert.equal(result.leased, 0);
+  assert.deepEqual(result.missingProviders, ["github"]);
+  assert.equal(result.label, "0/2 — missing providers");
+  assert.equal(result.tone, "warn");
 });

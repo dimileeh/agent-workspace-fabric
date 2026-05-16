@@ -15,6 +15,7 @@ export function WorkspaceInspector({
   children: React.ReactNode;
 }) {
   useEffect(() => {
+    // Keep onClose referentially stable in parents, e.g. with useCallback, to avoid listener churn.
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) {
         onClose();

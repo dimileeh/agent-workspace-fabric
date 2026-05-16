@@ -79,6 +79,10 @@ uv run --python 3.12 --extra dev ruff format --check .
 uv run --python 3.12 --extra dev mypy
 ```
 
+The local pre-commit hooks `awf-ruff-check`, `awf-ruff-format-check`, and
+`awf-mypy` run these checks without auto-fixing. Fix reported issues manually,
+then re-run the same command or `pre-commit run --all-files` before committing.
+
 ### Build the Agent Runtime Image
 
 AWF workspaces use `awf-agent-runtime:latest` unless configured otherwise.

@@ -23,6 +23,6 @@ function extractFunctionSource(functionName) {
   assert.notEqual(start, -1, `Expected ${functionName} to exist`);
 
   const nextFunction = dashboardSource.indexOf("\nfunction ", start + marker.length);
-  assert.notEqual(nextFunction, -1, `Expected ${functionName} to be followed by another function`);
-  return dashboardSource.slice(start, nextFunction);
+  const end = nextFunction === -1 ? dashboardSource.length : nextFunction;
+  return dashboardSource.slice(start, end);
 }

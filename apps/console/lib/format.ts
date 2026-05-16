@@ -36,7 +36,7 @@ export function fallbackLifecycleStages(
   const activeIndex = lifecycleStages.indexOf(status);
   const terminal = status === "failed" || status === "cancelled";
   const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
-  const completedThroughIndex = terminal ? Math.max(0, terminalSourceIndex) : activeIndex - 1;
+  const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
