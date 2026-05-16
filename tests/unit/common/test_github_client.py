@@ -1798,7 +1798,9 @@ class TestFetchFailingCheckLogs:
         )
 
     @pytest.mark.unit
-    async def test_extracts_multiple_pytest_failures_with_bounded_focused_command(self) -> None:
+    async def test_extracts_multiple_pytest_failures_without_untrusted_fallback_command(
+        self,
+    ) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1838,7 +1840,59 @@ class TestFetchFailingCheckLogs:
             "tests/unit/b/test_two.py::TestTwo::test_beta",
         )
         assert len(failure.test_node_ids) == 6
-        assert failure.suggested_repro_commands == ()
+        selected = failure.test_node_ids[:5]
+        quoted = " ".join(shlex.quote(node_id) for node_id in selected)
+        assert failure.suggested_repro_commands == (
+            f"uv run --python 3.12 --extra dev pytest {quoted} -q",
+        )
+
+    @pytest.mark.unit
+    async def test_extracts_multiple_pytest_failures_with_supplied_fallback_command(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 4300,
+                        "name": "any-provider-check",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/a/test_one.py::test_alpha - AssertionError: alpha\n"
+                "FAILED tests/unit/b/test_two.py::TestTwo::test_beta - AssertionError: beta\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+            pytest_fallback_commands=(
+                "ruff check .",
+                "uv run --python 3.12 --extra dev pytest --cov=awf",
+            ),
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (
+            "tests/unit/a/test_one.py::test_alpha",
+            "tests/unit/b/test_two.py::TestTwo::test_beta",
+        )
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/a/test_one.py::test_alpha "
+            "tests/unit/b/test_two.py::TestTwo::test_beta -q",
+        )
 
     @pytest.mark.unit
     async def test_builds_focused_command_from_detected_pytest_command(self) -> None:
@@ -1909,7 +1963,10 @@ class TestFetchFailingCheckLogs:
 
         failure = failures[0]
         assert failure.failing_commands == ()
-        assert failure.suggested_repro_commands == ()
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/runtime/test_prompt.py::test_one -q",
+        )
 
     @pytest.mark.unit
     async def test_quotes_parametrized_pytest_node_ids_in_focused_command(self) -> None:
@@ -1920,7 +1977,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 431,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -1930,6 +1987,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(
             returncode=0,
             stdout=(
+                "tests\tRun tests\tpython -m pytest tests/unit/runtime/test_prompt.py\n"
                 "FAILED tests/unit/runtime/test_prompt.py::test_handles[bad value; "
                 "echo owned] - AssertionError: boom\n"
             ),
@@ -1943,10 +2001,9 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
-        )
-        assert failure.suggested_repro_commands == ()
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (f"python -m pytest {shlex.quote(node_id)} -q",)
 
     @pytest.mark.unit
     async def test_quotes_parametrized_pytest_node_ids_from_non_failed_lines(self) -> None:
@@ -1957,7 +2014,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 432,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -1967,6 +2024,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(
             returncode=0,
             stdout=(
+                "tests\tRun tests\tpython -m pytest tests/unit/runtime/test_prompt.py\n"
                 "ERROR tests/unit/runtime/test_prompt.py::test_handles[bad value; "
                 "echo owned] - RuntimeError: boom\n"
             ),
@@ -1980,10 +2038,9 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
-        )
-        assert failure.suggested_repro_commands == ()
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (f"python -m pytest {shlex.quote(node_id)} -q",)
 
     @pytest.mark.unit
     async def test_preserves_pytest_param_ids_containing_failure_delimiter_text(self) -> None:
@@ -1994,7 +2051,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 433,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -2004,6 +2061,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(
             returncode=0,
             stdout=(
+                "tests\tRun tests\tpython -m pytest tests/unit/runtime/test_prompt.py\n"
                 "FAILED tests/unit/runtime/test_prompt.py::test_handles[a - b] "
                 "- AssertionError: boom\n"
             ),
@@ -2017,8 +2075,9 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == ("tests/unit/runtime/test_prompt.py::test_handles[a - b]",)
-        assert failure.suggested_repro_commands == ()
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[a - b]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (f"python -m pytest {shlex.quote(node_id)} -q",)
 
     @pytest.mark.unit
     async def test_preserves_significant_whitespace_in_pytest_param_ids(self) -> None:
@@ -2029,7 +2088,7 @@ class TestFetchFailingCheckLogs:
                 [
                     {
                         "databaseId": 434,
-                        "name": "python-full-coverage",
+                        "name": "any-provider-check",
                         "conclusion": "FAILURE",
                         "status": "completed",
                     }
@@ -2039,6 +2098,7 @@ class TestFetchFailingCheckLogs:
         fake.queue_result(
             returncode=0,
             stdout=(
+                "tests\tRun tests\tpython -m pytest tests/unit/runtime/test_prompt.py\n"
                 "FAILED tests/unit/runtime/test_prompt.py::test_handles[bad  value] "
                 "- AssertionError: boom\n"
             ),
@@ -2052,10 +2112,9 @@ class TestFetchFailingCheckLogs:
         )
 
         failure = failures[0]
-        assert failure.test_node_ids == (
-            "tests/unit/runtime/test_prompt.py::test_handles[bad  value]",
-        )
-        assert failure.suggested_repro_commands == ()
+        node_id = "tests/unit/runtime/test_prompt.py::test_handles[bad  value]"
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (f"python -m pytest {shlex.quote(node_id)} -q",)
 
     @pytest.mark.unit
     async def test_extracts_long_pytest_param_id_before_truncating_display_lines(self) -> None:

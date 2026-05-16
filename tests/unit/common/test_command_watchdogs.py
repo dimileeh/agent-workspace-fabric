@@ -109,8 +109,7 @@ async def test_asyncio_runner_cancellation_terminates_subprocess(tmp_path: Path)
             ],
         )
     )
-    await _wait_for_file(pid_file)
-    pid = int(pid_file.read_text())
+    pid = await _wait_for_pid_file(pid_file)
 
     try:
         task.cancel()
@@ -261,12 +260,47 @@ def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
     )
 
 
-async def _wait_for_file(path: Path) -> None:
+@pytest.mark.unit
+async def test_wait_for_pid_file_retries_when_file_disappears_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RacyPidPath:
+        def __init__(self) -> None:
+            self.values: list[str | FileNotFoundError] = [FileNotFoundError(), "123"]
+
+        def exists(self) -> bool:
+            return True
+
+        def read_text(self) -> str:
+            value = self.values.pop(0)
+            if isinstance(value, FileNotFoundError):
+                raise value
+            return value
+
+        def __str__(self) -> str:
+            return "racy.pid"
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    assert await _wait_for_pid_file(_RacyPidPath()) == 123  # type: ignore[arg-type]
+
+
+async def _wait_for_pid_file(path: Path) -> int:
+    last_value: str | None = None
     for _ in range(200):
-        if path.exists():
-            return
+        try:
+            last_value = path.read_text()
+            try:
+                return int(last_value)
+            except ValueError:
+                pass
+        except FileNotFoundError:
+            pass
         await asyncio.sleep(0.01)
-    raise AssertionError(f"{path} was not created")
+    raise AssertionError(f"{path} did not contain a process id; last value={last_value!r}")
 
 
 def _pid_exists(pid: int) -> bool:

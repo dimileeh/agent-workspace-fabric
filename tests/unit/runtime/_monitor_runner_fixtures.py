@@ -220,6 +220,7 @@ async def seed_monitoring_workspace(
     head_sha: str = "abc1234567890def",
     auto_merge: bool = True,
     pr_merge_sha: str | None = None,
+    test_commands: list[str] | None = None,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -229,7 +230,7 @@ async def seed_monitoring_workspace(
             task_title="monitor test",
             task_prompt="x",
             agent="claude_code",
-            test_commands=["pytest -q"],
+            test_commands=["pytest -q"] if test_commands is None else test_commands,
             requires_database=False,
             auto_merge=auto_merge,
         )
