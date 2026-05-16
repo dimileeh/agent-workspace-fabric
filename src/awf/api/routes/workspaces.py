@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
@@ -153,6 +154,7 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
             raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
         self._entries: OrderedDict[str, str | None] = OrderedDict()
+        self._lock = threading.Lock()
 
     def matches(
         self,
@@ -161,16 +163,18 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> bool:
-        if idempotency_key not in self._entries:
-            return False
-        request_hash = self._entries[idempotency_key]
-        if request_hash is not None and request_hash != _workspace_create_request_hash(
+        payload_hash = _workspace_create_request_hash(
             payload,
             api_version=api_version,
-        ):
-            raise _WorkspaceCreateIdempotencyConflictError
-        self._entries.move_to_end(idempotency_key)
-        return True
+        )
+        with self._lock:
+            if idempotency_key not in self._entries:
+                return False
+            request_hash = self._entries[idempotency_key]
+            if request_hash is not None and request_hash != payload_hash:
+                raise _WorkspaceCreateIdempotencyConflictError
+            self._entries.move_to_end(idempotency_key)
+            return True
 
     def remember(
         self,
@@ -185,9 +189,10 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         )
 
     def remember_hash(self, *, idempotency_key: str, request_hash: str | None) -> None:
-        self._entries[idempotency_key] = request_hash
-        self._entries.move_to_end(idempotency_key)
-        self._trim()
+        with self._lock:
+            self._entries[idempotency_key] = request_hash
+            self._entries.move_to_end(idempotency_key)
+            self._trim()
 
     def _trim(self) -> None:
         if self._max_entries is None:
@@ -232,6 +237,14 @@ async def create_workspace(
                 api_version=_WORKSPACE_CREATE_V1_API_VERSION,
             )
         except _WorkspaceCreateIdempotencyConflictError:
+            replay = await _workspace_create_v1_durable_replay_response(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
             return _workspace_create_idempotency_conflict_response()
         if known_replay_key:
             replay = await _workspace_create_v1_replay_response(

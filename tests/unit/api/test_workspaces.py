@@ -499,6 +499,18 @@ def _workspace_request_without_app_state() -> Request:
     )
 
 
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.enters = 0
+        self.exits = 0
+
+    def __enter__(self) -> None:
+        self.enters += 1
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.exits += 1
+
+
 def _provider_preflight_settings(tmp_path: Any) -> Settings:
     return Settings(
         _env_file=None,
@@ -1250,6 +1262,96 @@ class TestCreateWorkspace:
             )
             is True
         )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_locks_composite_lru_operations(self) -> None:
+        cache = workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache()  # noqa: SLF001
+        lock = _TrackingLock()
+        cache._lock = lock  # noqa: SLF001
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "locked workspace replay key"}
+        )
+
+        cache.remember(
+            payload,
+            idempotency_key="workspace-locked-key",
+            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+        )
+        matched = cache.matches(
+            payload,
+            idempotency_key="workspace-locked-key",
+            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+        )
+
+        assert matched is True
+        assert lock.enters == 2
+        assert lock.exits == 2
+
+    @pytest.mark.unit
+    async def test_v1_cache_hash_conflict_uses_durable_replay_before_conflict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = _request_with_disk_check()
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "durable replay after stale cache hash"}
+        )
+        idempotency_key = "workspace-v1-stale-cache-hash"
+        replay_key_cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        replay_key_cache.remember_hash(
+            idempotency_key=idempotency_key,
+            request_hash="stale-cache-hash",
+        )
+        existing = SimpleNamespace(
+            id="ws_v1_stale_hash_replay",
+            status=WorkspaceStatus.requested.value,
+            version=3,
+            created_at=datetime(2026, 5, 15, tzinfo=UTC),
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            agent=payload.agent.value,
+            env_profile=payload.env_profile,
+            test_commands=list(payload.test_commands),
+            requires_database=payload.requires_database,
+            task_attempt=None,
+        )
+        lock_keys: list[str] = []
+        lookup_keys: list[str] = []
+        create_calls: list[str | None] = []
+
+        async def tracked_lock(_self: WorkspaceRepository, key: str) -> None:
+            lock_keys.append(key)
+
+        async def tracked_lookup(_self: WorkspaceRepository, key: str) -> object:
+            lookup_keys.append(key)
+            return existing
+
+        async def fail_create(_self: WorkspaceRepository, **kwargs: object) -> None:
+            create_calls.append(kwargs.get("idempotency_key"))
+            raise AssertionError("durable replay must not create a new workspace")
+
+        monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
+        monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
+        monkeypatch.setattr(WorkspaceRepository, "create", fail_create)
+
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
+
+        assert not isinstance(response, JSONResponse)
+        assert response.workspace_id == existing.id
+        assert lock_keys == [idempotency_key]
+        assert lookup_keys == [idempotency_key]
+        assert create_calls == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

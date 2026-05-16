@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Annotated
@@ -61,6 +62,7 @@ class _CallbackIdempotencyReplayCache:
     def __init__(self, *, max_entries: int = _CALLBACK_REPLAY_CACHE_MAX_ENTRIES) -> None:
         self._max_entries = max_entries
         self._entries: OrderedDict[str, _CachedCallbackReplay] = OrderedDict()
+        self._lock = threading.Lock()
 
     def replay(
         self,
@@ -68,15 +70,17 @@ class _CallbackIdempotencyReplayCache:
         *,
         idempotency_key: str,
     ) -> CallbackSubscriptionResponse | None:
-        cached = self._entries.get(idempotency_key)
-        if cached is None:
-            return None
-        if cached.request_hash != callback_request_hash(payload):
-            raise CallbackIdempotencyConflictError(
-                "Idempotency-Key previously used with a different callback request."
-            )
-        self._entries.move_to_end(idempotency_key)
-        return cached.response.model_copy(deep=True)
+        request_hash = callback_request_hash(payload)
+        with self._lock:
+            cached = self._entries.get(idempotency_key)
+            if cached is None:
+                return None
+            if cached.request_hash != request_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            self._entries.move_to_end(idempotency_key)
+            return cached.response.model_copy(deep=True)
 
     def remember(
         self,
@@ -85,13 +89,15 @@ class _CallbackIdempotencyReplayCache:
         idempotency_key: str,
         response: CallbackSubscriptionResponse,
     ) -> None:
-        self._entries[idempotency_key] = _CachedCallbackReplay(
+        cached = _CachedCallbackReplay(
             request_hash=callback_request_hash(payload),
             response=response.model_copy(deep=True),
         )
-        self._entries.move_to_end(idempotency_key)
-        while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
+        with self._lock:
+            self._entries[idempotency_key] = cached
+            self._entries.move_to_end(idempotency_key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
 
 
 class _CallbackIdempotencyReplayKeyCache:
@@ -100,6 +106,7 @@ class _CallbackIdempotencyReplayKeyCache:
             raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
         self._entries: OrderedDict[str, str] = OrderedDict()
+        self._lock = threading.Lock()
 
     def matches(
         self,
@@ -107,15 +114,17 @@ class _CallbackIdempotencyReplayKeyCache:
         *,
         idempotency_key: str,
     ) -> bool:
-        request_hash = self._entries.get(idempotency_key)
-        if request_hash is None:
-            return False
-        if request_hash != callback_request_hash(payload):
-            raise CallbackIdempotencyConflictError(
-                "Idempotency-Key previously used with a different callback request."
-            )
-        self._entries.move_to_end(idempotency_key)
-        return True
+        payload_hash = callback_request_hash(payload)
+        with self._lock:
+            request_hash = self._entries.get(idempotency_key)
+            if request_hash is None:
+                return False
+            if request_hash != payload_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            self._entries.move_to_end(idempotency_key)
+            return True
 
     def remember(
         self,
@@ -129,9 +138,10 @@ class _CallbackIdempotencyReplayKeyCache:
         )
 
     def remember_hash(self, *, idempotency_key: str, request_hash: str) -> None:
-        self._entries[idempotency_key] = request_hash
-        self._entries.move_to_end(idempotency_key)
-        self._trim()
+        with self._lock:
+            self._entries[idempotency_key] = request_hash
+            self._entries.move_to_end(idempotency_key)
+            self._trim()
 
     def _trim(self) -> None:
         if self._max_entries is None:
@@ -362,26 +372,23 @@ async def _callback_durable_replay_response_for_persisted_key(
     *,
     idempotency_key: str,
 ) -> CallbackSubscriptionResponse | None:
-    durable_request_hash = await service.get_idempotency_request_hash(idempotency_key)
-    if durable_request_hash is None:
-        return None
-    replay_key_cache.remember_hash(
-        idempotency_key=idempotency_key,
-        request_hash=durable_request_hash,
-    )
     try:
-        replay_key_cache.matches(payload, idempotency_key=idempotency_key)
+        durable_replay = await service.replay_existing_for_persisted_key(
+            payload,
+            idempotency_key=idempotency_key,
+        )
     except CallbackIdempotencyConflictError as exc:
         raise _idempotency_conflict() from exc
-    response = await _callback_durable_replay_response(
-        service,
+    if durable_replay is None:
+        return None
+    response = CallbackSubscriptionResponse.model_validate(durable_replay)
+    _remember_callback_replay(
         replay_cache,
         replay_key_cache,
         payload,
         idempotency_key=idempotency_key,
+        response=response,
     )
-    if response is None:
-        raise _idempotency_replay_unavailable()
     return response
 
 

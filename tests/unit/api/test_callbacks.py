@@ -83,6 +83,18 @@ def _callback_request_without_app_state() -> Request:
     )
 
 
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.enters = 0
+        self.exits = 0
+
+    def __enter__(self) -> None:
+        self.enters += 1
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.exits += 1
+
+
 def _assert_callback_rate_limited(
     response: Response,
     *,
@@ -485,7 +497,7 @@ async def test_register_callback_cold_db_replay_does_not_spend_fresh_quota(
 
 
 @pytest.mark.unit
-async def test_register_callback_rate_limited_replay_reads_durable_hash_without_advisory_lock(
+async def test_register_callback_cold_replay_locks_before_durable_lookup(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -508,18 +520,24 @@ async def test_register_callback_rate_limited_replay_reads_durable_hash_without_
 
     calls: list[str] = []
     original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
-    original_hash_lookup = CallbackSubscriptionRepository.get_idempotency_request_hash
+    original_lookup = CallbackSubscriptionRepository.get_by_idempotency_key
 
     async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
         calls.append(f"lock:{key}")
         await original_lock(self, key)
 
-    async def tracked_hash_lookup(
+    async def tracked_lookup(
         self: CallbackSubscriptionRepository,
         key: str,
+    ) -> object | None:
+        calls.append(f"lookup:{key}")
+        return await original_lookup(self, key)
+
+    async def fail_hash_lookup(
+        _self: CallbackSubscriptionRepository,
+        _key: str,
     ) -> str | None:
-        calls.append(f"hash:{key}")
-        return await original_hash_lookup(self, key)
+        raise AssertionError("cold replay must not use a pre-lock hash probe")
 
     monkeypatch.setattr(
         CallbackSubscriptionRepository,
@@ -528,8 +546,13 @@ async def test_register_callback_rate_limited_replay_reads_durable_hash_without_
     )
     monkeypatch.setattr(
         CallbackSubscriptionRepository,
+        "get_by_idempotency_key",
+        tracked_lookup,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
         "get_idempotency_request_hash",
-        tracked_hash_lookup,
+        fail_hash_lookup,
     )
 
     replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
@@ -537,8 +560,8 @@ async def test_register_callback_rate_limited_replay_reads_durable_hash_without_
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
     assert calls[:2] == [
-        "hash:callback-inflight-rate-limit-replay",
         "lock:callback-inflight-rate-limit-replay",
+        "lookup:callback-inflight-rate-limit-replay",
     ]
 
 
@@ -1044,6 +1067,37 @@ def test_callback_replay_key_cache_app_state_is_bounded() -> None:
     newest_key = f"callback-app-state-key-{max_entries}"
     assert cache.matches(payload, idempotency_key="callback-app-state-key-0") is False
     assert cache.matches(payload, idempotency_key=newest_key) is True
+
+
+@pytest.mark.unit
+def test_callback_replay_caches_lock_composite_lru_operations() -> None:
+    replay_cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)  # noqa: SLF001
+    replay_lock = _TrackingLock()
+    replay_cache._lock = replay_lock  # noqa: SLF001
+    replay_payload = _callback_payload(
+        name="callback-replay-locked",
+        target_url="https://operator.example.com/awf/replay-locked",
+    )
+    replay_cache.remember(
+        replay_payload,
+        idempotency_key="callback-replay-locked",
+        response=_callback_response("cb_replay_locked"),
+    )
+    assert replay_cache.replay(replay_payload, idempotency_key="callback-replay-locked")
+    assert replay_lock.enters == 2
+    assert replay_lock.exits == 2
+
+    key_cache = callbacks_route._CallbackIdempotencyReplayKeyCache(max_entries=2)  # noqa: SLF001
+    key_lock = _TrackingLock()
+    key_cache._lock = key_lock  # noqa: SLF001
+    key_payload = _callback_payload(
+        name="callback-key-locked",
+        target_url="https://operator.example.com/awf/key-locked",
+    )
+    key_cache.remember(key_payload, idempotency_key="callback-key-locked")
+    assert key_cache.matches(key_payload, idempotency_key="callback-key-locked") is True
+    assert key_lock.enters == 2
+    assert key_lock.exits == 2
 
 
 @pytest.mark.unit
