@@ -337,10 +337,12 @@ placeholders, and mount leases bind exact read-only files or known local auth
 paths. Local service mode still mounts only the known credential paths under
 `${AWF_HOST_HOME:-${HOME}}` into the API and worker containers so legacy
 providers that need per-workspace writable copies can be seeded. It does not
-mount the whole home directory. It also forwards Docker Desktop's
-`/run/host-services/ssh-auth.sock` so service-worker Git operations can use the
-operator's loaded SSH keys. Set `AWF_HOST_HOME` if the shell running Docker
-Compose does not expose the operator home as `${HOME}`.
+mount the whole home directory. It also forwards the operator's SSH-agent socket
+to `/run/host-services/ssh-auth.sock` inside the control-plane containers so
+service-worker Git operations can use the operator's loaded SSH keys. On Linux,
+the host source falls back to `$SSH_AUTH_SOCK`; set `AWF_HOST_SSH_AUTH_SOCK` if
+the shell running Docker Compose does not expose it. Set `AWF_HOST_HOME` if that
+shell does not expose the operator home as `${HOME}`.
 
 Credential values used by Compose interpolation must be present in the shell
 that starts the stack or in a Compose env file such as `docker/compose/.env`.

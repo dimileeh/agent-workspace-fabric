@@ -65,13 +65,17 @@ can drive the host Docker daemon for per-workspace stacks.
 
 ### SSH And Auth Mounts
 
-The control plane mounts the operator's SSH agent forwarder and a curated
-set of read-only credential paths:
+The control plane mounts the operator's SSH-agent socket and a curated set of
+read-only credential paths:
 
-- `/run/host-services/ssh-auth.sock` (Docker Desktop SSH-agent forwarder)
-  is owned by `root:0` on Docker Desktop. A non-root container would need
-  additional setup (running `ssh-agent` inside, or chowning the socket — both
-  fragile). Running as root reads the forwarder directly.
+- `${AWF_HOST_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}}`
+  is mounted at `/run/host-services/ssh-auth.sock` inside the control-plane
+  containers. Docker Desktop keeps using its SSH-agent forwarder by default;
+  Linux hosts can use the shell's `$SSH_AUTH_SOCK` or set
+  `AWF_HOST_SSH_AUTH_SOCK` explicitly. The Docker Desktop forwarder is owned by
+  `root:0`; a non-root container would need additional setup (running
+  `ssh-agent` inside, or chowning the socket - both fragile). Running as root
+  reads the forwarder directly.
 - The read-only host-home credential mounts (`~/.gitconfig`, `~/.ssh`,
   `~/.config/gh`, `~/.config/gcloud`, `~/.codex`, `~/.claude`,
   `~/.claude.json`, `~/.gemini`, `~/.config/opencode`, `~/.ollama`) work for

@@ -123,6 +123,7 @@ AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
+AWF_HOST_SSH_AUTH_SOCK=<optional Linux SSH_AUTH_SOCK override>
 AWF_GITHUB_TOKEN=<token from gh auth token>
 OPENAI_API_KEY=<optional Codex env auth>
 ANTHROPIC_API_KEY=<optional Claude env auth>

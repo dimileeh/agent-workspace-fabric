@@ -44,6 +44,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"
     expected_host_home = "${AWF_HOST_HOME:-${HOME}}"
+    expected_ssh_auth_sock_source = (
+        "${AWF_HOST_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}}"
+    )
+    expected_ssh_auth_sock_target = "/run/host-services/ssh-auth.sock"
     expected_auth_mounts = {
         f"{expected_host_home}/.config/gh:{expected_host_home}/.config/gh:ro",
         f"{expected_host_home}/.config/gcloud:{expected_host_home}/.config/gcloud:ro",
@@ -62,7 +66,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
         assert services[service_name]["extra_hosts"] == ["host.docker.internal:host-gateway"]
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
-        assert "/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock" in volumes
+        assert f"{expected_ssh_auth_sock_source}:{expected_ssh_auth_sock_target}" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
@@ -94,7 +98,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_LOCAL_CAPACITY_DIND_SLOTS"] == (
             "${AWF_LOCAL_CAPACITY_DIND_SLOTS:-}"
         )
-        assert environment["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
+        assert environment["SSH_AUTH_SOCK"] == expected_ssh_auth_sock_target
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
