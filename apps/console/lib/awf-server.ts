@@ -3,12 +3,23 @@ import WebSocket from "ws";
 
 export const runtime = "nodejs";
 
+const defaultAwfFetchTimeoutMs = 30_000;
+
 export function awfBaseUrl(): string {
   return (process.env.AWF_API_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
 }
 
 export function awfToken(): string | undefined {
   return process.env.AWF_API_TOKEN?.trim() || undefined;
+}
+
+export function awfFetchTimeoutMs(): number {
+  const raw = process.env.AWF_API_FETCH_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return defaultAwfFetchTimeoutMs;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultAwfFetchTimeoutMs;
 }
 
 export function awfWebSocketUrl(path: string): string {
@@ -45,20 +56,30 @@ export async function proxyAwf(path: string, options: AwfProxyOptions = {}): Pro
       headers[key] = value;
     }
 
-    const response = await fetch(`${awfBaseUrl()}${path}`, {
-      method,
-      cache: "no-store",
-      headers,
-      body,
-    });
-    const text = await response.text();
-    return new NextResponse(text, {
-      status: response.status,
-      headers: {
-        "content-type": response.headers.get("content-type") || "application/json",
-        "cache-control": "no-store",
-      },
-    });
+    const timeoutMs = awfFetchTimeoutMs();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort(new Error(`AWF API request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    try {
+      const response = await fetch(`${awfBaseUrl()}${path}`, {
+        method,
+        cache: "no-store",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      return new NextResponse(text, {
+        status: response.status,
+        headers: {
+          "content-type": response.headers.get("content-type") || "application/json",
+          "cache-control": "no-store",
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (error) {
     return NextResponse.json(
       normalizeError(error, "AWF_API_UNREACHABLE", "Unable to reach the AWF API."),
