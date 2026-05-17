@@ -210,6 +210,7 @@ class WorkspaceCreateRequest(BaseModel):
             "requires_database",
         }
         extras = {key: value for key, value in data.items() if key not in allowed_keys}
+        profile_ref = "aira" if data.get("requires_database") is True else data.get("env_profile")
         coerced: dict[str, object] = {
             "repo": {
                 "url": data.get("repo_url"),
@@ -222,7 +223,7 @@ class WorkspaceCreateRequest(BaseModel):
                 "external_id": data.get("task_external_id"),
                 "kind": "feature_branch_pr",
             },
-            "workspace": {"profile_ref": data.get("env_profile") or "auto", "profile": None},
+            "workspace": {"profile_ref": profile_ref or "auto", "profile": None},
             "validation": {"commands": data.get("test_commands", []), "requested_tier": 1},
             "resources": {},
             **extras,

@@ -277,6 +277,10 @@ async def test_workspace_service_create_v1_and_event_listing(
             env_profile="python",
             test_commands=["pytest -q"],
             requires_database=True,
+            preflight={
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "observability test fixture",
+            },
         )
     )
 
@@ -284,7 +288,7 @@ async def test_workspace_service_create_v1_and_event_listing(
     missing_events = await service.list_events("ws_missing")
 
     assert created.repo_url == "git@github.com:example/v1.git"
-    assert created.env_profile == "python"
+    assert created.env_profile == "aira"
     assert created.requires_database is False
     assert events is not None
     assert [event.event_type for event in events] == ["workspace.created"]
