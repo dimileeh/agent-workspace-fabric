@@ -10491,6 +10491,7 @@
         "properties": {
           "commands": {
             "items": {
+              "minLength": 1,
               "type": "string"
             },
             "title": "Commands",

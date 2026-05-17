@@ -149,6 +149,16 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
 
 
 @pytest.mark.unit
+def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: dict) -> None:
+    command_items = openapi_spec["components"]["schemas"]["WorkspaceValidation"]["properties"][
+        "commands"
+    ]["items"]
+
+    assert command_items["type"] == "string"
+    assert command_items["minLength"] == 1
+
+
+@pytest.mark.unit
 def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
     paths = openapi_spec.get("paths", {})
     expected_methods: list[tuple[str, str]] = [

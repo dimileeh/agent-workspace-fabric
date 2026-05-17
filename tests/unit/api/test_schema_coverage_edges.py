@@ -8,6 +8,19 @@ from awf.api import schemas as api_schemas
 
 
 @pytest.mark.unit
+def test_workspace_validation_rejects_empty_command_entries() -> None:
+    with pytest.raises(ValueError):
+        api_schemas.WorkspaceValidation.model_validate({"commands": [""]})
+
+
+@pytest.mark.unit
+def test_workspace_validation_accepts_non_empty_command_entries() -> None:
+    request = api_schemas.WorkspaceValidation.model_validate({"commands": ["pytest -q"]})
+
+    assert request.commands == ["pytest -q"]
+
+
+@pytest.mark.unit
 def test_legacy_flat_workspace_create_requires_database_selects_aira_profile() -> None:
     request = api_schemas.WorkspaceCreateRequest.model_validate(
         {

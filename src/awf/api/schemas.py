@@ -22,6 +22,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStat
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
+ValidationCommand = Annotated[str, Field(min_length=1)]
 MergeBlockerReason = Literal[
     "ready_to_merge_or_waiting_for_github",
     "manual_merge_required",
@@ -152,7 +153,7 @@ class WorkspaceProfileSelection(BaseModel):
 class WorkspaceValidation(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    commands: list[str] = Field(default_factory=list)
+    commands: list[ValidationCommand] = Field(default_factory=list)
     requested_tier: int = Field(default=1, ge=1, le=3)
 
 
