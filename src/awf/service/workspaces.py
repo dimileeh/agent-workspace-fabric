@@ -1091,6 +1091,9 @@ def workspace_create_payload_matches(
         else None
     )
     task_class = payload.task.task_class.value if payload.task.task_class is not None else None
+    stored_task_kind = getattr(existing, "task_kind", None)
+    if stored_task_kind is None:
+        stored_task_kind = "feature_branch_pr"
     return (
         existing.repo_url == payload.repo.url
         and existing.branch_base == payload.repo.base_branch
@@ -1114,7 +1117,7 @@ def workspace_create_payload_matches(
             == payload.task.initial_review_grace_period_seconds
         )
         and existing.agent == payload.task.agent.value
-        and getattr(existing, "task_kind", "feature_branch_pr") == payload.task.kind
+        and stored_task_kind == payload.task.kind
         and _profile_ref_matches(existing, payload)
         and getattr(existing, "requested_profile", None) == requested_profile
         and _stored_validation_requested_tier_matches(existing, payload)

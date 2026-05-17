@@ -573,6 +573,25 @@ async def test_create_payload_match_treats_legacy_null_owned_paths_as_empty(
 
 
 @pytest.mark.unit
+async def test_create_payload_match_treats_legacy_null_task_kind_as_feature_branch_pr(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _v2_request()
+    created = await WorkspaceService(factory).create(
+        request,
+        idempotency_key="service-create-v2-legacy-null-task-kind",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.task_kind = None  # type: ignore[assignment]
+        workspace.status = "running"
+
+        assert workspaces.workspace_create_payload_matches(workspace, request)
+
+
+@pytest.mark.unit
 async def test_create_named_profile_replay_uses_policy_tier_when_profile_unresolved(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
