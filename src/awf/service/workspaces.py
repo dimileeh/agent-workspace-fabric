@@ -1143,7 +1143,7 @@ def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -
         return True
     legacy_env_profile = getattr(existing, "env_profile", None)
     if legacy_env_profile is not None:
-        return bool(legacy_env_profile == payload.workspace.profile_ref)
+        return _legacy_env_profile_ref_matches(existing, payload)
     if payload.workspace.profile_ref not in (None, "auto"):
         return False
     return not (
@@ -1152,6 +1152,17 @@ def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -
             getattr(existing, "requested_profile", None) is not None
             or payload.workspace.profile is not None
         )
+    )
+
+
+def _legacy_env_profile_ref_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateRequest,
+) -> bool:
+    """Check whether a legacy env_profile row matches the requested profile ref."""
+    legacy_env_profile = getattr(existing, "env_profile", None)
+    return bool(
+        legacy_env_profile is not None and legacy_env_profile == payload.workspace.profile_ref
     )
 
 
@@ -1218,6 +1229,7 @@ def _legacy_validation_requested_tier_unknown(
     return (
         getattr(existing, "profile_ref", None) is not None
         or _legacy_database_profile_ref_matches(existing, payload)
+        or _legacy_env_profile_ref_matches(existing, payload)
     ) and getattr(existing, "resolved_profile", None) is None
 
 

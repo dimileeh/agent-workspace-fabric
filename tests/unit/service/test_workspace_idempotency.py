@@ -483,6 +483,48 @@ async def test_create_database_profile_replays_legacy_requires_database_row(
 
 
 @pytest.mark.unit
+async def test_create_profile_ref_replays_legacy_env_profile_row_with_missing_requested_tier(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request_payload = _v2_request(requested_tier=2, profile_ref="python").model_dump(mode="python")
+    request_payload["preflight"] = {}
+    request = WorkspaceCreateRequest.model_validate(request_payload)
+    idempotency_key = "service-create-v1-env-profile-legacy-tier"
+    service = WorkspaceService(factory)
+
+    async with factory() as session:
+        created = await WorkspaceRepository(session).create(
+            repo_url=request.repo.url,
+            branch_base=request.repo.base_branch,
+            task_title=request.task.title,
+            task_prompt=request.task.prompt,
+            task_external_id=request.task.external_id,
+            agent=request.task.agent.value,
+            env_profile="python",
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=request.validation.commands,
+            requires_database=False,
+            idempotency_key=idempotency_key,
+        )
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+    conflicting_payload = _v2_request(requested_tier=2, profile_ref="node").model_dump(
+        mode="python"
+    )
+    conflicting_payload["preflight"] = {}
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(
+            WorkspaceCreateRequest.model_validate(conflicting_payload),
+            idempotency_key=idempotency_key,
+        )
+
+
+@pytest.mark.unit
 async def test_create_v1_replay_conflicts_with_matching_v2_row(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
