@@ -1345,6 +1345,36 @@ class TestCreateWorkspace:
         }
 
     @pytest.mark.unit
+    async def test_create_workspace_accepts_legacy_flat_arguments(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/legacy.git",
+                "branch_base": "legacy-base",
+                "task_title": "Legacy MCP create",
+                "task_prompt": "Preserve older MCP create arguments.",
+                "test_commands": ["uv run pytest tests/unit/mcp -q"],
+                "requires_database": True,
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp legacy create compatibility",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "legacy-base"
+        assert ws.profile_ref == "aira"
+        assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
+
+    @pytest.mark.unit
     async def test_policy_metadata_round_trips_through_create_get_and_list(
         self,
         mcp,

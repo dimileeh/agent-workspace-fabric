@@ -197,6 +197,12 @@ def build_mcp_server(
             default="main",
             description="Branch to branch FROM; feature branch is created off it.",
         ),
+        branch_base: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            description="Legacy alias for base_branch.",
+        ),
         task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
         task_kind: str = Field(
@@ -247,6 +253,14 @@ def build_mcp_server(
             default_factory=list,
             description="Shell commands to validate the change.",
         ),
+        test_commands: list[str] | None = Field(
+            default=None,
+            description="Legacy alias for validation_commands.",
+        ),
+        requires_database: bool = Field(
+            default=False,
+            description="Legacy database-profile shortcut; maps to profile_ref='aira'.",
+        ),
         requested_tier: int = Field(
             default=1,
             ge=1,
@@ -293,8 +307,13 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Create a new AWF workspace using the canonical rich v1 contract."""
+        effective_base_branch = branch_base or base_branch
+        effective_validation_commands = (
+            test_commands if test_commands is not None else validation_commands
+        )
+        effective_profile_ref = "aira" if requires_database else profile_ref
         req = WorkspaceCreateRequest(
-            repo={"url": repo_url, "base_branch": base_branch},
+            repo={"url": repo_url, "base_branch": effective_base_branch},
             task={
                 k: v
                 for k, v in {
@@ -315,8 +334,11 @@ def build_mcp_server(
                 }.items()
                 if v is not None
             },
-            workspace={"profile_ref": profile_ref, "profile": profile},
-            validation={"commands": validation_commands, "requested_tier": requested_tier},
+            workspace={"profile_ref": effective_profile_ref, "profile": profile},
+            validation={
+                "commands": effective_validation_commands,
+                "requested_tier": requested_tier,
+            },
             resources={
                 k: v
                 for k, v in {
