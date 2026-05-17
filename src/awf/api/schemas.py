@@ -73,7 +73,7 @@ class MergeCandidateReadinessResponse(BaseModel):
     stale_reason: str | None = None
 
 
-class WorkspaceV2Repo(BaseModel):
+class WorkspaceRepo(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     url: Annotated[str, Field(min_length=1, max_length=512)]
@@ -119,7 +119,7 @@ class WorkspaceLaunchPreflight(BaseModel):
     ] = None
 
 
-class WorkspaceV2Task(BaseModel):
+class WorkspaceTask(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     title: Annotated[str, Field(min_length=1, max_length=512)]
@@ -142,21 +142,21 @@ class WorkspaceV2Task(BaseModel):
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
 
 
-class WorkspaceV2Workspace(BaseModel):
+class WorkspaceProfileSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)]
     profile: WorkspaceProfile | None = None
 
 
-class WorkspaceV2Validation(BaseModel):
+class WorkspaceValidation(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     commands: list[str] = Field(default_factory=list)
     requested_tier: int = Field(default=1, ge=1, le=3)
 
 
-class WorkspaceV2Resources(BaseModel):
+class WorkspaceResources(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     cpu: float | None = Field(default=None, gt=0)
@@ -173,14 +173,14 @@ class WorkspaceCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    repo: WorkspaceV2Repo
-    task: WorkspaceV2Task
-    workspace: WorkspaceV2Workspace = Field(
-        default_factory=lambda: WorkspaceV2Workspace(profile_ref="auto", profile=None)
+    repo: WorkspaceRepo
+    task: WorkspaceTask
+    workspace: WorkspaceProfileSelection = Field(
+        default_factory=lambda: WorkspaceProfileSelection(profile_ref="auto", profile=None)
     )
-    validation: WorkspaceV2Validation = Field(default_factory=lambda: WorkspaceV2Validation())
-    resources: WorkspaceV2Resources = Field(
-        default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
+    validation: WorkspaceValidation = Field(default_factory=lambda: WorkspaceValidation())
+    resources: WorkspaceResources = Field(
+        default_factory=lambda: WorkspaceResources(cpu=None, memory=None)
     )
     preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
 

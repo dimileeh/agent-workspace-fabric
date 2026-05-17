@@ -378,14 +378,26 @@ class TestTaskAttemptMigration:
 
             monkeypatch.chdir(repo_root)
             with postgres_alembic_subprocess_lock(database_url):
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+                try:
+                    subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "alembic",
+                            "-c",
+                            "alembic.ini",
+                            "upgrade",
+                            "head",
+                        ],
+                        cwd=repo_root,
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    pytest.fail(f"Alembic upgrade timed out after {exc.timeout} seconds")
 
             engine = make_engine(database_url)
             try:

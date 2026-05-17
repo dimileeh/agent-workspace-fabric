@@ -1358,13 +1358,13 @@ def _stored_validation_requested_tier(existing: Workspace) -> int | None:
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
     """Extract the requested validation tier from the workspace's resolved profile."""
     profile = getattr(existing, "resolved_profile", None)
-    if profile is None:
+    if not isinstance(profile, Mapping):
         return None
     validation = profile.get("validation")
-    if not isinstance(validation, dict):
+    if not isinstance(validation, Mapping):
         return None
     tier = validation.get("requested_tier")
-    return tier if isinstance(tier, int) else None
+    return tier if isinstance(tier, int) and not isinstance(tier, bool) else None
 
 
 def _requested_task_out_of_scope_policy(

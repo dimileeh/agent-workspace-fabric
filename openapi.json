@@ -6999,19 +6999,19 @@
             "$ref": "#/components/schemas/WorkspaceLaunchPreflight"
           },
           "repo": {
-            "$ref": "#/components/schemas/WorkspaceV2Repo"
+            "$ref": "#/components/schemas/WorkspaceRepo"
           },
           "resources": {
-            "$ref": "#/components/schemas/WorkspaceV2Resources"
+            "$ref": "#/components/schemas/WorkspaceResources"
           },
           "task": {
-            "$ref": "#/components/schemas/WorkspaceV2Task"
+            "$ref": "#/components/schemas/WorkspaceTask"
           },
           "validation": {
-            "$ref": "#/components/schemas/WorkspaceV2Validation"
+            "$ref": "#/components/schemas/WorkspaceValidation"
           },
           "workspace": {
-            "$ref": "#/components/schemas/WorkspaceV2Workspace"
+            "$ref": "#/components/schemas/WorkspaceProfileSelection"
           }
         },
         "required": [
@@ -8873,6 +8873,36 @@
         "title": "WorkspaceProfile",
         "type": "object"
       },
+      "WorkspaceProfileSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile_ref": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "auto",
+            "title": "Profile Ref"
+          }
+        },
+        "title": "WorkspaceProfileSelection",
+        "type": "object"
+      },
       "WorkspaceProviderFallbackTarget": {
         "additionalProperties": false,
         "properties": {
@@ -9296,6 +9326,29 @@
         "title": "WorkspaceReliabilitySummaryResponse",
         "type": "object"
       },
+      "WorkspaceRepo": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "default": "main",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "WorkspaceRepo",
+        "type": "object"
+      },
       "WorkspaceResourceDefaultsResponse": {
         "properties": {
           "peak_cpu": {
@@ -9322,6 +9375,97 @@
           "peak_memory_gb"
         ],
         "title": "WorkspaceResourceDefaultsResponse",
+        "type": "object"
+      },
+      "WorkspaceResources": {
+        "additionalProperties": false,
+        "properties": {
+          "cpu": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu"
+          },
+          "disk_mb": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Mb"
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory"
+          },
+          "peak_cpu_cores": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Cpu Cores"
+          },
+          "peak_memory_gb": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Memory Gb"
+          },
+          "steady_state_cpu_cores": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steady State Cpu Cores"
+          },
+          "steady_state_memory_gb": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steady State Memory Gb"
+          }
+        },
+        "title": "WorkspaceResources",
         "type": "object"
       },
       "WorkspaceResponse": {
@@ -10212,121 +10356,7 @@
         "title": "WorkspaceStatus",
         "type": "string"
       },
-      "WorkspaceV2Repo": {
-        "additionalProperties": false,
-        "properties": {
-          "base_branch": {
-            "default": "main",
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Base Branch",
-            "type": "string"
-          },
-          "url": {
-            "maxLength": 512,
-            "minLength": 1,
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "title": "WorkspaceV2Repo",
-        "type": "object"
-      },
-      "WorkspaceV2Resources": {
-        "additionalProperties": false,
-        "properties": {
-          "cpu": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cpu"
-          },
-          "disk_mb": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Disk Mb"
-          },
-          "memory": {
-            "anyOf": [
-              {
-                "maxLength": 32,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Memory"
-          },
-          "peak_cpu_cores": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Peak Cpu Cores"
-          },
-          "peak_memory_gb": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Peak Memory Gb"
-          },
-          "steady_state_cpu_cores": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Steady State Cpu Cores"
-          },
-          "steady_state_memory_gb": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Steady State Memory Gb"
-          }
-        },
-        "title": "WorkspaceV2Resources",
-        "type": "object"
-      },
-      "WorkspaceV2Task": {
+      "WorkspaceTask": {
         "additionalProperties": false,
         "properties": {
           "agent": {
@@ -10453,10 +10483,10 @@
           "title",
           "prompt"
         ],
-        "title": "WorkspaceV2Task",
+        "title": "WorkspaceTask",
         "type": "object"
       },
-      "WorkspaceV2Validation": {
+      "WorkspaceValidation": {
         "additionalProperties": false,
         "properties": {
           "commands": {
@@ -10474,37 +10504,7 @@
             "type": "integer"
           }
         },
-        "title": "WorkspaceV2Validation",
-        "type": "object"
-      },
-      "WorkspaceV2Workspace": {
-        "additionalProperties": false,
-        "properties": {
-          "profile": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkspaceProfile"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "profile_ref": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": "auto",
-            "title": "Profile Ref"
-          }
-        },
-        "title": "WorkspaceV2Workspace",
+        "title": "WorkspaceValidation",
         "type": "object"
       },
       "WorkspaceWarningResponse": {

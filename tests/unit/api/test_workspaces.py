@@ -941,10 +941,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "post-denial replay v1"}
                 ),
@@ -952,7 +951,6 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
                 WorkspaceCreateRequest.model_validate(_v2_body(title="post-denial replay v2")),
                 "workspace-post-denial-replay-v2",
                 id="v2",
@@ -962,56 +960,37 @@ class TestCreateWorkspace:
     async def test_rate_limited_workspace_create_uses_post_denial_durable_replay(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateRequest,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
         created_at = datetime(2026, 5, 15, tzinfo=UTC)
-        if isinstance(payload, WorkspaceCreateRequest):
-            existing = SimpleNamespace(
-                id="ws_post_denial_replay_v1",
-                status=WorkspaceStatus.requested.value,
-                version=7,
-                created_at=created_at,
-                repo_url=payload.repo_url,
-                branch_base=payload.branch_base,
-                task_title=payload.task_title,
-                task_prompt=payload.task_prompt,
-                task_external_id=payload.task_external_id,
-                agent=payload.agent.value,
-                env_profile=payload.env_profile,
-                test_commands=list(payload.test_commands),
-                requires_database=payload.requires_database,
-                task_attempt=None,
-            )
-        else:
-            existing = SimpleNamespace(
-                id="ws_post_denial_replay_v2",
-                status=WorkspaceStatus.requested.value,
-                version=8,
-                created_at=created_at,
-                repo_url=payload.repo.url,
-                branch_base=payload.repo.base_branch,
-                task_title=payload.task.title,
-                task_prompt=payload.task.prompt,
-                task_external_id=payload.task.external_id,
-                task_class=None,
-                owned_paths=[],
-                task_policy={"resource_reservation_request": {}},
-                auto_merge=payload.task.auto_merge,
-                initial_review_grace_period_seconds=(
-                    payload.task.initial_review_grace_period_seconds
-                ),
-                agent=payload.task.agent.value,
-                task_kind=payload.task.kind,
-                profile_ref=payload.workspace.profile_ref,
-                requested_profile=None,
-                resolved_profile=None,
-                test_commands=list(payload.validation.commands),
-                task_attempt=object(),
-                events=[],
-            )
+        existing = SimpleNamespace(
+            id="ws_post_denial_replay",
+            status=WorkspaceStatus.requested.value,
+            version=7,
+            created_at=created_at,
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            task_class=(
+                payload.task.task_class.value if payload.task.task_class is not None else None
+            ),
+            owned_paths=list(payload.task.owned_paths),
+            task_policy={"resource_reservation_request": {}},
+            auto_merge=payload.task.auto_merge,
+            initial_review_grace_period_seconds=payload.task.initial_review_grace_period_seconds,
+            agent=payload.agent.value,
+            task_kind=payload.task.kind,
+            profile_ref=payload.env_profile,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=list(payload.test_commands),
+            task_attempt=object(),
+            events=[],
+        )
         calls: list[str] = []
         lookups = 0
 
@@ -1051,10 +1030,7 @@ class TestCreateWorkspace:
             calls.append(f"lookup:{key}:{lookups}")
             return None if lookups == 1 else existing
 
-        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
-            raise AssertionError("post-denial durable replay must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+        async def fail_create(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("post-denial durable replay must not create a workspace")
 
         monkeypatch.setattr(
@@ -1066,25 +1042,15 @@ class TestCreateWorkspace:
         monkeypatch.setattr(workspaces_route, "admit_request_async", denied_admission)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", replay_after_denial)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=1),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
 
         assert not isinstance(response, JSONResponse)
         assert response.workspace_id == existing.id
@@ -1099,10 +1065,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "fresh retry after v1"}
                 ),
@@ -1110,7 +1075,6 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
                 WorkspaceCreateRequest.model_validate(_v2_body(title="fresh retry after v2")),
                 "workspace-refresh-retry-after-v2",
                 id="v2",
@@ -1120,8 +1084,7 @@ class TestCreateWorkspace:
     async def test_rate_limited_workspace_create_refreshes_preview_after_durable_miss(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateRequest,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
@@ -1158,10 +1121,7 @@ class TestCreateWorkspace:
         async def missing_replay(_self: WorkspaceRepository, key: str) -> None:
             calls.append(f"lookup:{key}")
 
-        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
-            raise AssertionError("rate-limited request must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+        async def fail_create(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("rate-limited request must not create a workspace")
 
         monkeypatch.setattr(
@@ -1173,25 +1133,15 @@ class TestCreateWorkspace:
         monkeypatch.setattr(workspaces_route, "admit_request_async", fail_admit)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", missing_replay)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=1),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
 
         assert isinstance(response, JSONResponse)
         assert response.status_code == 429
@@ -1709,10 +1659,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "known missing replay v1"}
                 ),
@@ -1720,7 +1669,6 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
                 WorkspaceCreateRequest.model_validate(_v2_body(title="known missing replay v2")),
                 "known-missing-workspace-v2",
                 id="v2",
@@ -1730,8 +1678,7 @@ class TestCreateWorkspace:
     async def test_known_replay_key_db_miss_returns_conflict_without_create(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateRequest,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
@@ -1753,36 +1700,22 @@ class TestCreateWorkspace:
         async def tracked_lookup(_self: WorkspaceRepository, key: str) -> None:
             lookup_keys.append(key)
 
-        async def fail_v1_create(_self: WorkspaceRepository, **kwargs: object) -> None:
-            create_calls.append(kwargs.get("idempotency_key"))
-            raise AssertionError("known replay-key durable miss must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **kwargs: object) -> None:
+        async def fail_create(*_args: object, **kwargs: object) -> None:
             create_calls.append(kwargs.get("idempotency_key"))
             raise AssertionError("known replay-key durable miss must not create a workspace")
 
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
         session = SimpleNamespace(info={}, bind=None)
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=10),
-                session=session,  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=10),
-                session=session,  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=session,  # type: ignore[arg-type]
+        )
 
         assert isinstance(response, JSONResponse)
         assert response.status_code == 409
@@ -3423,6 +3356,14 @@ class TestCreateWorkspacePolicyMetadata:
             resolved_profile={"validation": "tier-two"},
             task_policy={},
         )
+        non_mapping_profile_workspace = SimpleNamespace(
+            resolved_profile=["legacy-corrupt-profile"],
+            task_policy={},
+        )
+        bool_tier_workspace = SimpleNamespace(
+            resolved_profile={"validation": {"requested_tier": True}},
+            task_policy={},
+        )
         policy_payload = WorkspaceCreateRequest.model_validate(
             {
                 **_V2_MINIMAL_BODY,
@@ -3442,6 +3383,18 @@ class TestCreateWorkspacePolicyMetadata:
         assert (
             workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
                 malformed_validation_workspace
+            )
+            is None
+        )  # type: ignore[arg-type]
+        assert (
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                non_mapping_profile_workspace
+            )
+            is None
+        )  # type: ignore[arg-type]
+        assert (
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                bool_tier_workspace
             )
             is None
         )  # type: ignore[arg-type]

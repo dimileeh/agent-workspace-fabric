@@ -75,7 +75,6 @@ _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
         ("post", "/v1/workspaces/{workspace_id}/stop"),
         ("post", "/v1/workspaces/{workspace_id}/validate"),
         ("get", "/v1/workspaces/{workspace_id}/validation"),
-        ("post", "/v1/workspaces"),
     }
 )
 
@@ -113,7 +112,6 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
         "/readyz",
         "/release-readiness",
         "/v1/workspaces",
-        "/v1/workspaces",
         "/v1/events",
         "/v1/tasks",
         "/v1/callbacks",
@@ -128,6 +126,26 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
         assert matching, (
             f"Expected path prefix {prefix!r} not found in spec paths. Available: {sorted(paths)}"
         )
+
+
+@pytest.mark.unit
+def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec: dict) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+
+    assert "WorkspaceV2" not in json.dumps(schemas, sort_keys=True)
+    assert {
+        "WorkspaceRepo",
+        "WorkspaceTask",
+        "WorkspaceProfileSelection",
+        "WorkspaceValidation",
+        "WorkspaceResources",
+    }.issubset(schemas)
+    assert schemas["WorkspaceCreateRequest"]["properties"]["repo"]["$ref"] == (
+        "#/components/schemas/WorkspaceRepo"
+    )
+    assert schemas["WorkspaceCreateRequest"]["properties"]["task"]["$ref"] == (
+        "#/components/schemas/WorkspaceTask"
+    )
 
 
 @pytest.mark.unit
@@ -336,7 +354,6 @@ def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dic
     ("method", "path"),
     [
         ("post", "/v1/callbacks"),
-        ("post", "/v1/workspaces"),
         ("post", "/v1/workspaces"),
     ],
 )
