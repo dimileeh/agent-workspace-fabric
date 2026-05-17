@@ -10,8 +10,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 
 | Tool | Purpose |
 | --- | --- |
-| `awf_create_workspace` | Create a legacy v1 workspace request. |
-| `awf_create_workspace_v2` | Create a profile-driven v2 workspace request. |
+| `awf_create_workspace` | Create a profile-driven workspace request. |
 | `awf_adopt_pull_request_monitor` | Adopt an already-open GitHub PR into AWF monitoring without rerunning the original coding agent. |
 | `awf_get_workspace` | Fetch one workspace by id. |
 | `awf_list_workspaces` | List recent workspaces newest-first, optionally filtered by status, agent, or repo URL. |
@@ -52,15 +51,14 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 The observability tools return `null` for a missing workspace, log stream, or
 operation rather than surfacing raw storage errors. Operator observability tools
 are read-only and mirror REST response envelopes; the explicit control tools do
-not provide shell access or arbitrary Docker execution. Known MCP parity backlog
-is documented in the matrix, including artifact content/download, global
-workspace event streaming, and surfaces that are intentionally out of scope for
-MCP.
+not provide shell access or arbitrary Docker execution. The parity matrix records
+implemented REST/CLI/MCP surfaces and the few surfaces intentionally out of
+scope for MCP.
 
-The create tools `awf_create_workspace` and `awf_create_workspace_v2` accept a
-schema-optional `idempotency_key` argument. Reusing the same key with the same
-effective create payload returns the existing workspace; reusing the key with a
-changed payload returns structured `IDEMPOTENCY_CONFLICT`.
+The create tool `awf_create_workspace` accepts a schema-optional
+`idempotency_key` argument. Reusing the same key with the same effective create
+payload returns the existing workspace; reusing the key with a changed payload
+returns structured `IDEMPOTENCY_CONFLICT`.
 
 **MCP control migration note:** The control tools `awf_cancel_workspace`,
 `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
@@ -80,7 +78,7 @@ now returns the `OperationListResponse` envelope. Clients that consumed the old
 top-level lists should iterate `items` and honor `has_more`, `limit`, and
 `cursor`.
 
-Example `awf_create_workspace_v2` arguments:
+Example `awf_create_workspace` arguments:
 
 ```json
 {

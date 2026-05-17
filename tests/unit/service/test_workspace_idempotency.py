@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime
-from awf.db.models import Workspace
+from awf.db.models import TaskAttempt, Workspace
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.models import DockerMode, ProfileDocker, ProfileResolution, WorkspaceProfile
@@ -47,11 +47,11 @@ def _v2_request(
     profile_ref: str | None = "auto",
     priority: int = 0,
     human_boost: int = 0,
-) -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
+) -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
         task={
-            "title": "Serialize v2 create",
+            "title": "Serialize rich create",
             "prompt": "Exercise serialized idempotency lookup.",
             "agent": "codex",
             "kind": "feature_branch_pr",
@@ -133,8 +133,31 @@ def test_v2_idempotency_helper_edges_use_durable_request_snapshots() -> None:
         ["tests/unit", "src/awf"],
     )
     assert not workspaces._owned_path_hints_match(["src/awf"], ["./src/awf"])  # noqa: SLF001
-    assert workspaces._has_v2_create_artifact(SimpleNamespace(task_attempt=object()))  # noqa: SLF001
-    assert not workspaces._has_v2_create_artifact(SimpleNamespace(task_attempt=None))  # noqa: SLF001
+    assert workspaces._has_rich_create_artifact(SimpleNamespace(task_attempt=object()))  # noqa: SLF001
+    assert not workspaces._has_rich_create_artifact(SimpleNamespace(task_attempt=None))  # noqa: SLF001
+    orm_workspace = Workspace(
+        id="ws_unloaded_rich_marker",
+        status="requested",
+        repo_url="git@github.com:example/idempotency.git",
+        branch_base="main",
+        task_title="Serialize rich create",
+        task_prompt="Exercise serialized idempotency lookup.",
+        agent="codex",
+        test_commands=[],
+    )
+    assert not workspaces._has_rich_create_artifact(orm_workspace)  # noqa: SLF001
+    orm_workspace.task_attempt = TaskAttempt(
+        id="att_loaded_rich_marker",
+        task_id="task_loaded_rich_marker",
+        workspace_id=orm_workspace.id,
+        attempt_number=1,
+        agent="codex",
+        status="requested",
+        repo_url=orm_workspace.repo_url,
+        base_branch=orm_workspace.branch_base,
+        title=orm_workspace.task_title,
+    )
+    assert workspaces._has_rich_create_artifact(orm_workspace)  # noqa: SLF001
     assert not workspaces._profile_ref_matches(  # noqa: SLF001
         SimpleNamespace(
             profile_ref=None,
@@ -162,7 +185,7 @@ def test_v2_idempotency_helper_edges_use_durable_request_snapshots() -> None:
 
 
 @pytest.mark.unit
-def test_v2_resource_snapshot_helpers_reject_malformed_values() -> None:
+def test_rich_resource_snapshot_helpers_reject_malformed_values() -> None:
     assert not workspaces._resource_reservation_matches_request_values(  # noqa: SLF001
         SimpleNamespace(
             steady_cpu=2.0,
@@ -214,14 +237,20 @@ def test_v2_resource_snapshot_helpers_reject_malformed_values() -> None:
         ).id
         == "newer"
     )
+    legacy_workspace_without_resource_snapshot = SimpleNamespace(
+        task_policy={},
+        resource_reservations=[],
+        resolved_profile=None,
+    )
+    assert workspaces._stored_resource_reservation_matches(  # noqa: SLF001
+        legacy_workspace_without_resource_snapshot,
+        _v2_request(),
+        settings=None,
+    )
     assert (
         workspaces._stored_resource_reservation_matches(  # noqa: SLF001
-            SimpleNamespace(
-                task_policy={},
-                resource_reservations=[],
-                resolved_profile=None,
-            ),
-            _v2_request(),
+            legacy_workspace_without_resource_snapshot,
+            _v2_request(resources={"cpu": 2.0}),
             settings=None,
         )
         is False
@@ -232,7 +261,7 @@ def test_v2_resource_snapshot_helpers_reject_malformed_values() -> None:
 async def test_v2_resource_snapshot_helpers_do_not_lazy_load_unloaded_reservations(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await WorkspaceService(factory).create_v2(
+    created = await WorkspaceService(factory).create(
         _v2_request(),
         idempotency_key="service-create-v2-unloaded-reservation-helper",
     )
@@ -259,7 +288,7 @@ def test_v2_validation_tier_helper_falls_back_to_resolved_profile() -> None:
 
 
 @pytest.mark.unit
-async def test_create_locks_idempotency_key_before_lookup(
+async def test_create_locks_idempotency_key_before_lookup_for_legacy_payload(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,13 +307,13 @@ async def test_create_locks_idempotency_key_before_lookup(
 
 
 @pytest.mark.unit
-async def test_create_v2_locks_idempotency_key_before_lookup(
+async def test_create_locks_idempotency_key_before_lookup_for_rich_payload(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_idempotency_lock_order(monkeypatch)
 
-    created = await WorkspaceService(factory).create_v2(
+    created = await WorkspaceService(factory).create(
         _v2_request(),
         idempotency_key="service-create-lock-v2",
     )
@@ -297,7 +326,7 @@ async def test_create_v2_locks_idempotency_key_before_lookup(
 
 
 @pytest.mark.unit
-async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
+async def test_create_resolves_lazy_disk_check_after_idempotency_replay(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     calls = 0
@@ -308,12 +337,12 @@ async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
         return _ok_disk_check()
 
     service = WorkspaceService(factory)
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-lazy-disk",
         disk_check_factory=disk_check_factory,
     )
-    replayed = await service.create_v2(
+    replayed = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-lazy-disk",
         disk_check_factory=disk_check_factory,
@@ -324,24 +353,24 @@ async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
 
 
 @pytest.mark.unit
-async def test_create_v2_scheduler_replay_does_not_rebuild_full_task_policy(
+async def test_create_scheduler_replay_does_not_rebuild_full_task_policy(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = WorkspaceService(factory)
     request = _v2_request(priority=42, human_boost=3)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-scheduler-policy",
     )
 
-    def unexpected_snapshot(_: WorkspaceCreateV2Request) -> dict[str, object]:
+    def unexpected_snapshot(_: WorkspaceCreateRequest) -> dict[str, object]:
         raise AssertionError("scheduler replay should not rebuild the full task policy")
 
-    monkeypatch.setattr(workspaces, "v2_task_policy_snapshot", unexpected_snapshot)
+    monkeypatch.setattr(workspaces, "workspace_create_task_policy_snapshot", unexpected_snapshot)
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-scheduler-policy",
     )
@@ -350,7 +379,7 @@ async def test_create_v2_scheduler_replay_does_not_rebuild_full_task_policy(
 
 
 @pytest.mark.unit
-async def test_create_v2_auto_profile_replay_conflicts_with_matching_v1_row(
+async def test_create_auto_profile_replays_matching_legacy_payload_row(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
@@ -364,14 +393,14 @@ async def test_create_v2_auto_profile_replay_conflicts_with_matching_v1_row(
     v2_payload["task"]["title"] = "Serialize v1 create"
     v2_payload["task"]["prompt"] = "Exercise serialized idempotency lookup."
     v2_payload["preflight"] = {}
-    request = WorkspaceCreateV2Request.model_validate(v2_payload)
+    request = WorkspaceCreateRequest.model_validate(v2_payload)
 
     assert created.id.startswith("ws_")
-    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
-            request,
-            idempotency_key="service-create-v1-then-v2-auto",
-        )
+    replayed = await service.create(
+        request,
+        idempotency_key="service-create-v1-then-v2-auto",
+    )
+    assert replayed.id == created.id
 
 
 @pytest.mark.unit
@@ -383,8 +412,8 @@ async def test_create_v1_replay_conflicts_with_matching_v2_row(
     v2_payload = _v2_request().model_dump(mode="python")
     v2_payload["task"]["title"] = "Serialize v1 create"
     v2_payload["task"]["prompt"] = "Exercise serialized idempotency lookup."
-    created = await service.create_v2(
-        WorkspaceCreateV2Request.model_validate(v2_payload),
+    created = await service.create(
+        WorkspaceCreateRequest.model_validate(v2_payload),
         idempotency_key="service-create-v2-then-v1-auto",
     )
 
@@ -397,32 +426,32 @@ async def test_create_v1_replay_conflicts_with_matching_v2_row(
 
 
 @pytest.mark.unit
-async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_changes(
+async def test_create_auto_profile_replay_conflicts_when_requested_tier_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(requested_tier=1),
         idempotency_key="service-create-v2-tier",
     )
 
     assert created.id.startswith("ws_")
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(requested_tier=2),
             idempotency_key="service-create-v2-tier",
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_auto_profile_legacy_replay_allows_missing_requested_tier(
+async def test_create_auto_profile_legacy_replay_allows_missing_requested_tier(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
     request = _v2_request(requested_tier=2)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-legacy-auto-tier",
     )
@@ -436,7 +465,7 @@ async def test_create_v2_auto_profile_legacy_replay_allows_missing_requested_tie
         workspace.resolved_profile = None
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-legacy-auto-tier",
     )
@@ -454,7 +483,7 @@ async def test_create_v2_auto_profile_legacy_replay_allows_missing_requested_tie
         ("removed", ["src/awf/**", "tests/unit/**"], ["src/awf/**"]),
     ],
 )
-async def test_create_v2_replay_compares_owned_paths_as_submitted_list(
+async def test_create_replay_compares_owned_paths_as_submitted_list(
     factory: async_sessionmaker[AsyncSession],
     case_name: str,
     initial_owned_paths: list[str],
@@ -463,27 +492,27 @@ async def test_create_v2_replay_compares_owned_paths_as_submitted_list(
     service = WorkspaceService(factory)
     idempotency_key = f"service-create-v2-owned-paths-list-{case_name}"
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(owned_paths=initial_owned_paths),
         idempotency_key=idempotency_key,
     )
 
     assert created.id.startswith("ws_")
-    replayed = await service.create_v2(
+    replayed = await service.create(
         _v2_request(owned_paths=list(initial_owned_paths)),
         idempotency_key=idempotency_key,
     )
     assert replayed.id == created.id
 
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(owned_paths=changed_owned_paths),
             idempotency_key=idempotency_key,
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unresolved(
+async def test_create_named_profile_replay_uses_policy_tier_when_profile_unresolved(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -502,7 +531,7 @@ async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unre
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-unresolved-tier",
     )
@@ -512,21 +541,21 @@ async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unre
         workspace.resolved_profile = None
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-unresolved-tier",
     )
 
     assert replayed.id == created.id
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(requested_tier=1, profile_ref="high-perf"),
             idempotency_key="service-create-v2-named-profile-unresolved-tier",
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_named_profile_legacy_replay_allows_missing_unresolved_tier(
+async def test_create_named_profile_legacy_replay_allows_missing_unresolved_tier(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -545,7 +574,7 @@ async def test_create_v2_named_profile_legacy_replay_allows_missing_unresolved_t
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-legacy-named-profile-tier",
     )
@@ -558,7 +587,7 @@ async def test_create_v2_named_profile_legacy_replay_allows_missing_unresolved_t
         workspace.resolved_profile = None
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-legacy-named-profile-tier",
     )
@@ -567,7 +596,7 @@ async def test_create_v2_named_profile_legacy_replay_allows_missing_unresolved_t
 
 
 @pytest.mark.unit
-async def test_create_v2_named_profile_replay_prefers_policy_tier_over_stale_profile(
+async def test_create_named_profile_replay_prefers_policy_tier_over_stale_profile(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -586,7 +615,7 @@ async def test_create_v2_named_profile_replay_prefers_policy_tier_over_stale_pro
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-policy-tier",
     )
@@ -601,26 +630,26 @@ async def test_create_v2_named_profile_replay_prefers_policy_tier_over_stale_pro
         workspace.resolved_profile = resolved_profile
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-policy-tier",
     )
 
     assert replayed.id == created.id
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(requested_tier=1, profile_ref="high-perf"),
             idempotency_key="service-create-v2-named-profile-policy-tier",
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_conflicts_when_resources_change(
+async def test_create_replay_conflicts_when_resources_change(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(
             resources={
                 "steady_state_cpu_cores": 2.0,
@@ -635,7 +664,7 @@ async def test_create_v2_replay_conflicts_when_resources_change(
 
     assert created.id.startswith("ws_")
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(
                 resources={
                     "steady_state_cpu_cores": 3.0,
@@ -650,36 +679,36 @@ async def test_create_v2_replay_conflicts_when_resources_change(
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_uses_stored_resource_request_when_reservation_is_capped(
+async def test_create_replay_uses_stored_resource_request_when_reservation_is_capped(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
     idempotency_key = "service-create-v2-resources-capped-reservation"
     request = _v2_request(resources={"steady_state_cpu_cores": 2.0})
 
-    created = await service.create_v2(request, idempotency_key=idempotency_key)
+    created = await service.create(request, idempotency_key=idempotency_key)
     async with factory() as session:
         reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
         reservations[0].steady_cpu = 1.5
         await session.commit()
 
-    replayed = await service.create_v2(request, idempotency_key=idempotency_key)
+    replayed = await service.create(request, idempotency_key=idempotency_key)
 
     assert replayed.id == created.id
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(resources={"steady_state_cpu_cores": 1.5}),
             idempotency_key=idempotency_key,
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_conflicts_when_resources_change_without_reservation_row(
+async def test_create_replay_conflicts_when_resources_change_without_reservation_row(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(
             resources={
                 "steady_state_cpu_cores": 2.0,
@@ -698,7 +727,7 @@ async def test_create_v2_replay_conflicts_when_resources_change_without_reservat
         await session.commit()
 
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(
                 resources={
                     "steady_state_cpu_cores": 3.0,
@@ -713,12 +742,12 @@ async def test_create_v2_replay_conflicts_when_resources_change_without_reservat
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_ignores_absent_disk_request(
+async def test_create_replay_ignores_absent_disk_request(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-absent-disk",
     )
@@ -727,7 +756,7 @@ async def test_create_v2_replay_ignores_absent_disk_request(
         reservations[0].disk_mb = 2048
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-absent-disk",
     )
@@ -736,7 +765,7 @@ async def test_create_v2_replay_ignores_absent_disk_request(
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_uses_stored_resource_request_after_reservation_changes(
+async def test_create_replay_uses_stored_resource_request_after_reservation_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
@@ -750,7 +779,7 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
         }
     )
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-default-then-explicit-resource",
     )
@@ -759,14 +788,14 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
         reservations[0].steady_cpu = 99.0
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-default-then-explicit-resource",
     )
 
     assert replayed.id == created.id
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(
                 resources={
                     "steady_state_cpu_cores": 3.0,
@@ -781,12 +810,12 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
 
 
 @pytest.mark.unit
-async def test_create_v2_legacy_replay_allows_explicit_resource_matching_prior_default(
+async def test_create_legacy_replay_allows_explicit_resource_matching_prior_default(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
     )
@@ -800,27 +829,27 @@ async def test_create_v2_legacy_replay_allows_explicit_resource_matching_prior_d
         workspace.task_policy = task_policy
         await session.commit()
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         _v2_request(resources={"steady_state_cpu_cores": steady_cpu}),
         idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
     )
 
     assert replayed.id == created.id
     with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-        await service.create_v2(
+        await service.create(
             _v2_request(resources={"steady_state_cpu_cores": steady_cpu + 1.0}),
             idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
         )
 
 
 @pytest.mark.unit
-async def test_create_v2_persists_and_replays_empty_resource_snapshot(
+async def test_create_persists_and_replays_empty_resource_snapshot(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-empty-resource-snapshot",
     )
@@ -834,7 +863,7 @@ async def test_create_v2_persists_and_replays_empty_resource_snapshot(
 
     monkeypatch.setattr(workspaces, "resource_reservation_plan", unexpected_plan)
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         _v2_request(),
         idempotency_key="service-create-v2-empty-resource-snapshot",
     )
@@ -843,7 +872,7 @@ async def test_create_v2_persists_and_replays_empty_resource_snapshot(
 
 
 @pytest.mark.unit
-async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
+async def test_create_named_profile_replay_preserves_stored_dind_mode(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -864,16 +893,16 @@ async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
     monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_mutable_profile)
     data = _v2_request().model_dump(mode="python")
     data["workspace"] = {"profile_ref": "mutable-docker-mode", "profile": None}
-    request = WorkspaceCreateV2Request.model_validate(data)
+    request = WorkspaceCreateRequest.model_validate(data)
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-dind-replay",
     )
     profile_mode = DockerMode.none
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-dind-replay",
     )
@@ -886,7 +915,7 @@ async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
 
 
 @pytest.mark.unit
-async def test_create_v2_named_profile_replay_uses_stored_resource_snapshot(
+async def test_create_named_profile_replay_uses_stored_resource_snapshot(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -906,7 +935,7 @@ async def test_create_v2_named_profile_replay_uses_stored_resource_snapshot(
     request = _v2_request(profile_ref="mutable-dind")
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(
+    created = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-stored-resource-snapshot",
     )
@@ -916,7 +945,7 @@ async def test_create_v2_named_profile_replay_uses_stored_resource_snapshot(
 
     monkeypatch.setattr(workspaces, "resolve_workspace_profile", fail_profile_resolution)
 
-    replayed = await service.create_v2(
+    replayed = await service.create(
         request,
         idempotency_key="service-create-v2-named-profile-stored-resource-snapshot",
     )

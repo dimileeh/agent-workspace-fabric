@@ -75,7 +75,7 @@ _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
         ("post", "/v1/workspaces/{workspace_id}/stop"),
         ("post", "/v1/workspaces/{workspace_id}/validate"),
         ("get", "/v1/workspaces/{workspace_id}/validation"),
-        ("post", "/v2/workspaces"),
+        ("post", "/v1/workspaces"),
     }
 )
 
@@ -113,7 +113,7 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
         "/readyz",
         "/release-readiness",
         "/v1/workspaces",
-        "/v2/workspaces",
+        "/v1/workspaces",
         "/v1/events",
         "/v1/tasks",
         "/v1/callbacks",
@@ -134,7 +134,7 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
 def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
     paths = openapi_spec.get("paths", {})
     expected_methods: list[tuple[str, str]] = [
-        ("POST", "/v2/workspaces"),
+        ("POST", "/v1/workspaces"),
         ("GET", "/v1/workspaces/{workspace_id}"),
         ("GET", "/v1/workspaces"),
         ("GET", "/v1/events"),
@@ -337,7 +337,7 @@ def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dic
     [
         ("post", "/v1/callbacks"),
         ("post", "/v1/workspaces"),
-        ("post", "/v2/workspaces"),
+        ("post", "/v1/workspaces"),
     ],
 )
 def test_rate_limited_posts_document_retry_after_header(
@@ -383,7 +383,7 @@ async def test_api_token_runtime_failures_match_documented_contract(
             assert wrong.headers["WWW-Authenticate"] == "Bearer"
             assert wrong.json()["detail"]["error_code"] == "UNAUTHORIZED"
 
-            monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+            monkeypatch.setenv("AWF_API_TOKEN", "")
             get_settings.cache_clear()
 
             unconfigured = await client.get("/v1/operations")

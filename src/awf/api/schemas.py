@@ -73,28 +73,6 @@ class MergeCandidateReadinessResponse(BaseModel):
     stale_reason: str | None = None
 
 
-class WorkspaceCreateRequest(BaseModel):
-    """Input for ``POST /v1/workspaces`` and ``awf_create_workspace`` (MCP).
-
-    Fields are grouped logically; see docs/PLAN_MVP.md § API surface.
-    """
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    repo_url: Annotated[str, Field(min_length=1, max_length=512)]
-    branch_base: Annotated[str, Field(default="development", min_length=1, max_length=256)]
-
-    task_title: Annotated[str, Field(min_length=1, max_length=512)]
-    task_prompt: Annotated[str, Field(min_length=1, max_length=16384)]
-    task_external_id: Annotated[str | None, Field(default=None, max_length=128)]
-
-    agent: AgentRuntime = Field(default=AgentRuntime.codex)
-    env_profile: Annotated[str | None, Field(default=None, max_length=128)]
-
-    test_commands: list[str] = Field(default_factory=list)
-    requires_database: bool = False
-
-
 class WorkspaceV2Repo(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -190,8 +168,8 @@ class WorkspaceV2Resources(BaseModel):
     disk_mb: int | None = Field(default=None, gt=0)
 
 
-class WorkspaceCreateV2Request(BaseModel):
-    """Clean v2 workspace creation contract."""
+class WorkspaceCreateRequest(BaseModel):
+    """Canonical workspace creation contract for ``POST /v1/workspaces``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -205,6 +183,87 @@ class WorkspaceCreateV2Request(BaseModel):
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
     )
     preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_flat_payload(cls, data: object) -> object:
+        """Accept old local flat payloads while exposing one rich public schema.
+
+        AWF is pre-stable, so docs and OpenAPI advertise only the rich v1
+        contract. This compatibility adapter keeps older tests and local callers
+        from failing abruptly during the cleanup window.
+        """
+        if not isinstance(data, dict) or "repo" in data:
+            return data
+        if "repo_url" not in data:
+            return data
+
+        allowed_keys = {
+            "repo_url",
+            "branch_base",
+            "task_title",
+            "task_prompt",
+            "task_external_id",
+            "agent",
+            "env_profile",
+            "test_commands",
+            "requires_database",
+        }
+        extras = {key: value for key, value in data.items() if key not in allowed_keys}
+        coerced: dict[str, object] = {
+            "repo": {
+                "url": data.get("repo_url"),
+                "base_branch": data.get("branch_base", "development"),
+            },
+            "task": {
+                "title": data.get("task_title"),
+                "prompt": data.get("task_prompt"),
+                "agent": data.get("agent", AgentRuntime.codex),
+                "external_id": data.get("task_external_id"),
+                "kind": "feature_branch_pr",
+            },
+            "workspace": {"profile_ref": data.get("env_profile") or "auto", "profile": None},
+            "validation": {"commands": data.get("test_commands", []), "requested_tier": 1},
+            "resources": {},
+            **extras,
+        }
+        return coerced
+
+    @property
+    def repo_url(self) -> str:
+        return self.repo.url
+
+    @property
+    def branch_base(self) -> str:
+        return self.repo.base_branch
+
+    @property
+    def task_title(self) -> str:
+        return self.task.title
+
+    @property
+    def task_prompt(self) -> str:
+        return self.task.prompt
+
+    @property
+    def task_external_id(self) -> str | None:
+        return self.task.external_id
+
+    @property
+    def agent(self) -> AgentRuntime:
+        return self.task.agent
+
+    @property
+    def env_profile(self) -> str | None:
+        return self.workspace.profile_ref
+
+    @property
+    def test_commands(self) -> list[str]:
+        return self.validation.commands
+
+    @property
+    def requires_database(self) -> bool:
+        return False
 
 
 class PullRequestMonitorAdoptionRequest(BaseModel):

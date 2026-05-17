@@ -500,7 +500,7 @@ class PullRequestMonitorRunner:
         self._worktrees_root = worktrees_root
         self._work_dir = _infer_service_work_dir(worktrees_root)
         # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
-        # per terminal transition. Default layout matches ``run_awf.py``'s
+        # per terminal transition. Default layout matches the local service
         # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
         # is ``<work_dir>/git/worktrees``, go up two levels.
         self._artifacts_root = artifacts_root or (worktrees_root.parents[1] / "artifacts")
@@ -1181,9 +1181,9 @@ class PullRequestMonitorRunner:
                             f"(task_kind={ws.task_kind}, branch_name="
                             f"{ws.branch_name!r}). For sync workspaces "
                             "predating the remote_push_branch migration, "
-                            "re-attach the monitor via "
-                            "attach_feature_pr_monitor.py so a fresh row "
-                            "is provisioned with the column populated."
+                            "adopt the PR again through the API/CLI/MCP "
+                            "adoption surface so a fresh row is provisioned "
+                            "with the column populated."
                         ),
                     )
                     return

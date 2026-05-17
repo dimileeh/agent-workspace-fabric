@@ -127,11 +127,13 @@ async def test_core_release_readiness_rejects_invalid_provider_names(mcp) -> Non
 
 _CREATE_ARGS: dict[str, object] = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
-    "branch_base": "development",
+    "base_branch": "development",
     "task_title": "Add docstring",
     "task_prompt": "Add a one-line docstring to src/module/__init__.py.",
     "agent": "codex",
-    "test_commands": ["pytest -q"],
+    "validation_commands": ["pytest -q"],
+    "provider_readiness_override": True,
+    "provider_readiness_override_reason": "mcp default create fixture",
 }
 
 
@@ -255,7 +257,7 @@ class TestToolRegistration:
             "awf_adopt_pull_request_monitor",
         } <= names
         assert {
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             "awf_get_workspace_runtime",
             "awf_list_workspace_operations",
             "awf_list_workspace_events",
@@ -374,12 +376,12 @@ class TestToolRegistration:
         assert "expected_version" not in rebase_required
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
+    async def test_create_workspace_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = await mcp.list_tools()
-        create_v2 = next(tool for tool in tools if tool.name == "awf_create_workspace_v2")
-        owned_paths = create_v2.inputSchema["properties"]["owned_paths"]
-        out_of_scope_changes = create_v2.inputSchema["properties"]["out_of_scope_changes"]
-        provider_recovery = create_v2.inputSchema["properties"]["provider_recovery"]
+        create = next(tool for tool in tools if tool.name == "awf_create_workspace")
+        owned_paths = create.inputSchema["properties"]["owned_paths"]
+        out_of_scope_changes = create.inputSchema["properties"]["out_of_scope_changes"]
+        provider_recovery = create.inputSchema["properties"]["provider_recovery"]
 
         assert owned_paths["maxItems"] == 128
         assert owned_paths["items"] == {
@@ -389,11 +391,9 @@ class TestToolRegistration:
         }
         assert _optional_object_schema(out_of_scope_changes)["type"] == "object"
         assert _optional_object_schema(provider_recovery)["type"] == "object"
+        assert create.inputSchema["properties"]["provider_readiness_override"]["default"] is False
         assert (
-            create_v2.inputSchema["properties"]["provider_readiness_override"]["default"] is False
-        )
-        assert (
-            create_v2.inputSchema["properties"]["provider_readiness_override_reason"]["default"]
+            create.inputSchema["properties"]["provider_readiness_override_reason"]["default"]
             is None
         )
 
@@ -924,82 +924,6 @@ class TestOperationTools:
         assert [item["type"] for item in payload["items"]] == ["validate"]
 
 
-class TestCreateWorkspace:
-    @pytest.mark.unit
-    async def test_happy_path_returns_accepted_payload(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        payload = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-
-        assert isinstance(payload, dict)
-        workspace_id = str(payload["workspace_id"])
-        assert payload["status"] == "requested"
-        assert workspace_id.startswith("ws_")
-        assert payload["status_url"] == f"/v1/workspaces/{workspace_id}"
-        assert payload["events_url"] == f"/v1/workspaces/{workspace_id}/events"
-        assert "accepted_at" in payload
-        assert "id" not in payload
-        assert "task_title" not in payload
-
-    @pytest.mark.unit
-    async def test_idempotency_key_replays_or_conflicts(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        args = {**_CREATE_ARGS, "idempotency_key": "mcp-create-v1-replay"}
-
-        first = await _call(mcp, "awf_create_workspace", args)
-        replay = await _call(mcp, "awf_create_workspace", args)
-        conflict = await mcp.call_tool(
-            "awf_create_workspace",
-            {**args, "task_title": "Changed MCP idempotency title"},
-        )
-
-        assert isinstance(first, dict)
-        assert isinstance(replay, dict)
-        assert _workspace_id(replay) == _workspace_id(first)
-        assert isinstance(conflict, CallToolResult)
-        assert conflict.isError is True
-        assert conflict.structuredContent is not None
-        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
-
-    @pytest.mark.parametrize(
-        ("changed_field", "changed_value"),
-        [
-            ("env_profile", "profile-b"),
-            ("task_external_id", "TASK-B"),
-        ],
-    )
-    @pytest.mark.unit
-    async def test_v1_idempotency_conflicts_on_profile_and_external_id(
-        self,
-        mcp,
-        changed_field: str,
-        changed_value: str,
-    ) -> None:  # type: ignore[no-untyped-def]
-        args = {
-            **_CREATE_ARGS,
-            "env_profile": "profile-a",
-            "task_external_id": "TASK-A",
-            "idempotency_key": "mcp-create-v1-user-fields",
-        }
-
-        first = await _call(mcp, "awf_create_workspace", args)
-        conflict = await mcp.call_tool(
-            "awf_create_workspace",
-            {**args, changed_field: changed_value},
-        )
-
-        assert isinstance(first, dict)
-        assert isinstance(conflict, CallToolResult)
-        assert conflict.isError is True
-        assert conflict.structuredContent is not None
-        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
-
-    @pytest.mark.unit
-    async def test_rejects_unknown_agent(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        bad = {**_CREATE_ARGS, "agent": "not-a-real-cli"}
-        from mcp.shared.exceptions import McpError  # imported lazily to keep top clean
-
-        with pytest.raises((McpError, Exception)):
-            await _call(mcp, "awf_create_workspace", bad)
-
-
 class _RecordingControlService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1329,21 +1253,21 @@ class TestWorkspaceControls:
         }
 
 
-class TestCreateWorkspaceV2:
+class TestCreateWorkspace:
     @pytest.fixture(autouse=True)
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for key in _PROVIDER_AUTH_ENV_KEYS:
             monkeypatch.delenv(key, raising=False)
 
     @pytest.mark.unit
-    async def test_persists_clean_v2_contract_fields(
+    async def test_persists_canonical_create_contract_fields(
         self,
         mcp,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:  # type: ignore[no-untyped-def]
         payload = await _call(
             mcp,
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/app.git",
                 "base_branch": "main",
@@ -1427,7 +1351,7 @@ class TestCreateWorkspaceV2:
     ) -> None:  # type: ignore[no-untyped-def]
         created = await _call(
             mcp,
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/docs.git",
                 "base_branch": "main",
@@ -1454,7 +1378,7 @@ class TestCreateWorkspaceV2:
         assert listed[0]["owned_paths"] == ["README.md", "docs/**"]
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_returns_structured_provider_preflight_error(
+    async def test_create_workspace_returns_structured_provider_preflight_error(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1470,7 +1394,7 @@ class TestCreateWorkspaceV2:
         mcp = build_mcp_server(service=service)
 
         result = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/docs.git",
                 "base_branch": "main",
@@ -1489,7 +1413,7 @@ class TestCreateWorkspaceV2:
         assert preflight["blocks_launch"] is True
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_rejects_insufficient_disk_without_creating_row(
+    async def test_create_workspace_rejects_insufficient_disk_without_creating_row(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1505,7 +1429,7 @@ class TestCreateWorkspaceV2:
         )
 
         result = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/docs.git",
                 "base_branch": "main",
@@ -1526,7 +1450,7 @@ class TestCreateWorkspaceV2:
         assert rows == []
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_idempotency_key_still_checks_disk_for_new_workspace(
+    async def test_create_workspace_idempotency_key_still_checks_disk_for_new_workspace(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1542,7 +1466,7 @@ class TestCreateWorkspaceV2:
         )
 
         result = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/docs.git",
                 "base_branch": "main",
@@ -1564,7 +1488,7 @@ class TestCreateWorkspaceV2:
         assert rows == []
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_override_returns_preflight_summary(
+    async def test_create_workspace_override_returns_preflight_summary(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1581,7 +1505,7 @@ class TestCreateWorkspaceV2:
 
         payload = await _call(
             mcp,
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/docs.git",
                 "base_branch": "main",
@@ -1599,7 +1523,7 @@ class TestCreateWorkspaceV2:
         assert preflight["override_reason"] == "operator verified local auth"
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_idempotency_key_replays_or_conflicts(
+    async def test_create_workspace_idempotency_key_replays_or_conflicts(
         self,
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
@@ -1613,10 +1537,10 @@ class TestCreateWorkspaceV2:
             "provider_readiness_override_reason": "mcp idempotency test fixture",
         }
 
-        first = await _call(mcp, "awf_create_workspace_v2", args)
-        replay = await _call(mcp, "awf_create_workspace_v2", args)
+        first = await _call(mcp, "awf_create_workspace", args)
+        replay = await _call(mcp, "awf_create_workspace", args)
         conflict = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {**args, "task_title": "Changed MCP idempotency title"},
         )
 
@@ -1629,7 +1553,7 @@ class TestCreateWorkspaceV2:
         assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_idempotency_replay_skips_disk_check(
+    async def test_create_workspace_idempotency_replay_skips_disk_check(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -1660,8 +1584,8 @@ class TestCreateWorkspaceV2:
             "provider_readiness_override_reason": "mcp idempotency disk test fixture",
         }
 
-        first = await _call(mcp, "awf_create_workspace_v2", args)
-        replay = await _call(mcp, "awf_create_workspace_v2", args)
+        first = await _call(mcp, "awf_create_workspace", args)
+        replay = await _call(mcp, "awf_create_workspace", args)
 
         assert isinstance(first, dict)
         assert isinstance(replay, dict)
@@ -1669,7 +1593,7 @@ class TestCreateWorkspaceV2:
         assert calls == 1
 
     @pytest.mark.unit
-    async def test_create_workspace_v2_external_id_scope_conflict_returns_structured_error(
+    async def test_create_workspace_external_id_scope_conflict_returns_structured_error(
         self,
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
@@ -1684,9 +1608,9 @@ class TestCreateWorkspaceV2:
             "provider_readiness_override_reason": "mcp external id conflict test fixture",
         }
 
-        created = await _call(mcp, "awf_create_workspace_v2", args)
+        created = await _call(mcp, "awf_create_workspace", args)
         conflict = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {**args, "base_branch": "release/next"},
         )
 
@@ -1721,7 +1645,7 @@ class TestCreateWorkspaceV2:
         mcp = build_mcp_server(service=service)
         created = await _call(
             mcp,
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/retry.git",
                 "base_branch": "main",
@@ -1838,7 +1762,7 @@ class TestCreateWorkspaceV2:
         from mcp.types import CallToolResult
 
         result = await mcp.call_tool(
-            "awf_create_workspace_v2",
+            "awf_create_workspace",
             {
                 "repo_url": "git@github.com:example/app.git",
                 "base_branch": "main",

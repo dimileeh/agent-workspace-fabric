@@ -79,8 +79,8 @@ async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     return str(response.json()["workspace_id"])
 
 
-async def _create_v2_policy_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v2/workspaces", json=_V2_POLICY_BODY)
+async def _create_policy_workspace(client: AsyncClient) -> str:
+    response = await client.post("/v1/workspaces", json=_V2_POLICY_BODY)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -182,7 +182,7 @@ class TestConsoleViews:
         self,
         client: AsyncClient,
     ) -> None:
-        workspace_id = await _create_v2_policy_workspace(client)
+        workspace_id = await _create_policy_workspace(client)
 
         tasks = await client.get("/v1/tasks")
         overview = await client.get("/v1/workspaces/overview")

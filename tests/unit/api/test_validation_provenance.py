@@ -125,14 +125,14 @@ def test_validation_provenance_command_lookup_includes_database_hooks() -> None:
     assert lookup[("db_refresh", 1)] == "python scripts/db_refresh.py"
 
 
-async def _create_v2_profile_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v2/workspaces", json=_V2_PROFILE_BODY, headers=_AUTH_HEADERS)
+async def _create_profile_workspace(client: AsyncClient) -> str:
+    response = await client.post("/v1/workspaces", json=_V2_PROFILE_BODY, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
 
-async def _create_v2_workspace_with_body(client: AsyncClient, body: dict) -> str:
-    response = await client.post("/v2/workspaces", json=body, headers=_AUTH_HEADERS)
+async def _create_workspace_with_body(client: AsyncClient, body: dict) -> str:
+    response = await client.post("/v1/workspaces", json=body, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -301,10 +301,13 @@ async def _attach_merge_candidate(
             task_class=workspace.task_class,
             owned_paths=list(workspace.owned_paths),
         )
-        attempt = await TaskAttemptRepository(session).create_for_workspace(
-            task=task,
-            workspace=workspace,
-        )
+        attempt_repo = TaskAttemptRepository(session)
+        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+        if attempt is None:
+            attempt = await attempt_repo.create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
         attempt.is_canonical_for_merge = True
         candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
             task=task,
@@ -470,7 +473,7 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_profile_workspace(client)
+    workspace_id = await _create_profile_workspace(client)
     await _mark_workspace_completed(engine, workspace_id)
     await _create_stream_pair(
         engine,
@@ -889,7 +892,7 @@ async def test_validation_provenance_resolves_profile_commands_by_phase_index(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,
@@ -955,7 +958,7 @@ async def test_validation_provenance_displays_http_healthcheck_target(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,
@@ -1002,7 +1005,7 @@ async def test_validation_provenance_resolves_coverage_command_from_profile(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,

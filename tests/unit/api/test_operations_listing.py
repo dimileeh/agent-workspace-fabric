@@ -970,7 +970,7 @@ async def test_unauthenticated_operation_reads_rejected(
 
     try:
         get_settings.cache_clear()
-        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWF_API_TOKEN", "")
         for path in [
             "/v1/operations",
             "/v1/operations/op_missing",

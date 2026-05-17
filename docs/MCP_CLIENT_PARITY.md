@@ -22,13 +22,13 @@ omitted this argument or sent `null` must pass a stable non-empty key for each
 operator action. This mirrors the REST `Idempotency-Key` requirement for the
 same control routes; `expected_version` remains optional and maps to `If-Match`.
 
-**MCP create idempotency note:** `awf_create_workspace` and
-`awf_create_workspace_v2` accept a schema-optional `idempotency_key` argument.
+**MCP create idempotency note:** `awf_create_workspace` accepts a
+schema-optional `idempotency_key` argument.
 The key maps to REST `Idempotency-Key`: same key and same effective create
 payload returns the existing workspace, while same key and changed payload
 returns structured `IDEMPOTENCY_CONFLICT`.
 
-**MCP create effort field note:** The agent `effort` field is intentionally excluded from `awf_create_workspace`, `awf_create_workspace_v2`, and the CLI `awf workspace create` command. It is explicitly provider-derived and resolved via the workspace profile or provider defaults, not supplied as a direct user input flag.
+**MCP create effort field note:** The agent `effort` field is intentionally excluded from `awf_create_workspace` and the CLI `awf workspace create` command. It is explicitly provider-derived and resolved via the workspace profile or provider defaults, not supplied as a direct user input flag.
 
 **MCP log and operation response migration note:** MCP log and operation tools
 now use REST-compatible response models. `awf_read_workspace_log` returns
@@ -55,8 +55,7 @@ top-level list.
 
 | Capability | Canonical REST surface | CLI surface | MCP tool name | Schema / Error-Code Contract | Security Boundary | Status | Backlog Slice |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Workspace create v1 | `POST /v1/workspaces` | CLI absent | `awf_create_workspace` | `WorkspaceAcceptedResponse`; IDEMPOTENCY_CONFLICT | `require_api_token`; MCP create accepts optional `idempotency_key`; no shell, no exec | MCP implemented | — |
-| Workspace create v2 | `POST /v2/workspaces` | `awf workspace create` | `awf_create_workspace_v2` | `WorkspaceAcceptedResponse`; IDEMPOTENCY_CONFLICT, INVALID_PROFILE, TASK_EXTERNAL_ID_CONFLICT, INSUFFICIENT_DISK | `require_api_token`; MCP create accepts optional `idempotency_key`; no shell, no exec | MCP implemented | — |
+| Workspace create | `POST /v1/workspaces` | `awf workspace create` | `awf_create_workspace` | `WorkspaceAcceptedResponse`; IDEMPOTENCY_CONFLICT, INVALID_PROFILE, TASK_EXTERNAL_ID_CONFLICT, INSUFFICIENT_DISK | `require_api_token`; MCP create accepts optional `idempotency_key`; no shell, no exec | MCP implemented | — |
 | Workspace list and get | `GET /v1/workspaces`, `GET /v1/workspaces/{workspace_id}` | `awf workspace list`, `awf workspace show` | `awf_list_workspaces`, `awf_get_workspace`, `awf_wait_for_workspace` | `WorkspaceResponse` | `require_api_token`; MCP bounded reads only | MCP implemented | — |
 | Existing PR monitor adoption | `POST /v1/workspaces/adopt-pr` | `awf workspace adopt-pr --repo owner/repo --pr 123`; `awf workspace adopt-pr --pr-url https://github.com/owner/repo/pull/123` | `awf_adopt_pull_request_monitor` | `PullRequestMonitorAdoptionResponse`; PR_ADOPTION_INPUT_REQUIRED, INVALID_GITHUB_REPO, PR_NOT_FOUND, PR_ALREADY_CLOSED, PR_ALREADY_MERGED, PR_METADATA_FETCH_FAILED, PR_METADATA_INVALID, PR_ADOPTION_POLICY_CONFLICT | `require_api_token`; MCP: audited control-plane adoption only, no shell, no exec | MCP implemented | — |
 | Workspace overview | `GET /v1/workspaces/overview` | CLI absent | `awf_list_workspace_overview` | `WorkspaceOverviewListResponse` | `require_api_token` | MCP implemented | — |
@@ -94,8 +93,8 @@ top-level list.
 ## MCP Security Boundary
 
 MCP may expose AWF-managed runtime snapshots, durable logs, artifact metadata,
-bounded artifact content if explicitly implemented later, operations, metrics,
-health, readiness, and audited safe control-plane operations.
+bounded artifact content, operations, metrics, health, readiness, and audited
+safe control-plane operations.
 
 MCP must expose AWF controls, not arbitrary shell. It must not provide
 unrestricted Docker exec, raw container exec, host filesystem browsing,

@@ -77,7 +77,7 @@ class TestWorkspaceCreate:
 
         args, kwargs = mock.call_args
         assert args[0] == "POST"
-        assert args[1].endswith("/v2/workspaces")
+        assert args[1].endswith("/v1/workspaces")
         body = kwargs["json"]
         assert body["repo"]["url"] == "git@github.com:x/y.git"
         assert body["task"]["title"] == "Add docs"

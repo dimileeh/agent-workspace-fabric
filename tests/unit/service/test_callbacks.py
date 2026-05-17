@@ -8,6 +8,7 @@ import functools
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from awf.db.enums import CallbackDeliveryStatus, OperationStatus, OperationType,
 from awf.db.models import CallbackDelivery, MergeCandidate, WorkspaceEvent
 from awf.db.repositories import (
     CallbackDeliveryRepository,
+    CallbackIdempotencyConflictError,
     CallbackSubscriptionRepository,
     MergeCandidateRepository,
     OperationRepository,
@@ -83,6 +85,43 @@ async def test_callback_service_persisted_key_replay_is_explicit_locked_replay_p
         ("primary-replay", "operator-console"),
         ("persisted-key-replay", "operator-console"),
     ]
+
+
+@pytest.mark.unit
+async def test_callback_service_replay_helpers_surface_hashes_and_conflicts(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(_env_file=None, api_token="callback-test-token")
+    service = CallbackService(factory, settings=settings)
+    payload = CallbackSubscriptionCreateRequest(
+        name="operator-console",
+        target_url="https://operator.example.com/awf/events",
+        event_types=["workspace.*"],
+    )
+    existing = await service.register(payload, idempotency_key="callback-service-replay")
+
+    assert (
+        await service.get_idempotency_request_hash("callback-service-replay")
+        == existing.request_hash
+    )
+    replay_keys = await service.list_idempotency_replay_keys(limit=10)
+    assert ("callback-service-replay", existing.request_hash) in replay_keys
+    replayed = await service.replay_existing(
+        payload,
+        idempotency_key="callback-service-replay",
+    )
+    assert replayed is not None and replayed.id == existing.id
+
+    conflicting_payload = CallbackSubscriptionCreateRequest(
+        name="operator-console-conflict",
+        target_url="https://operator.example.com/awf/events",
+        event_types=["workspace.*"],
+    )
+    with pytest.raises(CallbackIdempotencyConflictError):
+        await service.replay_existing(
+            conflicting_payload,
+            idempotency_key="callback-service-replay",
+        )
 
 
 @pytest.fixture
@@ -1258,6 +1297,119 @@ def test_callback_target_validation_executor_shutdown_closes_and_resets(
 
 
 @pytest.mark.unit
+def test_callback_target_validation_executor_rejects_invalid_worker_count() -> None:
+    with pytest.raises(ValueError, match="max_workers"):
+        callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+            max_workers=0,
+            thread_name_prefix="test-callback-dns",
+        )
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_rejects_submit_after_shutdown() -> None:
+    executor = callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+        max_workers=1,
+        thread_name_prefix="test-callback-dns",
+    )
+    executor.shutdown(wait=True)
+
+    with pytest.raises(RuntimeError, match="shutdown"):
+        executor.submit(lambda: "late")
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_cancels_pending_work_items() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    executor = callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+        max_workers=1,
+        thread_name_prefix="test-callback-dns",
+    )
+
+    def _blocking_work() -> bool:
+        started.set()
+        return release.wait(timeout=1.0)
+
+    first = executor.submit(_blocking_work)
+    assert started.wait(timeout=1.0)
+    second = executor.submit(lambda: "pending")
+
+    executor.shutdown(wait=False, cancel_futures=True)
+    release.set()
+
+    assert first.result(timeout=1.0) is True
+    assert second.cancelled() is True
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_cancels_queued_sentinel_safely() -> None:
+    executor = callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+        max_workers=1,
+        thread_name_prefix="test-callback-dns",
+    )
+    future: concurrent.futures.Future[str] = concurrent.futures.Future()
+    executor._work_queue.put(None)  # noqa: SLF001
+    executor._work_queue.put(  # noqa: SLF001
+        callback_service_module._CallbackTargetValidationWorkItem(  # noqa: SLF001
+            future=future,
+            function=lambda: "cancelled",
+            args=(),
+            kwargs={},
+        )
+    )
+
+    executor._cancel_pending_work_items_locked()  # noqa: SLF001
+
+    assert future.cancelled() is True
+    assert executor._work_queue.empty() is True  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_skips_pre_cancelled_work_item() -> None:
+    executor = callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+        max_workers=1,
+        thread_name_prefix="test-callback-dns",
+    )
+    future: concurrent.futures.Future[str] = concurrent.futures.Future()
+    future.cancel()
+    calls: list[str] = []
+    executor._work_queue.put(  # noqa: SLF001
+        callback_service_module._CallbackTargetValidationWorkItem(  # noqa: SLF001
+            future=future,
+            function=lambda: calls.append("ran"),
+            args=(),
+            kwargs={},
+        )
+    )
+    executor._work_queue.put(None)  # noqa: SLF001
+
+    executor._run_worker()  # noqa: SLF001
+
+    assert future.cancelled() is True
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_propagates_worker_exceptions() -> None:
+    executor = callback_service_module._CallbackTargetValidationExecutor(  # noqa: SLF001
+        max_workers=1,
+        thread_name_prefix="test-callback-dns",
+    )
+
+    def _raise() -> None:
+        raise RuntimeError("resolver failed")
+
+    try:
+        future = executor.submit(_raise)
+        with pytest.raises(RuntimeError, match="resolver failed"):
+            future.result(timeout=1.0)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert executor._threads == set()  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_validated_address_delivery_timeout_before_first_attempt_raises_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1479,6 +1631,42 @@ async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted
     assert "1.1.1.1 (TimeoutError)" in str(cause)
     assert "2.2.2.2 (TimeoutError)" in str(cause)
     assert "3.3.3.3" not in str(cause)
+
+
+@pytest.mark.unit
+async def test_validated_address_delivery_continues_after_unwrapped_attempt_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str | None] = []
+
+    async def _fake_attempt(
+        _poster: callback_service_module.CallbackHttpPoster,
+        _url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None,
+    ) -> CallbackPostResult:
+        del json, headers, timeout
+        attempts.append(connect_ip_address)
+        if connect_ip_address == "1.1.1.1":
+            raise ValueError("unexpected transport edge")
+        return CallbackPostResult(status_code=202)
+
+    monkeypatch.setattr(callback_service_module, "_run_callback_post_attempt", _fake_attempt)
+
+    result = await callback_service_module._post_to_validated_callback_addresses(
+        _RecordingPoster(status_code=204),
+        "https://operator.example.com/events",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=10.0,
+        connect_ip_addresses=("1.1.1.1", "2.2.2.2"),
+    )
+
+    assert result == CallbackPostResult(status_code=202)
+    assert attempts == ["1.1.1.1", "2.2.2.2"]
 
 
 @pytest.mark.unit

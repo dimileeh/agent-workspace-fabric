@@ -16,7 +16,6 @@ from awf.common.github_client import GitHubClient, GitHubClientError
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from scripts import run_awf
 from tests.postgres import create_postgres_test_engine
 
 # ── github_client error paths ──────────────────────────────────────────────
@@ -361,93 +360,6 @@ class TestGitManagerEmptyRefSkip:
             )
 
 
-# ── run_awf _main's "status != completed without failure_reason" ──────────
-
-
-class TestRunAwfIncompleteNoFailureReason:
-    @pytest.mark.unit
-    async def test_non_completed_status_without_reason_flips_exit_to_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Line 1072: a task result whose status isn't 'completed' but
-        also has no failure_reason is odd (state machine never reached
-        completed nor was it explicitly marked failed). Still exits 1
-        so the operator notices."""
-        config = tmp_path / "tasks.json"
-        config.write_text(
-            '[{"repo_url": "git@github.com:x/y.git", "branch_base": "development", '
-            '"task_title": "weird", "task_prompt": "p", "agent": "codex", '
-            '"test_commands": [], "requires_database": false}]'
-        )
-
-        async def _fake_run_task_with_guard(cfg, **kwargs):  # type: ignore[no-untyped-def]
-            return {
-                "workspace_id": "ws_weird",
-                "title": "weird",
-                # Odd state: not completed, but no failure_reason either.
-                "status": "cancelled",
-                "pr_url": None,
-                "failure_reason": None,
-                "failure_message": None,
-                "branch": "awf/weird",
-                "base_commit": "a" * 40,
-            }
-
-        monkeypatch.setattr(run_awf, "_run_task_with_failure_guard", _fake_run_task_with_guard)
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-
-        rc = await run_awf._main(
-            config_path=config,
-            work_dir=tmp_path / "work",
-            keep_state=True,
-        )
-        assert rc == 1
-
-
 # validation display tests live in tests/unit/test_polish_small_gaps.py,
 # where they drive ``ValidationRunner._exec`` directly with a fake
 # runner instead of reimplementing the formatting logic.
-
-
-# ── attach_feature_pr_monitor._main ────────────────────────────────────────
-
-
-class TestAttachFeaturePrMain:
-    @pytest.mark.unit
-    async def test_main_invokes_supported_adoption_flow_by_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The legacy helper now delegates to the supported API adoption flow."""
-        import argparse
-
-        from scripts import attach_feature_pr_monitor as mod
-
-        captured: dict[str, Any] = {}
-
-        async def _fake_adopt(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(mod, "orchestrate_service_adoption", _fake_adopt)
-
-        ns = argparse.Namespace(
-            repo="git@github.com:dimileeh/aira-web.git",
-            pr=277,
-            agent="codex",
-            auto_merge=False,
-            companions=None,
-            work_dir=tmp_path,
-            base_url="http://awf.local",
-            api_token="secret",
-            legacy_detached=False,
-            pr_url=None,
-        )
-        rc = await mod._main(ns)
-        assert rc == 0
-        assert captured["repo_url"] == "git@github.com:dimileeh/aira-web.git"
-        assert captured["pr_number"] == 277
-        assert captured["agent"] == "codex"
-        assert captured["base_url"] == "http://awf.local"
-        assert captured["api_token"] == "secret"

@@ -34,7 +34,6 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceArtifactReadResponse,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
     WorkspaceEventListResponse,
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
@@ -194,59 +193,6 @@ def build_mcp_server(
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
         repo_url: str = Field(..., description="Git URL the workspace should check out."),
-        task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
-        task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
-        branch_base: str = Field(
-            default="development",
-            description="Branch to branch FROM; feature branch is created off it.",
-        ),
-        agent: AgentRuntime = Field(
-            default=AgentRuntime.codex,
-            description="Which coding CLI to run inside the container.",
-        ),
-        test_commands: list[str] = Field(
-            default_factory=list,
-            description="Shell commands to validate the change (e.g. ['pytest -q']).",
-        ),
-        requires_database: bool = Field(
-            default=False,
-            description="If True, AWF runs `alembic upgrade head` before test_commands.",
-        ),
-        env_profile: str | None = Field(
-            default=None, description="Optional named env profile (e.g. 'aira-dev')."
-        ),
-        task_external_id: str | None = Field(
-            default=None, description="Optional caller-side task ID for correlation."
-        ),
-        idempotency_key: str | None = Field(
-            default=None,
-            description="Optional replay key matching the REST Idempotency-Key header.",
-        ),
-    ) -> StructuredToolResult:
-        """Create a new AWF workspace. Returns the accepted workspace payload."""
-        req = WorkspaceCreateRequest(
-            repo_url=repo_url,
-            branch_base=branch_base,
-            task_title=task_title,
-            task_prompt=task_prompt,
-            agent=agent,
-            test_commands=test_commands,
-            requires_database=requires_database,
-            env_profile=env_profile,
-            task_external_id=task_external_id,
-        )
-        try:
-            response = await service.create(
-                req,
-                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
-            )
-        except WorkspaceCreateIdempotencyConflictError as exc:
-            return _workspace_error_result(exc)
-        return _tool_result(_workspace_accepted_payload(response))
-
-    @mcp.tool(name="awf_create_workspace_v2")
-    async def awf_create_workspace_v2(
-        repo_url: str = Field(..., description="Git URL the workspace should check out."),
         base_branch: str = Field(
             default="main",
             description="Branch to branch FROM; feature branch is created off it.",
@@ -346,8 +292,8 @@ def build_mcp_server(
             description="Optional replay key matching the REST Idempotency-Key header.",
         ),
     ) -> StructuredToolResult:
-        """Create a new AWF workspace using the clean v2 contract."""
-        req = WorkspaceCreateV2Request(
+        """Create a new AWF workspace using the canonical rich v1 contract."""
+        req = WorkspaceCreateRequest(
             repo={"url": repo_url, "base_branch": base_branch},
             task={
                 k: v
@@ -398,7 +344,7 @@ def build_mcp_server(
             )
 
         try:
-            ws = await service.create_v2(
+            ws = await service.create(
                 req,
                 idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
                 disk_check_factory=resolve_disk_check,

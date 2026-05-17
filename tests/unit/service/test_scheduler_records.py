@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -29,8 +29,8 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
-def _request() -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
+def _request() -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/service.git", "base_branch": "main"},
         task={
             "title": "Persist admission",
@@ -57,7 +57,7 @@ def _request() -> WorkspaceCreateV2Request:
     )
 
 
-def _dind_request() -> WorkspaceCreateV2Request:
+def _dind_request() -> WorkspaceCreateRequest:
     data = _request().model_dump(mode="python")
     data["workspace"] = {
         "profile_ref": "inline",
@@ -66,7 +66,7 @@ def _dind_request() -> WorkspaceCreateV2Request:
             "docker": {"mode": "dind"},
         },
     }
-    return WorkspaceCreateV2Request.model_validate(data)
+    return WorkspaceCreateRequest.model_validate(data)
 
 
 def _resource_request(
@@ -78,7 +78,7 @@ def _resource_request(
     peak_memory_gb: float,
     disk_mb: int,
     dind: bool = False,
-) -> WorkspaceCreateV2Request:
+) -> WorkspaceCreateRequest:
     data = _request().model_dump(mode="python")
     data["task"]["title"] = title
     data["resources"] = {
@@ -96,7 +96,7 @@ def _resource_request(
                 "docker": {"mode": "dind"},
             },
         }
-    return WorkspaceCreateV2Request.model_validate(data)
+    return WorkspaceCreateRequest.model_validate(data)
 
 
 def _disk_check() -> DiskCheck:
@@ -116,7 +116,7 @@ def _disk_check() -> DiskCheck:
 
 
 @pytest.mark.unit
-async def test_create_v2_writes_admitted_decision_and_local_reservation(
+async def test_create_writes_admitted_decision_and_local_reservation(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,7 +129,7 @@ async def test_create_v2_writes_admitted_decision_and_local_reservation(
     monkeypatch.setattr(workspaces, "get_settings", lambda: settings)
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(_request())
+    created = await service.create(_request())
 
     async with factory() as session:
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(created.id)
@@ -245,7 +245,7 @@ async def test_create_v2_writes_admitted_decision_and_local_reservation(
 
 
 @pytest.mark.unit
-async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
+async def test_create_writes_resource_summary_with_disk_dind_and_capacity(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     settings = Settings(
@@ -255,7 +255,7 @@ async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
         local_capacity_dind_slots=2,
     )
     async with factory() as session:
-        created = await workspaces.create_workspace_v2_row(
+        created = await workspaces.create_workspace_row(
             session,
             _dind_request(),
             settings=settings,
@@ -316,7 +316,7 @@ async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
 
 
 @pytest.mark.unit
-async def test_create_v2_resource_summary_includes_existing_active_reservations(
+async def test_create_resource_summary_includes_existing_active_reservations(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     settings = Settings(
@@ -326,7 +326,7 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
         local_capacity_dind_slots=2,
     )
     async with factory() as session:
-        await workspaces.create_workspace_v2_row(
+        await workspaces.create_workspace_row(
             session,
             _resource_request(
                 title="active-one",
@@ -339,7 +339,7 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
             settings=settings,
             disk_check=_disk_check(),
         )
-        await workspaces.create_workspace_v2_row(
+        await workspaces.create_workspace_row(
             session,
             _resource_request(
                 title="active-two",
@@ -353,7 +353,7 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
             settings=settings,
             disk_check=_disk_check(),
         )
-        created = await workspaces.create_workspace_v2_row(
+        created = await workspaces.create_workspace_row(
             session,
             _dind_request(),
             settings=settings,
@@ -409,12 +409,12 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
 
 
 @pytest.mark.unit
-async def test_create_v2_overlap_stays_advisory_with_resource_summary(
+async def test_create_overlap_stays_advisory_with_resource_summary(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with factory() as session:
-        first = await workspaces.create_workspace_v2_row(session, _request())
-        second = await workspaces.create_workspace_v2_row(session, _request())
+        first = await workspaces.create_workspace_row(session, _request())
+        second = await workspaces.create_workspace_row(session, _request())
         await session.commit()
 
     async with factory() as session:
@@ -436,7 +436,7 @@ async def test_terminal_workspace_control_releases_active_reservation(
         return None
 
     service = WorkspaceService(factory, project_stopper=noop_stopper)
-    created = await service.create_v2(_request())
+    created = await service.create(_request())
 
     await service.cancel_workspace(
         created.id,
@@ -459,7 +459,7 @@ async def test_terminal_destroy_releases_leaked_active_reservation_once(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    created = await service.create_v2(_request())
+    created = await service.create(_request())
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(created.id)

@@ -764,11 +764,11 @@ def test_readme_documents_local_disaster_recovery() -> None:
 
 
 @pytest.mark.unit
-def test_readme_documents_run_awf_compatibility_status() -> None:
+def test_getting_started_documents_service_worker_as_canonical_executor() -> None:
     readme = Path("docs/GETTING_STARTED.md").read_text()
     normalized_readme = " ".join(readme.split())
 
-    assert "`scripts/run_awf.py` is the compatibility dogfood runner" in normalized_readme
+    assert "Use `awf workspace create`" in normalized_readme
     assert "PostgreSQL control-plane DB" in normalized_readme
     assert "service worker is the normal always-on executor" in normalized_readme.lower()
 

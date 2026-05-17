@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import awf.common.config as common_config
 from awf.common.config import (
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
@@ -258,6 +259,25 @@ def test_production_guardrail_diagnostics_redact_sensitive_values() -> None:
     assert DEFAULT_LOCAL_DATABASE_URL not in rendered
     assert "awf_dev" not in rendered
     assert "local-dev-token" not in rendered
+
+
+@pytest.mark.unit
+def test_production_settings_error_without_diagnostics_has_generic_message() -> None:
+    assert str(ProductionSettingsError(())) == "Production settings validation failed."
+
+
+@pytest.mark.unit
+def test_settings_guardrail_helpers_handle_short_tokens_and_bracketed_hosts() -> None:
+    assert common_config._is_repeated_weak_api_token_value("api") is False  # noqa: SLF001
+    assert common_config._normalize_callback_allowed_host("   ") == ""  # noqa: SLF001
+    assert (
+        common_config._normalize_callback_allowed_host("[Operator.Example.COM]:8443")  # noqa: SLF001
+        == "operator.example.com"
+    )
+    assert (
+        common_config._normalize_callback_allowed_host("[Operator.Example.COM")  # noqa: SLF001
+        == "[operator.example.com"
+    )
 
 
 @pytest.mark.unit

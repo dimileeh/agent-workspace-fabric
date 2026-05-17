@@ -31,7 +31,6 @@ from awf.api.schemas import (
     WorkspaceAppEndpointResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
     WorkspaceEventResponse,
     WorkspaceLogStreamResponse,
     WorkspaceResponse,
@@ -455,8 +454,10 @@ class WorkspaceService:
         req: WorkspaceCreateRequest,
         *,
         idempotency_key: str | None = None,
+        disk_check: DiskCheck | None = None,
+        disk_check_factory: DiskCheckFactory | None = None,
     ) -> WorkspaceResponse:
-        """Create a workspace from the v1 request contract."""
+        """Create a workspace from the canonical rich request contract."""
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
             if idempotency_key is not None:
@@ -467,52 +468,12 @@ class WorkspaceService:
                         raise WorkspaceCreateIdempotencyConflictError()
                     return workspace_response(existing)
 
-            ws = await repo.create(
-                repo_url=req.repo_url,
-                branch_base=req.branch_base,
-                task_title=req.task_title,
-                task_prompt=req.task_prompt,
-                task_external_id=req.task_external_id,
-                task_class=None,
-                owned_paths=[],
-                agent=req.agent.value,
-                env_profile=req.env_profile,
-                test_commands=req.test_commands,
-                requires_database=req.requires_database,
-                idempotency_key=idempotency_key,
-            )
-            await s.commit()
-            return workspace_response(ws)
-
-    async def create_v2(
-        self,
-        req: WorkspaceCreateV2Request,
-        *,
-        idempotency_key: str | None = None,
-        disk_check: DiskCheck | None = None,
-        disk_check_factory: DiskCheckFactory | None = None,
-    ) -> WorkspaceResponse:
-        """Create a workspace from the v2 request contract with profile and policy support."""
-        async with self._factory() as s:
-            repo = WorkspaceRepository(s)
-            if idempotency_key is not None:
-                await repo.acquire_idempotency_key_lock(idempotency_key)
-                existing = await repo.get_by_idempotency_key(idempotency_key)
-                if existing is not None:
-                    if not workspace_create_v2_payload_matches(
-                        existing,
-                        req,
-                        settings=self._settings,
-                    ):
-                        raise WorkspaceCreateIdempotencyConflictError()
-                    return workspace_response(existing)
-
             if disk_check is None and disk_check_factory is not None:
                 disk_check = await _resolve_disk_check_factory(disk_check_factory)
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
-            ws = await create_workspace_v2_row(
+            ws = await create_workspace_row(
                 s,
                 req,
                 idempotency_key=idempotency_key,
@@ -1003,9 +964,9 @@ class WorkspaceService:
         )
 
 
-async def create_workspace_v2_row(
+async def create_workspace_row(
     session: AsyncSession,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
     *,
     idempotency_key: str | None = None,
     settings: Settings | None = None,
@@ -1014,11 +975,11 @@ async def create_workspace_v2_row(
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
 ) -> Workspace:
-    """Persist one v2 workspace request without committing the session."""
+    """Persist one rich workspace create request without committing the session."""
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
-    base_task_policy = v2_task_policy_snapshot(payload)
-    requested_profile, resolved_profile = v2_profile_snapshots(payload)
+    base_task_policy = workspace_create_task_policy_snapshot(payload)
+    requested_profile, resolved_profile = workspace_create_profile_snapshots(payload)
     preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=payload.task.agent,
@@ -1118,30 +1079,10 @@ async def create_workspace_v2_row(
 def workspace_create_payload_matches(
     existing: Workspace,
     payload: WorkspaceCreateRequest,
-) -> bool:
-    """Compare a persisted v1 workspace against an idempotent replay payload."""
-    if _has_v2_create_artifact(existing):
-        return False
-    return (
-        existing.repo_url == payload.repo_url
-        and existing.branch_base == payload.branch_base
-        and existing.task_title == payload.task_title
-        and existing.task_prompt == payload.task_prompt
-        and existing.task_external_id == payload.task_external_id
-        and existing.agent == payload.agent.value
-        and existing.env_profile == payload.env_profile
-        and list(existing.test_commands) == list(payload.test_commands)
-        and existing.requires_database == payload.requires_database
-    )
-
-
-def workspace_create_v2_payload_matches(
-    existing: Workspace,
-    payload: WorkspaceCreateV2Request,
     *,
     settings: Settings | None = None,
 ) -> bool:
-    """Compare user-authored v2 create fields for idempotent replay."""
+    """Compare user-authored create fields for idempotent replay."""
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
         if payload.workspace.profile is not None
@@ -1154,23 +1095,26 @@ def workspace_create_v2_payload_matches(
         and existing.task_title == payload.task.title
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
-        and existing.task_class == task_class
-        and _owned_path_hints_match(existing.owned_paths, payload.task.owned_paths)
+        and getattr(existing, "task_class", None) == task_class
+        and _owned_path_hints_match(
+            cast(Sequence[str], getattr(existing, "owned_paths", [])),
+            payload.task.owned_paths,
+        )
         and _stored_task_agent_model(existing) == payload.task.model
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
         == _requested_task_provider_recovery_policy(payload)
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
-        and existing.auto_merge == payload.task.auto_merge
+        and getattr(existing, "auto_merge", True) == payload.task.auto_merge
         and (
-            existing.initial_review_grace_period_seconds
+            getattr(existing, "initial_review_grace_period_seconds", None)
             == payload.task.initial_review_grace_period_seconds
         )
         and existing.agent == payload.task.agent.value
-        and existing.task_kind == payload.task.kind
+        and getattr(existing, "task_kind", "feature_branch_pr") == payload.task.kind
         and _profile_ref_matches(existing, payload)
-        and existing.requested_profile == requested_profile
+        and getattr(existing, "requested_profile", None) == requested_profile
         and _stored_validation_requested_tier_matches(existing, payload)
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
@@ -1178,21 +1122,27 @@ def workspace_create_v2_payload_matches(
     )
 
 
-def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateV2Request) -> bool:
-    """Check whether a stored workspace's profile reference matches a v2 create request."""
-    if existing.profile_ref is not None:
-        return existing.profile_ref == payload.workspace.profile_ref
+def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
+    """Check whether a stored workspace's profile reference matches a rich create request."""
+    existing_profile_ref = getattr(existing, "profile_ref", None)
+    if existing_profile_ref is not None:
+        return bool(existing_profile_ref == payload.workspace.profile_ref)
+    legacy_env_profile = getattr(existing, "env_profile", None)
+    if legacy_env_profile is not None:
+        return bool(legacy_env_profile == payload.workspace.profile_ref)
     if payload.workspace.profile_ref not in (None, "auto"):
         return False
-    if payload.workspace.profile_ref == "auto" and (
-        existing.requested_profile is not None or payload.workspace.profile is not None
-    ):
-        return False
-    return _has_v2_create_artifact(existing)
+    return not (
+        payload.workspace.profile_ref == "auto"
+        and (
+            getattr(existing, "requested_profile", None) is not None
+            or payload.workspace.profile is not None
+        )
+    )
 
 
-def _has_v2_create_artifact(existing: Workspace) -> bool:
-    """Check whether the workspace was created via the v2 API (has a task attempt)."""
+def _has_rich_create_artifact(existing: Workspace) -> bool:
+    """Check whether the workspace was created through the rich create path."""
     try:
         state = sa_inspect(existing)
     except NoInspectionAvailable:
@@ -1207,14 +1157,14 @@ def _owned_path_hints_match(stored: Sequence[str], requested: Sequence[str]) -> 
     return list(stored) == list(requested)
 
 
-def _auto_profile_request(payload: WorkspaceCreateV2Request) -> bool:
+def _auto_profile_request(payload: WorkspaceCreateRequest) -> bool:
     """Check whether the payload requests an automatically resolved profile."""
     return payload.workspace.profile is None and payload.workspace.profile_ref in (None, "auto")
 
 
 def _stored_validation_requested_tier_matches(
     existing: Workspace,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> bool:
     """Check whether the stored validation requested tier matches the payload's tier."""
     stored_tier = _stored_validation_requested_tier(existing)
@@ -1228,21 +1178,27 @@ def _stored_validation_requested_tier_matches(
 
 def _legacy_validation_requested_tier_unknown(
     existing: Workspace,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> bool:
     """Check whether a legacy row with an unknown requested tier still matches the payload."""
     if not _profile_ref_matches(existing, payload):
         return False
-    if existing.requested_profile is not None or payload.workspace.profile is not None:
+    if (
+        getattr(existing, "requested_profile", None) is not None
+        or payload.workspace.profile is not None
+    ):
         return False
     if _auto_profile_request(payload):
         return True
-    return existing.profile_ref is not None and existing.resolved_profile is None
+    return (
+        getattr(existing, "profile_ref", None) is not None
+        and getattr(existing, "resolved_profile", None) is None
+    )
 
 
 def _stored_resource_reservation_matches(
     existing: Workspace,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
     *,
     settings: Settings | None,
 ) -> bool:
@@ -1256,7 +1212,7 @@ def _stored_resource_reservation_matches(
 
     reservation = _latest_workspace_resource_reservation(existing)
     if reservation is None:
-        return False
+        return not requested_values
 
     stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     return (
@@ -1266,9 +1222,9 @@ def _stored_resource_reservation_matches(
 
 
 def _requested_resource_reservation_values(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> dict[str, int | float]:
-    """Extract normalised resource reservation values from a v2 create request."""
+    """Extract normalised resource reservation values from a rich create request."""
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
     values: dict[str, int | float] = {}
@@ -1293,19 +1249,20 @@ def _requested_resource_reservation_values(
     return values
 
 
-def _requested_resource_dind_slots(payload: WorkspaceCreateV2Request) -> int:
+def _requested_resource_dind_slots(payload: WorkspaceCreateRequest) -> int:
     """Return the number of DinD slots requested by the payload's resolved profile."""
-    _, resolved_profile = v2_profile_snapshots(payload)
+    _, resolved_profile = workspace_create_profile_snapshots(payload)
     return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
 
 
 def _stored_resource_dind_slots(
     existing: Workspace,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> int:
     """Return the DinD slot count from the stored workspace's resolved profile, falling back to the request."""
-    if isinstance(existing.resolved_profile, Mapping):
-        return 1 if _dind_mode_from_profile_snapshot(existing.resolved_profile) == "dind" else 0
+    resolved_profile = getattr(existing, "resolved_profile", None)
+    if isinstance(resolved_profile, Mapping):
+        return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
     return _requested_resource_dind_slots(payload)
 
 
@@ -1313,7 +1270,7 @@ def _stored_resource_reservation_request_values(
     existing: Workspace,
 ) -> dict[str, int | float] | None:
     """Extract the resource reservation request values stored in a workspace's task policy."""
-    resource_request = existing.task_policy.get(RESOURCE_RESERVATION_REQUEST_POLICY_KEY)
+    resource_request = _stored_task_policy(existing).get(RESOURCE_RESERVATION_REQUEST_POLICY_KEY)
     if not isinstance(resource_request, dict):
         return None
     values: dict[str, int | float] = {}
@@ -1376,7 +1333,7 @@ def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReser
 
 def _stored_validation_requested_tier(existing: Workspace) -> int | None:
     """Return the requested validation tier stored in the workspace's task policy or resolved profile."""
-    validation_policy = existing.task_policy.get(VALIDATION_POLICY_KEY)
+    validation_policy = _stored_task_policy(existing).get(VALIDATION_POLICY_KEY)
     if isinstance(validation_policy, dict):
         tier = validation_policy.get(VALIDATION_REQUESTED_TIER_POLICY_KEY)
         if isinstance(tier, int) and not isinstance(tier, bool):
@@ -1389,7 +1346,7 @@ def _stored_validation_requested_tier(existing: Workspace) -> int | None:
 
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
     """Extract the requested validation tier from the workspace's resolved profile."""
-    profile = existing.resolved_profile
+    profile = getattr(existing, "resolved_profile", None)
     if profile is None:
         return None
     validation = profile.get("validation")
@@ -1400,7 +1357,7 @@ def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
 
 
 def _requested_task_out_of_scope_policy(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> dict[str, object] | None:
     """Return the out-of-scope changes policy dict from the request payload, if any."""
     if payload.task.out_of_scope_changes is None:
@@ -1410,12 +1367,12 @@ def _requested_task_out_of_scope_policy(
 
 def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] | None:
     """Return the out-of-scope changes policy dict stored in the workspace's task policy."""
-    out_of_scope = existing.task_policy.get("out_of_scope_changes")
+    out_of_scope = _stored_task_policy(existing).get("out_of_scope_changes")
     return out_of_scope if isinstance(out_of_scope, dict) else None
 
 
 def _requested_task_provider_recovery_policy(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> dict[str, object] | None:
     """Return the provider recovery policy dict from the request payload, if any."""
     if payload.task.provider_recovery is None:
@@ -1431,12 +1388,12 @@ def _stored_task_provider_recovery_policy(
     existing: Workspace,
 ) -> dict[str, object] | None:
     """Return the provider recovery policy dict stored in the workspace's task policy."""
-    provider_recovery = existing.task_policy.get("provider_recovery")
+    provider_recovery = _stored_task_policy(existing).get("provider_recovery")
     return provider_recovery if isinstance(provider_recovery, dict) else None
 
 
 def _requested_task_scheduler_policy(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> dict[str, object] | None:
     """Return the scheduler policy dict from the request payload, if priority or human_boost are set."""
     if payload.task.priority == 0 and payload.task.human_boost == 0:
@@ -1450,18 +1407,24 @@ def _requested_task_scheduler_policy(
 
 def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | None:
     """Return the scheduler policy dict stored in the workspace's task policy."""
-    scheduler_policy = existing.task_policy.get(SCHEDULER_POLICY_KEY)
+    scheduler_policy = _stored_task_policy(existing).get(SCHEDULER_POLICY_KEY)
     return scheduler_policy if isinstance(scheduler_policy, dict) else None
 
 
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     """Return the agent model string stored in the workspace's task policy."""
-    model = existing.task_policy.get("agent_model")
+    model = _stored_task_policy(existing).get("agent_model")
     return model if isinstance(model, str) and model else None
 
 
+def _stored_task_policy(existing: Workspace) -> Mapping[str, Any]:
+    """Return a task-policy mapping, tolerating legacy rows and simple test doubles."""
+    task_policy = getattr(existing, "task_policy", None)
+    return task_policy if isinstance(task_policy, Mapping) else {}
+
+
 def _requested_provider_readiness_override(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> tuple[bool, str | None]:
     """Extract the provider readiness override flag and normalised reason from the request."""
     return (
@@ -1491,7 +1454,7 @@ def _stored_task_provider_readiness_override(
 
 def _task_provider_readiness_override_matches(
     existing: Workspace,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
 ) -> bool:
     """Check whether the stored and requested provider readiness overrides match."""
     stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
@@ -1972,7 +1935,7 @@ def workspace_provider_readiness_preflight(
     workspace: Workspace,
 ) -> dict[str, Any] | None:
     """Extract the provider readiness preflight snapshot from a workspace's task policy."""
-    return provider_readiness_preflight_from_task_policy(workspace.task_policy)
+    return provider_readiness_preflight_from_task_policy(_stored_task_policy(workspace))
 
 
 def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResponse:
@@ -2046,6 +2009,9 @@ def workspace_response(
     computed_fields["app_endpoints"] = _workspace_app_endpoint_responses(workspace)
     computed_fields["requested_profile"] = _console_safe_profile_snapshot(
         getattr(workspace, "requested_profile", None)
+    )
+    computed_fields["env_profile"] = getattr(workspace, "env_profile", None) or getattr(
+        workspace, "profile_ref", None
     )
     computed_fields["resolved_profile"] = _console_safe_profile_snapshot(
         getattr(workspace, "resolved_profile", None)
@@ -2726,14 +2692,14 @@ def computed_priority(
 
 
 def resource_reservation_plan(
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
     *,
     settings: Settings,
 ) -> ResourceReservationPlan:
-    """Build a resource reservation plan from a v2 create request and settings."""
+    """Build a resource reservation plan from a rich create request and settings."""
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
-    _, resolved_profile = v2_profile_snapshots(payload)
+    _, resolved_profile = workspace_create_profile_snapshots(payload)
     dind_mode = _dind_mode_from_profile_snapshot(resolved_profile)
     return ResourceReservationPlan(
         node_id=settings.worker_node_id or "local",
@@ -2843,7 +2809,7 @@ def _parse_memory_gb(value: str | None) -> float | None:
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
     """Extract owned-path overlap warning responses from workspace events."""
     warnings: list[WorkspaceWarningResponse] = []
-    for event in workspace.events:
+    for event in getattr(workspace, "events", ()):
         if event.event_type != OWNED_PATH_OVERLAP_RISK_EVENT_TYPE:
             continue
         payload = event.payload
@@ -2898,10 +2864,10 @@ def _has_owned_path_overlap_payload_fields(item: Any) -> bool:
     )
 
 
-def v2_profile_snapshots(
-    payload: WorkspaceCreateV2Request,
+def workspace_create_profile_snapshots(
+    payload: WorkspaceCreateRequest,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Resolve requested and resolved profile snapshots from a v2 create request."""
+    """Resolve requested and resolved profile snapshots from a rich create request."""
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
         if payload.workspace.profile is not None
@@ -2925,8 +2891,8 @@ def v2_profile_snapshots(
     return requested_profile, resolved_profile
 
 
-def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
-    """Build a task policy dictionary from a v2 create request."""
+def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
+    """Build a task policy dictionary from a rich create request."""
     policy: dict[str, Any] = {}
     resource_request = _requested_resource_reservation_values(payload)
     # Persist empty requests so idempotent replays do not re-plan against

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.api.schemas import WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.models import Workspace
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service import supply_chain_policy as supply_chain_module
@@ -42,8 +42,8 @@ def _encoded_operation_cursor(*, operation_id: object) -> str:
     )
 
 
-def _v2_request(*, profile_ref: str | None = "auto") -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
+def _v2_request(*, profile_ref: str | None = "auto") -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/coverage.git", "base_branch": "main"},
         task={
             "title": "Cover service helper edge",

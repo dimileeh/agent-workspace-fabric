@@ -1,5 +1,10 @@
 # AWF Phase 1.5 — PR Monitor: Feature Branch → Development, Fully Autonomous
 
+> Historical design note: this plan predates the current service-backed
+> monitor adoption and remonitor surfaces. References to retired watchdog or
+> helper-script paths are preserved as implementation history, not current
+> operator guidance.
+
 ## Context
 
 Today AWF ends the task at "PR opened." The real cost — reviewer comments

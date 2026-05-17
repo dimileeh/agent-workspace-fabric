@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import QueueDecisionRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -28,7 +28,7 @@ def _request(
     title: str = "Owned path policy",
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
-) -> WorkspaceCreateV2Request:
+) -> WorkspaceCreateRequest:
     task = {
         "title": title,
         "prompt": "Do policy-sensitive work.",
@@ -38,7 +38,7 @@ def _request(
     }
     if task_class is not None:
         task["task_class"] = task_class
-    return WorkspaceCreateV2Request(
+    return WorkspaceCreateRequest(
         repo={"url": repo_url, "base_branch": base_branch},
         task=task,
         workspace={"profile_ref": "auto", "profile": None},
@@ -52,35 +52,35 @@ def _request(
 
 
 @pytest.mark.unit
-async def test_create_v2_allows_empty_requested_owned_paths(
+async def test_create_allows_empty_requested_owned_paths(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    await service.create_v2(_request(title="existing", owned_paths=["src/awf/api/**"]))
+    await service.create(_request(title="existing", owned_paths=["src/awf/api/**"]))
 
-    created = await service.create_v2(_request(title="new", owned_paths=[]))
+    created = await service.create(_request(title="new", owned_paths=[]))
 
     assert created.owned_paths == []
 
 
 @pytest.mark.unit
-async def test_create_v2_allows_non_overlapping_owned_paths(
+async def test_create_allows_non_overlapping_owned_paths(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    await service.create_v2(_request(title="existing", owned_paths=["src/awf/api/**"]))
+    await service.create(_request(title="existing", owned_paths=["src/awf/api/**"]))
 
-    created = await service.create_v2(_request(title="new", owned_paths=["docs/**"]))
+    created = await service.create(_request(title="new", owned_paths=["docs/**"]))
 
     assert created.owned_paths == ["docs/**"]
 
 
 @pytest.mark.unit
-async def test_create_v2_ignores_terminal_and_teardown_conflicts(
+async def test_create_ignores_terminal_and_teardown_conflicts(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    existing = await service.create_v2(_request(title="existing", owned_paths=["src/awf/api/**"]))
+    existing = await service.create(_request(title="existing", owned_paths=["src/awf/api/**"]))
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(existing.id)
@@ -88,7 +88,7 @@ async def test_create_v2_ignores_terminal_and_teardown_conflicts(
         workspace.status = WorkspaceStatus.completed.value
         await session.commit()
 
-    created = await service.create_v2(
+    created = await service.create(
         _request(title="new", owned_paths=["src/awf/api/routes/workspaces.py"])
     )
 
@@ -96,11 +96,11 @@ async def test_create_v2_ignores_terminal_and_teardown_conflicts(
 
 
 @pytest.mark.unit
-async def test_create_v2_allows_overlap_and_records_risk_event(
+async def test_create_allows_overlap_and_records_risk_event(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    existing = await service.create_v2(
+    existing = await service.create(
         _request(
             title="existing",
             task_class="refactor_task",
@@ -108,7 +108,7 @@ async def test_create_v2_allows_overlap_and_records_risk_event(
         )
     )
 
-    created = await service.create_v2(
+    created = await service.create(
         _request(
             title="new",
             task_class="docs_task",
@@ -160,11 +160,11 @@ async def test_create_v2_allows_overlap_and_records_risk_event(
 
 
 @pytest.mark.unit
-async def test_create_v2_attaches_overlap_coordination_context_to_workspace_metadata(
+async def test_create_attaches_overlap_coordination_context_to_workspace_metadata(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    existing = await service.create_v2(
+    existing = await service.create(
         _request(
             title="existing service work",
             task_class="refactor_task",
@@ -172,7 +172,7 @@ async def test_create_v2_attaches_overlap_coordination_context_to_workspace_meta
         )
     )
 
-    created = await service.create_v2(
+    created = await service.create(
         _request(
             title="new service file work",
             task_class="docs_task",
@@ -227,14 +227,14 @@ async def test_create_v2_attaches_overlap_coordination_context_to_workspace_meta
         ("build_config_task", "Dockerfile", "Dockerfile"),
     ],
 )
-async def test_create_v2_overlap_is_advisory_for_all_current_task_classes(
+async def test_create_overlap_is_advisory_for_all_current_task_classes(
     factory: async_sessionmaker[AsyncSession],
     task_class: str,
     existing_path: str,
     requested_path: str,
 ) -> None:
     service = WorkspaceService(factory)
-    existing = await service.create_v2(
+    existing = await service.create(
         _request(
             title=f"existing {task_class}",
             task_class=task_class,
@@ -242,7 +242,7 @@ async def test_create_v2_overlap_is_advisory_for_all_current_task_classes(
         )
     )
 
-    created = await service.create_v2(
+    created = await service.create(
         _request(
             title=f"new {task_class}",
             task_class=task_class,
@@ -276,7 +276,7 @@ async def test_overlap_coordination_context_is_non_blocking_for_serial_high_risk
     requested_path: str,
 ) -> None:
     service = WorkspaceService(factory)
-    existing = await service.create_v2(
+    existing = await service.create(
         _request(
             title=f"existing {task_class}",
             task_class=task_class,
@@ -284,7 +284,7 @@ async def test_overlap_coordination_context_is_non_blocking_for_serial_high_risk
         )
     )
 
-    created = await service.create_v2(
+    created = await service.create(
         _request(
             title=f"new {task_class}",
             task_class=task_class,

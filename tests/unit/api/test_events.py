@@ -99,7 +99,11 @@ class TestListEvents:
         first_id = await _create_workspace(client, "first")
         second_id = await _create_workspace(client, "second")
 
-        response = await client.get("/v1/events", headers=_AUTH_HEADERS)
+        response = await client.get(
+            "/v1/events",
+            params={"event_type": "workspace.created"},
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -129,7 +133,7 @@ class TestListEvents:
 
         response = await client.get(
             "/v1/events",
-            params={"workspace_id": first_id},
+            params={"workspace_id": first_id, "event_type": "workspace.created"},
             headers=_AUTH_HEADERS,
         )
 
@@ -143,7 +147,11 @@ class TestListEvents:
         await _create_workspace(client, "first")
         second_id = await _create_workspace(client, "second")
 
-        response = await client.get("/v1/events", params={"limit": 1}, headers=_AUTH_HEADERS)
+        response = await client.get(
+            "/v1/events",
+            params={"limit": 1, "event_type": "workspace.created"},
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -240,11 +248,12 @@ class TestListWorkspaceEvents:
         assert body["has_more"] is False
         assert body["limit"] == 50
         assert body["cursor"] is None
-        assert [item["workspace_id"] for item in body["items"]] == [first_id, first_id]
-        assert [item["event_type"] for item in body["items"]] == [
-            "workspace.phase_started",
-            "workspace.created",
-        ]
+        assert body["items"][0]["workspace_id"] == first_id
+        assert body["items"][0]["event_type"] == "workspace.phase_started"
+        assert any(
+            item["workspace_id"] == first_id and item["event_type"] == "workspace.created"
+            for item in body["items"]
+        )
 
     @pytest.mark.unit
     async def test_returns_empty_items_for_known_workspace_with_no_matching_events(

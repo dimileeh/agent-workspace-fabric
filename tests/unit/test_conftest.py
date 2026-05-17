@@ -29,7 +29,7 @@ async def test_client_fixture_clears_settings_cache_when_app_setup_fails(
             await fixture.__anext__()
         local_patch.undo()
 
-        assert get_settings().api_token is None
+        assert get_settings().api_token != api_token
     finally:
         local_patch.undo()
         get_settings.cache_clear()

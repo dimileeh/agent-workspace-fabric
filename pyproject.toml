@@ -57,7 +57,6 @@ dev = [
 
 [project.scripts]
 awf = "awf.cli.main:app"
-awf-watchdog = "awf.cli.watchdog:main"
 
 [project.urls]
 Repository = "https://github.com/dimileeh/aira-agent-workspace-fabric"
@@ -106,11 +105,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002"]  # test fixtures often appear unused to ruff
 "migrations/**" = ["E402", "F401"]
-# Operator CLIs implement Protocol/ABC stubs whose signatures must match the
-# production interface even when the method body ignores some params (noop
-# adapters in salvage_workspace.py, watcher stubs mirroring the release-PR
-# scheduler). Enforcing the stricter rules here would just mean splattering
-# ``# noqa`` across every stub for no safety benefit.
+# Generator scripts are small build/docs tools. Keep their lint posture slightly
+# looser so CLI helper signatures can stay simple.
 "scripts/**" = [
     "ARG001",
     "ARG002",

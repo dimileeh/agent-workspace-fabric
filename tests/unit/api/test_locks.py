@@ -51,7 +51,7 @@ async def _create_lock_workspace(
     owned_paths: list[str] | None = None,
 ) -> str:
     response = await client.post(
-        "/v2/workspaces",
+        "/v1/workspaces",
         json=_v2_body(
             repo_url=repo_url,
             title=title,
@@ -243,7 +243,7 @@ async def test_get_locks_exposes_owned_path_overlap_risks(
         owned_paths=["src/awf/api/**"],
     )
     overlapping_response = await client.post(
-        "/v2/workspaces",
+        "/v1/workspaces",
         json=_v2_body(
             title="Overlapping docs",
             task_class="docs_task",

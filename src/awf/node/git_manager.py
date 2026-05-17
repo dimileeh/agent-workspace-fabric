@@ -92,12 +92,10 @@ class GitManager:
     """Manages bare mirrors and per-workspace worktrees on the local filesystem."""
 
     # Lock registry scoped by event loop. Must be class-level, not
-    # instance-level: ``scripts/run_awf.py`` constructs one ``GitManager``
-    # per task inside ``asyncio.gather(...)``. If the dict were an
-    # instance attribute, two concurrent tasks targeting the same repo
-    # would get INDEPENDENT locks and race on ``git clone --mirror`` /
-    # ``worktree add`` / ``worktree prune`` — the exact corruption the
-    # lock exists to prevent.
+    # instance-level: the worker can provision multiple tasks concurrently.
+    # If the dict were an instance attribute, two concurrent tasks targeting
+    # the same repo would get independent locks and race on ``git clone
+    # --mirror`` / ``worktree add`` / ``worktree prune``.
     #
     # We key first by running loop, then by resolved mirror path, rather
     # than keeping a flat ``{path → Lock}`` dict, because ``asyncio.Lock``

@@ -92,8 +92,8 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "key and body when recovering from a lost response."
         ),
         (
-            "Too many `POST /v1/workspaces` or `POST /v2/workspaces` requests arrived "
-            "for the same bearer-token or client-host identity within one admission window."
+            "Too many `POST /v1/workspaces` requests arrived for the same "
+            "bearer-token or client-host identity within one admission window."
         ),
         "awf workspace list",
         "docs/REASON_CATALOG.md#workspace_create_rate_limited",

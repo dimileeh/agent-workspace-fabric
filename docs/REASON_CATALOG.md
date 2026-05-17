@@ -417,7 +417,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### WORKSPACE_CREATE_RATE_LIMITED
 **Problem:** AWF rejected a workspace creation request because the request-admission rate limit was exhausted.
-**Likely Cause:** Too many `POST /v1/workspaces` or `POST /v2/workspaces` requests arrived for the same bearer-token or client-host identity within one admission window.
+**Likely Cause:** Too many `POST /v1/workspaces` requests arrived for the same bearer-token or client-host identity within one admission window.
 **Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)

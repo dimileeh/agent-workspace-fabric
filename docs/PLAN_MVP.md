@@ -123,8 +123,7 @@ Same underlying service, exposed as MCP tools so Codex / Claude Code can invoke 
 
 | Tool | Description |
 |---|---|
-| `awf_create_workspace` | Identical body to `POST /v1/workspaces`. Returns `workspace_id`. |
-| `awf_create_workspace_v2` | Clean v2 submission shape for profile-driven workspaces. |
+| `awf_create_workspace` | Rich profile-driven body matching `POST /v1/workspaces`. Returns `workspace_id`. |
 | `awf_get_workspace` | Fetch current state by `workspace_id`. |
 | `awf_wait_for_workspace` | Blocking helper: polls until terminal state or `timeout_seconds`. Useful for agents that want synchronous behavior. |
 | `awf_list_workspaces` | List with filters. |

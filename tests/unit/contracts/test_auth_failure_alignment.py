@@ -72,7 +72,7 @@ _CLI_OPTION_VALUES_BY_CAPABILITY = {
         "--repo": "owner/repo",
         "--pr": "1",
     },
-    "create_workspace_v2": {
+    "create_workspace": {
         "--repo": "git@github.com:dimileeh/aira-agent.git",
         "--title": "Auth contract",
         "--prompt": "Create workspace auth contract.",
@@ -352,16 +352,7 @@ def _protected_rest_params(capability_name: str) -> dict[str, object] | None:
 
 
 def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
-    if capability_name == "create_workspace_v1":
-        return {
-            "repo_url": "git@github.com:dimileeh/aira-agent.git",
-            "branch_base": "main",
-            "task_title": "Auth contract",
-            "task_prompt": "Create a workspace under auth-protected route.",
-            "agent": "codex",
-            "test_commands": ["pytest -q"],
-        }
-    if capability_name == "create_workspace_v2":
+    if capability_name == "create_workspace":
         return {
             "repo": {
                 "url": "git@github.com:dimileeh/aira-agent.git",

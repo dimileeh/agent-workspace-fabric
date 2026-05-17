@@ -38,6 +38,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_workspace
 from tests.postgres import (
     create_postgres_test_engine,
+    postgres_alembic_subprocess_lock,
     postgres_empty_test_url,
     postgres_test_session,
 )
@@ -826,14 +827,15 @@ class TestMonitorPolicyMigration:
             }
 
             def _alembic(*args: str) -> None:
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+                with postgres_alembic_subprocess_lock(database_url):
+                    subprocess.run(
+                        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                        cwd=repo_root,
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
 
             monkeypatch.chdir(repo_root)
             _alembic("upgrade", "e5f6a1b2c3d4")
@@ -897,14 +899,15 @@ class TestTaskPolicyMetadataMigration:
             }
 
             def _alembic(*args: str) -> None:
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+                with postgres_alembic_subprocess_lock(database_url):
+                    subprocess.run(
+                        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                        cwd=repo_root,
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
 
             monkeypatch.chdir(repo_root)
             _alembic("upgrade", "f6a1b2c3d4e5")

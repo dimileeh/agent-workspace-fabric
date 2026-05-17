@@ -16,7 +16,7 @@ from awf.adapters.provider_failures import (
     AGENT_TIMEOUT,
     classify_provider_failure,
 )
-from awf.api.schemas import WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
@@ -55,7 +55,7 @@ from awf.service.provider_recovery import (
     provider_recovery_metadata_from_workspace,
     provider_recovery_state_for_workspace,
 )
-from awf.service.workspaces import WorkspaceService, v2_task_policy_snapshot
+from awf.service.workspaces import WorkspaceService, workspace_create_task_policy_snapshot
 from tests.postgres import postgres_test_engine
 
 """Provider/model recovery policy and fallback attempt tests."""
@@ -67,8 +67,8 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
-def _request() -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
+def _request() -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/provider.git", "base_branch": "development"},
         task={
             "title": "Recover provider outage",
@@ -110,7 +110,7 @@ async def _seed_monitoring_provider_workspace(
     max_same_provider_retries: int,
 ) -> str:
     service = WorkspaceService(factory)
-    response = await service.create_v2(_request())
+    response = await service.create(_request())
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -205,8 +205,8 @@ async def _move_workspace_to_status(
     await repo.transition(workspace, to=WorkspaceStatus.destroyed, reason_code="SEED")
 
 
-def test_v2_task_policy_snapshot_persists_provider_fallback_policy() -> None:
-    policy = v2_task_policy_snapshot(_request())
+def test_workspace_create_task_policy_snapshot_persists_provider_fallback_policy() -> None:
+    policy = workspace_create_task_policy_snapshot(_request())
 
     assert policy["agent_model"] == "gemini-2.5-pro"
     assert policy["provider_recovery"] == {
@@ -229,7 +229,7 @@ def test_provider_recovery_metadata_derives_from_persisted_failure_details() -> 
         reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         message=("RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: 90 token sk-provider-secret"),
         details={"provider": "google", "model": "gemini-2.5-pro"},
-        task_policy=v2_task_policy_snapshot(_request()),
+        task_policy=workspace_create_task_policy_snapshot(_request()),
     )
 
     assert metadata is not None
@@ -252,7 +252,7 @@ def test_provider_recovery_metadata_disables_fallback_for_auth_failure() -> None
         reason_code=AGENT_AUTH_FAILED,
         message="Codex token_expired websocket 401 Unauthorized",
         details={"provider": "openai", "model": "gpt-5.5"},
-        task_policy=v2_task_policy_snapshot(_request()),
+        task_policy=workspace_create_task_policy_snapshot(_request()),
     )
 
     assert metadata is not None
@@ -733,7 +733,7 @@ def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None
 
 
 def test_repeated_identical_fingerprint_is_terminal_no_loop() -> None:
-    policy = v2_task_policy_snapshot(_request())
+    policy = workspace_create_task_policy_snapshot(_request())
     metadata = provider_recovery_metadata_from_failure(
         reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         message="RESOURCE_EXHAUSTED RetryableQuotaError",
@@ -840,7 +840,7 @@ async def test_provider_recovery_stale_terminal_callback_is_ignored(
     final_status: WorkspaceStatus,
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -904,7 +904,7 @@ async def test_provider_recovery_failed_without_provider_metadata_is_ignored(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -957,7 +957,7 @@ async def test_terminal_provider_recovery_records_terminal_event(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
     metadata = {
         "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         "retryable": False,
@@ -998,7 +998,7 @@ async def test_duplicate_provider_recovery_request_is_idempotent(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
     metadata = {
         "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         "retryable": True,
@@ -1070,7 +1070,7 @@ async def test_retry_recovery_without_fingerprint_keeps_source_attempt_lineage(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -1109,7 +1109,7 @@ async def test_non_capacity_provider_failure_skips_circuit_recording(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
 
     async with factory() as session:
         result = await create_provider_recovery_attempt_row(
@@ -1621,7 +1621,7 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    source_response = await service.create_v2(_request())
+    source_response = await service.create(_request())
     requested_profile = {
         "name": "requested-provider-recovery",
         "source": "inline-test",
@@ -2638,7 +2638,7 @@ class TestFallbackInheritanceCompleteness:
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         service = WorkspaceService(factory)
-        source_response = await service.create_v2(_request())
+        source_response = await service.create(_request())
 
         async with factory() as session:
             repo = WorkspaceRepository(session)
@@ -2732,7 +2732,7 @@ class TestTerminalState:
     fallbacks."""
 
     def test_repeated_fingerprint_three_times_is_terminal(self) -> None:
-        policy = v2_task_policy_snapshot(_request())
+        policy = workspace_create_task_policy_snapshot(_request())
         metadata = provider_recovery_metadata_from_failure(
             reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
             message="RESOURCE_EXHAUSTED RetryableQuotaError",
@@ -2763,7 +2763,7 @@ class TestTerminalState:
         assert decision.terminal_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
 
     def test_exhausted_fallbacks_is_terminal(self) -> None:
-        policy = v2_task_policy_snapshot(_request())
+        policy = workspace_create_task_policy_snapshot(_request())
         metadata = provider_recovery_metadata_from_failure(
             reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
             message="RESOURCE_EXHAUSTED RetryableQuotaError",

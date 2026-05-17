@@ -333,7 +333,7 @@ class TestDeferSignalArtifact:
     ) -> None:
         """When ``artifacts_root`` is not passed to the runner, it
         defaults to ``worktrees_root.parents[1] / "artifacts"`` — matches
-        the layout ``run_awf.py`` uses where ``worktrees_root`` is
+        the local service layout where ``worktrees_root`` is
         ``<work_dir>/git/worktrees`` and artifacts live at
         ``<work_dir>/artifacts``."""
         ws_id = await seed_monitoring_workspace(factory)

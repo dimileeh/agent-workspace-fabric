@@ -88,11 +88,10 @@ Implemented now:
 - Release/sync PR monitor variants that keep workspaces alive until human merge.
 - Post-merge target-branch reconciliation for Python/Alembic multi-head repair.
 - Initial PR review grace period before auto-merge.
-- Durable v2 task policy metadata (`task_class`, `owned_paths`) for later lock scheduling.
+- Durable task policy metadata (`task_class`, `owned_paths`) for scheduling and review provenance.
 - Non-actionable bot status comment filtering.
 - `/v1/events` for workspace timelines.
-- Filterable `/v1/workspaces` list endpoint for future dashboard work.
-- Stranded feature-PR watchdog (`awf-watchdog`) for reattaching dead monitors.
+- Filterable `/v1/workspaces` list endpoint for console and operator clients.
 
 Still not complete:
 

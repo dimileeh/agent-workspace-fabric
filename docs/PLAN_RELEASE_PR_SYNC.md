@@ -1,5 +1,9 @@
 # AWF Phase 1.5b — Automatic development → main release-PR sync
 
+> Historical design note: this plan predates the current service-backed
+> CLI/API/MCP workflow. References to retired helper scripts are preserved as
+> implementation history, not current operator guidance.
+
 ## Problem
 
 Today nothing creates the `development → main` PR, so it only happens

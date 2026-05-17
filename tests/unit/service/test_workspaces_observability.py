@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.workspace_observability as workspace_observability_module
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -54,7 +54,7 @@ from awf.service.workspaces import (
     owned_path_overlap_warnings,
     profile_with_requested_tier,
     retry_workspace_row,
-    v2_task_policy_snapshot,
+    workspace_create_task_policy_snapshot,
 )
 from tests.postgres import postgres_test_engine
 
@@ -230,7 +230,7 @@ async def test_workspace_service_round_trips_policy_metadata(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/service.git", "base_branch": "main"},
         task={
             "title": "Update dependency",
@@ -249,7 +249,7 @@ async def test_workspace_service_round_trips_policy_metadata(
         },
     )
 
-    created = await service.create_v2(request)
+    created = await service.create(request)
     fetched = await service.get(created.id)
     listed = await service.list(limit=10)
 
@@ -285,7 +285,7 @@ async def test_workspace_service_create_v1_and_event_listing(
 
     assert created.repo_url == "git@github.com:example/v1.git"
     assert created.env_profile == "python"
-    assert created.requires_database is True
+    assert created.requires_database is False
     assert events is not None
     assert [event.event_type for event in events] == ["workspace.created"]
     assert missing_events is None
@@ -846,7 +846,7 @@ def test_workspace_retry_error_uses_default_message() -> None:
 
 @pytest.mark.unit
 def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> None:
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
         task={
             "title": "Policy snapshot",
@@ -865,7 +865,7 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
     )
     profile = WorkspaceProfile(name="unit-profile")
 
-    policy = v2_task_policy_snapshot(request)
+    policy = workspace_create_task_policy_snapshot(request)
     unchanged = profile_with_requested_tier(profile, 1)
     changed = profile_with_requested_tier(profile, 3)
 

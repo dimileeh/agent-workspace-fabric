@@ -50,7 +50,6 @@ from awf.api.schemas import (
     StaleReasonListResponse,
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
     WorkspaceEventListResponse,
     WorkspaceEventResponse,
     WorkspaceOverviewListResponse,
@@ -98,11 +97,10 @@ from awf.service.workspaces import (
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     _egress_audit_response,
-    create_workspace_v2_row,
+    create_workspace_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
     workspace_create_payload_matches,
-    workspace_create_v2_payload_matches,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
@@ -114,20 +112,13 @@ router = APIRouter(
     dependencies=[Depends(require_api_token)],
     responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
-router_v2 = APIRouter(
-    prefix="/v2/workspaces",
-    tags=["workspaces-v2"],
-    dependencies=[Depends(require_api_token)],
-    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
-)
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
 _WORKSPACE_CREATE_RATE_LIMITED = "WORKSPACE_CREATE_RATE_LIMITED"
 _IDEMPOTENCY_REPLAY_UNAVAILABLE = "IDEMPOTENCY_REPLAY_UNAVAILABLE"
 _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY = "workspace_create_idempotency_replay_key_cache"
 _WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES = 4096
-_WORKSPACE_CREATE_V1_API_VERSION = "v1"
-_WORKSPACE_CREATE_V2_API_VERSION = "v2"
+_WORKSPACE_CREATE_API_VERSION = "v1"
 
 __all__ = [
     "InvalidWorkspaceOverviewCursorError",
@@ -135,7 +126,6 @@ __all__ = [
     "_decode_overview_cursor",
     "_encode_overview_cursor",
     "create_workspace",
-    "create_workspace_v2",
     "get_workspace",
     "list_workspace_events",
     "list_workspace_overview",
@@ -159,7 +149,7 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
 
     def matches(
         self,
-        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        payload: WorkspaceCreateRequest,
         *,
         idempotency_key: str,
         api_version: str,
@@ -182,7 +172,7 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
 
     def remember(
         self,
-        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        payload: WorkspaceCreateRequest,
         *,
         idempotency_key: str,
         api_version: str,
@@ -221,7 +211,11 @@ def _current_request(request: Request) -> Request:
     "",
     response_model=WorkspaceAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    responses={409: {"model": ErrorResponse}, 429: RATE_LIMITED_ERROR_RESPONSE},
+    responses={
+        409: {"model": ErrorResponse},
+        429: RATE_LIMITED_ERROR_RESPONSE,
+        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+    },
 )
 async def create_workspace(
     payload: WorkspaceCreateRequest,
@@ -239,124 +233,10 @@ async def create_workspace(
             known_replay_key = replay_key_cache.matches(
                 payload,
                 idempotency_key=idempotency_key,
-                api_version=_WORKSPACE_CREATE_V1_API_VERSION,
+                api_version=_WORKSPACE_CREATE_API_VERSION,
             )
         except _WorkspaceCreateIdempotencyConflictError:
-            replay = await _workspace_create_v1_durable_replay_response(
-                repo,
-                replay_key_cache,
-                payload,
-                idempotency_key=idempotency_key,
-            )
-            if replay is not None:
-                return replay
-            return _workspace_create_idempotency_conflict_response()
-        if known_replay_key:
-            replay = await _workspace_create_v1_replay_response(
-                repo,
-                payload,
-                idempotency_key=idempotency_key,
-            )
-            if replay is not None:
-                return replay
-            return _workspace_create_idempotency_replay_unavailable_response()
-        admission_preview = await check_request_async(
-            request,
-            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-            limit=settings.workspace_create_rate_limit_count,
-            window_seconds=settings.request_admission_window_seconds,
-            reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
-        )
-        replay = await _workspace_create_v1_durable_replay_response(
-            repo,
-            replay_key_cache,
-            payload,
-            idempotency_key=idempotency_key,
-        )
-        if replay is not None:
-            return replay
-        if not admission_preview.allowed:
-            admission_preview = await check_request_async(
-                request,
-                endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-                limit=settings.workspace_create_rate_limit_count,
-                window_seconds=settings.request_admission_window_seconds,
-                reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
-            )
-        if not admission_preview.allowed:
-            return _workspace_create_rate_limited_response(admission_preview)
-
-    admission = await admit_request_async(
-        request,
-        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
-        limit=settings.workspace_create_rate_limit_count,
-        window_seconds=settings.request_admission_window_seconds,
-        reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
-    )
-    if not admission.allowed:
-        if idempotency_key is not None:
-            replay = await _workspace_create_v1_durable_replay_response(
-                repo,
-                replay_key_cache,
-                payload,
-                idempotency_key=idempotency_key,
-            )
-            if replay is not None:
-                return replay
-        return _workspace_create_rate_limited_response(admission)
-
-    ws = await repo.create(
-        repo_url=payload.repo_url,
-        branch_base=payload.branch_base,
-        task_title=payload.task_title,
-        task_prompt=payload.task_prompt,
-        task_external_id=payload.task_external_id,
-        agent=payload.agent.value,
-        env_profile=payload.env_profile,
-        test_commands=payload.test_commands,
-        requires_database=payload.requires_database,
-        idempotency_key=idempotency_key,
-    )
-
-    if idempotency_key is not None:
-        replay_key_cache.remember(
-            payload,
-            idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V1_API_VERSION,
-        )
-    return _accepted(ws.id, ws.status, ws.version, ws.created_at)
-
-
-@router_v2.post(
-    "",
-    response_model=WorkspaceAcceptedResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    responses={
-        409: {"model": ErrorResponse},
-        429: RATE_LIMITED_ERROR_RESPONSE,
-        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
-    },
-)
-async def create_workspace_v2(
-    payload: WorkspaceCreateV2Request,
-    request: Request,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    settings: Settings = Depends(get_settings),
-    session: AsyncSession = Depends(get_db_session),
-) -> WorkspaceAcceptedResponse | JSONResponse:
-    repo = WorkspaceRepository(session)
-    replay_key_cache = _workspace_create_idempotency_replay_key_cache(request)
-    known_replay_key = False
-
-    if idempotency_key is not None:
-        try:
-            known_replay_key = replay_key_cache.matches(
-                payload,
-                idempotency_key=idempotency_key,
-                api_version=_WORKSPACE_CREATE_V2_API_VERSION,
-            )
-        except _WorkspaceCreateIdempotencyConflictError:
-            replay = await _workspace_create_v2_durable_replay_response(
+            replay = await _workspace_create_durable_replay_response(
                 repo,
                 replay_key_cache,
                 payload,
@@ -367,7 +247,7 @@ async def create_workspace_v2(
                 return replay
             return _workspace_create_idempotency_conflict_response()
         if known_replay_key:
-            replay = await _workspace_create_v2_replay_response(
+            replay = await _workspace_create_replay_response(
                 repo,
                 payload,
                 idempotency_key=idempotency_key,
@@ -383,7 +263,7 @@ async def create_workspace_v2(
             window_seconds=settings.request_admission_window_seconds,
             reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
         )
-        replay = await _workspace_create_v2_durable_replay_response(
+        replay = await _workspace_create_durable_replay_response(
             repo,
             replay_key_cache,
             payload,
@@ -412,7 +292,7 @@ async def create_workspace_v2(
     )
     if not admission.allowed:
         if idempotency_key is not None:
-            replay = await _workspace_create_v2_durable_replay_response(
+            replay = await _workspace_create_durable_replay_response(
                 repo,
                 replay_key_cache,
                 payload,
@@ -428,7 +308,7 @@ async def create_workspace_v2(
         return _insufficient_disk_response(disk_check)
 
     try:
-        ws = await create_workspace_v2_row(
+        ws = await create_workspace_row(
             session,
             payload,
             idempotency_key=idempotency_key,
@@ -464,7 +344,7 @@ async def create_workspace_v2(
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V2_API_VERSION,
+            api_version=_WORKSPACE_CREATE_API_VERSION,
         )
     return _accepted(
         ws.id,
@@ -476,49 +356,9 @@ async def create_workspace_v2(
     )
 
 
-async def _workspace_create_v1_replay_response(
+async def _workspace_create_replay_response(
     repo: WorkspaceRepository,
     payload: WorkspaceCreateRequest,
-    *,
-    idempotency_key: str,
-) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    await repo.acquire_idempotency_key_lock(idempotency_key)
-    existing = await repo.get_by_idempotency_key(idempotency_key)
-    if existing is None:
-        return None
-    if not _payloads_match(existing, payload):
-        return _workspace_create_idempotency_conflict_response()
-    return _accepted(existing.id, existing.status, existing.version, existing.created_at)
-
-
-async def _workspace_create_v1_durable_replay_response(
-    repo: WorkspaceRepository,
-    replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
-    payload: WorkspaceCreateRequest,
-    *,
-    idempotency_key: str,
-) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    replay = await _workspace_create_v1_replay_response(
-        repo,
-        payload,
-        idempotency_key=idempotency_key,
-    )
-    if replay is None:
-        return None
-    if not isinstance(replay, JSONResponse):
-        replay_key_cache.remember(
-            payload,
-            idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V1_API_VERSION,
-        )
-    else:
-        replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
-    return replay
-
-
-async def _workspace_create_v2_replay_response(
-    repo: WorkspaceRepository,
-    payload: WorkspaceCreateV2Request,
     *,
     idempotency_key: str,
     settings: Settings | None = None,
@@ -527,7 +367,7 @@ async def _workspace_create_v2_replay_response(
     existing = await repo.get_by_idempotency_key(idempotency_key)
     if existing is None:
         return None
-    if not _payloads_match_v2(existing, payload, settings=settings):
+    if not _payloads_match(existing, payload, settings=settings):
         return _workspace_create_idempotency_conflict_response()
     return _accepted(
         existing.id,
@@ -539,15 +379,15 @@ async def _workspace_create_v2_replay_response(
     )
 
 
-async def _workspace_create_v2_durable_replay_response(
+async def _workspace_create_durable_replay_response(
     repo: WorkspaceRepository,
     replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
-    payload: WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
     *,
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    replay = await _workspace_create_v2_replay_response(
+    replay = await _workspace_create_replay_response(
         repo,
         payload,
         idempotency_key=idempotency_key,
@@ -559,17 +399,21 @@ async def _workspace_create_v2_durable_replay_response(
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V2_API_VERSION,
+            api_version=_WORKSPACE_CREATE_API_VERSION,
         )
     else:
         replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     return replay
 
 
-async def _workspace_admission_disk_check(request: Request, settings: Settings) -> DiskCheck:
+async def _workspace_admission_disk_check(
+    request: Request | object | None,
+    settings: Settings,
+) -> DiskCheck:
+    state = request_app_state(request)
     provider = cast(
         DiskCheckProvider | None,
-        getattr(request.app.state, "workspace_admission_disk_check", None),
+        getattr(state, "workspace_admission_disk_check", None) if state is not None else None,
     )
     if provider is not None:
         return await asyncio.to_thread(provider, settings)
@@ -984,27 +828,23 @@ def _accepted(
     )
 
 
-def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
+def _payloads_match(
+    existing: Workspace,
+    payload: WorkspaceCreateRequest,
+    *,
+    settings: Settings | None = None,
+) -> bool:
     """Compare the persisted workspace against the replayed request.
 
     We only check the user-authored fields — derived/runtime fields (node_id,
     branch_name, etc.) are expected to differ between the initial accept and
     any later replay.
     """
-    return workspace_create_payload_matches(existing, payload)
-
-
-def _payloads_match_v2(
-    existing: Workspace,
-    payload: WorkspaceCreateV2Request,
-    *,
-    settings: Settings | None = None,
-) -> bool:
-    return workspace_create_v2_payload_matches(existing, payload, settings=settings)
+    return workspace_create_payload_matches(existing, payload, settings=settings)
 
 
 def _workspace_create_request_hash(
-    payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+    payload: WorkspaceCreateRequest,
     *,
     api_version: str,
 ) -> str:

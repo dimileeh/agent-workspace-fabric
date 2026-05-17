@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.models import Task, TaskAttempt, Workspace
+from awf.db.models import ProviderModelCircuitBreaker, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -31,9 +31,11 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
+    _as_utc_naive,
     _callback_delivery_insert_if_absent_stmt,
     _callback_subscription_insert_if_absent_stmt,
     _candidate_terminal_close_reason,
+    _circuit_breaker_expired,
     _claims_non_docs_path,
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
@@ -60,6 +62,54 @@ async def session() -> AsyncIterator[AsyncSession]:
         factory = make_session_factory(engine)
         async with factory() as s:
             yield s
+
+
+@pytest.mark.unit
+async def test_task_attempt_lock_is_noop_for_non_postgres_dialects(
+    session: AsyncSession,
+) -> None:
+    repo = TaskAttemptRepository(session, dialect_name="sqlite")
+
+    await repo._lock_attempt_number_sequence("task-no-lock")  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_repository_time_helpers_normalize_circuit_breaker_expiry() -> None:
+    aware_now = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
+    naive_now = aware_now.replace(tzinfo=None)
+
+    assert _as_utc_naive(naive_now) is naive_now
+    assert _as_utc_naive(aware_now) == naive_now
+    assert not _circuit_breaker_expired(
+        ProviderModelCircuitBreaker(
+            id="pcb_closed",
+            provider="codex",
+            model="gpt-5.5",
+            state="closed",
+            cooldown_until=aware_now - timedelta(seconds=1),
+        ),
+        aware_now,
+    )
+    assert not _circuit_breaker_expired(
+        ProviderModelCircuitBreaker(
+            id="pcb_open_without_cooldown",
+            provider="codex",
+            model="gpt-5.5",
+            state="open",
+            cooldown_until=None,
+        ),
+        aware_now,
+    )
+    assert _circuit_breaker_expired(
+        ProviderModelCircuitBreaker(
+            id="pcb_expired",
+            provider="codex",
+            model="gpt-5.5",
+            state="open",
+            cooldown_until=aware_now - timedelta(seconds=1),
+        ),
+        aware_now,
+    )
 
 
 async def _workspace(

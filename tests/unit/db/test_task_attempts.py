@@ -18,7 +18,11 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine
-from tests.postgres import postgres_empty_test_url, postgres_test_session
+from tests.postgres import (
+    postgres_alembic_subprocess_lock,
+    postgres_empty_test_url,
+    postgres_test_session,
+)
 
 
 @pytest.fixture
@@ -373,14 +377,15 @@ class TestTaskAttemptMigration:
             }
 
             monkeypatch.chdir(repo_root)
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            with postgres_alembic_subprocess_lock(database_url):
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
             engine = make_engine(database_url)
             try:
