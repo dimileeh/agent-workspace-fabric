@@ -65,12 +65,26 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.mark.unit
-async def test_task_attempt_lock_is_noop_for_non_postgres_dialects(
-    session: AsyncSession,
-) -> None:
+async def test_task_attempt_lock_is_noop_for_non_postgres_dialects() -> None:
+    class RecordingSession:
+        info: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.executed: list[tuple[object, dict[str, object] | None]] = []
+
+        async def execute(
+            self,
+            statement: object,
+            params: dict[str, object] | None = None,
+        ) -> object:
+            self.executed.append((statement, params))
+            return object()
+
+    session = RecordingSession()
     repo = TaskAttemptRepository(session, dialect_name="sqlite")
 
     await repo._lock_attempt_number_sequence("task-no-lock")  # noqa: SLF001
+    assert session.executed == []
 
 
 @pytest.mark.unit
