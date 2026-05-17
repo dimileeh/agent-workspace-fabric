@@ -795,6 +795,13 @@ def test_owned_path_overlap_warning_parsing_ignores_malformed_payload_items() ->
 
 
 @pytest.mark.unit
+def test_owned_path_overlap_warning_parsing_treats_none_events_as_empty() -> None:
+    workspace = SimpleNamespace(events=None)
+
+    assert owned_path_overlap_warnings(workspace) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
 def test_owned_path_warning_payloads_dedupe_ids_and_tolerate_non_lists() -> None:
     payload = owned_path_overlap_warning_payload(
         [

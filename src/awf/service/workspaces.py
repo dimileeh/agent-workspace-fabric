@@ -2834,7 +2834,7 @@ def _parse_memory_gb(value: str | None) -> float | None:
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
     """Extract owned-path overlap warning responses from workspace events."""
     warnings: list[WorkspaceWarningResponse] = []
-    for event in getattr(workspace, "events", ()):
+    for event in getattr(workspace, "events", ()) or ():
         if event.event_type != OWNED_PATH_OVERLAP_RISK_EVENT_TYPE:
             continue
         payload = event.payload
