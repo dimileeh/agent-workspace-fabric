@@ -1083,6 +1083,8 @@ def workspace_create_payload_matches(
     settings: Settings | None = None,
 ) -> bool:
     """Compare user-authored create fields for idempotent replay."""
+    # Lifecycle status/subphase are intentionally excluded: create idempotency
+    # replays the existing workspace in whatever state it has reached.
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
         if payload.workspace.profile is not None
@@ -1097,7 +1099,7 @@ def workspace_create_payload_matches(
         and existing.task_external_id == payload.task.external_id
         and getattr(existing, "task_class", None) == task_class
         and _owned_path_hints_match(
-            cast(Sequence[str], getattr(existing, "owned_paths", [])),
+            cast(Sequence[str], getattr(existing, "owned_paths", None) or []),
             payload.task.owned_paths,
         )
         and _stored_task_agent_model(existing) == payload.task.model

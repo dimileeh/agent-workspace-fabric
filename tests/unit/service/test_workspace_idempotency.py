@@ -108,6 +108,37 @@ def _ok_disk_check() -> DiskCheck:
     )
 
 
+async def _ready_provider_preflight(
+    *_: object,
+    agent: AgentRuntime | str,
+    override: bool,
+    override_reason: str | None,
+    **__: object,
+) -> dict[str, object]:
+    normalized_reason = override_reason.strip() if override_reason is not None else None
+    return {
+        "provider": "codex",
+        "agent": agent.value if isinstance(agent, AgentRuntime) else str(agent),
+        "model": None,
+        "model_source": "test",
+        "readiness_status": "ready",
+        "auth_status": "ok",
+        "auth_source": "test",
+        "credential_scope": "test",
+        "isolation": "test",
+        "probe_status": "ok",
+        "reason_code": "PROVIDER_READINESS_READY",
+        "message": "provider readiness satisfied by unit test fixture",
+        "override_required": False,
+        "override_requested": override,
+        "override_used": False,
+        "override_reason": normalized_reason or None,
+        "blocks_launch": False,
+        "checked_at": datetime(2026, 5, 17, tzinfo=UTC).isoformat(),
+        "credential_sources": [],
+    }
+
+
 @pytest.mark.unit
 async def test_resolve_disk_check_factory_accepts_sync_result() -> None:
     disk_check = _ok_disk_check()
@@ -293,6 +324,11 @@ async def test_create_locks_idempotency_key_before_lookup_for_legacy_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_idempotency_lock_order(monkeypatch)
+    monkeypatch.setattr(
+        workspaces,
+        "_selected_provider_preflight_for_task_async",
+        _ready_provider_preflight,
+    )
 
     created = await WorkspaceService(factory).create(
         _v1_request(),
@@ -381,7 +417,13 @@ async def test_create_scheduler_replay_does_not_rebuild_full_task_policy(
 @pytest.mark.unit
 async def test_create_auto_profile_replays_matching_legacy_payload_row(
     factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        workspaces,
+        "_selected_provider_preflight_for_task_async",
+        _ready_provider_preflight,
+    )
     service = WorkspaceService(factory)
 
     created = await service.create(
@@ -509,6 +551,25 @@ async def test_create_replay_compares_owned_paths_as_submitted_list(
             _v2_request(owned_paths=changed_owned_paths),
             idempotency_key=idempotency_key,
         )
+
+
+@pytest.mark.unit
+async def test_create_payload_match_treats_legacy_null_owned_paths_as_empty(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _v2_request(owned_paths=[])
+    created = await WorkspaceService(factory).create(
+        request,
+        idempotency_key="service-create-v2-legacy-null-owned-paths",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.owned_paths = None  # type: ignore[assignment]
+        workspace.status = "running"
+
+        assert workspaces.workspace_create_payload_matches(workspace, request)
 
 
 @pytest.mark.unit
