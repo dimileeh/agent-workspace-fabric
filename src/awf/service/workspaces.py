@@ -173,6 +173,7 @@ PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
 VALIDATION_POLICY_KEY = "validation"
 VALIDATION_REQUESTED_TIER_POLICY_KEY = "requested_tier"
 RESOURCE_RESERVATION_REQUEST_POLICY_KEY = "resource_reservation_request"
+LEGACY_DATABASE_PROFILE_REF = "aira"
 QUEUE_DECISION_ADMITTED = "admitted"
 QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
 RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
@@ -1138,6 +1139,8 @@ def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -
     existing_profile_ref = getattr(existing, "profile_ref", None)
     if existing_profile_ref is not None:
         return bool(existing_profile_ref == payload.workspace.profile_ref)
+    if _legacy_database_profile_ref_matches(existing, payload):
+        return True
     legacy_env_profile = getattr(existing, "env_profile", None)
     if legacy_env_profile is not None:
         return bool(legacy_env_profile == payload.workspace.profile_ref)
@@ -1149,6 +1152,17 @@ def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -
             getattr(existing, "requested_profile", None) is not None
             or payload.workspace.profile is not None
         )
+    )
+
+
+def _legacy_database_profile_ref_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateRequest,
+) -> bool:
+    """Check whether a legacy requires_database row matches the database profile."""
+    return bool(
+        getattr(existing, "requires_database", False) is True
+        and payload.workspace.profile_ref == LEGACY_DATABASE_PROFILE_REF
     )
 
 
@@ -1203,8 +1217,8 @@ def _legacy_validation_requested_tier_unknown(
         return True
     return (
         getattr(existing, "profile_ref", None) is not None
-        and getattr(existing, "resolved_profile", None) is None
-    )
+        or _legacy_database_profile_ref_matches(existing, payload)
+    ) and getattr(existing, "resolved_profile", None) is None
 
 
 def _stored_resource_reservation_matches(

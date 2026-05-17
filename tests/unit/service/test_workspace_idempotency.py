@@ -27,7 +27,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
-def _v1_request() -> WorkspaceCreateRequest:
+def _v1_request(*, requires_database: bool = False) -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest(
         repo_url="git@github.com:example/idempotency.git",
         branch_base="main",
@@ -35,7 +35,7 @@ def _v1_request() -> WorkspaceCreateRequest:
         task_prompt="Exercise serialized idempotency lookup.",
         agent=AgentRuntime.codex,
         test_commands=["pytest -q"],
-        requires_database=False,
+        requires_database=requires_database,
     )
 
 
@@ -442,6 +442,43 @@ async def test_create_auto_profile_replays_matching_legacy_payload_row(
         request,
         idempotency_key="service-create-v1-then-v2-auto",
     )
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_database_profile_replays_legacy_requires_database_row(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _v1_request(requires_database=True)
+    idempotency_key = "service-create-v1-database-legacy-profile-replay"
+    service = WorkspaceService(factory)
+
+    async with factory() as session:
+        created = await WorkspaceRepository(session).create(
+            repo_url=request.repo.url,
+            branch_base=request.repo.base_branch,
+            task_title=request.task.title,
+            task_prompt=request.task.prompt,
+            task_external_id=request.task.external_id,
+            agent=request.task.agent.value,
+            env_profile=None,
+            profile_ref=None,
+            test_commands=request.validation.commands,
+            requires_database=True,
+            idempotency_key=idempotency_key,
+        )
+        await session.commit()
+
+    non_database_payload = _v2_request(profile_ref="python").model_dump(mode="python")
+    non_database_payload["task"]["title"] = request.task.title
+    non_database_payload["task"]["prompt"] = request.task.prompt
+    non_database_payload["preflight"] = {}
+    non_database_request = WorkspaceCreateRequest.model_validate(non_database_payload)
+
+    assert not workspaces.workspace_create_payload_matches(created, non_database_request)
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
     assert replayed.id == created.id
 
 
