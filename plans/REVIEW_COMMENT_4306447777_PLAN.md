@@ -34,7 +34,8 @@ AWF-managed branch without changing branches or pushing.
   should pass.
 - `uv run --python 3.12 --extra dev pytest tests/unit/api/test_schema_coverage_edges.py tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_omits_unspecified_optional_task_fields -q`
   should pass.
-- `python scripts/generate_openapi.py --check` should pass.
+- `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check`
+  should pass.
 
 ## Assumptions/Changes
 
