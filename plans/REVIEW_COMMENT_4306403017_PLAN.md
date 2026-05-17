@@ -56,5 +56,5 @@ verified and documented as no-ops.
   should pass.
 - `uv run --python 3.12 --extra dev pytest tests/unit/db/test_task_attempts.py::TestTaskAttemptMigration::test_task_attempt_migration_creates_tables tests/unit/db/test_repository_coverage.py::test_task_attempt_lock_is_noop_for_non_postgres_dialects -q`
   should pass.
-- `python scripts/generate_openapi.py --check` should pass after regenerating
+- `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check` should pass after regenerating
   the artifact.
