@@ -299,14 +299,17 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
+    session = SimpleNamespace(rollback=AsyncMock())
+
     response = await workspace_routes.create_workspace(
         payload,
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key=None,
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
+    session.rollback.assert_awaited_once()
     assert response.status_code == 409
     body = json.loads(response.body)
     assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"

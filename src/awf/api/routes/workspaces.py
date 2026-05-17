@@ -325,6 +325,7 @@ async def create_workspace(
             ).model_dump(),
         )
     except TaskExternalIdConflictError as exc:
+        await session.rollback()
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content=ErrorResponse(

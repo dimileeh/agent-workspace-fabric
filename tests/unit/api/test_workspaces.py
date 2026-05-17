@@ -2542,6 +2542,42 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         _assert_no_internal_error_fields(body)
 
     @pytest.mark.unit
+    async def test_v2_external_id_scope_conflict_rolls_back_rejected_workspace(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_codex_auth_env(monkeypatch)
+        repo_url = "git@github.com:example/external-id-conflict-rollback.git"
+        external_id = "WAVE-ROLLBACK"
+        first_payload = _v2_body(
+            repo_url=repo_url,
+            title="docs slice",
+            owned_paths=["docs/**"],
+        )
+        first_payload["task"]["external_id"] = external_id  # type: ignore[index]
+        second_payload = _v2_body(
+            repo_url=repo_url,
+            title="api slice",
+            owned_paths=["src/awf/api/**"],
+        )
+        second_payload["task"]["external_id"] = external_id  # type: ignore[index]
+
+        first = await client.post("/v1/workspaces", json=first_payload)
+        second = await client.post("/v1/workspaces", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(repo_url=repo_url, limit=10)
+
+        matching_rows = [row for row in rows if row.task_external_id == external_id]
+        assert [row.task_title for row in matching_rows] == ["docs slice"]
+
+    @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_title(
         self,
         client: AsyncClient,
