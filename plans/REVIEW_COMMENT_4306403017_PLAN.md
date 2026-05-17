@@ -46,7 +46,7 @@ verified and documented as no-ops.
 
 - `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py::test_workspace_create_schema_components_use_canonical_v1_names -q`
   should fail before the schema rename and pass after it.
-- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspaces.py::TestCreateWorkspace::test_stored_profile_and_policy_helpers_handle_missing_or_malformed_data -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspaces.py::TestCreateWorkspacePolicyMetadata::test_stored_profile_and_policy_helpers_handle_missing_or_malformed_data -q`
   should fail before the mapping guard and pass after it.
 - `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py tests/unit/api/test_workspaces.py::TestCreateWorkspace::test_rate_limited_workspace_create_uses_post_denial_durable_replay tests/unit/api/test_workspaces.py::TestCreateWorkspace::test_rate_limited_workspace_create_refreshes_preview_after_durable_miss tests/unit/api/test_workspaces.py::TestCreateWorkspace::test_known_replay_key_db_miss_returns_conflict_without_create tests/unit/api/test_validation_provenance.py tests/unit/db/test_task_attempts.py::TestTaskAttemptMigration::test_task_attempt_migration_creates_tables tests/unit/db/test_repository_coverage.py::test_task_attempt_lock_is_noop_for_non_postgres_dialects -q`
   should pass.
