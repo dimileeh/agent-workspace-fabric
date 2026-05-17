@@ -1108,7 +1108,7 @@ def workspace_create_payload_matches(
         and _stored_task_provider_recovery_policy(existing)
         == _requested_task_provider_recovery_policy(payload)
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
-        and getattr(existing, "auto_merge", True) == payload.task.auto_merge
+        and _stored_auto_merge_matches(existing, payload)
         and (
             getattr(existing, "initial_review_grace_period_seconds", None)
             == payload.task.initial_review_grace_period_seconds
@@ -1122,6 +1122,12 @@ def workspace_create_payload_matches(
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
     )
+
+
+def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
+    """Check stored auto-merge intent, treating legacy NULL as the old default."""
+    stored = getattr(existing, "auto_merge", None)
+    return (stored is not False) == payload.task.auto_merge
 
 
 def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:

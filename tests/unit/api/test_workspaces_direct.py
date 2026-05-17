@@ -382,6 +382,36 @@ class TestPayloadsMatch:
         assert _payloads_match(ws, payload) is True
 
     @pytest.mark.unit
+    async def test_legacy_null_auto_merge_matches_default_true(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=["x"],
+            requires_database=False,
+            idempotency_key="k",
+        )
+        payload = _payload(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            test_commands=["x"],
+        )
+
+        try:
+            ws.auto_merge = None  # type: ignore[assignment]
+            assert _payloads_match(ws, payload) is True
+        finally:
+            ws.auto_merge = True
+
+    @pytest.mark.unit
     async def test_mismatch_on_repo_url(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
         ws = await repo.create(
