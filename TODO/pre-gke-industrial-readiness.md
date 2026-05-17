@@ -623,8 +623,8 @@ and production configuration footguns.
   covered by contract tests; sensitive reads/writes require auth by default or
   have a written local-dev exception; and workspace create/list/events behavior
   is re-evaluated for local-dev versus production/network-facing mode. Must
-  explicitly cover `POST /v1/workspaces`, `POST /v1/workspaces`, workspace
-  list/overview/get/events/stale-reasons, and
+  explicitly cover `POST /v1/workspaces`, `GET /v1/workspaces`, workspace
+  overview/get/events/stale-reasons, and
   `/v1/workspaces/{workspace_id}/secret-leases`; secret lease status may not
   expose secret names, mount targets, providers, or reference digests across an
   unauthenticated boundary. Tests should prove new routes are auth-required by
