@@ -32,6 +32,10 @@ _BODY = {
     "task_prompt": "Exercise sensitive workspace controls.",
     "agent": "codex",
     "test_commands": ["pytest -q"],
+    "preflight": {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": "control idempotency fixture",
+    },
 }
 _ACTIVE_CLAIM_EXPIRES_AT = datetime(2026, 4, 26, 12, 30, tzinfo=UTC)
 _ACTIVE_CLAIM_EXPIRES_AT_JSON = _ACTIVE_CLAIM_EXPIRES_AT.isoformat()

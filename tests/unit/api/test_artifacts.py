@@ -27,6 +27,10 @@ _MINIMAL_BODY = {
     "task_prompt": "Expose workspace artifact metadata.",
     "agent": "codex",
     "test_commands": ["pytest -q"],
+    "preflight": {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": "artifact API fixture",
+    },
 }
 
 

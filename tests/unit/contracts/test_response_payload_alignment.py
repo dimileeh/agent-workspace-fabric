@@ -77,6 +77,8 @@ async def test_create_registry_response_fields_match_mcp_payload(
             "repo_url": "git@github.com:example/create-response.git",
             "task_title": "Create response contract",
             "task_prompt": "Exercise create response metadata.",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "response contract fixture",
         },
     )
 
