@@ -171,6 +171,23 @@ This local slice does not implement cloud `NetworkPolicy`, host firewall rules,
 iptables/nftables mutation, DNS filtering, transparent proxies, or package
 registry mirror management.
 
+### Local service port defaults and portability
+
+AWF’s local service compose stack keeps container ports stable (`postgres:5432` and
+`api:8000`) while allowing host-port overrides for machine portability:
+
+- `AWF_POSTGRES_HOST_PORT` controls the host-facing Postgres port (default `5433`).
+- `AWF_API_HOST_PORT` controls the host-facing API port (default `8000`).
+
+By default, host bind addresses stay loopback (`127.0.0.1`) so the service remains
+local by default. If `AWF_API_HOST_PORT` changes, client calls (including `awf
+service status`, `awf service doctor`, and `/readyz` checks) that target the local
+API host must use `AWF_API_BASE_URL` (for example
+`http://localhost:${AWF_API_HOST_PORT}`) so operator tooling and manual requests
+remain aligned with the running service.
+Set `AWF_API_BASE_URL` to that host value before running local status or doctor
+diagnostics against a custom API port.
+
 ## Workspace Lifecycle
 
 The normal feature-branch task path uses these workspace states:
@@ -412,6 +429,15 @@ uv run --python 3.12 --extra dev awf service release-readiness --format pretty
 curl 'http://localhost:8000/readyz?provider=github'
 curl 'http://localhost:8000/release-readiness'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
+```
+
+If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` first and use it for
+local API diagnostics:
+
+```bash
+export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+curl "${AWF_API_BASE_URL}/readyz?provider=github"
+curl "${AWF_API_BASE_URL}/release-readiness"
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for

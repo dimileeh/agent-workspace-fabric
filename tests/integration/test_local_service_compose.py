@@ -8,6 +8,13 @@ import pytest
 import yaml
 
 
+def _compose_template_value(value: str, env: dict[str, str]) -> str:
+    if not (value.startswith("${") and value.endswith("}") and ":-" in value):
+        return value
+    key, default = value[2:-1].split(":-", 1)
+    return env.get(key, default)
+
+
 @pytest.mark.integration
 def test_local_service_compose_declares_control_plane_stack() -> None:
     compose_path = Path("docker/compose/local-service.yml")
@@ -119,7 +126,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
     )
     assert "awf_dev" not in yaml.safe_dump(postgres["environment"])
-    assert postgres["ports"] == ["127.0.0.1:5433:5432"]
+    assert postgres["ports"] == ["127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"]
+
+    api = services["api"]
+    assert api["ports"] == ["${AWF_API_HOST_PORT:-8000}:8000"]
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
@@ -140,3 +150,28 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr",
         "TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}",
     ]
+
+
+@pytest.mark.integration
+def test_local_service_compose_port_templates_support_default_and_override_values() -> None:
+    compose_path = Path("docker/compose/local-service.yml")
+    data = yaml.safe_load(compose_path.read_text())
+    services = data["services"]
+
+    postgres_mapping = services["postgres"]["ports"][0]
+    api_mapping = services["api"]["ports"][0]
+    postgres_host = postgres_mapping.split(":", 1)[1].rsplit(":", 1)[0]
+    api_host = api_mapping.rsplit(":", 1)[0]
+
+    assert postgres_mapping == "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
+    assert api_mapping == "${AWF_API_HOST_PORT:-8000}:8000"
+
+    assert _compose_template_value(postgres_host, {}) == "5433"
+    assert _compose_template_value(api_host, {}) == "8000"
+
+    override_env = {
+        "AWF_POSTGRES_HOST_PORT": "55333",
+        "AWF_API_HOST_PORT": "9100",
+    }
+    assert _compose_template_value(postgres_host, override_env) == "55333"
+    assert _compose_template_value(api_host, override_env) == "9100"

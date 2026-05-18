@@ -104,10 +104,14 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 cp .env.example .env
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
+export AWF_POSTGRES_HOST_PORT=5433
+export AWF_API_HOST_PORT=8000
 # Persist Compose-interpolated values into docker/compose/.env.
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
+  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
+  printf 'AWF_API_HOST_PORT=%s\n' "$AWF_API_HOST_PORT"
 } > docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
@@ -123,6 +127,8 @@ uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 Key local service values:
 
 ```text
+AWF_POSTGRES_HOST_PORT=5433
+AWF_API_HOST_PORT=8000
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
 AWF_API_TOKEN=<local bearer token>
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
@@ -143,6 +149,18 @@ AWF_WORKSPACE_CLEANUP_ENABLED=true
 AWF_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS=3600
 AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
 AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
+```
+
+If you change `AWF_API_HOST_PORT`, update host-side CLI targeting for
+`awf service status` and `awf service doctor`, plus local HTTP checks, to use a
+matching API base URL. For example:
+
+```bash
+export AWF_API_HOST_PORT=9001
+export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf service status --format pretty
+awf service doctor
+curl "http://localhost:9001/readyz?provider=github"
 ```
 
 ### Local vs Production Configuration

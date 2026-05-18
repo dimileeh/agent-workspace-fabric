@@ -54,6 +54,19 @@ def _diagnostic_text(error: ProductionSettingsError) -> str:
     )
 
 
+def test_local_service_environ_preserves_host_port_overrides(tmp_path: Path) -> None:
+    env_file = tmp_path / "docker" / "compose" / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        "AWF_POSTGRES_HOST_PORT=15433\nAWF_API_HOST_PORT=9100\n",
+        encoding="utf-8",
+    )
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_POSTGRES_HOST_PORT"] == "15433"
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
 @pytest.mark.unit
 def test_production_guardrails_allow_local_defaults() -> None:
     settings = Settings(_env_file=None, env="local", api_token=None, callbacks_enabled=True)
