@@ -310,7 +310,11 @@ def test_parity_matrix_implemented_status_is_backed_by_real_surfaces() -> None:
 @pytest.mark.unit
 def test_partial_and_missing_rows_have_unchecked_backlog_visibility() -> None:
     rows = _parity_rows()
-    active_todo_markers = _unchecked_todo_markers(TODO_DOC.read_text(encoding="utf-8"))
+    active_todo_markers = (
+        _unchecked_todo_markers(TODO_DOC.read_text(encoding="utf-8"))
+        if TODO_DOC.exists()
+        else set()
+    )
 
     failures: list[str] = []
     for row in rows:

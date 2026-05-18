@@ -1,1 +1,0 @@
-{"status":"satisfied","summary":"Implementation satisfies the saved stale-policy plan: docs/awf-plans artifacts are advisory-only, source and policy-sensitive overlaps remain blocking, API/merge queue/PR monitor/console surfaces distinguish blocking stale reasons from advisory risks, and the requested Python plus console validation passed.","gaps":[]}

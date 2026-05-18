@@ -136,9 +136,8 @@ def _completed(stdout: str, *, returncode: int = 0, stderr: str = "") -> Any:
 
 
 def _worker_running(args: list[str], **_kwargs: object) -> Any:
-    assert args == [
-        "docker",
-        "compose",
+    assert args[:2] == ["docker", "compose"]
+    assert args[-6:] == [
         "-f",
         "docker/compose/local-service.yml",
         "ps",
@@ -202,6 +201,38 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
     assert diagnostics["port.db"]["message"] == "localhost:5433 is accepting connections."
     assert "AWF doctor: ok" in render_doctor_pretty(report)
     assert "[ok] Docker:" in render_doctor_pretty(report)
+
+
+@pytest.mark.unit
+def test_doctor_worker_inspection_loads_local_compose_env_file(tmp_path: Path) -> None:
+    from awf.service.doctor import collect_doctor_report
+
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env_file = compose_file.parent / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_PASSWORD=from-compose-env\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        calls.append((args, dict(kwargs["env"])))  # type: ignore[arg-type]
+        return _completed('[{"Service":"worker","State":"running","Health":"healthy"}]')
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_green_collector,
+            run_subprocess=_run,
+            socket_connector=_connect_ok,
+            environ={},
+            compose_file=compose_file,
+        )
+    )
+
+    args, env = calls[0]
+    assert report.to_dict()["status"] == "ok"
+    assert args[:4] == ["docker", "compose", "--env-file", str(compose_env_file)]
+    assert env["AWF_POSTGRES_PASSWORD"] == "from-compose-env"
 
 
 @pytest.mark.unit

@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "All 5 required behaviors are implemented and tested: (1) ProviderRecoveryStateResponse schema exposes all recovery fields on WorkspaceResponse, WorkspaceFailureDetailsResponse, MergeQueueItemResponse; (2) PROVIDER_RECOVERY_REASON_CODES frozenset and event payload contract tests enforce structured payloads; (3) MergeQueueItemResponse.provider_recovery_state, ResourceSaturationSummary.provider_recovery_state_summary, and FailedWorkspaceExample/RootCauseCluster provider_recovery fields give first-class visibility; (4) All schema fields are nullable/optional, ProviderCircuitBreakerSummaryResponse tolerates None fields, tests confirm no ValidationError on missing fields; (5) 19 contract-style unit tests pass covering schema roundtrips, missing-field tolerance, reason-code stability, extraction functions, event payloads, metrics dataclass shape, and action enum values. Lint and mypy clean. Non-goal files (worker, pr_monitor, db/models, db/repositories, migrations) untouched.",
-  "gaps": []
-}

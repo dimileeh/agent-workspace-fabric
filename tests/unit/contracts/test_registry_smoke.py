@@ -302,7 +302,11 @@ def test_mcp_implemented_matrix_rows_have_executable_coverage_reference() -> Non
 
 @pytest.mark.unit
 def test_non_implemented_matrix_rows_track_unchecked_backlog_slice() -> None:
-    active_todo_markers = _unchecked_todo_markers(TODO_DOC.read_text(encoding="utf-8"))
+    active_todo_markers = (
+        _unchecked_todo_markers(TODO_DOC.read_text(encoding="utf-8"))
+        if TODO_DOC.exists()
+        else set()
+    )
     failures: list[str] = []
 
     for row in _parity_rows():

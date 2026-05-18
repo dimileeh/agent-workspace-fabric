@@ -113,8 +113,62 @@ def test_changelog_and_upgrade_guide_are_discoverable() -> None:
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
     assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
+    assert (REPO_ROOT / "RELEASING.md").exists()
     assert "[Changelog](CHANGELOG.md)" in readme_text
     assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
+    assert "[Release Checklist](RELEASING.md)" in readme_text
+
+
+def test_public_oss_release_metadata_is_consistent() -> None:
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    license_text = (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+    pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    releasing_text = (REPO_ROOT / "RELEASING.md").read_text(encoding="utf-8")
+
+    assert "# Agent Workspace Fabric (AWF)" in readme_text
+    assert "[LICENSE](LICENSE)" in readme_text
+    assert "Apache License" in license_text
+    assert 'name = "agent-workspace-fabric"' in pyproject_text
+    assert "pip-licenses" in releasing_text
+    assert "license-checker" in releasing_text
+    assert "awf service readiness --format json" in releasing_text
+
+
+def test_primary_public_docs_use_public_brand_and_not_internal_backlog() -> None:
+    public_entrypoints = [
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "docs" / "README.md",
+        REPO_ROOT / "docs" / "QUICKSTART.md",
+        REPO_ROOT / "docs" / "GETTING_STARTED.md",
+        REPO_ROOT / "CONTRIBUTING.md",
+        REPO_ROOT / "RELEASING.md",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in public_entrypoints)
+
+    assert "Agent Workspace Fabric (AWF)" in combined
+    assert "Aira Agent Workspace Fabric" not in combined
+    assert "TODO/pre-gke-industrial-readiness.md" not in combined
+
+
+def test_generated_plan_artifacts_are_not_tracked_public_docs() -> None:
+    result = subprocess.run(
+        ["git", "ls-files", "docs/awf-plans", "plans"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    tracked = set(result.stdout.splitlines())
+
+    assert "docs/awf-plans/README.md" in tracked
+    assert "plans/PLAN_EXECUTION_PROTOCOL.md" in tracked
+    assert not any(
+        path.startswith("docs/awf-plans/") and path != "docs/awf-plans/README.md"
+        for path in tracked
+    )
+    assert not any(
+        path.startswith("plans/") and path != "plans/PLAN_EXECUTION_PROTOCOL.md" for path in tracked
+    )
 
 
 def test_shell_snippet_validation_fails_cleanly_when_bash_is_missing(

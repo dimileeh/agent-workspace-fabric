@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "The explicit-doc stance for the v0.1 SDK has been documented correctly in README.md, CLIENT_SURFACES.md, and MCP_CLIENT_PARITY.md. A validation test tests/unit/docs/test_sdk_stance_docs.py was created and passes based on the validation evidence provided.",
-  "gaps": []
-}

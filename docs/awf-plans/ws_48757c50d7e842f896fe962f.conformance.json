@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "The implementation satisfies the saved plan: it adds focused test-only coverage for snapshot auto-merge blockers, runner-side grace/validation/stale/non-check-reviewer/pre-merge-recheck gates, and a clean merge path after all gates pass. No production implementation files were modified, the work is locally committed, and the required validation commands pass.",
-  "gaps": []
-}

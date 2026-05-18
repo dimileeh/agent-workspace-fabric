@@ -1,4 +1,4 @@
-# Aira Agent Workspace Fabric (AWF)
+# Agent Workspace Fabric (AWF)
 
 *New to AWF? See the [Quickstart](docs/QUICKSTART.md) to bootstrap a local evaluation workspace in a few commands.*
 
@@ -11,8 +11,8 @@ review monitoring, comment-fix loops, merge gates, artifacts, events, and
 cleanup.
 
 AWF is not a chatbot and not a product-planning brain. It is the execution
-substrate beneath a planner such as Aira, a human operator, or an MCP client;
-inside a workspace it can enforce a concrete implementation-plan lifecycle.
+substrate beneath a planner, a human operator, or an MCP client; inside a
+workspace it can enforce a concrete implementation-plan lifecycle.
 
 ## The Problem
 
@@ -67,14 +67,17 @@ cleanup.
 
 ## Current Status
 
-This repository is an active MVP moving toward the full AWF v2.2 product
-contract.
+This repository is the alpha local Core of Agent Workspace Fabric. It is ready
+for local evaluation and dogfooding, while hosted, GKE, and multi-tenant
+deployments remain future layers.
 
 Implemented now:
 
-- FastAPI REST API.
+- FastAPI REST API with a single canonical `/v1` namespace.
 - Typer CLI.
-- MCP server primitives.
+- MCP server tools for workspace creation, controls, operator reads, metrics,
+  and PR monitor adoption.
+- Local operator console.
 - SQLAlchemy control-plane models for workspaces, operations, and events.
 - Profile-driven workspace resolution.
 - Per-workspace Docker Compose stack generation.
@@ -90,25 +93,26 @@ Implemented now:
 - Initial PR review grace period before auto-merge.
 - Durable task policy metadata (`task_class`, `owned_paths`) for scheduling and review provenance.
 - Non-actionable bot status comment filtering.
-- `/v1/events` for workspace timelines.
-- Filterable `/v1/workspaces` list endpoint for console and operator clients.
+- Workspace timelines, logs, artifacts, runtime snapshots, validation
+  provenance, metrics, locks, and merge-queue inspection.
 
-Still not complete:
+Alpha limitations:
 
-- Full merge queue across multiple task PRs.
-- Full task-class lock matrix.
-- Full stale/canonical attempt model.
 - Multi-node scheduling.
-- Cloud backend.
-- Full web dashboard.
-- Full secret lease broker (local profiles declare security/egress and secrets metadata, but full cloud enforcement is pending).
+- Cloud backend and hosted control plane.
+- Multi-tenant authz, cloud secret broker, and hardened network sandbox.
+- Full semantic merge automation beyond the local PR monitor and merge-safety
+  gates already implemented.
 
 See:
 
-- [docs/awf_prd_v2.2.md](docs/awf_prd_v2.2.md) for the end-state PRD.
-- [docs/PLAN_MVP.md](docs/PLAN_MVP.md) for the MVP plan.
-- [docs/PLAN_PR_MONITOR.md](docs/PLAN_PR_MONITOR.md) for PR monitor design.
-- [docs/PLAN_RELEASE_PR_SYNC.md](docs/PLAN_RELEASE_PR_SYNC.md) for release PR sync.
+- [docs/awf_prd_v2.2.md](docs/awf_prd_v2.2.md) for the historical end-state
+  PRD that guided the alpha.
+- [docs/PLAN_MVP.md](docs/PLAN_MVP.md) for the historical MVP plan.
+- [docs/PLAN_PR_MONITOR.md](docs/PLAN_PR_MONITOR.md) for historical PR
+  monitor design.
+- [docs/PLAN_RELEASE_PR_SYNC.md](docs/PLAN_RELEASE_PR_SYNC.md) for historical
+  release PR sync design.
 - [docs/AWF_CORE_TRUST_MODEL.md](docs/AWF_CORE_TRUST_MODEL.md) for the local
   Core trust boundary and future Operator/Architect split.
 - [docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md](docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md)
@@ -136,6 +140,7 @@ See:
 - [Test Quality Guardrails](docs/test-quality-guardrails.md)
 - [Changelog](CHANGELOG.md)
 - [Contributor Guide](CONTRIBUTING.md)
+- [Release Checklist](RELEASING.md)
 
 ## Supported Client Surfaces (v0.1)
 

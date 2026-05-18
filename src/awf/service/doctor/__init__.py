@@ -16,7 +16,11 @@ from urllib.parse import urlsplit
 from sqlalchemy.engine import make_url
 
 from awf.service import provider_readiness
-from awf.service.config import ServiceSettings
+from awf.service.config import (
+    LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    ServiceSettings,
+    local_service_environ,
+)
 from awf.service.doctor import reasons as _reasons
 from awf.service.doctor.models import (
     CompletedProcessLike,
@@ -65,8 +69,13 @@ async def collect_doctor_report(
     """Collect read-only local diagnostics for operator troubleshooting."""
 
     env = os.environ if environ is None else environ
-    provider_env = env if provider_environ is None else provider_environ
-    secrets = _secret_values(settings, env, provider_env)
+    compose_env_file = _local_service_compose_env_file(compose_file)
+    service_env = local_service_environ(
+        env,
+        env_file=compose_env_file or LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    )
+    provider_env = service_env if provider_environ is None else provider_environ
+    secrets = _secret_values(settings, service_env, provider_env)
     collector = status_collector or collect_service_status
     runner = run_subprocess or _run_subprocess
     connector = socket_connector or _socket_connect
@@ -88,8 +97,9 @@ async def collect_doctor_report(
             _worker_diagnostic(
                 settings,
                 run_subprocess=runner,
-                environ=env,
+                environ=service_env,
                 compose_file=compose_file,
+                compose_env_file=compose_env_file,
                 secrets=secrets,
             ),
             *_port_diagnostics(settings, socket_connector=connector, secrets=secrets),
@@ -288,18 +298,16 @@ def _worker_diagnostic(
     run_subprocess: SubprocessRun,
     environ: Mapping[str, str],
     compose_file: Path,
+    compose_env_file: Path | None,
     secrets: frozenset[str],
 ) -> DoctorDiagnostic:
     args = [
         "docker",
         "compose",
-        "-f",
-        str(compose_file),
-        "ps",
-        "worker",
-        "--format",
-        "json",
     ]
+    if compose_env_file is not None:
+        args.extend(["--env-file", str(compose_env_file)])
+    args.extend(["-f", str(compose_file), "ps", "worker", "--format", "json"])
     try:
         result = run_subprocess(
             args,
@@ -446,6 +454,25 @@ def _worker_diagnostic(
         metadata=metadata,
         secrets=secrets,
     )
+
+
+def _local_service_compose_env_file(compose_file: Path) -> Path | None:
+    candidates: list[Path] = []
+    if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
+        candidates.append(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+    else:
+        candidates.append(compose_file.parent / ".env")
+        candidates.append(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
 
 
 def _port_diagnostics(

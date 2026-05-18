@@ -1,5 +1,9 @@
 # AWF MVP — Parallel-Agent Execution Substrate for Aira
 
+> Historical design note: this plan records the original Aira-oriented MVP
+> framing that informed the public Agent Workspace Fabric (AWF) alpha. It is
+> preserved as implementation history, not current release guidance.
+
 ## Context
 
 Dmitri's primary constraint on shipping aira features is **parallel agent throughput**, not feature scope or agent capability. Today, each PR takes ~8 hours end-to-end (largely review + conflict resolution), and the workflow is serial — he babysits one PR at a time. Concurrent agent demand is 8+ but suppressed by the lack of a substrate that can isolate agents safely.

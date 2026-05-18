@@ -1,5 +1,10 @@
 # Aira Agent Workspace Fabric (AWF) v2.2
 
+> Historical product contract: this Aira-oriented PRD guided the current public
+> Agent Workspace Fabric (AWF) alpha. Public release instructions live in
+> `RELEASING.md`; current user-facing setup lives in `README.md` and
+> `docs/QUICKSTART.md`.
+
 **Combined Product Requirements Document and Architecture Specification**
 
 | Field | Value |

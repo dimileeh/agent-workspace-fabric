@@ -1,8 +1,0 @@
-{
-  "status": "needs_iteration",
-  "summary": "The requested API route/WebSocket focus scope now appears complete, but the workspace does not fully satisfy the saved coverage campaign because full AWF branch coverage remains below 99%. Current validation: ruff passed, mypy passed, tests/unit/api passed with 298 tests, and the full branch-coverage run passed with 1533 passed and 4 skipped. Total coverage is 93.03%. The nine focus files from the plan report 100% aggregate branch coverage.",
-  "gaps": [
-    "Continue coverage work until full AWF branch coverage reaches the requested 99%+. Current total is 93.03%; the highest remaining gaps include src/awf/control/worker.py at 82%, src/awf/control/executor.py at 85%, src/awf/db/repositories.py at 85%, src/awf/service/alembic_resolver.py at 85%, src/awf/service/target_branch_monitor.py at 86%, src/awf/common/commands.py at 87%, and src/awf/runtime/validation.py at 87%.",
-    "Preserve explicit red/green TDD evidence for any further production changes. The current local history contains production changes after the saved plan, but it does not provide a separate red-test commit or captured narrow failing-test evidence before those fixes."
-  ]
-}

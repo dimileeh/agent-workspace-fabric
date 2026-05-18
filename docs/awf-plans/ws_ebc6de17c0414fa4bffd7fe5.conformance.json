@@ -1,1 +1,0 @@
-{"status":"satisfied","summary":"Implementation matches the saved plan: agent_readiness is wired into /readyz and service status with strict provider handling, provider auth signals are redacted and documented, required tests exist, and focused plus broad validation passed (ruff, mypy, unit tests, coverage 99.04%).","gaps":[]}

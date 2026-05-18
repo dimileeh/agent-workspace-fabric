@@ -80,7 +80,7 @@ class _MinRichHelpWidthCommand(typer.core.TyperCommand):
 
 app = typer.Typer(
     name="awf",
-    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}{_MUTATES_GLOBAL_HELP}",
+    help=f"Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}{_MUTATES_GLOBAL_HELP}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )

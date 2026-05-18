@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "The implementation fully achieves the saved plan. _run_agent_task_with_optional_planning now captures a pre-planning HEAD SHA, unions committed changes (git diff --name-only <base>..HEAD) with dirty/untracked changes (porcelain), and uses the combined set for both the plan-artifact check and the enforce_plan_only_changes check. A new _committed_paths_since helper was added. All four required TDD test scenarios (committed plan accepted, committed plan + code rejected as outside plan, dirty plan still accepted, dirty extra still rejected) are present in test_executor_coverage_edges.py and passing. Ruff and mypy are clean and coverage thresholds were not lowered.",
-  "gaps": []
-}
