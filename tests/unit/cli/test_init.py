@@ -463,6 +463,7 @@ def test_init_without_path_seeds_source_compose_env_when_missing(
 def test_init_without_path_prefers_compose_env_example_over_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Prefer compose `.env.example` over root when seeding bootstrap env."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -523,6 +524,7 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
 def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Resolve compose env seeding from resolved AWF asset roots."""
     workspace_root = tmp_path / "workspace"
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
