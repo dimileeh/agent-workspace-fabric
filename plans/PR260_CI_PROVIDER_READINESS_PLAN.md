@@ -33,6 +33,18 @@ their coverage.
 5. Run a narrow provider-readiness blocking test to ensure enforcement was not
    disabled.
 
+## Assumptions/Changes
+
+- A local full-coverage run after the initial fix found additional fixture-only
+  workspace create paths with the same provider-readiness precheck failure. The
+  plan scope expands to add explicit overrides to those unrelated API/direct
+  test helpers as well:
+  - `tests/unit/api/test_events.py`
+  - `tests/unit/api/test_observability_api.py`
+  - `tests/unit/api/test_pagination_envelopes.py`
+  - `tests/unit/api/test_workspaces_direct.py`
+  - `tests/unit/contracts/test_structured_error_envelope.py`
+
 ## Verification commands and pass criteria
 
 - `uv run --python 3.12 --extra dev pytest '<reported node ids>' -q` passes.

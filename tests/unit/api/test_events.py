@@ -23,6 +23,10 @@ _MINIMAL_BODY = {
     "task_prompt": "Add a one-line docstring to src/aira_agent/api/main.py.",
     "agent": "codex",
     "test_commands": ["pytest -q"],
+    "preflight": {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": "event API fixture",
+    },
 }
 
 

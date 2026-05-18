@@ -102,6 +102,10 @@ async def test_enveloped_list_preserves_representative_item_shape(
             "task_prompt": "Keep event item fields stable.",
             "agent": "codex",
             "test_commands": ["pytest -q"],
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "pagination envelope fixture",
+            },
         },
         headers=_AUTH_HEADERS,
     )

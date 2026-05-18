@@ -40,7 +40,13 @@ _BODY = {
     "task_external_id": "TICKET-123",
     "agent": "codex",
     "test_commands": ["pytest -q"],
+    "preflight": {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": "observability API fixture",
+    },
 }
+
+_REPOSITORY_BODY = {key: value for key, value in _BODY.items() if key != "preflight"}
 
 
 _V2_POLICY_BODY = {
@@ -1180,7 +1186,7 @@ class TestWorkspaceWebSocket:
                 async def setup():
                     async with factory() as session:
                         ws_repo = WorkspaceRepository(session)
-                        ws = await ws_repo.create(**_BODY)
+                        ws = await ws_repo.create(**_REPOSITORY_BODY)
                         await session.commit()
                         repo = WorkspaceLogStreamRepository(session)
                         await repo.create_or_get(
