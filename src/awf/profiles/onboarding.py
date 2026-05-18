@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from awf.common.profile_paths import _PROFILE_MARKER_PATHS
 from awf.profiles.models import (
     DockerMode,
     EgressAllowlistTemplate,
@@ -47,12 +48,6 @@ _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}")
 _SECRET_NAME_RE = re.compile(
     r"(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|ACCESS_KEY)",
     re.IGNORECASE,
-)
-_PROFILE_MARKER_PATHS = (
-    ".awf/workspace.yml",
-    ".awf/workspace.yaml",
-    "awf.workspace.yml",
-    "awf.workspace.yaml",
 )
 _HTTP_COMPOSE_PORTS = frozenset({80, 3000, 3001, 4173, 5000, 5173, 8000, 8080, 8081, 8888})
 _HTTPS_COMPOSE_PORTS = frozenset({443, 8443})
