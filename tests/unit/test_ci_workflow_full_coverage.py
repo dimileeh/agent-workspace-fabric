@@ -275,4 +275,7 @@ def test_contributor_docs_require_ci_rollup_status_check() -> None:
 
     assert "branch protection" in docs.lower()
     assert "ci-required" in docs
+    assert "lint-and-type" in docs
     assert "python-full-coverage" in docs
+    assert "release-artifacts" in docs
+    assert "lint-and-test" not in docs

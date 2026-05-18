@@ -38,13 +38,13 @@ docker compose version
 The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
 
 ```bash
-uv tool install aira-awf
+uv tool install agent-workspace-fabric
 ```
 
 If you prefer to install it into an existing environment, use:
 
 ```bash
-uv pip install aira-awf
+uv pip install agent-workspace-fabric
 ```
 
 For contributors who want to modify AWF itself:
@@ -165,11 +165,10 @@ Production must set:
 - `AWF_API_TOKEN` to a deployment-specific high-entropy bearer token. Missing
   values, short values, and local placeholders such as `local-dev-token`,
   `changeme`, or `default` are rejected.
-- `AWF_CALLBACKS_ENABLED=false`. Production startup rejects enabled callbacks
-  until callback routes enforce bearer-token authentication and the callback
-  SSRF hardening slice adds HTTPS and allowlist policy validation. A strong
-  `AWF_API_TOKEN` is still required for production, but it is not sufficient to
-  expose callback registration safely.
+- `AWF_CALLBACKS_ENABLED=false` unless callback delivery is intentionally used.
+  For production callback delivery, keep the strong API token, set
+  `AWF_CALLBACKS_REQUIRE_HTTPS=true`, and set
+  `AWF_CALLBACKS_ALLOWED_HOSTS` to the exact callback hosts you operate.
 
 Production validation diagnostics name the unsafe setting and remediation, but
 they do not print raw tokens, database passwords, or full secret-bearing

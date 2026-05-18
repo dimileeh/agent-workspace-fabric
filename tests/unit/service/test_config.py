@@ -604,6 +604,42 @@ def test_local_service_environ_loads_compose_env_with_host_override(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_local_service_environ_derives_compose_postgres_password_from_database_url(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_DATABASE_URL=postgresql+asyncpg://awf:compose-secret@localhost:5433/awf\n",
+        encoding="utf-8",
+    )
+
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+
+
+@pytest.mark.unit
+def test_local_service_environ_preserves_explicit_compose_postgres_password(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AWF_DATABASE_URL=postgresql+asyncpg://awf:database-url-secret@localhost:5433/awf",
+                "AWF_POSTGRES_PASSWORD=explicit-secret",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_POSTGRES_PASSWORD"] == "explicit-secret"
+
+
+@pytest.mark.unit
 def test_host_awf_host_work_dir_overrides_host_awf_work_dir(tmp_path: Path) -> None:
     settings = resolve_service_settings(
         Settings(_env_file=None),

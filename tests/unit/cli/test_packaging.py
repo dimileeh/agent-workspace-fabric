@@ -8,8 +8,7 @@ def test_packaging_metadata() -> None:
     with pyproject_path.open("rb") as f:
         data = tomllib.load(f)
 
-    # 1. project.name = "aira-awf"
-    assert data["project"]["name"] == "aira-awf"
+    assert data["project"]["name"] == "agent-workspace-fabric"
 
     # 2. project.scripts.awf exists as the canonical operator CLI
     scripts = data["project"].get("scripts", {})
@@ -22,9 +21,8 @@ def test_readme_install_paths() -> None:
     readme_path = Path(__file__).parents[3] / "docs" / "GETTING_STARTED.md"
     content = readme_path.read_text()
 
-    # 3. README explicitly documents `uv tool install aira-awf` and `uv pip install aira-awf`
-    assert "uv tool install aira-awf" in content, "README must document uv tool install"
-    assert "uv pip install aira-awf" in content, "README must document uv pip install"
+    assert "uv tool install agent-workspace-fabric" in content
+    assert "uv pip install agent-workspace-fabric" in content
 
     # 4. README preserves the `git clone` path
     assert "git clone" in content, "README must preserve the git clone contributor path"

@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "The implementation satisfies the saved plan: it adds the focused public-docs status tests for index discoverability, AWF CLI command mentions, and copy-paste snippet syntax; keeps docs changes narrow to README links and stale service command mentions; recognizes the troubleshooting guide; and checks off only the matching TODO item. Existing validation evidence shows the required docs-status pytest run, combined docs-drift/docs-status pytest run, and ruff check passing, plus iteration-2 failing-first evidence from a temporary pre-implementation archive.",
-  "gaps": []
-}

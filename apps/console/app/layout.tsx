@@ -7,7 +7,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AWF Console",
-  description: "Local operator console for Aira Agent Workspace Fabric.",
+  description: "Local operator console for Agent Workspace Fabric.",
 };
 
 export const viewport: Viewport = {

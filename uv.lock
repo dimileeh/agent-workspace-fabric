@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "aira-awf"
+name = "agent-workspace-fabric"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

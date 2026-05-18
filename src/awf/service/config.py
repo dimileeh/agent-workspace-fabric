@@ -156,7 +156,24 @@ def local_service_environ(
             {key: value for key, value in dotenv_values(env_file).items() if value is not None}
         )
     merged.update(os.environ if environ is None else dict(environ))
+    _populate_compose_postgres_password(merged)
     return merged
+
+
+def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
+    """Expose the local Postgres password as the variable Compose interpolates."""
+
+    if _env_value(environ, "AWF_POSTGRES_PASSWORD"):
+        return
+    database_url = _env_value(environ, "AWF_DATABASE_URL")
+    if not database_url:
+        return
+    try:
+        password = make_url(database_url).password
+    except Exception:
+        return
+    if password:
+        environ["AWF_POSTGRES_PASSWORD"] = password
 
 
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:

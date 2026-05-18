@@ -3,7 +3,7 @@
 ## Architecture
 
 ```text
-        Human / Aira / MCP client / local script
+        Human / planner / MCP client / local script
                          |
                          v
         +------------------------------------+
@@ -58,7 +58,7 @@ The important design boundary:
 
 ## Workspace Profiles
 
-Profiles make AWF universal rather than Aira-specific.
+Profiles keep AWF generic rather than tied to one application stack.
 
 A `WorkspaceProfile` can describe:
 
@@ -906,7 +906,7 @@ Recent dogfood observability slices added:
 
 | Term | Meaning |
 | --- | --- |
-| AWF | Aira Agent Workspace Fabric. |
+| AWF | Agent Workspace Fabric. |
 | Workspace | One isolated task execution environment and its persisted control-plane row. |
 | Profile | Project-specific runtime, services, phases, validation, secrets, and monitor policy. |
 | Agent runtime | The coding CLI launched inside the workspace container. |

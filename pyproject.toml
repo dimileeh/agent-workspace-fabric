@@ -1,7 +1,7 @@
 [project]
-name = "aira-awf"
+name = "agent-workspace-fabric"
 version = "0.1.0"
-description = "Aira Agent Workspace Fabric — isolated Docker execution substrate for AI coding agents"
+description = "Agent Workspace Fabric — isolated Docker execution substrate for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }

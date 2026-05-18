@@ -95,7 +95,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     and call ``configure_database`` themselves so each test gets its own isolated DB.
     """
     app = FastAPI(
-        title="Aira Agent Workspace Fabric",
+        title="Agent Workspace Fabric",
         description=(
             "Isolated Docker execution substrate for AI coding agents. Exposes a REST API "
             "and an MCP server over the same underlying control plane."

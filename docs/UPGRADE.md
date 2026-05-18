@@ -8,7 +8,7 @@ newer version.
 For a released install:
 
 ```bash
-uv tool upgrade aira-awf
+uv tool upgrade agent-workspace-fabric
 ```
 
 For a source checkout:

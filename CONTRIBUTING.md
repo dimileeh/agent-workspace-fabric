@@ -1,8 +1,9 @@
-# Contributing To AWF Core
+# Contributing To Agent Workspace Fabric
 
-AWF Core is the local open-source control plane for isolated agent workspaces.
-Contributions should preserve the product contract in `docs/awf_prd_v2.2.md`
-and the local trust model in `docs/AWF_CORE_TRUST_MODEL.md`.
+Agent Workspace Fabric (AWF) Core is the local open-source control plane for
+isolated agent workspaces. Contributions should preserve the product contract
+in `docs/awf_prd_v2.2.md` and the local trust model in
+`docs/AWF_CORE_TRUST_MODEL.md`.
 
 ## Development Setup
 
@@ -29,9 +30,9 @@ npm --prefix apps/console run build
 ## Required GitHub Status Check
 
 Branch protection for `main` and `development` must require the CI
-`ci-required` job. That rollup job depends on `lint-and-test`,
-`python-full-coverage`, `console`, `release-artifacts`, and `integration`, so
-the 99% coverage gate cannot be bypassed by other green jobs in the workflow.
+`ci-required` job. That rollup job depends on `lint-and-type`,
+`python-full-coverage`, `console`, and `release-artifacts`, so the 99%
+coverage gate cannot be bypassed by other green jobs in the workflow.
 
 Before a local Core release, run:
 
@@ -46,8 +47,6 @@ uv run --python 3.12 --extra dev awf service readiness --format json
   surfaces.
 - Preserve failure reason codes and logs. Do not hide failures behind generic
   retries.
-- Update `TODO/pre-gke-industrial-readiness.md` when a P0/P1 readiness item
-  changes state.
 - Redact secrets from logs, screenshots, and fixtures.
 
 ## Local Versus Future Hosted Support

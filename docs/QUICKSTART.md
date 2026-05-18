@@ -16,7 +16,7 @@ commands.
 For a released install:
 
 ```bash
-uv tool install aira-awf
+uv tool install agent-workspace-fabric
 ```
 
 For contributor or source checkout work:

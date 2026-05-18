@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "Implementation satisfies the saved plan: focused manual-merge regressions cover open green PR notification without completion, external merge completion with MONITOR_DONE cleanup, closed-unmerged abort, comments, policy blockers, checks, and release factory wiring; targeted, supporting, ruff, mypy, and full unit validation passed.",
-  "gaps": []
-}

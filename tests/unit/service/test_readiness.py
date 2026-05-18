@@ -56,13 +56,13 @@ async def _classified_failure_collector(*, since_hours: int) -> dict[str, object
 
 
 @pytest.mark.unit
-def test_ready_for_gke_criteria_reference_executable_release_gate() -> None:
+def test_release_docs_reference_executable_release_gate() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    todo = (repo_root / "TODO" / "pre-gke-industrial-readiness.md").read_text(encoding="utf-8")
     readme = (repo_root / "docs/CONCEPTS.md").read_text(encoding="utf-8")
+    releasing = (repo_root / "RELEASING.md").read_text(encoding="utf-8")
 
-    assert "awf service readiness --format json" in todo
-    assert "examples/awf-core-demo" in todo
+    assert "awf service readiness --format json" in releasing
+    assert "Dependency License Audit" in releasing
     assert "awf service readiness --format json" in readme
 
 
