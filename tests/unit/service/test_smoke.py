@@ -11,6 +11,7 @@ import pytest
 from awf.service.smoke import (
     _default_config_resolver,
     _default_console_checker,
+    _default_disk_profile_preview,
     _default_service_collector,
     _extract_validation_commands,
     _phase_service_readiness,
@@ -650,6 +651,10 @@ class TestCollectSmokeReportMockedMode:
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
         assert profile_phase.get("evidence", {}).get("error")
+        assert (
+            profile_phase["action"]
+            == "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint checks."
+        )
         assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
         workspace_request_phase = next(
@@ -678,6 +683,10 @@ class TestCollectSmokeReportMockedMode:
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
         assert profile_phase.get("evidence", {}).get("error")
+        assert (
+            profile_phase["action"]
+            == "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint checks."
+        )
         assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
         workspace_request_phase = next(
@@ -989,7 +998,20 @@ class TestCollectSmokeReportExceptionPaths:
         profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
-        assert "cannot read directory" in profile_phase["message"]
+        assert profile_phase.get("evidence", {}).get("error")
+
+    async def test_default_disk_profile_preview_preserves_profile_yaml(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".awf").mkdir()
+        profile_path = tmp_path / ".awf" / "workspace.yml"
+        profile_yaml = (
+            "awf:\n  name: preserved-profile\n  phases:\n    validate:\n      - pytest -q\n"
+        )
+        profile_path.write_text(profile_yaml, encoding="utf-8")
+
+        preview = _default_disk_profile_preview(tmp_path)
+        assert preview.draft.yaml == profile_yaml
 
     async def test_extract_validation_commands_returns_empty_when_draft_profile_is_none(
         self, tmp_path: Path

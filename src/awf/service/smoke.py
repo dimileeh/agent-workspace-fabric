@@ -259,13 +259,21 @@ def _phase_profile_preview(
             preview_fn = _default_profile_preview
         preview = preview_fn(project)
     except Exception as exc:
+        if profile_preview is None and _project_has_awf_profile(project):
+            action = (
+                "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, "
+                "awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint "
+                "checks."
+            )
+        else:
+            action = "Verify the project is a valid AWF workspace project."
         return None, {
             "name": "profile_preview",
             "status": "fail",
             "reason_code": "SMOKE_PROFILE_PREVIEW_FAILED",
             "message": f"Project profile preview failed: {exc}",
             "evidence": {"project": str(project), "error": str(exc)},
-            "action": "Verify the project is a valid AWF workspace project.",
+            "action": action,
         }
 
     detected_template = getattr(getattr(preview, "draft", None), "template", "unknown")
