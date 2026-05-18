@@ -611,7 +611,7 @@ def init(
         "--write-env/--no-write-env",
         help=(
             "When bootstrapping the local service, copy `.env.example` to "
-            "`.env` if `.env` is missing. Has no effect in project-onboarding "
+            "the Compose env target if it is missing. Has no effect in project-onboarding "
             "mode."
         ),
     ),
@@ -855,6 +855,19 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
     return (Path(home) / ".awf" / "service").expanduser().resolve()
 
 
+def _resolve_init_env_paths() -> tuple[Path, Path]:
+    """Return the `(target_env, source_example)` pair for bootstrap env seeding."""
+
+    compose_local_service = Path("docker/compose/local-service.yml")
+    if compose_local_service.exists():
+        compose_env = Path("docker/compose/.env")
+        compose_example = compose_env.with_name(".env.example")
+        if compose_example.exists():
+            return compose_env, compose_example
+        return compose_env, Path(".env.example")
+    return Path(".env"), Path(".env.example")
+
+
 def _docker_diagnostic_from_report(report: object) -> object | None:
     from typing import cast
 
@@ -964,22 +977,25 @@ def _run_init_service_bootstrap(
 
     env_action = "skipped"
     if write_env:
-        env_file = Path(".env")
-        env_example = Path(".env.example")
+        env_file, env_example = _resolve_init_env_paths()
         if env_file.exists():
             env_action = "kept_existing"
             if pretty:
-                typer.echo("  kept existing .env")
+                typer.echo(f"  kept existing {env_file}")
         elif env_example.exists():
             env_file.write_bytes(env_example.read_bytes())
             env_action = "wrote_from_example"
             if pretty:
-                typer.echo("  wrote .env from .env.example")
+                if env_file == Path(".env"):
+                    typer.echo("  wrote .env from .env.example")
+                else:
+                    typer.echo(f"  wrote {env_file} from .env.example")
         else:
             env_action = "no_example"
             if pretty:
                 typer.echo(
-                    "  no .env.example found in current directory; skipped .env "
+                    "  no .env.example found in current directory; skipped "
+                    f"{env_file} "
                     "creation (run `awf init` from the AWF repository root if "
                     "you expected one)"
                 )

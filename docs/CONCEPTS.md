@@ -361,7 +361,7 @@ workspace log store.
 Start from a clean checkout with the repeatable bootstrap command:
 
 ```bash
-cp .env.example .env
+cp .env.example docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```

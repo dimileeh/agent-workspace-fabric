@@ -697,6 +697,15 @@ def test_readme_documents_service_bootstrap_command() -> None:
     assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
     assert "docker compose -f docker/compose/local-service.yml up --build" in readme
     assert "safe to re-run" in readme
+    assert "docker/compose/.env" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_compose_env_bootstrap_path() -> None:
+    quickstart = Path("docs/QUICKSTART.md").read_text()
+
+    assert "docker/compose/.env" in quickstart
+    assert "wrote .env" not in quickstart
 
 
 @pytest.mark.unit

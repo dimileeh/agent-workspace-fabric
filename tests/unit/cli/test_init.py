@@ -436,6 +436,52 @@ def test_init_without_path_runs_service_bootstrap(
 
 
 @pytest.mark.unit
+def test_init_without_path_seeds_source_compose_env_when_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    example = tmp_path / ".env.example"
+    example.write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    env_file = compose / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == example.read_bytes()
+    assert "wrote docker/compose/.env from .env.example" in result.output
+    assert not (tmp_path / ".env").exists()
+
+
+@pytest.mark.unit
+def test_init_without_path_does_not_overwrite_existing_source_compose_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    env_file = compose / ".env"
+    env_file.write_text("AWF_API_TOKEN=already_set\n", encoding="utf-8")
+    example = tmp_path / ".env.example"
+    example.write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert env_file.read_text(encoding="utf-8") == "AWF_API_TOKEN=already_set\n"
+    assert "kept existing docker/compose/.env" in result.output
+    assert not (tmp_path / ".env").exists()
+
+
+@pytest.mark.unit
 def test_init_without_path_seeds_env_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -452,6 +498,22 @@ def test_init_without_path_seeds_env_when_missing(
     assert env_file.exists()
     assert env_file.read_bytes() == example.read_bytes()
     assert "wrote .env" in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_does_not_emit_seeded_token_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "super-secret-token"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert secret not in result.output
 
 
 @pytest.mark.unit
@@ -784,6 +846,8 @@ def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
     assert "awf init" in readme
     assert "awf init <path>" in readme
     assert "awf service status --format pretty" in readme
+    assert "docker/compose/.env" in readme
+    assert "cp .env.example .env" not in readme
 
 
 @pytest.mark.unit
