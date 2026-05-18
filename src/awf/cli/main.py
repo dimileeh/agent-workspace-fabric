@@ -666,6 +666,7 @@ def init(
     ctx = click.get_current_context()
 
     def _explicit(name: str) -> bool:
+        """Return whether a bootstrap-only option was explicitly supplied."""
         return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
     bootstrap_only_flags: list[str] = []

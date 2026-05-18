@@ -28,6 +28,13 @@ pushes, or unrelated refactors.
 4. Save validation results to `plans/comment_4482017811_docstring_coverage_VALIDATION.md`.
 5. Stage only changed files and commit locally.
 
+## Assumptions/Changes
+
+- Iteration 2: the review-level evidence still reports 71.43% docstring
+  coverage after the first docstring pass. Treat the remaining gap as modified
+  functions in the review-fix diff, not just newly added functions, and add
+  concise docstrings without changing behavior.
+
 ## Verification Commands And Pass Criteria
 
 ```bash

@@ -117,6 +117,7 @@ def _fail_path_write_bytes(
     original_write_bytes = Path.write_bytes
 
     def _write_bytes(self: Path, data: bytes) -> int:
+        """Raise a synthetic write failure only for the configured path."""
         if str(self) == failing_path:
             raise OSError(message)
         return original_write_bytes(self, data)
@@ -723,6 +724,7 @@ def test_init_without_path_no_write_env_flag_skips_seeding(
 def test_init_without_path_warns_when_env_example_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Explain fallback env-example lookup when root seeding cannot run."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     _stub_bootstrap_mode(monkeypatch)
