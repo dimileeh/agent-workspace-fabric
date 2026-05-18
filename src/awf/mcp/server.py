@@ -252,6 +252,11 @@ def build_mcp_server(
             default="auto",
             description="Workspace profile reference, e.g. auto, python, node, aira.",
         ),
+        env_profile: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Legacy alias for profile_ref.",
+        ),
         profile: dict[str, Any] | None = Field(
             default=None,
             description="Optional inline workspace profile dictionary.",
@@ -329,12 +334,21 @@ def build_mcp_server(
                 "INVALID_REQUEST",
                 "Provide either validation_commands or test_commands, or ensure they match.",
             )
+        if (
+            not requires_database
+            and env_profile is not None
+            and profile_ref not in (None, "auto", env_profile)
+        ):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either profile_ref or env_profile, or ensure they match.",
+            )
 
         effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
         effective_validation_commands = (
             test_commands if test_commands is not None else validation_commands or []
         )
-        effective_profile_ref = "aira" if requires_database else profile_ref
+        effective_profile_ref = "aira" if requires_database else env_profile or profile_ref
         req = WorkspaceCreateRequest(
             repo={"url": repo_url, "base_branch": effective_base_branch},
             task={

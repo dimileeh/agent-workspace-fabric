@@ -380,12 +380,16 @@ class TestToolRegistration:
         tools = await mcp.list_tools()
         create = next(tool for tool in tools if tool.name == "awf_create_workspace")
         base_branch = create.inputSchema["properties"]["base_branch"]
+        env_profile = create.inputSchema["properties"]["env_profile"]
         owned_paths = create.inputSchema["properties"]["owned_paths"]
         out_of_scope_changes = create.inputSchema["properties"]["out_of_scope_changes"]
         provider_recovery = create.inputSchema["properties"]["provider_recovery"]
 
         assert base_branch["default"] == "development"
         assert "Defaults to development" in base_branch["description"]
+        assert env_profile["default"] is None
+        assert _optional_string_schema(env_profile)["maxLength"] == 128
+        assert "Legacy alias for profile_ref" in env_profile["description"]
         assert owned_paths["maxItems"] == 128
         assert owned_paths["items"] == {
             "maxLength": 512,
@@ -1378,6 +1382,36 @@ class TestCreateWorkspace:
         assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
 
     @pytest.mark.unit
+    async def test_create_workspace_accepts_legacy_env_profile_alias(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/legacy-profile.git",
+                "branch_base": "legacy-base",
+                "task_title": "Legacy MCP profile alias",
+                "task_prompt": "Preserve older MCP env_profile create argument.",
+                "env_profile": "python",
+                "test_commands": ["uv run pytest tests/unit/mcp -q"],
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp env_profile compatibility",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "legacy-base"
+        assert ws.profile_ref == "python"
+        assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
+
+    @pytest.mark.unit
     async def test_create_workspace_omitted_branch_preserves_legacy_development_default(
         self,
         mcp,
@@ -1456,6 +1490,38 @@ class TestCreateWorkspace:
         assert result.structuredContent == {
             "error_code": "INVALID_REQUEST",
             "message": "Provide either base_branch or branch_base, or ensure they match.",
+            "detail": None,
+        }
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
+    async def test_create_workspace_rejects_conflicting_profile_aliases(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/conflicting-profile.git",
+                "base_branch": "main",
+                "task_title": "Conflicting profile aliases",
+                "task_prompt": "Reject mismatched profile alias values.",
+                "profile_ref": "node",
+                "env_profile": "python",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp profile alias conflict regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": "Provide either profile_ref or env_profile, or ensure they match.",
             "detail": None,
         }
         assert_no_internal_error_fields(result.structuredContent)
