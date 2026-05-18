@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from awf.common.profile_paths import _PROFILE_MARKER_PATHS
 from awf.profiles.lint import lint_workspace_profile
 from awf.profiles.models import (
     ProfileLintFinding,
@@ -17,12 +18,7 @@ from awf.profiles.models import (
 )
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
 
-_PROFILE_PATHS = (
-    ".awf/workspace.yml",
-    ".awf/workspace.yaml",
-    "awf.workspace.yml",
-    "awf.workspace.yaml",
-)
+PROFILE_MARKER_PATHS = _PROFILE_MARKER_PATHS
 
 
 class ProfileResolutionError(Exception):
@@ -123,7 +119,7 @@ class ProfileResolver:
     def _load_repo_profile(
         self, worktree_path: Path, considered: list[str]
     ) -> WorkspaceProfile | None:
-        for rel in _PROFILE_PATHS:
+        for rel in PROFILE_MARKER_PATHS:
             path = worktree_path / rel
             considered.append(f"repo:{rel}")
             if not path.is_file():

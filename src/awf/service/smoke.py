@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from awf.common.profile_paths import _PROFILE_MARKER_PATHS as _COMMON_PROFILE_MARKER_PATHS
+from awf.profiles.resolver import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
@@ -15,7 +15,7 @@ ProfilePreview = Callable[..., Any]
 ConfigResolver = Callable[[ServiceSettings], dict[str, Any]]
 ConsoleChecker = Callable[[str], Awaitable[bool]]
 DEFAULT_LOCAL_CONSOLE_URL = "http://localhost:3000"
-_PROFILE_MARKER_PATHS: tuple[str, ...] = _COMMON_PROFILE_MARKER_PATHS
+_PROFILE_MARKER_PATHS: tuple[str, ...] = PROFILE_MARKER_PATHS
 
 
 def _project_has_awf_profile(path: Path) -> bool:
