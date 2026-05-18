@@ -379,10 +379,13 @@ class TestToolRegistration:
     async def test_create_workspace_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = await mcp.list_tools()
         create = next(tool for tool in tools if tool.name == "awf_create_workspace")
+        base_branch = create.inputSchema["properties"]["base_branch"]
         owned_paths = create.inputSchema["properties"]["owned_paths"]
         out_of_scope_changes = create.inputSchema["properties"]["out_of_scope_changes"]
         provider_recovery = create.inputSchema["properties"]["provider_recovery"]
 
+        assert base_branch["default"] == "development"
+        assert "Defaults to development" in base_branch["description"]
         assert owned_paths["maxItems"] == 128
         assert owned_paths["items"] == {
             "maxLength": 512,
@@ -1373,6 +1376,31 @@ class TestCreateWorkspace:
         assert ws.branch_base == "legacy-base"
         assert ws.profile_ref == "aira"
         assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
+
+    @pytest.mark.unit
+    async def test_create_workspace_omitted_branch_preserves_legacy_development_default(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/legacy-default.git",
+                "task_title": "Legacy MCP branch default",
+                "task_prompt": "Preserve older MCP create branch fallback.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp legacy branch default regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "development"
 
     @pytest.mark.unit
     async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(

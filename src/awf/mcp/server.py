@@ -124,6 +124,7 @@ RuntimeHealthSummaryProvider = Callable[
 
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
+_MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
 
 
 class ReadinessProvider(Protocol):
@@ -197,10 +198,10 @@ def build_mcp_server(
             default=None,
             min_length=1,
             max_length=256,
-            json_schema_extra={"default": "main"},
+            json_schema_extra={"default": _MCP_LEGACY_BASE_BRANCH_DEFAULT},
             description=(
                 "Branch to branch FROM; feature branch is created off it. "
-                "Defaults to main when omitted."
+                f"Defaults to {_MCP_LEGACY_BASE_BRANCH_DEFAULT} when omitted."
             ),
         ),
         branch_base: str | None = Field(
@@ -329,7 +330,7 @@ def build_mcp_server(
                 "Provide either validation_commands or test_commands, or ensure they match.",
             )
 
-        effective_base_branch = branch_base or base_branch or "main"
+        effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
         effective_validation_commands = (
             test_commands if test_commands is not None else validation_commands or []
         )
