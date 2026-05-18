@@ -611,6 +611,27 @@ def test_init_without_path_does_not_emit_seeded_token_values(
 
 
 @pytest.mark.unit
+def test_init_without_path_does_not_emit_seeded_compose_token_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Avoid printing secret values copied during compose `awf init` seeding."""
+    secret = "super-secret-token"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    example = compose / ".env.example"
+    example.write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert secret not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_overwrite_existing_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
