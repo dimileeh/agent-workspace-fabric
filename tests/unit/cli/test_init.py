@@ -113,6 +113,7 @@ def _fail_path_write_bytes(
     failing_path: str,
     message: str = "permission denied",
 ) -> None:
+    """Patch Path.write_bytes to fail for one expected relative path."""
     original_write_bytes = Path.write_bytes
 
     def _write_bytes(self: Path, data: bytes) -> int:
@@ -174,6 +175,7 @@ def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.unit
 def test_init_write_env_help_names_compose_target() -> None:
+    """Document the concrete Compose env target in init help text."""
     from awf.cli import main as cli_main
 
     write_env_option = inspect.signature(cli_main.init).parameters["write_env"].default
@@ -738,6 +740,7 @@ def test_init_without_path_warns_when_env_example_missing(
 def test_init_without_path_warns_when_compose_env_examples_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Report every compose env example path checked before skipping seeding."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -757,6 +760,7 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
 def test_init_without_path_warns_when_env_write_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Warn cleanly when init cannot copy the env example."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
@@ -777,6 +781,7 @@ def test_init_without_path_warns_when_env_write_fails(
 def test_init_without_path_json_marks_env_write_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Expose env copy failures in machine-readable init output."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
