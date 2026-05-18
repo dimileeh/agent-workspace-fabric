@@ -61,6 +61,7 @@ CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
 NetworkPosture = Literal["offline", "restricted", "open"]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
+_LEGACY_DATABASE_PROFILE_REF = "aira"
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -211,7 +212,11 @@ class WorkspaceCreateRequest(BaseModel):
             "requires_database",
         }
         extras = {key: value for key, value in data.items() if key not in allowed_keys}
-        profile_ref = "aira" if data.get("requires_database") is True else data.get("env_profile")
+        profile_ref = (
+            _LEGACY_DATABASE_PROFILE_REF
+            if data.get("requires_database") is True
+            else data.get("env_profile")
+        )
         coerced: dict[str, object] = {
             **extras,
             "repo": {
@@ -265,7 +270,7 @@ class WorkspaceCreateRequest(BaseModel):
 
     @property
     def requires_database(self) -> bool:
-        return False
+        return self.workspace.profile_ref == _LEGACY_DATABASE_PROFILE_REF
 
 
 class PullRequestMonitorAdoptionRequest(BaseModel):

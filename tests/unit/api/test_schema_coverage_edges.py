@@ -37,7 +37,7 @@ def test_legacy_flat_workspace_create_requires_database_selects_aira_profile() -
 
     assert request.workspace.profile_ref == "aira"
     assert request.env_profile == "aira"
-    assert request.requires_database is False
+    assert request.requires_database is True
 
 
 @pytest.mark.unit
@@ -60,6 +60,7 @@ def test_legacy_flat_workspace_create_nested_extras_do_not_override_coerced_sect
     assert request.validation.commands == ["pytest -q"]
     assert request.validation.requested_tier == 1
     assert request.resources.cpu is None
+    assert request.requires_database is False
 
 
 @pytest.mark.unit
