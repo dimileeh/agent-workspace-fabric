@@ -48,4 +48,4 @@ their coverage.
 ## Verification commands and pass criteria
 
 - `uv run --python 3.12 --extra dev pytest '<reported node ids>' -q` passes.
-- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspace_retry.py::test_retry_endpoint_blocks_missing_provider_readiness tests/unit/mcp/test_mcp_server.py::test_create_workspace_returns_structured_provider_preflight_error -q` passes.
+- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspace_retry.py::test_retry_endpoint_blocks_missing_provider_readiness tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_create_workspace_returns_structured_provider_preflight_error -q` passes.
