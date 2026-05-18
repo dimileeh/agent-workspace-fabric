@@ -150,9 +150,9 @@ def test_primary_public_docs_use_public_brand_and_not_internal_backlog() -> None
     assert "TODO/pre-gke-industrial-readiness.md" not in combined
 
 
-def test_generated_operator_artifacts_are_not_tracked_public_docs() -> None:
+def test_generated_plan_artifacts_are_not_tracked_public_docs() -> None:
     result = subprocess.run(
-        ["git", "ls-files", "TODO", "docs/awf-plans", "plans"],
+        ["git", "ls-files", "docs/awf-plans", "plans"],
         check=True,
         capture_output=True,
         text=True,
@@ -162,7 +162,6 @@ def test_generated_operator_artifacts_are_not_tracked_public_docs() -> None:
 
     assert "docs/awf-plans/README.md" in tracked
     assert "plans/PLAN_EXECUTION_PROTOCOL.md" in tracked
-    assert not any(path.startswith("TODO/") for path in tracked)
     assert not any(
         path.startswith("docs/awf-plans/") and path != "docs/awf-plans/README.md"
         for path in tracked

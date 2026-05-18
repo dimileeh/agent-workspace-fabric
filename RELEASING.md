@@ -41,7 +41,6 @@ mkdir -p artifacts/release
 uv run --python 3.12 --extra dev --with pip-licenses pip-licenses \
   --format=json \
   --output-file artifacts/release/python-licenses.json
-npm --prefix apps/console ci
 npx --yes license-checker --production --json --start apps/console \
   > artifacts/release/node-licenses.json
 ```
