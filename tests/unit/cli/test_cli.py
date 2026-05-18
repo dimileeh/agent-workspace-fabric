@@ -455,6 +455,29 @@ class TestWorkspaceShow:
         status_pos = result.stdout.index("status:")
         assert id_pos < status_pos
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("base_url", "expected_url"),
+        (
+            ("http://host:8000/awf", "http://host:8000/awf/v1/workspaces/ws_xyz"),
+            ("http://host:8000/awf/v1", "http://host:8000/awf/v1/workspaces/ws_xyz"),
+        ),
+    )
+    def test_show_with_reversed_proxy_prefix_normalizes_v1(
+        self,
+        base_url: str,
+        expected_url: str,
+    ) -> None:
+        response = _mock_response(status_code=200, payload={"id": "ws_xyz", "status": "ready"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                ["workspace", "show", "ws_xyz", "--base-url", base_url],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args[0] == ("GET", expected_url)
+
 
 class TestWorkspaceRetry:
     @pytest.mark.unit
@@ -1164,6 +1187,60 @@ class TestWorkspaceAdoptPr:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("base_url",),
+        (
+            ("http://host:8000",),
+            ("http://host:8000/",),
+            ("http://host:8000/v1",),
+            ("http://host:8000/v1/",),
+        ),
+    )
+    def test_posts_adoption_request_to_normalized_v1_endpoint(self, base_url: str) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--base-url",
+                    base_url,
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
+
+    @pytest.mark.unit
+    def test_posts_adoption_request_to_normalized_v1_endpoint_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for base_url in ("http://host:8000/v1", "http://host:8000/v1/"):
+            monkeypatch.setenv("AWF_CLI_BASE_URL", base_url)
+            response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+            with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+                result = _runner.invoke(
+                    app,
+                    [
+                        "workspace",
+                        "adopt-pr",
+                        "--repo",
+                        "dimileeh/aira-web",
+                        "--pr",
+                        "277",
+                    ],
+                )
+
+            assert result.exit_code == 0
+            assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
+
+    @pytest.mark.unit
     def test_posts_model_and_effort_when_requested(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
@@ -1274,8 +1351,90 @@ class TestWorkspaceAdoptPr:
         assert mock.call_args.kwargs["json"]["pr_number"] is None
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
 
+    @pytest.mark.unit
+    def test_not_found_includes_request_context_and_does_not_emit_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "api-token-secret")
+        response = _mock_response(status_code=404, payload={"message": "Not Found"})
+        with patch("awf.cli.main.httpx.request", return_value=response):
+            result = _runner.invoke(
+                app,
+                ["workspace", "adopt-pr", "--repo", "dimileeh/aira-web", "--pr", "277"],
+            )
+
+        assert result.exit_code == 1
+        assert "POST http://localhost:8000/v1/workspaces/adopt-pr" in result.stderr
+        assert "404" in result.stderr
+        assert "Not Found" in result.stderr
+        assert "api-token-secret" not in result.stderr
+        assert "Authorization" not in result.stderr
+
+    @pytest.mark.unit
+    def test_not_found_sanitizes_url_secret_query_params(self) -> None:
+        response = _mock_response(status_code=404, payload={"message": "Not Found"})
+        base_url = "http://host:8000/v1?access_token=top-secret-token"
+        with patch("awf.cli.main.httpx.request", return_value=response):
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--base-url",
+                    base_url,
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert (
+            "POST http://host:8000/v1/workspaces/adopt-pr?access_token=%2A%2A%2A" in result.stderr
+        )
+        assert "top-secret-token" not in result.stderr
+
+    @pytest.mark.unit
+    def test_non_adopt_workspace_http_error_includes_request_context_and_does_not_emit_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "api-token-secret")
+        response = _mock_response(status_code=404, payload={"message": "Not Found"})
+        with patch("awf.cli.main.httpx.request", return_value=response):
+            result = _runner.invoke(app, ["workspace", "show", "ws_show"])
+
+        assert result.exit_code == 1
+        assert "GET http://localhost:8000/v1/workspaces/ws_show" in result.stderr
+        assert "404" in result.stderr
+        assert "Not Found" in result.stderr
+        assert "api-token-secret" not in result.stderr
+        assert "Authorization" not in result.stderr
+
 
 class TestWorkspaceList:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("base_url", "expected_url"),
+        (
+            ("http://host:8000/awf", "http://host:8000/awf/v1/workspaces"),
+            ("http://host:8000/awf/v1", "http://host:8000/awf/v1/workspaces"),
+        ),
+    )
+    def test_list_uses_reversed_proxy_prefix_without_v1_duplication(
+        self,
+        base_url: str,
+        expected_url: str,
+    ) -> None:
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "list", "--base-url", base_url])
+
+        assert result.exit_code == 0
+        assert mock.call_args[0] == ("GET", expected_url)
+
     @pytest.mark.unit
     def test_passes_limit_as_query_param(self) -> None:
         response = _mock_response(status_code=200, payload=[])

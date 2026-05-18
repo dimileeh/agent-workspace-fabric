@@ -107,6 +107,77 @@ class OutputFormat(StrEnum):
 
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
+_CALL_CONTEXT: dict[int, tuple[str, str]] = {}
+
+
+def _normalize_api_url(base_url: str, path: str) -> str:
+    if not path.startswith("/v1/"):
+        return f"{base_url.rstrip('/')}{path}"
+
+    parsed_base = urllib.parse.urlsplit(base_url)
+    base_path = (parsed_base.path or "").rstrip("/")
+    if base_path.endswith("/v1"):
+        base_path = base_path[:-3]
+    base_path = base_path.rstrip("/")
+    normalized_path = f"{base_path}{path}" if base_path else path
+    return urllib.parse.urlunsplit(
+        (
+            parsed_base.scheme,
+            parsed_base.netloc,
+            normalized_path,
+            parsed_base.query,
+            parsed_base.fragment,
+        )
+    )
+
+
+def _sanitize_request_url(url: str) -> str:
+    parsed_url = urllib.parse.urlsplit(url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        return url
+    host = parsed_url.hostname or ""
+    if parsed_url.port is not None:
+        host = f"{host}:{parsed_url.port}"
+    query_pairs = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+    sanitized_pairs = []
+    for name, value in query_pairs:
+        if name.lower() in {
+            "token",
+            "api_token",
+            "access_token",
+            "secret",
+            "authorization",
+        }:
+            sanitized_pairs.append((name, "***"))
+        else:
+            sanitized_pairs.append((name, value))
+    query = urllib.parse.urlencode(sanitized_pairs, doseq=True)
+    return urllib.parse.urlunsplit(
+        (parsed_url.scheme, host, parsed_url.path, query, parsed_url.fragment)
+    )
+
+
+def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
+    context = _CALL_CONTEXT.pop(id(response), None)
+    if context is not None:
+        context_method, context_request_url = context
+        context_method_text = context_method if isinstance(context_method, str) else None
+        context_request_url_text = (
+            context_request_url if isinstance(context_request_url, str) else None
+        )
+        return (
+            context_method_text,
+            _sanitize_request_url(context_request_url_text) if context_request_url_text else None,
+        )
+
+    request = getattr(response, "request", None)
+    if request is None:
+        return None, None
+    method_value = getattr(request, "method", None)
+    request_url_value = getattr(request, "url", None)
+    method_text = method_value if isinstance(method_value, str) else None
+    request_url_text = str(request_url_value) if request_url_value is not None else None
+    return method_text, _sanitize_request_url(request_url_text) if request_url_text else None
 
 
 def _base_url(override: str | None) -> str:
@@ -548,11 +619,16 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
-    url = f"{base_url.rstrip('/')}{path}"
+    url = _normalize_api_url(base_url, path)
     try:
-        return httpx.request(method, url, timeout=30.0, **kwargs)
+        response = httpx.request(method, url, timeout=30.0, **kwargs)
+        _CALL_CONTEXT[id(response)] = (method, url)
+        return response
     except httpx.RequestError as exc:
-        typer.echo(f"error: could not reach AWF API at {url}: {exc}", err=True)
+        typer.echo(
+            f"error: could not reach AWF API at {_sanitize_request_url(url)}: {exc}",
+            err=True,
+        )
         raise typer.Exit(code=2) from exc
 
 
@@ -563,6 +639,13 @@ def _handle_response(
     pretty_items: bool = False,
 ) -> None:
     if response.status_code >= 400:
+        method, request_url = _request_context(response)
+        if request_url is not None:
+            method = method or "HTTP"
+            typer.echo(
+                f"error: {method} {request_url} -> HTTP {response.status_code}",
+                err=True,
+            )
         try:
             typer.echo(json.dumps(response.json(), indent=2), err=True)
         except ValueError:
