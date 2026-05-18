@@ -40,6 +40,22 @@ async def collect_smoke_report(
     config_resolver: ConfigResolver | None = None,
     console_checker: ConsoleChecker | None = None,
 ) -> dict[str, Any]:
+    """Run smoke checks for a project and return a phase-by-phase status report.
+
+    Args:
+        project: Path to the project root under inspection.
+        settings: Service settings for resolving service/API/console URLs.
+        mocked_local: If true, marks expected-live failures as warnings where safe.
+        demo_path: Optional fallback project root used when ``project`` is missing.
+        service_collector: Optional override for service health checks.
+        auth_collector: Optional override for provider readiness checks.
+        profile_preview: Optional override for profile inspection behavior.
+        config_resolver: Optional override for API/console configuration.
+        console_checker: Optional override for console URL reachability checks.
+
+    Returns:
+        Structured smoke report including phase statuses, evidence, and next actions.
+    """
     mode = "mocked_local" if mocked_local else "live"
     phases: list[dict[str, Any]] = []
     overall: list[str] = []
