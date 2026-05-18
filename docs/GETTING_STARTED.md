@@ -63,8 +63,8 @@ Docker, ensures the host state directory under
 `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, copies `.env.example` to
 `docker/compose/.env` when the source checkout includes
 `docker/compose/local-service.yml` and falls back to `.env` otherwise (use
-`--no-write-env` to skip), then starts or validates the local Postgres + migrate
- API + worker stack via
+`--no-write-env` to skip), then starts or validates the local Postgres + migrate + API + worker
+stack via
 `awf service bootstrap`.
 
 ```bash
