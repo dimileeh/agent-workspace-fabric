@@ -428,6 +428,27 @@ def test_conformance_requires_awf_validation_accepts_named_validation_command_ha
 @pytest.mark.parametrize(
     "gap",
     (
+        "Run pytest under AWF validation and wire the API endpoint required by the plan.",
+        "Rerun mypy under validation after you implement the endpoint.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_mixed_named_command_handoff_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Validation command handoff and implementation work remain.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "No AWF-owned validation evidence is present for the required commands in "
         "this conformance phase; please run during validation: uv run --python 3.12 "
         "--extra dev pytest tests/integration/test_local_service_compose.py "
