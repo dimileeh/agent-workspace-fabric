@@ -867,7 +867,7 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
 
     from awf.service import bootstrap as bootstrap_mod
 
-    asset_root = bootstrap_mod._resolve_bootstrap_asset_root()
+    asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
         compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
         if compose_local_service.exists():
@@ -1013,18 +1013,39 @@ def _run_init_service_bootstrap(
         elif env_example.exists():
             try:
                 env_file.parent.mkdir(parents=True, exist_ok=True)
-                env_file.write_bytes(env_example.read_bytes())
             except OSError as exc:
                 env_action = "write_failed"
                 if pretty:
                     typer.echo(
-                        f"  warning: could not write {env_file} from {env_example}: {exc}",
+                        "  warning: could not create parent directory "
+                        f"{env_file.parent} for {env_file}: {exc}",
                         err=True,
                     )
             else:
-                env_action = "wrote_from_example"
-                if pretty:
-                    typer.echo(f"  wrote {env_file} from {env_example}")
+                try:
+                    env_contents = env_example.read_bytes()
+                except OSError as exc:
+                    env_action = "write_failed"
+                    if pretty:
+                        typer.echo(
+                            f"  warning: could not read {env_example} "
+                            f"while seeding {env_file}: {exc}",
+                            err=True,
+                        )
+                else:
+                    try:
+                        env_file.write_bytes(env_contents)
+                    except OSError as exc:
+                        env_action = "write_failed"
+                        if pretty:
+                            typer.echo(
+                                f"  warning: could not write {env_file} from {env_example}: {exc}",
+                                err=True,
+                            )
+                    else:
+                        env_action = "wrote_from_example"
+                        if pretty:
+                            typer.echo(f"  wrote {env_file} from {env_example}")
         else:
             env_action = "no_example"
             if pretty:

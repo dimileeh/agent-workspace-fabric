@@ -302,6 +302,12 @@ def _resolve_bootstrap_assets(
     )
 
 
+def get_bootstrap_asset_root() -> Path | None:
+    """Return the verified source root that contains local bootstrap assets."""
+
+    return _resolve_bootstrap_asset_root()
+
+
 def _resolve_bootstrap_asset_root() -> Path | None:
     for candidate in _bootstrap_asset_root_candidates():
         if _is_bootstrap_asset_root(candidate):

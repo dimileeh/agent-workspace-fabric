@@ -102,7 +102,7 @@ def _stub_bootstrap_mode(
         return bootstrap_result
 
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
-    monkeypatch.setattr(bootstrap_mod, "_resolve_bootstrap_asset_root", lambda: asset_root)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
     return captured
 
 
@@ -123,6 +123,30 @@ def _fail_path_write_bytes(
         return original_write_bytes(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", _write_bytes)
+
+
+def _fail_path_mkdir(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failing_path: str,
+    message: str = "permission denied",
+) -> None:
+    """Patch Path.mkdir to fail for one expected path."""
+    original_mkdir = Path.mkdir
+    failing_path_resolved = Path(failing_path).resolve()
+
+    def _mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        """Raise a synthetic mkdir failure only for the configured path."""
+        if self.resolve() == failing_path_resolved:
+            raise OSError(message)
+        original_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
 
 
 def _stub_local_prerequisites(
@@ -755,6 +779,34 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
     assert not (compose / ".env").exists()
     assert "looked for docker/compose/.env.example, .env.example" in result.output
     assert "skipped docker/compose/.env creation" in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_warns_when_compose_env_parent_creation_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Warn about directory creation failures separately from file writes."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+    _fail_path_mkdir(monkeypatch, failing_path="docker/compose")
+
+    result = _runner.invoke(app, ["init"])
+    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+
+    assert result.exit_code == 0, output
+    assert not (compose / ".env").exists()
+    assert (
+        "warning: could not create parent directory docker/compose "
+        "for docker/compose/.env: permission denied"
+    ) in output
+    assert "warning: could not write docker/compose/.env" not in output
+    assert len(captured["bootstrap_calls"]) == 1
+    assert "Traceback" not in output
 
 
 @pytest.mark.unit
