@@ -114,7 +114,7 @@ export AWF_GITHUB_TOKEN="$(gh auth token)"
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
-} > docker/compose/.env
+} >> docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 

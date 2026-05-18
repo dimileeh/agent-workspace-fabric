@@ -986,10 +986,7 @@ def _run_init_service_bootstrap(
             env_file.write_bytes(env_example.read_bytes())
             env_action = "wrote_from_example"
             if pretty:
-                if env_file == Path(".env"):
-                    typer.echo("  wrote .env from .env.example")
-                else:
-                    typer.echo(f"  wrote {env_file} from .env.example")
+                typer.echo(f"  wrote {env_file} from {env_example}")
         else:
             env_action = "no_example"
             if pretty:
