@@ -24,6 +24,7 @@ _PROFILE_MARKER_PATHS = (
 
 
 def _project_has_awf_profile(path: Path) -> bool:
+    """Check whether the project root contains a workspace profile marker file."""
     return any((path / rel).is_file() for rel in _PROFILE_MARKER_PATHS)
 
 
@@ -248,6 +249,7 @@ def _phase_profile_preview(
     mocked_local: bool,
     profile_preview: ProfilePreview | None,
 ) -> tuple[Any, dict[str, Any]]:
+    """Collect the smoke profile preview phase result and metadata."""
     try:
         if profile_preview is not None:
             preview_fn = profile_preview
@@ -550,6 +552,7 @@ def _default_profile_preview(project: Path) -> Any:
 
 
 def _default_disk_profile_preview(project: Path) -> Any:
+    """Resolve a workspace profile from disk and return a smoke preview object."""
     from awf.profiles import resolve_workspace_profile
     from awf.profiles.onboarding import preview_workspace_profile
 
