@@ -479,7 +479,7 @@ def test_init_without_path_prefers_compose_env_example_over_root(
     env_file = compose / ".env"
     assert env_file.exists()
     assert env_file.read_bytes() == compose_example.read_bytes()
-    assert f"wrote {env_file} from {compose_example}" in result.output
+    assert "wrote docker/compose/.env from docker/compose/.env.example" in result.output
     assert not (tmp_path / ".env").exists()
 
 
