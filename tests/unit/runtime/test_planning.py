@@ -428,6 +428,38 @@ def test_conformance_requires_awf_validation_accepts_named_validation_command_ha
 @pytest.mark.parametrize(
     "gap",
     (
+        "No AWF-owned validation evidence is present for the required commands in "
+        "this conformance phase; please run during validation: uv run --python 3.12 "
+        "--extra dev pytest tests/integration/test_local_service_compose.py "
+        "tests/unit/service/test_config.py tests/unit/service/test_doctor.py -q; "
+        "uv run --python 3.12 --extra dev ruff check src/awf "
+        "tests/integration/test_local_service_compose.py "
+        "tests/unit/service/test_config.py tests/unit/service/test_doctor.py; "
+        "uv run --python 3.12 --extra dev mypy src/awf",
+        "Run and record the required validation commands for this plan: "
+        "`uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli.py -q`; "
+        "`uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py "
+        "tests/unit/cli/test_cli.py`; "
+        "`uv run --python 3.12 --extra dev mypy src/awf`.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_paths(
+    gap: str,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation is complete; AWF validation evidence is missing.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(gap,),
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "AWF test suite, coverage report is missing.",
         "AWF test run: coverage evidence is absent.",
     ),
