@@ -880,14 +880,6 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
                 return compose_env, compose_example
             return compose_env, fallback_example
 
-    compose_local_service = Path("docker/compose/local-service.yml")
-    if compose_local_service.exists():
-        compose_env = Path("docker/compose/.env")
-        compose_example = compose_env.with_name(".env.example")
-        if compose_example.exists():
-            return compose_env, compose_example
-        return compose_env, Path(".env.example")
-
     return Path(".env"), Path(".env.example")
 
 

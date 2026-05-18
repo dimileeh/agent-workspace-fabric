@@ -520,6 +520,33 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
 
 
 @pytest.mark.unit
+def test_init_without_path_does_not_seed_current_compose_dir_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Do not treat current-directory compose files as verified AWF assets."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_example = compose / ".env.example"
+    compose_example.write_text("AWF_API_TOKEN=wrong\n", encoding="utf-8")
+    root_example = tmp_path / ".env.example"
+    root_example.write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch, asset_root=None)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert not (compose / ".env").exists()
+    env_file = tmp_path / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == root_example.read_bytes()
+    assert "wrote .env from .env.example" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
