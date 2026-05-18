@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,6 +107,22 @@ def _stub_bootstrap_mode(
     return captured
 
 
+def _fail_path_write_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failing_path: str,
+    message: str = "permission denied",
+) -> None:
+    original_write_bytes = Path.write_bytes
+
+    def _write_bytes(self: Path, data: bytes) -> int:
+        if str(self) == failing_path:
+            raise OSError(message)
+        return original_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", _write_bytes)
+
+
 def _stub_local_prerequisites(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -153,6 +170,15 @@ def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0, result.output
     assert "AWF init: local onboarding readiness check" in result.output
+
+
+@pytest.mark.unit
+def test_init_write_env_help_names_compose_target() -> None:
+    from awf.cli import main as cli_main
+
+    write_env_option = inspect.signature(cli_main.init).parameters["write_env"].default
+
+    assert "docker/compose/.env" in write_env_option.help
 
 
 @pytest.mark.unit
@@ -706,6 +732,62 @@ def test_init_without_path_warns_when_env_example_missing(
     assert "no .env.example found" in result.output
     assert "current directory" not in result.output
     assert "AWF repository root" in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_warns_when_compose_env_examples_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert not (compose / ".env").exists()
+    assert "looked for docker/compose/.env.example, .env.example" in result.output
+    assert "skipped docker/compose/.env creation" in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_warns_when_env_write_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch)
+    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init"])
+    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+
+    assert result.exit_code == 0, output
+    assert not (tmp_path / ".env").exists()
+    assert "warning: could not write .env from .env.example: permission denied" in output
+    assert len(captured["bootstrap_calls"]) == 1
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_marks_env_write_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["env_action"] == "write_failed"
 
 
 @pytest.mark.unit

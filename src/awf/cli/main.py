@@ -611,8 +611,9 @@ def init(
         "--write-env/--no-write-env",
         help=(
             "When bootstrapping the local service, copy `.env.example` to "
-            "the Compose env target if it is missing. Has no effect in project-onboarding "
-            "mode."
+            "the Compose env target if it is missing. Target path: "
+            "docker/compose/.env. Uses `.env` when Compose assets are "
+            "unavailable. Has no effect in project-onboarding mode."
         ),
     ),
     timeout_seconds: float = typer.Option(
@@ -883,6 +884,16 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
     return Path(".env"), Path(".env.example")
 
 
+def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
+    """Return the env examples that explain what init checked before skipping."""
+
+    search_paths: list[Path] = []
+    for candidate in (env_file.with_name(".env.example"), env_example):
+        if candidate not in search_paths:
+            search_paths.append(candidate)
+    return tuple(search_paths)
+
+
 def _docker_diagnostic_from_report(report: object) -> object | None:
     from typing import cast
 
@@ -999,18 +1010,31 @@ def _run_init_service_bootstrap(
             if pretty:
                 typer.echo(f"  kept existing {env_file}")
         elif env_example.exists():
-            env_file.write_bytes(env_example.read_bytes())
-            env_action = "wrote_from_example"
-            if pretty:
-                typer.echo(f"  wrote {env_file} from {env_example}")
+            try:
+                env_file.parent.mkdir(parents=True, exist_ok=True)
+                env_file.write_bytes(env_example.read_bytes())
+            except OSError as exc:
+                env_action = "write_failed"
+                if pretty:
+                    typer.echo(
+                        f"  warning: could not write {env_file} from {env_example}: {exc}",
+                        err=True,
+                    )
+            else:
+                env_action = "wrote_from_example"
+                if pretty:
+                    typer.echo(f"  wrote {env_file} from {env_example}")
         else:
             env_action = "no_example"
             if pretty:
+                search_paths = ", ".join(
+                    str(path) for path in _init_env_example_search_paths(env_file, env_example)
+                )
                 typer.echo(
                     "  no .env.example found; skipped "
                     f"{env_file} "
-                    "creation (run `awf init` from the AWF repository root if "
-                    "you expected one)"
+                    f"creation (looked for {search_paths}; run `awf init` from "
+                    "the AWF repository root if you expected one)"
                 )
 
     options = ServiceBootstrapOptions(
