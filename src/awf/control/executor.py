@@ -245,6 +245,7 @@ _VALIDATION_EVIDENCE_CORE_KEYS = (
     "retry_count",
     "command_set_hash",
 )
+_FILE_DIGEST_CHUNK_SIZE = 64 * 1024
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -4792,13 +4793,13 @@ class WorkspaceExecutor:
             else set()
         )
         after_plan = dirty_paths | committed_paths
-        plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
-        if (
-            plan_path not in after_plan
-            and plan_file_digest_after is not None
-            and plan_file_digest_after != plan_file_digest_before
-        ):
-            after_plan = {*after_plan, plan_path}
+        if plan_path not in after_plan:
+            plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
+            if (
+                plan_file_digest_after is not None
+                and plan_file_digest_after != plan_file_digest_before
+            ):
+                after_plan = {*after_plan, plan_path}
         if plan_path not in after_plan:
             return _build_planning_scope_failure(
                 scope_phase="planning",
@@ -5261,13 +5262,12 @@ class WorkspaceExecutor:
         # Stream file bytes in fixed-size chunks rather than read_bytes() so a
         # large generated artifact in the dirty set does not balloon peak
         # memory on every conformance iteration.
-        chunk_size = 65536
         for path in sorted(paths, key=lambda p: p.as_posix()):
             hasher.update(path.as_posix().encode("utf-8"))
             hasher.update(b"\0")
             try:
                 with (worktree_path / path).open("rb") as fh:
-                    while chunk := fh.read(chunk_size):
+                    while chunk := fh.read(_FILE_DIGEST_CHUNK_SIZE):
                         hasher.update(chunk)
             except OSError:
                 hasher.update(b"<missing>")
@@ -7709,7 +7709,11 @@ def _read_text_if_present(path: Path) -> str | None:
 def _digest_file_if_present(path: Path) -> str | None:
     try:
         if path.is_file():
-            return hashlib.sha256(path.read_bytes()).hexdigest()
+            hasher = hashlib.sha256()
+            with path.open("rb") as fh:
+                while chunk := fh.read(_FILE_DIGEST_CHUNK_SIZE):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
     except OSError:
         return None
     return None
