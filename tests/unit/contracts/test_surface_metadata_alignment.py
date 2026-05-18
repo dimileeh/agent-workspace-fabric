@@ -44,7 +44,7 @@ FORBIDDEN_MCP_INPUTS = {
     "token",
 }
 
-CREATE_V2_FULL_PARITY_FIELDS = frozenset(
+CREATE_FULL_PARITY_FIELDS = frozenset(
     {"cpu", "priority", "human_boost", "memory", "out_of_scope_changes", "provider_recovery"}
 )
 STATUS_FILTER_PARITY_CAPABILITIES = (
@@ -70,7 +70,6 @@ WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH = (
     ("GET", "/v1/tasks"),
     ("GET", "/v1/tasks/{task_ref}/attempts"),
     ("POST", "/v1/workspaces"),
-    ("POST", "/v2/workspaces"),
     ("GET", "/v1/workspaces"),
     ("GET", "/v1/workspaces/overview"),
     ("GET", "/v1/workspaces/{workspace_id}"),
@@ -243,14 +242,14 @@ async def test_mcp_tool_schema_matches_registry(capability_name: str) -> None:
 
 
 @pytest.mark.unit
-async def test_create_v2_registry_status_tracks_mcp_payload_parity_gap() -> None:
-    capability = CAPABILITIES_BY_NAME["create_workspace_v2"]
-    tool = (await mcp_tools())["awf_create_workspace_v2"]
-    missing = CREATE_V2_FULL_PARITY_FIELDS - tool.properties
+async def test_create_registry_status_tracks_mcp_payload_parity_gap() -> None:
+    capability = CAPABILITIES_BY_NAME["create_workspace"]
+    tool = (await mcp_tools())["awf_create_workspace"]
+    missing = CREATE_FULL_PARITY_FIELDS - tool.properties
 
     if missing:
         assert capability.parity_status == "MCP partial"
-        assert capability.parity_backlog_slice == "TODO§create-v2-parity"
+        assert capability.parity_backlog_slice == "TODO§create-parity"
     else:
         assert capability.parity_status == "MCP implemented"
         assert capability.parity_backlog_slice == "—"
@@ -282,10 +281,8 @@ def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None
 
     assert required_capabilities == {capability.name for capability in control_capabilities()}
     assert required_capabilities <= supported_capabilities
-    assert CAPABILITIES_BY_NAME["create_workspace_v1"].supports_idempotency_key is True
-    assert CAPABILITIES_BY_NAME["create_workspace_v1"].requires_idempotency_key is False
-    assert CAPABILITIES_BY_NAME["create_workspace_v2"].supports_idempotency_key is True
-    assert CAPABILITIES_BY_NAME["create_workspace_v2"].requires_idempotency_key is False
+    assert CAPABILITIES_BY_NAME["create_workspace"].supports_idempotency_key is True
+    assert CAPABILITIES_BY_NAME["create_workspace"].requires_idempotency_key is False
 
 
 @pytest.mark.unit

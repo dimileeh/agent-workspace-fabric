@@ -22,6 +22,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStat
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
+ValidationCommand = Annotated[str, Field(min_length=1)]
 MergeBlockerReason = Literal[
     "ready_to_merge_or_waiting_for_github",
     "manual_merge_required",
@@ -60,6 +61,9 @@ CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
 NetworkPosture = Literal["offline", "restricted", "open"]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
+_DEFAULT_REPO_BASE_BRANCH = "main"
+_LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
+_LEGACY_DATABASE_PROFILE_REF = "aira"
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -73,33 +77,13 @@ class MergeCandidateReadinessResponse(BaseModel):
     stale_reason: str | None = None
 
 
-class WorkspaceCreateRequest(BaseModel):
-    """Input for ``POST /v1/workspaces`` and ``awf_create_workspace`` (MCP).
-
-    Fields are grouped logically; see docs/PLAN_MVP.md § API surface.
-    """
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    repo_url: Annotated[str, Field(min_length=1, max_length=512)]
-    branch_base: Annotated[str, Field(default="development", min_length=1, max_length=256)]
-
-    task_title: Annotated[str, Field(min_length=1, max_length=512)]
-    task_prompt: Annotated[str, Field(min_length=1, max_length=16384)]
-    task_external_id: Annotated[str | None, Field(default=None, max_length=128)]
-
-    agent: AgentRuntime = Field(default=AgentRuntime.codex)
-    env_profile: Annotated[str | None, Field(default=None, max_length=128)]
-
-    test_commands: list[str] = Field(default_factory=list)
-    requires_database: bool = False
-
-
-class WorkspaceV2Repo(BaseModel):
+class WorkspaceRepo(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     url: Annotated[str, Field(min_length=1, max_length=512)]
-    base_branch: Annotated[str, Field(default="main", min_length=1, max_length=256)]
+    base_branch: Annotated[
+        str, Field(default=_DEFAULT_REPO_BASE_BRANCH, min_length=1, max_length=256)
+    ]
 
 
 class WorkspaceProviderFallbackTarget(BaseModel):
@@ -141,7 +125,7 @@ class WorkspaceLaunchPreflight(BaseModel):
     ] = None
 
 
-class WorkspaceV2Task(BaseModel):
+class WorkspaceTask(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     title: Annotated[str, Field(min_length=1, max_length=512)]
@@ -164,21 +148,21 @@ class WorkspaceV2Task(BaseModel):
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
 
 
-class WorkspaceV2Workspace(BaseModel):
+class WorkspaceProfileSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)]
     profile: WorkspaceProfile | None = None
 
 
-class WorkspaceV2Validation(BaseModel):
+class WorkspaceValidation(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    commands: list[str] = Field(default_factory=list)
+    commands: list[ValidationCommand] = Field(default_factory=list)
     requested_tier: int = Field(default=1, ge=1, le=3)
 
 
-class WorkspaceV2Resources(BaseModel):
+class WorkspaceResources(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     cpu: float | None = Field(default=None, gt=0)
@@ -190,21 +174,107 @@ class WorkspaceV2Resources(BaseModel):
     disk_mb: int | None = Field(default=None, gt=0)
 
 
-class WorkspaceCreateV2Request(BaseModel):
-    """Clean v2 workspace creation contract."""
+class WorkspaceCreateRequest(BaseModel):
+    """Canonical workspace creation contract for ``POST /v1/workspaces``."""
 
     model_config = ConfigDict(extra="forbid")
 
-    repo: WorkspaceV2Repo
-    task: WorkspaceV2Task
-    workspace: WorkspaceV2Workspace = Field(
-        default_factory=lambda: WorkspaceV2Workspace(profile_ref="auto", profile=None)
+    repo: WorkspaceRepo
+    task: WorkspaceTask
+    workspace: WorkspaceProfileSelection = Field(
+        default_factory=lambda: WorkspaceProfileSelection(profile_ref="auto", profile=None)
     )
-    validation: WorkspaceV2Validation = Field(default_factory=lambda: WorkspaceV2Validation())
-    resources: WorkspaceV2Resources = Field(
-        default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
+    validation: WorkspaceValidation = Field(default_factory=lambda: WorkspaceValidation())
+    resources: WorkspaceResources = Field(
+        default_factory=lambda: WorkspaceResources(cpu=None, memory=None)
     )
     preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_flat_payload(cls, data: object) -> object:
+        """Accept old local flat payloads while exposing one rich public schema.
+
+        AWF is pre-stable, so docs and OpenAPI advertise only the rich v1
+        contract. This compatibility adapter keeps older tests and local callers
+        from failing abruptly during the cleanup window.
+        """
+        if not isinstance(data, dict) or "repo" in data:
+            return data
+        if "repo_url" not in data:
+            return data
+
+        allowed_keys = {
+            "repo_url",
+            "branch_base",
+            "task_title",
+            "task_prompt",
+            "task_external_id",
+            "agent",
+            "env_profile",
+            "test_commands",
+            "requires_database",
+        }
+        extras = {key: value for key, value in data.items() if key not in allowed_keys}
+        profile_ref = (
+            _LEGACY_DATABASE_PROFILE_REF
+            if data.get("requires_database") is True
+            else data.get("env_profile")
+        )
+        coerced: dict[str, object] = {
+            **extras,
+            "repo": {
+                "url": data.get("repo_url"),
+                "base_branch": data.get("branch_base", _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT),
+            },
+            "task": {
+                "title": data.get("task_title"),
+                "prompt": data.get("task_prompt"),
+                "agent": data.get("agent", AgentRuntime.codex),
+                "external_id": data.get("task_external_id"),
+                "kind": "feature_branch_pr",
+            },
+            "workspace": {"profile_ref": profile_ref or "auto", "profile": None},
+            "validation": {"commands": data.get("test_commands", []), "requested_tier": 1},
+            "resources": {},
+        }
+        return coerced
+
+    @property
+    def repo_url(self) -> str:
+        return self.repo.url
+
+    @property
+    def branch_base(self) -> str:
+        return self.repo.base_branch
+
+    @property
+    def task_title(self) -> str:
+        return self.task.title
+
+    @property
+    def task_prompt(self) -> str:
+        return self.task.prompt
+
+    @property
+    def task_external_id(self) -> str | None:
+        return self.task.external_id
+
+    @property
+    def agent(self) -> AgentRuntime:
+        return self.task.agent
+
+    @property
+    def env_profile(self) -> str | None:
+        return self.workspace.profile_ref
+
+    @property
+    def test_commands(self) -> list[str]:
+        return self.validation.commands
+
+    @property
+    def requires_database(self) -> bool:
+        return self.workspace.profile_ref == _LEGACY_DATABASE_PROFILE_REF
 
 
 class PullRequestMonitorAdoptionRequest(BaseModel):

@@ -36,11 +36,8 @@ from tests.unit.mcp._parity_utils import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
-    "Workspace create v1": (
-        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_happy_path_returns_accepted_payload",
-    ),
-    "Workspace create v2": (
-        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_v2_hydrates_canonical_request_model",
+    "Workspace create": (
+        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_hydrates_canonical_request_model",
     ),
     "Workspace list and get": (
         "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_get_returns_the_workspace_just_created",
@@ -128,7 +125,7 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/mcp/test_mcp_control_contracts.py::TestRealDbPaths::test_rebase_creates_operation_row",
     ),
     "Retry workspace": (
-        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspaceV2::test_retry_workspace_provider_preflight_error_and_override",
+        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_retry_workspace_provider_preflight_error_and_override",
     ),
     "Existing PR monitor adoption": (
         "tests/unit/mcp/test_mcp_server.py::TestToolRegistration::test_adopt_pull_request_monitor_tool_creates_adoption",

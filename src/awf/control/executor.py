@@ -1082,11 +1082,10 @@ class WorkspaceExecutor:
           hand in a stub (the production monitor needs the per-task agent
           adapter, which the executor only has mid-``execute``).
         * ``pr_monitor_factory`` — a callable the executor invokes AFTER
-          the adapter is resolved. Production path: ``run_awf.py`` passes
-          a factory that builds a ``PullRequestMonitorRunner`` from the
-          adapter, GitHub client, worktree paths, and resolved workspace
-          profile. Adapter-only factories are still accepted for older
-          tests and compatibility scripts.
+          the adapter is resolved. The service worker passes a factory
+          that builds a ``PullRequestMonitorRunner`` from the adapter,
+          GitHub client, worktree paths, and resolved workspace profile.
+          Adapter-only factories are still accepted for older tests.
 
         If both are None the monitor stage is skipped and the executor
         preserves the original ``pushing → completed`` contract (the

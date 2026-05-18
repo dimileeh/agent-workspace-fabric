@@ -15,7 +15,7 @@ from fastapi import HTTPException, Request
 import awf.api.routes.artifacts as artifact_routes
 import awf.api.routes.validation as validation_routes
 import awf.api.routes.workspaces as workspace_routes
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings, get_settings
 from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import workspaces as workspaces_service
@@ -53,7 +53,7 @@ def test_workspace_v1_direct_request_default_is_type_visible_optional() -> None:
 
 
 def test_workspace_create_routes_use_typed_settings_dependency() -> None:
-    for route in (workspace_routes.create_workspace, workspace_routes.create_workspace_v2):
+    for route in (workspace_routes.create_workspace, workspace_routes.create_workspace):
         parameter = inspect.signature(route).parameters["settings"]
         annotation = get_type_hints(route, include_extras=True)["settings"]
 
@@ -62,52 +62,7 @@ def test_workspace_create_routes_use_typed_settings_dependency() -> None:
 
 
 @pytest.mark.unit
-async def test_workspace_v1_create_acquires_idempotency_lock_before_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-    created_at = datetime(2026, 1, 1, tzinfo=UTC)
-
-    class _Repository:
-        def __init__(self, _session: object) -> None:
-            return None
-
-        async def acquire_idempotency_key_lock(self, key: str) -> None:
-            calls.append(("lock", key))
-
-        async def get_by_idempotency_key(self, key: str) -> object | None:
-            calls.append(("get", key))
-            return None
-
-        async def create(self, **kwargs: object) -> object:
-            calls.append(("create", str(kwargs["idempotency_key"])))
-            return SimpleNamespace(
-                id="ws_locked_v1",
-                status="requested",
-                version=1,
-                created_at=created_at,
-            )
-
-    monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-
-    response = await workspace_routes.create_workspace(
-        WorkspaceCreateRequest(
-            repo_url="https://github.com/example/repo.git",
-            branch_base="main",
-            task_title="Serialize REST v1 idempotency",
-            task_prompt="exercise lock ordering",
-        ),
-        idempotency_key="route-v1-key",
-        settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
-    )
-
-    assert response.workspace_id == "ws_locked_v1"
-    assert calls[:2] == [("lock", "route-v1-key"), ("get", "route-v1-key")]
-
-
-@pytest.mark.unit
-async def test_workspace_v2_create_acquires_idempotency_lock_before_lookup(
+async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
@@ -126,14 +81,14 @@ async def test_workspace_v2_create_acquires_idempotency_lock_before_lookup(
 
     async def create_row(*_args: object, **_kwargs: object) -> object:
         return SimpleNamespace(
-            id="ws_locked_v2",
+            id="ws_locked_flat",
             status="requested",
             version=1,
             created_at=created_at,
         )
 
     monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-    monkeypatch.setattr(workspace_routes, "create_workspace_v2_row", create_row)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row", create_row)
     monkeypatch.setattr(workspace_routes, "owned_path_overlap_warnings", lambda _ws: [])
     monkeypatch.setattr(
         workspace_routes,
@@ -146,19 +101,76 @@ async def test_workspace_v2_create_acquires_idempotency_lock_before_lookup(
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
-    response = await workspace_routes.create_workspace_v2(
-        WorkspaceCreateV2Request(
-            repo={"url": "https://github.com/example/repo.git", "base_branch": "main"},
-            task={"title": "Serialize REST v2 idempotency", "prompt": "exercise lock ordering"},
+    response = await workspace_routes.create_workspace(
+        WorkspaceCreateRequest(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="Serialize REST v1 idempotency",
+            task_prompt="exercise lock ordering",
         ),
         request=SimpleNamespace(),  # type: ignore[arg-type]
-        idempotency_key="route-v2-key",
+        idempotency_key="route-flat-key",
         settings=Settings(_env_file=None),
         session=object(),  # type: ignore[arg-type]
     )
 
-    assert response.workspace_id == "ws_locked_v2"
-    assert calls[:2] == [("lock", "route-v2-key"), ("get", "route-v2-key")]
+    assert response.workspace_id == "ws_locked_flat"
+    assert calls[:2] == [("lock", "route-flat-key"), ("get", "route-flat-key")]
+
+
+@pytest.mark.unit
+async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Repository:
+        def __init__(self, _session: object) -> None:
+            return None
+
+        async def acquire_idempotency_key_lock(self, key: str) -> None:
+            calls.append(("lock", key))
+
+        async def get_by_idempotency_key(self, key: str) -> object | None:
+            calls.append(("get", key))
+            return None
+
+    async def create_row(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            id="ws_locked_rich",
+            status="requested",
+            version=1,
+            created_at=created_at,
+        )
+
+    monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row", create_row)
+    monkeypatch.setattr(workspace_routes, "owned_path_overlap_warnings", lambda _ws: [])
+    monkeypatch.setattr(
+        workspace_routes,
+        "workspace_provider_readiness_preflight",
+        lambda _ws: None,
+    )
+    monkeypatch.setattr(
+        workspace_routes,
+        "_workspace_admission_disk_check",
+        AsyncMock(return_value=_admission_ok_disk_check()),
+    )
+
+    response = await workspace_routes.create_workspace(
+        WorkspaceCreateRequest(
+            repo={"url": "https://github.com/example/repo.git", "base_branch": "main"},
+            task={"title": "Serialize REST idempotency", "prompt": "exercise lock ordering"},
+        ),
+        request=SimpleNamespace(),  # type: ignore[arg-type]
+        idempotency_key="route-rich-key",
+        settings=Settings(_env_file=None),
+        session=object(),  # type: ignore[arg-type]
+    )
+
+    assert response.workspace_id == "ws_locked_rich"
+    assert calls[:2] == [("lock", "route-rich-key"), ("get", "route-rich-key")]
 
 
 @pytest.mark.unit
@@ -264,7 +276,7 @@ async def test_workspace_secret_leases_route_reports_missing_workspace(
 async def test_workspace_v2_create_reports_task_external_id_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = WorkspaceCreateV2Request(
+    payload = WorkspaceCreateRequest(
         repo={"url": "https://github.com/example/repo.git", "base_branch": "main"},
         task={"title": "conflict", "prompt": "implement it", "external_id": "task-123"},
     )
@@ -280,21 +292,24 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
             return None
 
     monkeypatch.setattr(workspace_routes, "WorkspaceRepository", _Repository)
-    monkeypatch.setattr(workspace_routes, "create_workspace_v2_row", raise_conflict)
+    monkeypatch.setattr(workspace_routes, "create_workspace_row", raise_conflict)
     monkeypatch.setattr(
         workspace_routes,
         "_workspace_admission_disk_check",
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
-    response = await workspace_routes.create_workspace_v2(
+    session = SimpleNamespace(rollback=AsyncMock())
+
+    response = await workspace_routes.create_workspace(
         payload,
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key=None,
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
+    session.rollback.assert_awaited_once()
     assert response.status_code == 409
     body = json.loads(response.body)
     assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"

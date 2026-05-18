@@ -34,7 +34,6 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceArtifactReadResponse,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
     WorkspaceEventListResponse,
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
@@ -125,6 +124,7 @@ RuntimeHealthSummaryProvider = Callable[
 
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
+_MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
 
 
 class ReadinessProvider(Protocol):
@@ -194,62 +194,21 @@ def build_mcp_server(
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
         repo_url: str = Field(..., description="Git URL the workspace should check out."),
-        task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
-        task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
-        branch_base: str = Field(
-            default="development",
-            description="Branch to branch FROM; feature branch is created off it.",
-        ),
-        agent: AgentRuntime = Field(
-            default=AgentRuntime.codex,
-            description="Which coding CLI to run inside the container.",
-        ),
-        test_commands: list[str] = Field(
-            default_factory=list,
-            description="Shell commands to validate the change (e.g. ['pytest -q']).",
-        ),
-        requires_database: bool = Field(
-            default=False,
-            description="If True, AWF runs `alembic upgrade head` before test_commands.",
-        ),
-        env_profile: str | None = Field(
-            default=None, description="Optional named env profile (e.g. 'aira-dev')."
-        ),
-        task_external_id: str | None = Field(
-            default=None, description="Optional caller-side task ID for correlation."
-        ),
-        idempotency_key: str | None = Field(
+        base_branch: str | None = Field(
             default=None,
-            description="Optional replay key matching the REST Idempotency-Key header.",
+            min_length=1,
+            max_length=256,
+            json_schema_extra={"default": _MCP_LEGACY_BASE_BRANCH_DEFAULT},
+            description=(
+                "Branch to branch FROM; feature branch is created off it. "
+                f"Defaults to {_MCP_LEGACY_BASE_BRANCH_DEFAULT} when omitted."
+            ),
         ),
-    ) -> StructuredToolResult:
-        """Create a new AWF workspace. Returns the accepted workspace payload."""
-        req = WorkspaceCreateRequest(
-            repo_url=repo_url,
-            branch_base=branch_base,
-            task_title=task_title,
-            task_prompt=task_prompt,
-            agent=agent,
-            test_commands=test_commands,
-            requires_database=requires_database,
-            env_profile=env_profile,
-            task_external_id=task_external_id,
-        )
-        try:
-            response = await service.create(
-                req,
-                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
-            )
-        except WorkspaceCreateIdempotencyConflictError as exc:
-            return _workspace_error_result(exc)
-        return _tool_result(_workspace_accepted_payload(response))
-
-    @mcp.tool(name="awf_create_workspace_v2")
-    async def awf_create_workspace_v2(
-        repo_url: str = Field(..., description="Git URL the workspace should check out."),
-        base_branch: str = Field(
-            default="main",
-            description="Branch to branch FROM; feature branch is created off it.",
+        branch_base: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            description="Legacy alias for base_branch.",
         ),
         task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
@@ -293,13 +252,27 @@ def build_mcp_server(
             default="auto",
             description="Workspace profile reference, e.g. auto, python, node, aira.",
         ),
+        env_profile: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Legacy alias for profile_ref.",
+        ),
         profile: dict[str, Any] | None = Field(
             default=None,
             description="Optional inline workspace profile dictionary.",
         ),
-        validation_commands: list[str] = Field(
-            default_factory=list,
+        validation_commands: list[str] | None = Field(
+            default=None,
+            json_schema_extra={"default": []},
             description="Shell commands to validate the change.",
+        ),
+        test_commands: list[str] | None = Field(
+            default=None,
+            description="Legacy alias for validation_commands.",
+        ),
+        requires_database: bool = Field(
+            default=False,
+            description="Legacy database-profile shortcut; maps to profile_ref='aira'.",
         ),
         requested_tier: int = Field(
             default=1,
@@ -346,9 +319,45 @@ def build_mcp_server(
             description="Optional replay key matching the REST Idempotency-Key header.",
         ),
     ) -> StructuredToolResult:
-        """Create a new AWF workspace using the clean v2 contract."""
-        req = WorkspaceCreateV2Request(
-            repo={"url": repo_url, "base_branch": base_branch},
+        """Create a new AWF workspace using the canonical rich v1 contract."""
+        if branch_base is not None and base_branch is not None and branch_base != base_branch:
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either base_branch or branch_base, or ensure they match.",
+            )
+        if (
+            test_commands is not None
+            and validation_commands is not None
+            and test_commands != validation_commands
+        ):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either validation_commands or test_commands, or ensure they match.",
+            )
+        if (
+            not requires_database
+            and env_profile is not None
+            and profile_ref not in (None, "auto", env_profile)
+        ):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either profile_ref or env_profile, or ensure they match.",
+            )
+        if requires_database and (
+            profile_ref not in (None, "auto", "aira") or env_profile not in (None, "aira")
+        ):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either requires_database or profile_ref/env_profile='aira'.",
+            )
+
+        effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
+        effective_validation_commands = (
+            test_commands if test_commands is not None else validation_commands or []
+        )
+        effective_profile_ref = "aira" if requires_database else env_profile or profile_ref
+        req = WorkspaceCreateRequest(
+            repo={"url": repo_url, "base_branch": effective_base_branch},
             task={
                 k: v
                 for k, v in {
@@ -369,8 +378,11 @@ def build_mcp_server(
                 }.items()
                 if v is not None
             },
-            workspace={"profile_ref": profile_ref, "profile": profile},
-            validation={"commands": validation_commands, "requested_tier": requested_tier},
+            workspace={"profile_ref": effective_profile_ref, "profile": profile},
+            validation={
+                "commands": effective_validation_commands,
+                "requested_tier": requested_tier,
+            },
             resources={
                 k: v
                 for k, v in {
@@ -398,7 +410,7 @@ def build_mcp_server(
             )
 
         try:
-            ws = await service.create_v2(
+            ws = await service.create(
                 req,
                 idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
                 disk_check_factory=resolve_disk_check,

@@ -1274,6 +1274,482 @@ def test_callback_replay_key_cache_default_retains_keys_past_response_cache_limi
 
 
 @pytest.mark.unit
+def test_callback_replay_key_cache_rejects_invalid_size() -> None:
+    with pytest.raises(ValueError, match="max_entries"):
+        callbacks_route._CallbackIdempotencyReplayKeyCache(max_entries=0)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_direct_callback_replay_caches_tolerate_non_extensible_test_objects() -> None:
+    class _Slotless:
+        __slots__ = ()
+
+    request = _Slotless()
+
+    replay_cache = callbacks_route._direct_callback_idempotency_replay_cache(  # noqa: SLF001
+        request
+    )
+    replay_key_cache = callbacks_route._direct_callback_idempotency_replay_key_cache(  # noqa: SLF001
+        request
+    )
+
+    assert isinstance(replay_cache, callbacks_route._CallbackIdempotencyReplayCache)  # noqa: SLF001
+    assert isinstance(
+        replay_key_cache,
+        callbacks_route._CallbackIdempotencyReplayKeyCache,  # noqa: SLF001
+    )
+    assert (
+        callbacks_route._direct_callback_idempotency_replay_cache(request)  # noqa: SLF001
+        is not replay_cache
+    )
+    assert (
+        callbacks_route._direct_callback_idempotency_replay_key_cache(request)  # noqa: SLF001
+        is not replay_key_cache
+    )
+
+
+@pytest.mark.unit
+async def test_callback_durable_replay_helpers_remember_successful_responses() -> None:
+    payload = _callback_payload(name="callback-durable-helper")
+    replay_cache = callbacks_route._CallbackIdempotencyReplayCache()  # noqa: SLF001
+    replay_key_cache = callbacks_route._CallbackIdempotencyReplayKeyCache()  # noqa: SLF001
+
+    class _DurableReplayService:
+        async def replay_existing_for_persisted_key(
+            self,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> api_schemas.CallbackSubscriptionResponse:
+            assert idempotency_key == "persisted-key"
+            return _callback_response("cb_persisted_helper")
+
+        async def replay_existing_for_persisted_key_in_session(
+            self,
+            _session: object,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> api_schemas.CallbackSubscriptionResponse:
+            assert idempotency_key == "persisted-session-key"
+            return _callback_response("cb_persisted_session_helper")
+
+        async def replay_existing_in_locked_session(
+            self,
+            _session: object,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> api_schemas.CallbackSubscriptionResponse:
+            assert idempotency_key == "locked-key"
+            return _callback_response("cb_locked_helper")
+
+    service = _DurableReplayService()
+
+    response = await callbacks_route._callback_durable_replay_response_for_persisted_key(  # noqa: SLF001
+        service,  # type: ignore[arg-type]
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key="persisted-key",
+    )
+    session_response = await callbacks_route._callback_durable_replay_response_for_persisted_key(  # noqa: SLF001
+        service,  # type: ignore[arg-type]
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key="persisted-session-key",
+        session=object(),  # type: ignore[arg-type]
+    )
+    locked_response = await callbacks_route._callback_durable_replay_response_from_locked_session(  # noqa: SLF001
+        service,  # type: ignore[arg-type]
+        replay_cache,
+        replay_key_cache,
+        payload,
+        idempotency_key="locked-key",
+        session=object(),  # type: ignore[arg-type]
+    )
+
+    assert response is not None and response.id == "cb_persisted_helper"
+    assert session_response is not None and session_response.id == "cb_persisted_session_helper"
+    assert locked_response is not None and locked_response.id == "cb_locked_helper"
+    assert replay_cache.replay(payload, idempotency_key="locked-key") is not None
+    assert replay_key_cache.matches(payload, idempotency_key="locked-key") is True
+
+
+@pytest.mark.unit
+async def test_callback_durable_replay_helpers_translate_conflicts() -> None:
+    payload = _callback_payload(name="callback-durable-conflict")
+    replay_cache = callbacks_route._CallbackIdempotencyReplayCache()  # noqa: SLF001
+    replay_key_cache = callbacks_route._CallbackIdempotencyReplayKeyCache()  # noqa: SLF001
+
+    class _ConflictingReplayService:
+        async def replay_existing_for_persisted_key(
+            self,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> None:
+            del idempotency_key
+            raise callbacks_route.CallbackIdempotencyConflictError("conflict")
+
+        async def replay_existing_in_locked_session(
+            self,
+            _session: object,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> None:
+            del idempotency_key
+            raise callbacks_route.CallbackIdempotencyConflictError("conflict")
+
+        async def replay_existing(
+            self,
+            _payload: api_schemas.CallbackSubscriptionCreateRequest,
+            *,
+            idempotency_key: str,
+        ) -> None:
+            del idempotency_key
+            raise callbacks_route.CallbackIdempotencyConflictError("conflict")
+
+    service = _ConflictingReplayService()
+
+    with pytest.raises(callbacks_route.HTTPException) as persisted_exc:
+        await callbacks_route._callback_durable_replay_response_for_persisted_key(  # noqa: SLF001
+            service,  # type: ignore[arg-type]
+            replay_cache,
+            replay_key_cache,
+            payload,
+            idempotency_key="persisted-key",
+        )
+    with pytest.raises(callbacks_route.HTTPException) as locked_exc:
+        await callbacks_route._callback_durable_replay_response_from_locked_session(  # noqa: SLF001
+            service,  # type: ignore[arg-type]
+            replay_cache,
+            replay_key_cache,
+            payload,
+            idempotency_key="locked-key",
+            session=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(callbacks_route.HTTPException) as hot_exc:
+        await callbacks_route._callback_durable_replay_response(  # noqa: SLF001
+            service,  # type: ignore[arg-type]
+            replay_cache,
+            replay_key_cache,
+            payload,
+            idempotency_key="hot-key",
+        )
+
+    assert persisted_exc.value.status_code == 409
+    assert locked_exc.value.status_code == 409
+    assert hot_exc.value.status_code == 409
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("policy_error", "error_code"),
+    [
+        (
+            callbacks_route.CallbackTargetPolicyViolationError("https required"),
+            "CALLBACK_TARGET_POLICY_VIOLATION",
+        ),
+        (
+            callbacks_route.CallbackTargetPolicyError("invalid target"),
+            "CALLBACK_TARGET_INVALID",
+        ),
+    ],
+)
+async def test_register_callback_translates_policy_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    policy_error: Exception,
+    error_code: str,
+) -> None:
+    class _FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeCallbackService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def replay_existing_for_persisted_key_in_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def replay_existing_in_locked_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def register_with_locked_idempotency_key(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise policy_error
+
+    async def _admit_allowed(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(allowed=True, metadata={})
+
+    monkeypatch.setattr(callbacks_route, "CallbackService", _FakeCallbackService)
+    monkeypatch.setattr(callbacks_route, "admit_request_async", _admit_allowed)
+
+    with pytest.raises(callbacks_route.HTTPException) as exc_info:
+        await callbacks_route.register_callback(
+            _callback_payload(name=f"callback-policy-{error_code.lower()}"),
+            _direct_callback_request(),
+            idempotency_key=f"callback-policy-{error_code.lower()}",
+            session_factory=_FakeSessionFactory(),  # type: ignore[arg-type]
+            settings=_callback_request_admission_settings(),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["error_code"] == error_code
+
+
+@pytest.mark.unit
+async def test_register_callback_hot_key_cache_conflict_returns_409() -> None:
+    request = _direct_callback_request()
+    replay_key_cache = callbacks_route._callback_idempotency_replay_key_cache(  # noqa: SLF001
+        request
+    )
+    replay_key_cache.remember(
+        _callback_payload(name="callback-hot-cache-original"),
+        idempotency_key="callback-hot-cache-key",
+    )
+
+    with pytest.raises(callbacks_route.HTTPException) as exc_info:
+        await callbacks_route.register_callback(
+            _callback_payload(name="callback-hot-cache-conflict"),
+            request,
+            idempotency_key="callback-hot-cache-key",
+            session_factory=object(),  # type: ignore[arg-type]
+            settings=_callback_request_admission_settings(),
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "replay_stage",
+    ["persisted-before-admission", "locked-rate-limited", "locked-before-register"],
+)
+async def test_register_callback_returns_durable_replay_before_fresh_register(
+    monkeypatch: pytest.MonkeyPatch,
+    replay_stage: str,
+) -> None:
+    class _FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeCallbackService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.locked_calls = 0
+
+        async def replay_existing_for_persisted_key_in_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> api_schemas.CallbackSubscriptionResponse | None:
+            if replay_stage == "persisted-before-admission":
+                return _callback_response("cb_persisted_route")
+            return None
+
+        async def replay_existing_in_locked_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> api_schemas.CallbackSubscriptionResponse | None:
+            self.locked_calls += 1
+            if replay_stage == "locked-rate-limited":
+                return _callback_response("cb_rate_limited_replay")
+            if replay_stage == "locked-before-register":
+                return _callback_response("cb_locked_replay")
+            return None
+
+        async def register_with_locked_idempotency_key(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise AssertionError("durable replay should return before fresh register")
+
+    async def _admission(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            allowed=replay_stage != "locked-rate-limited",
+            metadata={
+                "reason_code": "CALLBACK_REGISTER_RATE_LIMITED",
+                "retry_after_seconds": 1,
+            },
+        )
+
+    monkeypatch.setattr(callbacks_route, "CallbackService", _FakeCallbackService)
+    monkeypatch.setattr(callbacks_route, "admit_request_async", _admission)
+
+    response = await callbacks_route.register_callback(
+        _callback_payload(name=f"callback-replay-{replay_stage}"),
+        _direct_callback_request(),
+        idempotency_key=f"callback-replay-{replay_stage}",
+        session_factory=_FakeSessionFactory(),  # type: ignore[arg-type]
+        settings=_callback_request_admission_settings(),
+    )
+
+    assert isinstance(response, api_schemas.CallbackSubscriptionResponse)
+    assert response.id in {
+        "cb_persisted_route",
+        "cb_rate_limited_replay",
+        "cb_locked_replay",
+    }
+
+
+@pytest.mark.unit
+async def test_register_callback_direct_rate_limit_returns_structured_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeCallbackService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def replay_existing_for_persisted_key_in_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def replay_existing_in_locked_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def register_with_locked_idempotency_key(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise AssertionError("rate-limited callback registration must not register")
+
+    async def _rate_limited(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            allowed=False,
+            metadata={
+                "reason_code": "CALLBACK_REGISTER_RATE_LIMITED",
+                "endpoint_family": "callback_register",
+                "identity_type": "bearer_token",
+                "identity_digest": "digest",
+                "limit": 1,
+                "window_seconds": 60,
+                "retry_after_seconds": 12,
+            },
+        )
+
+    monkeypatch.setattr(callbacks_route, "CallbackService", _FakeCallbackService)
+    monkeypatch.setattr(callbacks_route, "admit_request_async", _rate_limited)
+
+    response = await callbacks_route.register_callback(
+        _callback_payload(name="callback-direct-rate-limited"),
+        _direct_callback_request(),
+        idempotency_key="callback-direct-rate-limited",
+        session_factory=_FakeSessionFactory(),  # type: ignore[arg-type]
+        settings=_callback_request_admission_settings(),
+    )
+
+    assert response.status_code == 429
+    assert json.loads(response.body)["error_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
+
+
+@pytest.mark.unit
+async def test_register_callback_locked_idempotency_conflict_returns_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeCallbackService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def replay_existing_for_persisted_key_in_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def replay_existing_in_locked_session(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def register_with_locked_idempotency_key(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise callbacks_route.CallbackIdempotencyConflictError("conflict")
+
+    async def _admit_allowed(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(allowed=True, metadata={})
+
+    monkeypatch.setattr(callbacks_route, "CallbackService", _FakeCallbackService)
+    monkeypatch.setattr(callbacks_route, "admit_request_async", _admit_allowed)
+
+    with pytest.raises(callbacks_route.HTTPException) as exc_info:
+        await callbacks_route.register_callback(
+            _callback_payload(name="callback-locked-conflict"),
+            _direct_callback_request(),
+            idempotency_key="callback-locked-conflict",
+            session_factory=_FakeSessionFactory(),  # type: ignore[arg-type]
+            settings=_callback_request_admission_settings(),
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.unit
 async def test_register_callback_known_replay_key_db_miss_returns_conflict_without_register(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

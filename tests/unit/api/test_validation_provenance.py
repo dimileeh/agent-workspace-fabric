@@ -17,7 +17,12 @@ import awf.api.routes.validation as validation_route
 import awf.service.validation_provenance as validation_service
 from awf.common.config import get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    WorkspaceLogStreamRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
@@ -125,14 +130,14 @@ def test_validation_provenance_command_lookup_includes_database_hooks() -> None:
     assert lookup[("db_refresh", 1)] == "python scripts/db_refresh.py"
 
 
-async def _create_v2_profile_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v2/workspaces", json=_V2_PROFILE_BODY, headers=_AUTH_HEADERS)
+async def _create_profile_workspace(client: AsyncClient) -> str:
+    response = await client.post("/v1/workspaces", json=_V2_PROFILE_BODY, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
 
-async def _create_v2_workspace_with_body(client: AsyncClient, body: dict) -> str:
-    response = await client.post("/v2/workspaces", json=body, headers=_AUTH_HEADERS)
+async def _create_workspace_with_body(client: AsyncClient, body: dict) -> str:
+    response = await client.post("/v1/workspaces", json=body, headers=_AUTH_HEADERS)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -291,20 +296,27 @@ async def _attach_merge_candidate(
         workspace.pr_url = "https://github.com/example/provenance/pull/1"
         workspace.pr_number = 1
         workspace.branch_name = "codex/validation-provenance"
-        task = await TaskRepository(session).create_or_get(
-            repo_url=workspace.repo_url,
-            base_branch=workspace.branch_base,
-            title=workspace.task_title,
-            prompt=workspace.task_prompt,
-            external_id=f"VALIDATION-{head_sha or 'missing'}",
-            idempotency_key=None,
-            task_class=workspace.task_class,
-            owned_paths=list(workspace.owned_paths),
-        )
-        attempt = await TaskAttemptRepository(session).create_for_workspace(
-            task=task,
-            workspace=workspace,
-        )
+        task_repo = TaskRepository(session)
+        attempt_repo = TaskAttemptRepository(session)
+        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+        if attempt is None:
+            task = await task_repo.create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=f"VALIDATION-{head_sha or 'missing'}",
+                idempotency_key=None,
+                task_class=workspace.task_class,
+                owned_paths=list(workspace.owned_paths),
+            )
+            attempt = await attempt_repo.create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+        else:
+            task = await task_repo.get(attempt.task_id)
+            assert task is not None
         attempt.is_canonical_for_merge = True
         candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
             task=task,
@@ -315,6 +327,29 @@ async def _attach_merge_candidate(
         )
         candidate.updated_at = updated_at
         await session.commit()
+
+
+@pytest.mark.unit
+async def test_attach_merge_candidate_reuses_existing_attempt_task(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_profile_workspace(client)
+
+    await _attach_merge_candidate(
+        engine,
+        workspace_id,
+        head_sha="helper-regression-head",
+        updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+    )
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        assert attempt is not None
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt.id)
+        assert candidate is not None
+        assert candidate.task_id == attempt.task_id
 
 
 async def _mark_workspace_validation_failed(
@@ -470,7 +505,7 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_profile_workspace(client)
+    workspace_id = await _create_profile_workspace(client)
     await _mark_workspace_completed(engine, workspace_id)
     await _create_stream_pair(
         engine,
@@ -889,7 +924,7 @@ async def test_validation_provenance_resolves_profile_commands_by_phase_index(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,
@@ -955,7 +990,7 @@ async def test_validation_provenance_displays_http_healthcheck_target(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,
@@ -1002,7 +1037,7 @@ async def test_validation_provenance_resolves_coverage_command_from_profile(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    workspace_id = await _create_v2_workspace_with_body(
+    workspace_id = await _create_workspace_with_body(
         client,
         {
             **_V2_PROFILE_BODY,

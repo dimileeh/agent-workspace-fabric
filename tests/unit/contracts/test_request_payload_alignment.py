@@ -19,7 +19,6 @@ from awf.api.schemas import (
     PullRequestMonitorAdoptionResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
     WorkspaceRetryResponse,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
@@ -175,20 +174,19 @@ class _RequestRecordingService:
 
     def __init__(self) -> None:
         self.create_calls: list[WorkspaceCreateRequest] = []
-        self.create_v2_calls: list[WorkspaceCreateV2Request] = []
         self.adopt_calls: list[PullRequestMonitorAdoptionRequest] = []
 
-    async def create_v2(
+    async def create(
         self,
-        req: WorkspaceCreateV2Request,
+        req: WorkspaceCreateRequest,
         *,
         idempotency_key: str | None = None,
         disk_check: Any | None = None,
         disk_check_factory: Any | None = None,
     ) -> SimpleNamespace:
-        self.create_v2_calls.append(req)
+        self.create_calls.append(req)
         return SimpleNamespace(
-            id="ws_mcp_create_v2_contract",
+            id="ws_mcp_create_contract",
             status=WorkspaceStatus.requested,
             version=1,
             coordination_warnings=[],
@@ -370,11 +368,11 @@ async def _seed_workspace_for_cancel(contract_stack: ContractStack) -> tuple[str
 
 
 @pytest.mark.unit
-async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
-    """MCP ``awf_create_workspace_v2`` builds a ``WorkspaceCreateV2Request`` matching the REST payload.
+async def test_mcp_create_hydrates_canonical_request_model() -> None:
+    """MCP ``awf_create_workspace`` builds a ``WorkspaceCreateRequest`` matching the REST payload.
 
     Concretely: an MCP tool call with flat fields produces the same nested
-    ``WorkspaceCreateV2Request`` instance as the REST handler's parsed body.
+    ``WorkspaceCreateRequest`` instance as the REST handler's parsed body.
     """
     rest_payload = {
         "repo": {"url": "git@github.com:example/x.git", "base_branch": "main"},
@@ -418,13 +416,13 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
             "provider_readiness_override_reason": None,
         },
     }
-    rest_request = WorkspaceCreateV2Request.model_validate(rest_payload)
+    rest_request = WorkspaceCreateRequest.model_validate(rest_payload)
 
     recorder = _RequestRecordingService()
     mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
 
     result = await mcp.call_tool(
-        "awf_create_workspace_v2",
+        "awf_create_workspace",
         {
             "repo_url": "git@github.com:example/x.git",
             "base_branch": "main",
@@ -466,13 +464,13 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
         },
     )
     assert getattr(result, "isError", False) is False
-    assert len(recorder.create_v2_calls) == 1
-    mcp_request = recorder.create_v2_calls[0]
+    assert len(recorder.create_calls) == 1
+    mcp_request = recorder.create_calls[0]
     assert rest_request.model_dump(mode="json") == mcp_request.model_dump(mode="json")
 
 
 @pytest.mark.unit
-async def test_mcp_create_v2_omits_unspecified_optional_task_fields() -> None:
+async def test_mcp_create_omits_unspecified_optional_task_fields() -> None:
     rest_payload = {
         "repo": {"url": "git@github.com:example/y.git", "base_branch": "main"},
         "task": {
@@ -495,13 +493,13 @@ async def test_mcp_create_v2_omits_unspecified_optional_task_fields() -> None:
             "provider_readiness_override_reason": None,
         },
     }
-    rest_request = WorkspaceCreateV2Request.model_validate(rest_payload)
+    rest_request = WorkspaceCreateRequest.model_validate(rest_payload)
 
     recorder = _RequestRecordingService()
     mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
 
     result = await mcp.call_tool(
-        "awf_create_workspace_v2",
+        "awf_create_workspace",
         {
             "repo_url": "git@github.com:example/y.git",
             "base_branch": "main",
@@ -510,8 +508,8 @@ async def test_mcp_create_v2_omits_unspecified_optional_task_fields() -> None:
         },
     )
     assert getattr(result, "isError", False) is False
-    assert len(recorder.create_v2_calls) == 1
-    mcp_request = recorder.create_v2_calls[0]
+    assert len(recorder.create_calls) == 1
+    mcp_request = recorder.create_calls[0]
     assert rest_request.model_dump(mode="json", exclude_none=True) == (
         mcp_request.model_dump(mode="json", exclude_none=True)
     )

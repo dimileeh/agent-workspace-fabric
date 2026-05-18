@@ -304,6 +304,77 @@ def test_bootstrap_fails_clearly_when_source_assets_are_unavailable(
 
 
 @pytest.mark.unit
+def test_bootstrap_resolves_custom_compose_paths_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    relative_compose = tmp_path / "service.yml"
+    relative_compose.write_text("services: {}\n", encoding="utf-8")
+    fallback_env = tmp_path / "local.env"
+    fallback_env.write_text("AWF_API_TOKEN=from-fallback\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: ())
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        Path("local.env"),
+        raising=False,
+    )
+
+    assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+        Path("service.yml"),
+        require_agent_runtime=False,
+    )
+
+    assert assets.root is None
+    assert assets.agent_runtime_dockerfile is None
+    assert assets.compose_file == relative_compose.resolve()
+    assert assets.compose_env_file == fallback_env.resolve()
+
+
+@pytest.mark.unit
+def test_bootstrap_requires_source_assets_for_custom_runtime_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    custom_compose = tmp_path / "service.yml"
+    custom_compose.write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: ())
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+            custom_compose,
+            require_agent_runtime=True,
+        )
+
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND"
+
+
+@pytest.mark.unit
+def test_bootstrap_resolves_asset_root_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "checkout"
+    asset_root.mkdir()
+    env_file = asset_root / "docker" / "compose" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("AWF_API_TOKEN=from-asset-root\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        Path("docker/compose/.env"),
+        raising=False,
+    )
+
+    assert bootstrap._resolve_compose_env_file(asset_root) == env_file  # noqa: SLF001
+
+    env_file.unlink()
+    assert bootstrap._resolve_compose_env_file(asset_root) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
     tmp_path: Path,
 ) -> None:

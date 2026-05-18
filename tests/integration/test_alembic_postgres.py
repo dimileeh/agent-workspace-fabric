@@ -24,6 +24,8 @@ import pytest
 from dotenv import dotenv_values
 from sqlalchemy.engine import URL, make_url
 
+from tests.postgres import postgres_alembic_subprocess_lock
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -134,14 +136,15 @@ def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
     cwd = str(_REPO_ROOT)
 
     def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-            cwd=cwd,
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        with postgres_alembic_subprocess_lock(database_url.render_as_string(hide_password=False)):
+            return subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=cwd,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
     try:
         # Start from a known-clean state.

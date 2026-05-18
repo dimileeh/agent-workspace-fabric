@@ -75,13 +75,13 @@ curl "http://localhost:8000/release-readiness?provider=codex&provider=claude_cod
 
 ## Create Workspace
 
-### Create a v2 workspace (recommended)
+### Create a workspace
 
-Uses the structured v2 request body. Supports idempotency via `Idempotency-Key`
-header and provider readiness preflight.
+Uses the canonical structured workspace request body. Supports idempotency via
+`Idempotency-Key` header and provider readiness preflight.
 
 ```bash
-curl -X POST http://localhost:8000/v2/workspaces \
+curl -X POST http://localhost:8000/v1/workspaces \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: example-task-001" \
   -H "Authorization: Bearer $AWF_API_TOKEN" \
@@ -118,29 +118,11 @@ curl -X POST http://localhost:8000/v2/workspaces \
 
 Returns `202 Accepted` with workspace ID, status URL, and events URL.
 
-The v2 task object accepts policy metadata:
+The task object accepts policy metadata:
 
 - `task_class`: one of `docs_task`, `test_task`, `refactor_task`,
   `migration_task`, `dependency_task`, or `build_config_task`.
 - `owned_paths`: path globs the task expects to own; defaults to `[]`.
-
-### Create a v1 workspace (legacy)
-
-```bash
-curl -X POST http://localhost:8000/v1/workspaces \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: example-legacy-001" \
-  -H "Authorization: Bearer $AWF_API_TOKEN" \
-  -d '{
-    "repo_url": "git@github.com:example/app.git",
-    "branch_base": "main",
-    "task_title": "Fix login bug",
-    "task_prompt": "Fix the login validation error.",
-    "agent": "codex",
-    "test_commands": ["pytest -q"],
-    "requires_database": false
-  }'
-```
 
 ---
 

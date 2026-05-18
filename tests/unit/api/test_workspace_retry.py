@@ -76,7 +76,7 @@ def api_auth_headers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]
 
 
 async def _create_failed_workspace(client: AsyncClient, engine: AsyncEngine) -> str:
-    created = await client.post("/v2/workspaces", json=_V2_RETRY_BODY)
+    created = await client.post("/v1/workspaces", json=_V2_RETRY_BODY)
     assert created.status_code == 202
     workspace_id = str(created.json()["workspace_id"])
 
@@ -95,7 +95,7 @@ async def _create_failed_workspace(client: AsyncClient, engine: AsyncEngine) -> 
 
 async def _create_cancelled_workspace(client: AsyncClient, engine: AsyncEngine) -> str:
     created = await client.post(
-        "/v2/workspaces",
+        "/v1/workspaces",
         json={
             **_V2_RETRY_BODY,
             "task": {
@@ -122,7 +122,7 @@ async def _create_conformance_failed_workspace(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> str:
-    created = await client.post("/v2/workspaces", json=_V2_RETRY_BODY)
+    created = await client.post("/v1/workspaces", json=_V2_RETRY_BODY)
     assert created.status_code == 202
     workspace_id = str(created.json()["workspace_id"])
 
@@ -314,7 +314,7 @@ async def test_retry_endpoint_rejects_non_terminal_workspace(
     client: AsyncClient,
     api_auth_headers: dict[str, str],
 ) -> None:
-    created = await client.post("/v2/workspaces", json=_V2_RETRY_BODY)
+    created = await client.post("/v1/workspaces", json=_V2_RETRY_BODY)
     assert created.status_code == 202
     workspace_id = str(created.json()["workspace_id"])
 

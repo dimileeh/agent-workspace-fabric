@@ -26,8 +26,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 _SRC = Path(__file__).parents[3] / "src"
 _SCRIPTS = Path(__file__).parents[3] / "scripts"
 
@@ -166,43 +164,3 @@ def test_monitor_git_push_arguments_carry_refspec() -> None:
         " ``HEAD:refs/heads/<branch>`` refspec string — reverting to"
         " ``push origin HEAD`` reopens the 2026-04-23 bug."
     )
-
-
-@pytest.mark.unit
-def test_no_push_default_upstream_writes_in_configure_helper() -> None:
-    """Second layer of defense: make sure the helper that writes branch
-    push config never writes ``push.default=upstream``. A per-workspace
-    helper has no business touching a global config knob.
-
-    We parse the function's AST and inspect the list literals it emits
-    (the ``[f"branch.<X>.remote", "origin"]`` etc. tuples). The
-    docstring is intentionally allowed to mention ``push.default`` —
-    that's where we explain WHY we don't set it — so a plain substring
-    check won't do."""
-    import inspect
-
-    from scripts.run_awf import _configure_branch_push_upstream
-
-    src = inspect.getsource(_configure_branch_push_upstream)
-    tree = ast.parse(src)
-    func = tree.body[0]
-    assert isinstance(func, ast.AsyncFunctionDef)
-
-    # Strip the docstring so the literal-scan below only sees code.
-    body = func.body
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    ):
-        body = body[1:]
-
-    code_node = ast.Module(body=body, type_ignores=[])
-    for node in ast.walk(code_node):
-        if isinstance(node, ast.Constant) and node.value == "push.default":
-            raise AssertionError(
-                "_configure_branch_push_upstream writes push.default —"
-                " that's the write that turned the 2026-04-23 monitor"
-                " push into a development-branch push. Remove it."
-            )

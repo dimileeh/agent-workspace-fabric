@@ -1617,7 +1617,7 @@ def workspace_create(
         headers["Idempotency-Key"] = idempotency_key
     response = _call(
         "POST",
-        "/v2/workspaces",
+        "/v1/workspaces",
         base_url=_base_url(base_url),
         json=body,
         headers=headers,
@@ -2254,7 +2254,7 @@ def profile_init(
     include_smoke_request: bool = typer.Option(
         False,
         "--include-smoke-request",
-        help="Include an example v2 workspace request body without launching it.",
+        help="Include an example workspace request body without launching it.",
     ),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:

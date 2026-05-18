@@ -128,6 +128,128 @@ def test_request_admission_invalid_bearer_falls_back_to_client_host() -> None:
 
 
 @pytest.mark.unit
+def test_request_admission_rejects_invalid_limits_for_admit_and_check() -> None:
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    identity = extract_request_identity(
+        _request(),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    with pytest.raises(ValueError, match="limit"):
+        limiter.admit(
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            identity=identity,
+            limit=0,
+            window_seconds=60,
+            reason_code="LIMIT",
+        )
+    with pytest.raises(ValueError, match="window"):
+        limiter.admit(
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            identity=identity,
+            limit=1,
+            window_seconds=0,
+            reason_code="WINDOW",
+        )
+    with pytest.raises(ValueError, match="limit"):
+        limiter.check(
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            identity=identity,
+            limit=0,
+            window_seconds=60,
+            reason_code="LIMIT",
+        )
+    with pytest.raises(ValueError, match="window"):
+        limiter.check(
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            identity=identity,
+            limit=1,
+            window_seconds=0,
+            reason_code="WINDOW",
+        )
+
+    limiter._last_pruned_windows[5] = 99  # noqa: SLF001
+    limiter._buckets[(WORKSPACE_CREATE_ENDPOINT_FAMILY, "client_host", "digest", 5, 3)] = 1  # noqa: SLF001
+    limiter._prune_locked(window_seconds=60, current_window=1, now=30.0)  # noqa: SLF001
+
+    assert limiter._last_pruned_windows[5] == 99  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_request_admission_identity_handles_header_and_client_edge_cases() -> None:
+    class _NoHeaders:
+        client = ("203.0.113.77", 12345)
+
+    class _BadHeaders:
+        headers = object()
+        client = None
+        scope = {"client": ("203.0.113.88", 54321)}
+
+    class _UnknownClient:
+        headers = Headers({"authorization": "Basic nope"})
+        client = None
+        scope = {}
+
+    tuple_identity = extract_request_identity(
+        _NoHeaders(),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    scope_identity = extract_request_identity(
+        _BadHeaders(),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    unknown_identity = extract_request_identity(
+        _UnknownClient(),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert tuple_identity.identity_type == "client_host"
+    assert request_admission._client_host(_NoHeaders()) == "203.0.113.77"  # noqa: SLF001
+    assert request_admission._client_host(_BadHeaders()) == "203.0.113.88"  # noqa: SLF001
+    assert request_admission._client_host(_UnknownClient()) == "unknown-client"  # noqa: SLF001
+    assert tuple_identity.identity_digest != scope_identity.identity_digest
+    assert unknown_identity.identity_digest
+    assert (
+        extract_request_identity(
+            _request(authorization="Bearer"),
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        ).identity_type
+        == "client_host"
+    )
+    assert (
+        extract_request_identity(
+            _request(authorization="Basic token"),
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        ).identity_type
+        == "client_host"
+    )
+    assert request_admission._bearer_token(_request(authorization="Bearer")) is None  # noqa: SLF001
+    assert (
+        request_admission._bearer_token(_request(authorization="Bearer   ")) is None  # noqa: SLF001
+    )
+    assert (
+        request_admission._bearer_token(_request(authorization="Basic token")) is None  # noqa: SLF001
+    )
+    assert request_admission._authorization_header(SimpleNamespace(headers=object())) is None  # noqa: SLF001
+    assert request_admission._authorization_header(None) is None  # noqa: SLF001
+
+    assert (
+        request_admission._client_host(  # noqa: SLF001
+            SimpleNamespace(client=(12345, 80), scope={"client": (None, 443)})
+        )
+        == "unknown-client"
+    )
+
+    class _RaisesForApp:
+        @property
+        def app(self) -> object:
+            raise RuntimeError("app unavailable")
+
+    assert request_admission.request_app_state(_RaisesForApp()) is None
+    assert deps._normalized_authorization_header("Bearer") == "Bearer"  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_request_admission_logs_verified_bearer_header_downgrade() -> None:
     raw_token = "secret-token-value"
     request = SimpleNamespace(
@@ -632,6 +754,21 @@ def test_request_admission_reuses_limiter_without_app_state() -> None:
     assert first.allowed is True
     assert rejected.allowed is False
     assert rejected.metadata["reason_code"] == "STATELESS_REQUEST_RATE_LIMITED"
+
+
+@pytest.mark.unit
+def test_request_admission_direct_limiter_tolerates_non_extensible_test_objects() -> None:
+    class _Slotless:
+        __slots__ = ()
+
+    request = _Slotless()
+
+    first = request_admission._direct_request_admission_limiter(request)  # noqa: SLF001
+    second = request_admission._direct_request_admission_limiter(request)  # noqa: SLF001
+
+    assert isinstance(first, RequestAdmissionLimiter)
+    assert isinstance(second, RequestAdmissionLimiter)
+    assert first is not second
 
 
 @pytest.mark.unit

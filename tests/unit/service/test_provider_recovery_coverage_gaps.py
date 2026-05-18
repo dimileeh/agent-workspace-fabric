@@ -618,10 +618,10 @@ async def test_create_attempt_returns_none_when_workspace_missing(
 async def test_create_attempt_returns_none_when_no_recovery_metadata(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from awf.api.schemas import WorkspaceCreateV2Request
+    from awf.api.schemas import WorkspaceCreateRequest
     from awf.service.workspaces import WorkspaceService
 
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@example.com:repo.git", "base_branch": "main"},
         task={
             "title": "Untouched workspace",
@@ -640,7 +640,7 @@ async def test_create_attempt_returns_none_when_no_recovery_metadata(
         },
     )
     service = WorkspaceService(factory)
-    response = await service.create_v2(request)
+    response = await service.create(request)
 
     async with factory() as session:
         result = await create_provider_recovery_attempt_row(
@@ -657,13 +657,13 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
 ) -> None:
     from sqlalchemy import select
 
-    from awf.api.schemas import WorkspaceCreateV2Request
+    from awf.api.schemas import WorkspaceCreateRequest
     from awf.db.enums import FailureReason, WorkspaceStatus
     from awf.db.models import WorkspaceEvent
     from awf.db.repositories import WorkspaceRepository
     from awf.service.workspaces import WorkspaceService
 
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@example.com:repo.git", "base_branch": "main"},
         task={
             "title": "Exhausted workspace",
@@ -689,7 +689,7 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
         },
     )
     service = WorkspaceService(factory)
-    response = await service.create_v2(request)
+    response = await service.create(request)
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -752,11 +752,11 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
 async def test_retry_task_for_source_creates_task_when_attempt_missing(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from awf.api.schemas import WorkspaceCreateV2Request
+    from awf.api.schemas import WorkspaceCreateRequest
     from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
     from awf.service.workspaces import WorkspaceService
 
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@example.com:repo.git", "base_branch": "main"},
         task={
             "title": "Workspace without attempt",
@@ -775,7 +775,7 @@ async def test_retry_task_for_source_creates_task_when_attempt_missing(
         },
     )
     service = WorkspaceService(factory)
-    response = await service.create_v2(request)
+    response = await service.create(request)
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -806,13 +806,13 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
 ) -> None:
     from sqlalchemy import select
 
-    from awf.api.schemas import WorkspaceCreateV2Request
+    from awf.api.schemas import WorkspaceCreateRequest
     from awf.db.enums import FailureReason, WorkspaceStatus
     from awf.db.models import WorkspaceEvent
     from awf.db.repositories import WorkspaceRepository
     from awf.service.workspaces import WorkspaceService
 
-    request = WorkspaceCreateV2Request(
+    request = WorkspaceCreateRequest(
         repo={"url": "git@example.com:repo.git", "base_branch": "main"},
         task={
             "title": "Already-recovered workspace",
@@ -838,7 +838,7 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         },
     )
     service = WorkspaceService(factory)
-    response = await service.create_v2(request)
+    response = await service.create(request)
 
     fingerprint_metadata = provider_recovery_metadata_from_failure(
         reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",

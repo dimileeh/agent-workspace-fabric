@@ -52,7 +52,7 @@ async def _create_graph_workspace(
     owned_paths: list[str] | None = None,
 ) -> str:
     response = await client.post(
-        "/v2/workspaces",
+        "/v1/workspaces",
         json=_v2_body(
             repo_url=repo_url,
             base_branch=base_branch,

@@ -103,7 +103,8 @@ under Failed / Superseded Slices for root-cause history.
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_716851d0d48f4ff69bcc41ad` | [#252](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/252) | merged | Completed and merged 2026-05-15. Note: the fix is present in latest `codex/awf-post-merge-fixes`; the local service had to be rebuilt afterward so the worker would honor `validation.strategy.final_gate: none`. |
 | P0 Test Coverage And Quality Gates | Make workspace setup dependency installs resilient and cache-aware | `ws_0e15317e2baa44328c40f81e` | [#248](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/248) | merged | Completed and merged 2026-05-15 with GitHub CI green; transient dependency/DNS setup fetch failures are retried/classified by AWF instead of surfacing as opaque service startup failures. |
 | P1 Security, Secrets, And Egress Policy | API auth posture and timing-safe token checks | `ws_c63623b7d5194bfa83cc702e` | [#250](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/250) | merged | Monitor-only adoption replaced failed monitor `ws_95ce188d34484e5093b727c5`; completed and merged 2026-05-15 after GitHub CI went green. |
-| P1 MCP And Project Onboarding Client Parity | Complete workspace create v2 CLI and MCP policy parity | `ws_4599ede79dce445790f4c6e4` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | merged | Monitor-only adoption replaced failed Spark workspace `ws_61e0f7b210fa423faef0b6f3`, handled PR monitoring on Codex `gpt-5.5`, and merged 2026-05-14 with all GitHub CI checks green. |
+| P1 API Contract Completion | Collapse workspace create to one canonical v1 API and remove stale docs/scripts | _local_ | _pending_ | validated locally | 2026-05-17 local cleanup collapses the rich workspace-create contract into `POST /v1/workspaces`, removes the former duplicate create route/tool, retires legacy operator scripts, updates public docs/backlog guidance, and passes focused API/CLI/MCP/contract/docs validation plus lint/type/OpenAPI drift checks. |
+| P1 MCP And Project Onboarding Client Parity | Complete workspace create CLI and MCP policy parity | `ws_4599ede79dce445790f4c6e4` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | merged | Monitor-only adoption replaced failed Spark workspace `ws_61e0f7b210fa423faef0b6f3`, handled PR monitoring on Codex `gpt-5.5`, and merged 2026-05-14 with all GitHub CI checks green. |
 | P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_7038898eac3747ecaa53fb2c` | [#242](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/242) | merged | Codex `gpt-5.5`; completed 2026-05-14 and preserves primary validation/provider failure causality across stale callbacks, recovery/remonitor epochs, cleanup/runtime secondary failures, and worker reconnect paths. |
 | P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_f9c0654695334f2386c2c7eb` | [#246](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/246) | merged | Gemini `gemini-3.1-pro-preview`; clean retry completed 2026-05-14 after failed `ws_02ef6b49f7dc4657a8e63355` and superseded planning-scope failure `ws_b9112aecd2d94fc7b4babf26`; adds CLI/API/MCP create/list parity and active multi-status list semantics. |
 | P1 MCP And Project Onboarding Client Parity | Add MCP parity for global events | `ws_32a3971e4aa147c08ed46683` | [#245](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/245) | merged | OpenCode/Ollama `ollama/glm-5.1:cloud`; clean retry completed 2026-05-14 after failed `ws_cd0ccbb17db943ed8415aff1` and `ws_dabd5b60a8464f10b927f1d2`; adds the global events MCP parity surface. |
@@ -182,7 +183,7 @@ under Failed / Superseded Slices for root-cause history.
 | P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | merged | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` propagation landed structured provider-capacity classification. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | merged | Adds scheduler decision-record planning/docs slice after the OpenCode GLM attempt stalled in conformance. |
 | P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | merged | Adds console security and egress status panels via OpenCode GLM retry. |
-| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | merged | Guards v1/legacy response compatibility until documented v2 cutover. |
+| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | merged | Historical compatibility guard from before the single-API simplification. |
 | P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | merged | Strengthens per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
 | P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | [#155](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/155) | merged | Adds plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
 | P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | [#154](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/154) | merged | Adds declared secret lease mounts and safer local auth handling while preserving compatibility. |
@@ -205,7 +206,7 @@ under Failed / Superseded Slices for root-cause history.
 | P1 API Contract Completion | Normalized list pagination envelopes | `ws_49f61dfb52e74dc9836aad50` | [#136](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/136) | merged | Normalizes list pagination envelope behavior while preserving backward-compatible response fields. |
 | P1 Security, Secrets, And Egress Policy | Local egress policy enforcement | `ws_830a162773f845adb14caed9` | [#135](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/135) | merged | Adds local Docker-mode egress policy enforcement with tests for open/restricted modes. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Operator-visible advisory overlap graph | `ws_0bb96ca3f38142288e51ef2f` | [#133](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/133) | merged | Exposes advisory overlap visibility without blocking workspace launch. |
-| P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | [#132](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/132) | merged | Documents local image versioning, Postgres backup/restore, rollback, disaster recovery, and `scripts/run_awf.py` compatibility. |
+| P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | [#132](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/132) | merged | Documents local image versioning, Postgres backup/restore, rollback, and disaster recovery for the service-backed workflow. |
 | P0 Operation And Recovery Truth | Safe console recovery controls | `ws_3407ebb7411448af9db52daf` | [#131](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/131) | merged | Adds safe remonitor/refresh/revalidate controls using stable recovery APIs. |
 | P0 Operation And Recovery Truth | Terminal-state stale callback guard | `ws_caa5d122e46d47d1a696cf0b` | [#129](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/129) | merged | Prevents cancelled/destroyed/completed workspaces from advancing after stale callbacks. |
 | P1 Operator Console Completion | PR monitor transitions visible as operations | `ws_5eac8b3526704e77ad477d0c` | [#130](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/130) | merged | Exposes monitor wait/recovery/merge transitions as durable operations and console entries. |
@@ -263,7 +264,7 @@ under Failed / Superseded Slices for root-cause history.
 | P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_b7017872938042129fd09d33` | none | superseded | Cancelled 2026-05-15 because the local worker image was stale and ignored the already-merged `final_gate: none` executor policy, causing repeated local full-coverage repair loops before PR creation. Branch/worktree/logs are preserved as evidence, but the branch was polluted by broad coverage-threshold repair commits; clean retry `ws_8b76839898f1400abc16ad08` now owns the slice. |
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_82b51b498cd044d2b4646d67` | none | superseded | Attempt had one local commit plus dirty follow-up files, but no PR. It failed 2026-05-14 because a local service restart interrupted the running agent and stale-active cleanup stopped the runtime. Evidence is retained in the failed worktree; clean retry `ws_716851d0d48f4ff69bcc41ad` now owns the slice from current base. |
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_6c3a1f289fe040dfb32cc8d0` | none | failed | Attempt failed 2026-05-14 before agent execution with `SERVICE_STARTUP_FAILURE`: profile setup command `uv sync --extra dev` failed to download `docker==7.1.0` because PyPI DNS lookup returned `No address associated with hostname`. Treat as AWF setup/dependency resilience work, not provider or agent failure. |
-| P1 MCP And Project Onboarding Client Parity | Complete workspace create v2 CLI and MCP policy parity | `ws_61e0f7b210fa423faef0b6f3` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | superseded | Original Spark monitor failed after Codex `gpt-5.3-codex-spark` capacity/circuit exhaustion and stale-active terminalization. Existing PR branch was preserved and re-adopted by `ws_4599ede79dce445790f4c6e4` using Codex default `gpt-5.5`/`xhigh`. |
+| P1 MCP And Project Onboarding Client Parity | Complete workspace create CLI and MCP policy parity | `ws_61e0f7b210fa423faef0b6f3` | [#247](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/247) | superseded | Original Spark monitor failed after Codex `gpt-5.3-codex-spark` capacity/circuit exhaustion and stale-active terminalization. Existing PR branch was preserved and re-adopted by `ws_4599ede79dce445790f4c6e4` using Codex default `gpt-5.5`/`xhigh`. |
 | P1 Security, Secrets, And Egress Policy | API auth posture and timing-safe token checks | `ws_7dd27492f4184baf8eb67b81` | [#250](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/250) | superseded | Original Spark monitor failed after Codex `gpt-5.3-codex-spark` capacity/circuit exhaustion and stale-active terminalization. Existing PR branch was preserved and re-adopted by `ws_95ce188d34484e5093b727c5` using Codex default `gpt-5.5`/`xhigh`. |
 | P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_e56b535618c649cdb5a60999` | [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249) | superseded | Original Spark monitor failed during PR comment repair with `AGENT_PROVIDER_CAPACITY_EXHAUSTED`, entered provider recovery, then was incorrectly terminalized by stale-active cleanup. Existing PR branch was preserved and re-adopted by `ws_60589ae904754135b70e6e9f` using Codex default `gpt-5.5`/`xhigh`. |
 | P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_b9112aecd2d94fc7b4babf26` | none | superseded | Failed 2026-05-14 because Gemini edited implementation files during the planning phase. AWF correctly blocked the premature implementation and created clean retry `ws_f9c0654695334f2386c2c7eb`; do not salvage the failed branch unless explicitly requested. |
@@ -622,8 +623,8 @@ and production configuration footguns.
   covered by contract tests; sensitive reads/writes require auth by default or
   have a written local-dev exception; and workspace create/list/events behavior
   is re-evaluated for local-dev versus production/network-facing mode. Must
-  explicitly cover `POST /v1/workspaces`, `POST /v2/workspaces`, workspace
-  list/overview/get/events/stale-reasons, and
+  explicitly cover `POST /v1/workspaces`, `GET /v1/workspaces`, workspace
+  overview/get/events/stale-reasons, and
   `/v1/workspaces/{workspace_id}/secret-leases`; secret lease status may not
   expose secret names, mount targets, providers, or reference digests across an
   unauthenticated boundary. Tests should prove new routes are auth-required by
@@ -715,7 +716,7 @@ and production configuration footguns.
   pre-push blocking, and focused regressions for warn, block, allowed, and
   false-positive-safe cases. PR [#197](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/197)
   merged 2026-05-05. Evidence:
-  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_supply_chain_policy.py tests/unit/profiles/test_security_policy.py tests/unit/api/test_workspaces.py::TestCreateWorkspaceV2PolicyMetadata::test_inline_profile_accepts_and_returns_supply_chain_policy tests/unit/control/test_executor_validation_fix_cycle.py::TestSupplyChainPolicy tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py::test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed -q`;
+  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_supply_chain_policy.py tests/unit/profiles/test_security_policy.py tests/unit/api/test_workspaces.py::TestCreateWorkspacePolicyMetadata::test_inline_profile_accepts_and_returns_supply_chain_policy tests/unit/control/test_executor_validation_fix_cycle.py::TestSupplyChainPolicy tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py::test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed -q`;
   `uv run --python 3.12 --extra dev mypy src/awf`.
 
 ## P1: Workspace Services And Realistic Project Profiles
@@ -868,14 +869,14 @@ and production configuration footguns.
 
 - [x] Make workspace create/list surfaces parity-safe across REST, CLI, and MCP.
   Regression source: during the 2026-05-14 dogfood launch, the canonical REST
-  `/v2/workspaces` request could select `task.model`, resources, and scheduler
+  `/v1/workspaces` request could select `task.model`, resources, and scheduler
   knobs, while `awf workspace create` could not express the same request without
   hand-written API calls. Separately, `awf workspace list --status requested
   --status provisioning --status ready --status running --status validating
   --status pushing --status monitoring_pr` returned zero rows even though direct
   `workspace show` proved active running workspaces existed, because REST/CLI
   accepted only one effective `status` filter. Acceptance: CLI create must expose
-  canonical v2 fields already present in REST/MCP without CLI-only behavior;
+  canonical create fields already present in REST/MCP without CLI-only behavior;
   REST, CLI, and MCP list surfaces must support backward-compatible multi-status
   filtering for active-workspace queries; contract/parity tests must pin request
   fields, list filter semantics, docs status, and MCP schemas; and effort must be
@@ -897,7 +898,11 @@ and production configuration footguns.
 - [x] Add first-class operation endpoints for rebase, validate, refresh, and make-canonical.
 - [x] Add artifact listing and download semantics beyond metadata.
 - [x] Add failure analysis API with root cause, evidence links, and suggested recovery actions.
-- [x] Keep old compatibility endpoints stable until a documented v2 API cutover.
+- [x] Collapse workspace creation to one canonical v1 API surface before public
+  stabilization. The rich create contract lives at `POST /v1/workspaces`; the
+  former duplicate create route and MCP tool are retired while AWF is still
+  pre-stable. Public docs now describe one create surface and legacy operator
+  scripts are no longer supported entrypoints.
 
 ## P1: MCP And Project Onboarding Client Parity
 
@@ -985,21 +990,19 @@ coding agent in any project to use AWF for a feature.
   reject closed/merged PRs with structured reason codes; must support
   `auto_merge` versus manual monitor policy; must record task/attempt lineage,
   PR URL, head/base refs, validation freshness state, and durable monitor logs;
-  and must retire or wrap the legacy `scripts/attach_feature_pr_monitor.py`
-  detached `run_awf.py` path so Core users have one supported adoption flow.
+  and must keep Core users on one supported adoption flow through REST, CLI,
+  and MCP.
   Evidence: implemented `POST /v1/workspaces/adopt-pr`,
   `awf workspace adopt-pr`, and MCP tool `awf_adopt_pull_request_monitor`;
   adoption persists task/attempt lineage, queue/resource records, an `adopt_pr`
   operation, PR metadata, validation freshness, monitor log links, and
   deterministic repo/PR idempotency; executor/provisioner tests cover
-  no-agent/no-new-PR monitor handoff for `sync_feature_pr`; the legacy attach
-  script now defaults to the supported adoption API with `--legacy-detached`
-  reserved for the old detached runner. Iteration 1 conformance evidence:
-  added executor/LogStore monitor-start and redaction coverage, MCP terminal
-  error-result coverage, and direct attach-script service-adoption HTTP mapping
-  coverage; on 2026-05-03, `ruff check src/awf tests/unit scripts`, `mypy
-  src/awf`, the 351-test focused adoption/touched-file suite, and the 3,461-test
-  service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
+  no-agent/no-new-PR monitor handoff for `sync_feature_pr`. Iteration 1
+  conformance evidence: added executor/LogStore monitor-start and redaction
+  coverage plus MCP terminal error-result coverage; on 2026-05-03, `ruff check
+  src/awf tests/unit scripts`, `mypy src/awf`, the focused
+  adoption/touched-file suite, and the service/api/cli/mcp/control/node/runtime
+  unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
 - [x] Align CLI command coverage with the canonical REST API and MCP surfaces:
@@ -1070,7 +1073,7 @@ coding agent in any project to use AWF for a feature.
   `ws_cd0ccbb17db943ed8415aff1` and auto-retry
   `ws_dabd5b60a8464f10b927f1d2`; local commit `89ea11f` fixed the
   planning-scope retry prompt poisoning before relaunch.
-- [x] TODO§create-v2-parity: Add full MCP and CLI parity for `awf_create_workspace_v2` and `workspace create` so callers can configure REST v2 `out_of_scope_changes` and `provider_recovery` policies, or keep the matrix row explicitly marked `MCP partial`. Completed by `ws_61e0f7b210fa423faef0b6f3` (local workspace). Evidence: `docs/awf-plans/ws_61e0f7b210fa423faef0b6f3.validation.txt` and parity-coverage updates in `tests/unit/contracts`, `tests/unit/mcp/test_mcp_server.py`, and `tests/unit/cli/test_cli.py`.
+- [x] TODO§create-parity: Add full MCP and CLI parity for `awf_create_workspace` and `workspace create` so callers can configure canonical create `out_of_scope_changes` and `provider_recovery` policies. Completed by `ws_61e0f7b210fa423faef0b6f3` and replacement monitor `ws_4599ede79dce445790f4c6e4`. Evidence: `docs/awf-plans/ws_61e0f7b210fa423faef0b6f3.validation.txt` and parity-coverage updates in `tests/unit/contracts`, `tests/unit/mcp/test_mcp_server.py`, and `tests/unit/cli/test_cli.py`.
 - [x] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
@@ -1234,7 +1237,10 @@ without reading the whole repo.
   image builds before public release.
 - [x] Add backup/restore instructions for AWF control-plane Postgres.
 - [x] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.
-- [x] Keep `scripts/run_awf.py` compatibility documented until the API-backed runner fully replaces it.
+- [x] Retire legacy operator scripts once the API-backed runner fully replaces
+  them. The supported operator path is now the service-backed REST/CLI/MCP
+  surface; only OpenAPI and reason-catalog generator scripts remain under
+  `scripts/`.
 - [x] Auto-prune git worktrees for completed and merged workspaces. AWF should
   detect terminal workspaces whose PR has landed, preserve retained
   logs/artifacts/audit metadata, release reservations, and safely prune linked

@@ -11,10 +11,10 @@ def test_packaging_metadata() -> None:
     # 1. project.name = "aira-awf"
     assert data["project"]["name"] == "aira-awf"
 
-    # 2. project.scripts.awf and project.scripts.awf-watchdog exist
+    # 2. project.scripts.awf exists as the canonical operator CLI
     scripts = data["project"].get("scripts", {})
     assert "awf" in scripts
-    assert "awf-watchdog" in scripts
+    assert "awf-watchdog" not in scripts
 
 
 def test_readme_install_paths() -> None:

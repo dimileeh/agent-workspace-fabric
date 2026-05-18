@@ -14,7 +14,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from awf.db.session import make_engine
-from tests.postgres import postgres_empty_test_url
+from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
 
 
 @pytest.mark.unit
@@ -62,14 +62,15 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         }
 
         monkeypatch.chdir(repo_root)
-        subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-            cwd=repo_root,
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        with postgres_alembic_subprocess_lock(database_url):
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
         engine = make_engine(database_url)
         try:
@@ -320,14 +321,15 @@ async def test_workspace_event_order_migration_reruns_after_column_exists(
         }
 
         def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            with postgres_alembic_subprocess_lock(database_url):
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
         monkeypatch.chdir(repo_root)
         _alembic("upgrade", "d6e7f8a9b0c1")
@@ -434,14 +436,15 @@ async def test_workspace_event_order_migration_backfills_existing_events(
         }
 
         def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            with postgres_alembic_subprocess_lock(database_url):
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
         monkeypatch.chdir(repo_root)
         _alembic("upgrade", "d6e7f8a9b0c1")
@@ -575,14 +578,15 @@ async def test_workspace_event_order_migration_orders_old_writer_events_after_up
         }
 
         def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            with postgres_alembic_subprocess_lock(database_url):
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
         monkeypatch.chdir(repo_root)
         _alembic("upgrade", "d6e7f8a9b0c1")

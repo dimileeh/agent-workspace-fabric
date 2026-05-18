@@ -15,8 +15,8 @@ Usage:
 
 This module doesn't introduce any new state transitions or DB columns —
 it's a pure configuration of the same runner. Kept as its own module so
-callers (API / CLI / ``run_awf.py``) have an obvious entry point to
-import and so the distinction shows up in grep/docs.
+service and API callers have an obvious entry point to import and so the
+distinction shows up in grep/docs.
 """
 
 from __future__ import annotations

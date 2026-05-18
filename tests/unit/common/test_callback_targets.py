@@ -89,3 +89,11 @@ def test_nat64_extraction_rejects_unsupported_prefix_lengths() -> None:
             ipaddress.IPv6Address("64:ff9b::808:808"),
             24,
         )
+
+
+@pytest.mark.unit
+def test_nat64_extraction_handles_reserved_octet_prefix_lengths() -> None:
+    assert callback_targets._extract_nat64_embedded_ipv4_address(  # noqa: SLF001
+        ipaddress.IPv6Address("64:ff9b:1:c0a8:1:100::"),
+        48,
+    ) == ipaddress.IPv4Address("192.168.1.1")

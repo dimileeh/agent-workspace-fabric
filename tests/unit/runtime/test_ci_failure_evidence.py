@@ -196,6 +196,43 @@ def test_pytest_repro_command_skips_unparseable_command_before_valid_pytest() ->
 
 
 @pytest.mark.unit
+def test_ci_failure_shell_tokens_handle_quotes_and_escapes() -> None:
+    tokens = ci_failure_evidence._shell_tokens(  # noqa: SLF001
+        r"""uv run pytest "tests/unit/test space.py::test_name" escaped\ value"""
+    )
+
+    assert [token.value for token in tokens] == [
+        "uv",
+        "run",
+        "pytest",
+        "tests/unit/test space.py::test_name",
+        "escaped value",
+    ]
+    assert tokens[2].end_index == len("uv run pytest")
+
+    quoted_escape_tokens = ci_failure_evidence._shell_tokens(  # noqa: SLF001
+        r'''pytest "tests/unit/test_example.py::test_handles[bad \"value\"]"'''
+    )
+    assert quoted_escape_tokens[-1].value == (
+        'tests/unit/test_example.py::test_handles[bad "value"]'
+    )
+
+
+@pytest.mark.unit
+def test_ci_failure_shell_tokens_reject_unterminated_escape_and_quote() -> None:
+    with pytest.raises(ValueError):
+        ci_failure_evidence._shell_tokens("pytest tests/unit/test_example.py\\")  # noqa: SLF001
+    with pytest.raises(ValueError):
+        ci_failure_evidence._shell_tokens("pytest 'tests/unit/test_example.py")  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_ci_failure_shell_tokens_accept_empty_or_whitespace_commands() -> None:
+    assert ci_failure_evidence._shell_tokens("") == []  # noqa: SLF001
+    assert ci_failure_evidence._shell_tokens("   ") == []  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_pytest_repro_command_returns_none_without_pytest_command() -> None:
     command = ci_failure_evidence._pytest_repro_command(  # noqa: SLF001
         ["ruff check src/awf tests"]

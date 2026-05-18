@@ -63,6 +63,12 @@ def _postgres_database_key(database_url: str) -> str:
     return hashlib.sha256(database_url.encode("utf-8")).hexdigest()[:16]
 
 
+def _postgres_server_database_key(database_url: str) -> str:
+    parsed_url = make_url(database_url)
+    server_url = parsed_url.set(query={})
+    return _postgres_database_key(server_url.render_as_string(hide_password=False))
+
+
 def _postgres_test_run_uid() -> str:
     return (
         os.environ.get("PYTEST_XDIST_TESTRUNUID")
@@ -181,6 +187,34 @@ def _postgres_test_run_lock_path(database_url: str, namespace: str) -> Path:
     return Path(tempfile.gettempdir()) / (
         f"awf-pytest-postgres-active-{database_key}-{namespace}.lock"
     )
+
+
+@contextmanager
+def postgres_alembic_subprocess_lock(database_url: str | None = None) -> Iterator[None]:
+    """Serialize live Alembic subprocess tests sharing one Postgres server.
+
+    Alembic migrations are isolated by schema in tests, but Postgres concurrent
+    index DDL still waits on transactions in the shared database. Running several
+    full migration chains at once under xdist can deadlock or trip lock timeouts,
+    so tests that shell out to ``alembic`` take this file lock around the
+    subprocess. Production migrations are still exercised exactly as issued.
+    """
+
+    if fcntl is None:
+        yield
+        return
+
+    database_url = database_url or postgres_test_database_url()
+    lock_path = Path(tempfile.gettempdir()) / (
+        f"awf-pytest-alembic-{_postgres_server_database_key(database_url)}.lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _ensure_postgres_test_run_active(database_url: str) -> None:

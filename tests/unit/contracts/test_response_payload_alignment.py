@@ -64,11 +64,11 @@ READ_RESPONSE_CAPABILITY_NAMES = tuple(
 
 
 @pytest.mark.unit
-async def test_create_v1_registry_response_fields_match_mcp_payload(
+async def test_create_registry_response_fields_match_mcp_payload(
     contract_stack: ContractStack,
 ) -> None:
-    """The create v1 registry must document the MCP payload clients receive."""
-    capability = CAPABILITIES_BY_NAME["create_workspace_v1"]
+    """The create registry must document the MCP payload clients receive."""
+    capability = CAPABILITIES_BY_NAME["create_workspace"]
 
     mcp_payload = await _call_mcp_structured(
         contract_stack.mcp,
@@ -77,6 +77,8 @@ async def test_create_v1_registry_response_fields_match_mcp_payload(
             "repo_url": "git@github.com:example/create-response.git",
             "task_title": "Create response contract",
             "task_prompt": "Exercise create response metadata.",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "response contract fixture",
         },
     )
 

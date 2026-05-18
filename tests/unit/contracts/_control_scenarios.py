@@ -34,8 +34,7 @@ CONTROL_CAPABILITY_NAMES = (
 CONTROL_CAPABILITY_SET = frozenset(CONTROL_CAPABILITY_NAMES)
 
 NON_CONTROL_IDEMPOTENT_SURFACE_NAMES = (
-    "create_workspace_v1",
-    "create_workspace_v2",
+    "create_workspace",
     "adopt_pr_monitor",
 )
 
@@ -385,27 +384,17 @@ def idempotent_rest_body(
     *,
     variant: str = "base",
 ) -> dict[str, object]:
-    if capability_name == "create_workspace_v1":
-        return {
-            "repo_url": "git@github.com:example/idempotent-create-v1.git",
-            "branch_base": "main",
-            "task_title": (
-                "Idempotent create v1" if variant == "base" else "Changed idempotent create v1"
-            ),
-            "task_prompt": "Exercise create v1 idempotency.",
-            "test_commands": ["pytest -q"],
-        }
-    if capability_name == "create_workspace_v2":
+    if capability_name == "create_workspace":
         return {
             "repo": {
-                "url": "git@github.com:example/idempotent-create-v2.git",
+                "url": "git@github.com:example/idempotent-create.git",
                 "base_branch": "main",
             },
             "task": {
                 "title": (
-                    "Idempotent create v2" if variant == "base" else "Changed idempotent create v2"
+                    "Idempotent create" if variant == "base" else "Changed idempotent create"
                 ),
-                "prompt": "Exercise create v2 idempotency.",
+                "prompt": "Exercise create idempotency.",
                 "agent": "codex",
                 "auto_merge": True,
             },
@@ -429,16 +418,7 @@ def idempotent_mcp_args(
     *,
     variant: str = "base",
 ) -> dict[str, object]:
-    if capability_name == "create_workspace_v1":
-        body = idempotent_rest_body(capability_name, variant=variant)
-        return {
-            "repo_url": body["repo_url"],
-            "branch_base": body["branch_base"],
-            "task_title": body["task_title"],
-            "task_prompt": body["task_prompt"],
-            "test_commands": body["test_commands"],
-        }
-    if capability_name == "create_workspace_v2":
+    if capability_name == "create_workspace":
         body = idempotent_rest_body(capability_name, variant=variant)
         repo = body["repo"]
         task = body["task"]
@@ -498,10 +478,7 @@ def idempotent_response_identity_field(capability_name: str, *, client: str) -> 
 def idempotent_conflict_error_code(capability_name: str) -> str:
     if capability_name == "adopt_pr_monitor":
         return "PR_ADOPTION_POLICY_CONFLICT"
-    if capability_name in CONTROL_CAPABILITY_SET or capability_name in {
-        "create_workspace_v1",
-        "create_workspace_v2",
-    }:
+    if capability_name in CONTROL_CAPABILITY_SET or capability_name == "create_workspace":
         return "IDEMPOTENCY_CONFLICT"
     raise AssertionError(f"unknown idempotent surface {capability_name}")
 

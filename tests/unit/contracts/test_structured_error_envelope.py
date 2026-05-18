@@ -168,6 +168,10 @@ async def test_rest_idempotency_conflict_envelope_for_create_v1(
         "task_prompt": "Exercise replay error envelope.",
         "agent": "codex",
         "test_commands": ["pytest -q"],
+        "preflight": {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "structured error fixture",
+        },
     }
     headers = {**contract_stack.auth_headers, "Idempotency-Key": "create-v1-key"}
     accepted = await contract_stack.client.post("/v1/workspaces", json=body, headers=headers)

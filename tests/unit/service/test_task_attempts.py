@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceCreateV2Request
+from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.session import make_session_factory
 from awf.service.tasks import _pricing_from_workspace
@@ -31,8 +31,8 @@ def _request(
     repo_url: str = "git@github.com:example/app.git",
     base_branch: str = "development",
     owned_paths: list[str] | None = None,
-) -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
+) -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
         repo={"url": repo_url, "base_branch": base_branch},
         task={
             "title": title,
@@ -54,14 +54,14 @@ def _request(
 
 
 @pytest.mark.unit
-async def test_create_v2_creates_task_and_attempt(
+async def test_create_creates_task_and_attempt(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from awf.db.models import Task, TaskAttempt
 
     service = WorkspaceService(factory)
 
-    created = await service.create_v2(_request())
+    created = await service.create(_request())
 
     async with factory() as session:
         tasks = list((await session.execute(select(Task))).scalars())
@@ -120,15 +120,15 @@ def test_pricing_from_workspace_serializes_current_profile_pricing() -> None:
 
 
 @pytest.mark.unit
-async def test_create_v2_reuses_task_and_increments_attempt_for_same_external_id(
+async def test_create_reuses_task_and_increments_attempt_for_same_external_id(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from awf.db.models import Task, TaskAttempt
 
     service = WorkspaceService(factory)
 
-    first = await service.create_v2(_request(title="same backlog slice", owned_paths=[]))
-    second = await service.create_v2(_request(title="same backlog slice", owned_paths=[]))
+    first = await service.create(_request(title="same backlog slice", owned_paths=[]))
+    second = await service.create(_request(title="same backlog slice", owned_paths=[]))
 
     async with factory() as session:
         tasks = list((await session.execute(select(Task))).scalars())
@@ -147,17 +147,17 @@ async def test_create_v2_reuses_task_and_increments_attempt_for_same_external_id
 
 
 @pytest.mark.unit
-async def test_create_v2_rejects_external_id_reuse_for_different_owned_paths(
+async def test_create_rejects_external_id_reuse_for_different_owned_paths(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from awf.db.repositories import TaskExternalIdConflictError
 
     service = WorkspaceService(factory)
 
-    await service.create_v2(_request(external_id="WAVE-1", owned_paths=["docs/**"]))
+    await service.create(_request(external_id="WAVE-1", owned_paths=["docs/**"]))
 
     with pytest.raises(TaskExternalIdConflictError) as excinfo:
-        await service.create_v2(
+        await service.create(
             _request(
                 external_id="WAVE-1",
                 title="different backlog slice",
@@ -170,14 +170,14 @@ async def test_create_v2_rejects_external_id_reuse_for_different_owned_paths(
 
 
 @pytest.mark.unit
-async def test_create_v2_rejects_external_id_reuse_for_different_title(
+async def test_create_rejects_external_id_reuse_for_different_title(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from awf.db.repositories import TaskExternalIdConflictError
 
     service = WorkspaceService(factory)
 
-    await service.create_v2(
+    await service.create(
         _request(
             external_id="WAVE-1",
             title="docs(onboarding): add prompts",
@@ -186,7 +186,7 @@ async def test_create_v2_rejects_external_id_reuse_for_different_title(
     )
 
     with pytest.raises(TaskExternalIdConflictError) as excinfo:
-        await service.create_v2(
+        await service.create(
             _request(
                 external_id="WAVE-1",
                 title="docs(install): document local install",

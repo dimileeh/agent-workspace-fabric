@@ -179,13 +179,14 @@ Agent watchdogs are conservative by default: AWF terminates a coding CLI after
 7200 seconds of wall-clock runtime or 900 seconds without stdout/stderr output.
 Partial stdout/stderr is kept in workspace logs for salvage and diagnosis.
 
-The local dogfood runner uses the configured PostgreSQL control-plane DB. Set
-`AWF_DATABASE_URL` before launching it when you need an isolated control plane.
+The local service uses the configured PostgreSQL control-plane DB. Set
+`AWF_DATABASE_URL` before bootstrapping the service when you need an isolated
+control plane.
 
 ### Agent Credentials in Containers
 
-`scripts/run_awf.py` and local service worker-created workspace stacks map local
-auth into the agent container:
+Local service worker-created workspace stacks map local auth into the agent
+container:
 
 - `~/.config/gh`
 - `~/.config/gcloud`
@@ -295,8 +296,9 @@ Default agent models and effort are centralized in
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
 If a local subscription or provider account cannot use a default model, choose a
-supported model in the task or adapter configuration. In the v2 API, set
-`task.model` to override the selected agent's default for that workspace.
+supported model in the task or adapter configuration. In the workspace create
+request, set `task.model` to override the selected agent's default for that
+workspace.
 For example, Gemini dogfood tests can use a Flash preview model when Pro is
 unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 `ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or
@@ -320,9 +322,10 @@ http://localhost:8000/docs
 2. Ensure `awf-agent-runtime:latest` exists.
 3. Ensure `gh auth status` is clean.
 4. Ensure the target repo can be cloned and pushed over SSH.
-5. Write a `scripts/run_awf.py` JSON task.
-6. Run `scripts/run_awf.py`.
-7. Watch the terminal logs for:
+5. Use `awf workspace create` to submit the task to the local service.
+6. Watch the workspace through `awf workspace show`, `awf workspace logs`, or
+   the console.
+7. Expect lifecycle evidence such as:
    - `agent.run.start`
    - `agent.run.ok`
    - `pr.created`
@@ -332,61 +335,26 @@ http://localhost:8000/docs
 
 ## Local Dogfood Runner
 
-`scripts/run_awf.py` is the compatibility dogfood runner for exercising the same
-building blocks outside the always-on service. It stores its PostgreSQL DB under
-the configured `AWF_DATABASE_URL`, provisions workspaces, launches Docker
-Compose, runs the agent, creates a PR, and runs the PR monitor. The service
-worker is the normal always-on executor; use the script for isolated
-experiments, checked-in specs, release/sync compatibility runs, and
-PostgreSQL-backed throwaway runs.
+The local service worker is the normal always-on executor. Submit dogfood work
+through the API, CLI, MCP, or console; all four surfaces create the same
+control-plane workspace rows in the PostgreSQL control-plane DB.
 
-Example config:
-
-```json
-[
-  {
-    "repo_url": "git@github.com:dimileeh/aira-agent-workspace-fabric.git",
-    "branch_base": "codex/awf-universal-profile-base",
-    "task_title": "Add workspace list filters for operator console",
-    "task_prompt": "Implement the requested feature with tests.",
-    "agent": "codex",
-    "test_commands": [
-      "uv run ruff check src/awf/api src/awf/db tests/unit/api tests/unit/db",
-      "uv run mypy src/awf/api src/awf/db",
-      "uv run pytest tests/unit/api tests/unit/db/test_workspace_repository.py -q"
-    ],
-    "requires_database": false,
-    "profile_ref": "auto",
-    "task_kind": "feature_branch_pr",
-    "auto_merge": true,
-    "initial_review_grace_period_seconds": 900
-  }
-]
-```
-
-`auto_merge: true` means the feature PR monitor may merge after all gates pass.
-`initial_review_grace_period_seconds: 0` is useful only for explicit fast-path
-tests; normal dogfood runs should keep the default grace window so first-pass
-reviewers have time to post comments.
-
-Run it:
+Example CLI submission:
 
 ```bash
-uv run --python 3.12 --extra dev python scripts/run_awf.py \
-  --config /tmp/awf-task.json \
-  --work-dir ~/.awf/runs/example-run
+uv run --python 3.12 --extra dev awf workspace create \
+  --repo git@github.com:dimileeh/aira-agent-workspace-fabric.git \
+  --base development \
+  --profile auto \
+  --agent codex \
+  --title "Add workspace list filters for operator console" \
+  --prompt "Implement the requested feature with tests." \
+  --test "uv run --python 3.12 --extra dev pytest tests/unit -q" \
+  --auto-merge \
+  --format json
 ```
 
-Run state is preserved by default. Reusing the same `--work-dir` appends new
-workspace rows to the configured control-plane database (`AWF_DATABASE_URL`),
-which keeps the API, PR monitors, and console looking at one consistent run
-history.
-
-Reset a throwaway run database only when no API or monitor process is using it:
-
-```bash
-uv run --python 3.12 --extra dev python scripts/run_awf.py \
-  --config /tmp/awf-task.json \
-  --work-dir ~/.awf/runs/example-run \
-  --reset-state
-```
+Use `awf workspace show <workspace_id> --format pretty`,
+`awf workspace logs <workspace_id>`, or the console to follow progress. Use
+`awf service gc` for service-owned cleanup rather than deleting workspaces by
+hand.

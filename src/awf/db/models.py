@@ -152,11 +152,11 @@ class Workspace(Base):
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     env_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)
     profile_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    """Requested v2 workspace profile reference (``auto``, ``python``,
-    ``docker-compose``, ``aira``, etc.). Nullable for legacy v1 rows."""
+    """Requested workspace profile reference (``auto``, ``python``,
+    ``docker-compose``, ``aira``, etc.). Nullable for legacy rows."""
 
     requested_profile: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    """Inline v2 profile supplied by the caller. Stored separately from the
+    """Inline profile supplied by the caller. Stored separately from the
     immutable resolved snapshot so operators can see what was requested."""
 
     resolved_profile: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

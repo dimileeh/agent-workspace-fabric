@@ -33,7 +33,6 @@ from awf.api.deps import get_db_session
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
     WorkspaceCreateRequest,
-    WorkspaceCreateV2Request,
 )
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
@@ -247,7 +246,7 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
         ],
         "max_fallback_attempts": 1,
     }
-    payload = WorkspaceCreateV2Request.model_validate(body)
+    payload = WorkspaceCreateRequest.model_validate(body)
     existing = SimpleNamespace(task_policy={})
 
     assert workspaces_service._requested_task_provider_recovery_policy(payload) == {  # noqa: SLF001
@@ -352,7 +351,7 @@ async def test_workspace_metadata_routes_require_authorization(
     default_authorization = client.headers.get("Authorization")
     checks = [
         ("POST", "/v1/workspaces", _MINIMAL_BODY),
-        ("POST", "/v2/workspaces", _v2_body()),
+        ("POST", "/v1/workspaces", _v2_body()),
         ("GET", "/v1/workspaces", None),
         ("GET", f"/v1/workspaces/{workspace_id}", None),
         ("GET", "/v1/workspaces/overview", None),
@@ -386,7 +385,7 @@ async def test_workspace_metadata_routes_accept_authorized_requests(client: Asyn
     assert (await client.post("/v1/workspaces", json=_MINIMAL_BODY)).status_code == 202
     assert (
         await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(owned_paths=["src/**", "tests/**"]),
         )
     ).status_code == 202
@@ -438,31 +437,28 @@ async def test_adopt_pr_route_maps_service_errors_to_json_response(
     }
 
 
-async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
-    body = {**_MINIMAL_BODY, **overrides}
-    response = await client.post("/v1/workspaces", json=body)
-    assert response.status_code == 202
-    return str(response.json()["workspace_id"])
-
-
-async def _create_v2_workspace(
+async def _create_workspace(
     client: AsyncClient,
     *,
     repo_url: str = "git@github.com:example/app.git",
     base_branch: str = "development",
     title: str = "Owned path policy test",
+    task_title: str | None = None,
+    agent: str = "codex",
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
 ) -> str:
+    body = _v2_body_with_preflight_override(
+        repo_url=repo_url,
+        base_branch=base_branch,
+        title=task_title or title,
+        task_class=task_class,
+        owned_paths=owned_paths,
+    )
+    body["task"]["agent"] = agent
     response = await client.post(
-        "/v2/workspaces",
-        json=_v2_body(
-            repo_url=repo_url,
-            base_branch=base_branch,
-            title=title,
-            task_class=task_class,
-            owned_paths=owned_paths,
-        ),
+        "/v1/workspaces",
+        json=body,
     )
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
@@ -837,7 +833,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "/v2/workspaces",
+                "/v1/workspaces",
                 _v2_body(title="fresh key db first v2"),
                 _v2_body(title="fresh key db second v2"),
                 "workspace-fresh-db-first-v2",
@@ -945,10 +941,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "post-denial replay v1"}
                 ),
@@ -956,8 +951,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
-                WorkspaceCreateV2Request.model_validate(_v2_body(title="post-denial replay v2")),
+                WorkspaceCreateRequest.model_validate(_v2_body(title="post-denial replay v2")),
                 "workspace-post-denial-replay-v2",
                 id="v2",
             ),
@@ -966,56 +960,37 @@ class TestCreateWorkspace:
     async def test_rate_limited_workspace_create_uses_post_denial_durable_replay(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
         created_at = datetime(2026, 5, 15, tzinfo=UTC)
-        if isinstance(payload, WorkspaceCreateRequest):
-            existing = SimpleNamespace(
-                id="ws_post_denial_replay_v1",
-                status=WorkspaceStatus.requested.value,
-                version=7,
-                created_at=created_at,
-                repo_url=payload.repo_url,
-                branch_base=payload.branch_base,
-                task_title=payload.task_title,
-                task_prompt=payload.task_prompt,
-                task_external_id=payload.task_external_id,
-                agent=payload.agent.value,
-                env_profile=payload.env_profile,
-                test_commands=list(payload.test_commands),
-                requires_database=payload.requires_database,
-                task_attempt=None,
-            )
-        else:
-            existing = SimpleNamespace(
-                id="ws_post_denial_replay_v2",
-                status=WorkspaceStatus.requested.value,
-                version=8,
-                created_at=created_at,
-                repo_url=payload.repo.url,
-                branch_base=payload.repo.base_branch,
-                task_title=payload.task.title,
-                task_prompt=payload.task.prompt,
-                task_external_id=payload.task.external_id,
-                task_class=None,
-                owned_paths=[],
-                task_policy={"resource_reservation_request": {}},
-                auto_merge=payload.task.auto_merge,
-                initial_review_grace_period_seconds=(
-                    payload.task.initial_review_grace_period_seconds
-                ),
-                agent=payload.task.agent.value,
-                task_kind=payload.task.kind,
-                profile_ref=payload.workspace.profile_ref,
-                requested_profile=None,
-                resolved_profile=None,
-                test_commands=list(payload.validation.commands),
-                task_attempt=object(),
-                events=[],
-            )
+        existing = SimpleNamespace(
+            id="ws_post_denial_replay",
+            status=WorkspaceStatus.requested.value,
+            version=7,
+            created_at=created_at,
+            repo_url=payload.repo_url,
+            branch_base=payload.branch_base,
+            task_title=payload.task_title,
+            task_prompt=payload.task_prompt,
+            task_external_id=payload.task_external_id,
+            task_class=(
+                payload.task.task_class.value if payload.task.task_class is not None else None
+            ),
+            owned_paths=list(payload.task.owned_paths),
+            task_policy={"resource_reservation_request": {}},
+            auto_merge=payload.task.auto_merge,
+            initial_review_grace_period_seconds=payload.task.initial_review_grace_period_seconds,
+            agent=payload.agent.value,
+            task_kind=payload.task.kind,
+            profile_ref=payload.env_profile,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=list(payload.test_commands),
+            task_attempt=object(),
+            events=[],
+        )
         calls: list[str] = []
         lookups = 0
 
@@ -1055,10 +1030,7 @@ class TestCreateWorkspace:
             calls.append(f"lookup:{key}:{lookups}")
             return None if lookups == 1 else existing
 
-        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
-            raise AssertionError("post-denial durable replay must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+        async def fail_create(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("post-denial durable replay must not create a workspace")
 
         monkeypatch.setattr(
@@ -1070,25 +1042,15 @@ class TestCreateWorkspace:
         monkeypatch.setattr(workspaces_route, "admit_request_async", denied_admission)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", replay_after_denial)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace_v2(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=1),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
 
         assert not isinstance(response, JSONResponse)
         assert response.workspace_id == existing.id
@@ -1103,10 +1065,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "fresh retry after v1"}
                 ),
@@ -1114,8 +1075,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
-                WorkspaceCreateV2Request.model_validate(_v2_body(title="fresh retry after v2")),
+                WorkspaceCreateRequest.model_validate(_v2_body(title="fresh retry after v2")),
                 "workspace-refresh-retry-after-v2",
                 id="v2",
             ),
@@ -1124,8 +1084,7 @@ class TestCreateWorkspace:
     async def test_rate_limited_workspace_create_refreshes_preview_after_durable_miss(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
@@ -1162,10 +1121,7 @@ class TestCreateWorkspace:
         async def missing_replay(_self: WorkspaceRepository, key: str) -> None:
             calls.append(f"lookup:{key}")
 
-        async def fail_v1_create(_self: WorkspaceRepository, **_kwargs: object) -> None:
-            raise AssertionError("rate-limited request must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **_kwargs: object) -> None:
+        async def fail_create(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("rate-limited request must not create a workspace")
 
         monkeypatch.setattr(
@@ -1177,25 +1133,15 @@ class TestCreateWorkspace:
         monkeypatch.setattr(workspaces_route, "admit_request_async", fail_admit)
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", missing_replay)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace_v2(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=1),
-                session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=1),
+            session=SimpleNamespace(info={}, bind=None),  # type: ignore[arg-type]
+        )
 
         assert isinstance(response, JSONResponse)
         assert response.status_code == 429
@@ -1220,7 +1166,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "/v2/workspaces",
+                "/v1/workspaces",
                 _v2_body(title="cache loss replay v2"),
                 "workspace-cache-loss-replay-v2",
                 id="v2",
@@ -1294,7 +1240,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "/v2/workspaces",
+                "/v1/workspaces",
                 _v2_body(title="cold replay quota v2"),
                 _v2_body(title="fresh after cold replay v2"),
                 "workspace-cold-replay-quota-v2",
@@ -1350,7 +1296,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "/v2/workspaces",
+                "/v1/workspaces",
                 _v2_body(title="in-flight over quota replay v2"),
                 "workspace-inflight-rate-limit-replay-v2",
                 id="v2",
@@ -1470,7 +1416,7 @@ class TestCreateWorkspace:
             json={**_MINIMAL_BODY, "task_title": "shared bucket first v1"},
         )
         rejected = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(title="shared bucket second v2"),
         )
 
@@ -1517,6 +1463,37 @@ class TestCreateWorkspace:
         )
 
     @pytest.mark.unit
+    def test_workspace_replay_key_cache_tolerates_non_extensible_test_objects(self) -> None:
+        class _Slotless:
+            __slots__ = ()
+
+        request = _Slotless()
+
+        first = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        second = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+
+        assert isinstance(
+            first,
+            workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache,  # noqa: SLF001
+        )
+        assert isinstance(
+            second,
+            workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache,  # noqa: SLF001
+        )
+        assert first is not second
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_rejects_invalid_size(self) -> None:
+        with pytest.raises(ValueError, match="max_entries"):
+            workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache(  # noqa: SLF001
+                max_entries=0
+            )
+
+    @pytest.mark.unit
     def test_workspace_replay_key_cache_real_request_without_app_state_fails_loudly(
         self,
     ) -> None:
@@ -1542,7 +1519,7 @@ class TestCreateWorkspace:
             cache.remember(
                 payload,
                 idempotency_key=f"workspace-app-state-key-{index}",
-                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+                api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
             )
 
         newest_key = f"workspace-app-state-key-{max_entries}"
@@ -1550,7 +1527,7 @@ class TestCreateWorkspace:
             cache.matches(
                 payload,
                 idempotency_key="workspace-app-state-key-0",
-                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+                api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
             )
             is False
         )
@@ -1558,7 +1535,7 @@ class TestCreateWorkspace:
             cache.matches(
                 payload,
                 idempotency_key=newest_key,
-                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+                api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
             )
             is True
         )
@@ -1578,14 +1555,14 @@ class TestCreateWorkspace:
             cache.remember(
                 payload,
                 idempotency_key=f"workspace-default-key-{index}",
-                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+                api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
             )
 
         assert (
             cache.matches(
                 payload,
                 idempotency_key="workspace-default-key-0",
-                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+                api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
             )
             is True
         )
@@ -1602,12 +1579,12 @@ class TestCreateWorkspace:
         cache.remember(
             payload,
             idempotency_key="workspace-locked-key",
-            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
         )
         matched = cache.matches(
             payload,
             idempotency_key="workspace-locked-key",
-            api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
         )
 
         assert matched is True
@@ -1682,10 +1659,9 @@ class TestCreateWorkspace:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("api_version", "payload", "idempotency_key"),
+        ("payload", "idempotency_key"),
         [
             pytest.param(
-                "v1",
                 WorkspaceCreateRequest.model_validate(
                     {**_MINIMAL_BODY, "task_title": "known missing replay v1"}
                 ),
@@ -1693,8 +1669,7 @@ class TestCreateWorkspace:
                 id="v1",
             ),
             pytest.param(
-                "v2",
-                WorkspaceCreateV2Request.model_validate(_v2_body(title="known missing replay v2")),
+                WorkspaceCreateRequest.model_validate(_v2_body(title="known missing replay v2")),
                 "known-missing-workspace-v2",
                 id="v2",
             ),
@@ -1703,8 +1678,7 @@ class TestCreateWorkspace:
     async def test_known_replay_key_db_miss_returns_conflict_without_create(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        api_version: str,
-        payload: WorkspaceCreateRequest | WorkspaceCreateV2Request,
+        payload: WorkspaceCreateRequest,
         idempotency_key: str,
     ) -> None:
         request = _request_with_disk_check()
@@ -1714,7 +1688,7 @@ class TestCreateWorkspace:
         replay_key_cache.remember(
             payload,
             idempotency_key=idempotency_key,
-            api_version=api_version,
+            api_version=workspaces_route._WORKSPACE_CREATE_API_VERSION,  # noqa: SLF001
         )
         lock_keys: list[str] = []
         lookup_keys: list[str] = []
@@ -1726,36 +1700,22 @@ class TestCreateWorkspace:
         async def tracked_lookup(_self: WorkspaceRepository, key: str) -> None:
             lookup_keys.append(key)
 
-        async def fail_v1_create(_self: WorkspaceRepository, **kwargs: object) -> None:
-            create_calls.append(kwargs.get("idempotency_key"))
-            raise AssertionError("known replay-key durable miss must not create a workspace")
-
-        async def fail_v2_create(*_args: object, **kwargs: object) -> None:
+        async def fail_create(*_args: object, **kwargs: object) -> None:
             create_calls.append(kwargs.get("idempotency_key"))
             raise AssertionError("known replay-key durable miss must not create a workspace")
 
         monkeypatch.setattr(WorkspaceRepository, "acquire_idempotency_key_lock", tracked_lock)
         monkeypatch.setattr(WorkspaceRepository, "get_by_idempotency_key", tracked_lookup)
-        monkeypatch.setattr(WorkspaceRepository, "create", fail_v1_create)
-        monkeypatch.setattr(workspaces_route, "create_workspace_v2_row", fail_v2_create)
+        monkeypatch.setattr(workspaces_route, "create_workspace_row", fail_create)
 
         session = SimpleNamespace(info={}, bind=None)
-        if api_version == "v1":
-            response = await workspaces_route.create_workspace(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=10),
-                session=session,  # type: ignore[arg-type]
-            )
-        else:
-            response = await workspaces_route.create_workspace_v2(
-                payload,  # type: ignore[arg-type]
-                request=request,  # type: ignore[arg-type]
-                idempotency_key=idempotency_key,
-                settings=_workspace_request_admission_settings(limit=10),
-                session=session,  # type: ignore[arg-type]
-            )
+        response = await workspaces_route.create_workspace(
+            payload,
+            request=request,  # type: ignore[arg-type]
+            idempotency_key=idempotency_key,
+            settings=_workspace_request_admission_settings(limit=10),
+            session=session,  # type: ignore[arg-type]
+        )
 
         assert isinstance(response, JSONResponse)
         assert response.status_code == 409
@@ -1819,7 +1779,7 @@ class TestCreateWorkspace:
         _assert_no_internal_error_fields(body)
 
 
-class TestCreateWorkspaceV2DiskPressure:
+class TestCreateWorkspaceDiskPressure:
     @pytest.mark.unit
     async def test_rejects_v2_create_burst_after_configured_limit(
         self,
@@ -1830,9 +1790,9 @@ class TestCreateWorkspaceV2DiskPressure:
             limit=1
         )
 
-        first = await client.post("/v2/workspaces", json=_v2_body(title="rate limit first v2"))
+        first = await client.post("/v1/workspaces", json=_v2_body(title="rate limit first v2"))
         rejected = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(title="rate limit second v2"),
         )
 
@@ -1861,8 +1821,8 @@ class TestCreateWorkspaceV2DiskPressure:
 
         app.state.workspace_admission_disk_check = admission_check
 
-        first = await client.post("/v2/workspaces", json=_v2_body(title="disk first"))
-        rejected = await client.post("/v2/workspaces", json=_v2_body(title="disk second"))
+        first = await client.post("/v1/workspaces", json=_v2_body(title="disk first"))
+        rejected = await client.post("/v1/workspaces", json=_v2_body(title="disk second"))
 
         assert first.status_code == 202
         _assert_workspace_rate_limited(rejected)
@@ -1882,17 +1842,17 @@ class TestCreateWorkspaceV2DiskPressure:
         fresh_key = _unique_idempotency_key("rate-limit-v2-fresh")
 
         first = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=payload,
             headers={"Idempotency-Key": replay_key},
         )
         replay = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=payload,
             headers={"Idempotency-Key": replay_key},
         )
         fresh = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(title="fresh key bounded"),
             headers={"Idempotency-Key": fresh_key},
         )
@@ -1937,7 +1897,7 @@ class TestCreateWorkspaceV2DiskPressure:
             ok=False,
         )
 
-        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        response = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
         listed = await client.get("/v1/workspaces")
 
         assert response.status_code == 503
@@ -1960,14 +1920,14 @@ class TestCreateWorkspaceV2DiskPressure:
             threshold_bytes=400,
             ok=True,
         )
-        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        first = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
 
         app.state.workspace_admission_disk_check = lambda _settings: _disk_check(
             free_bytes=300,
             threshold_bytes=400,
             ok=False,
         )
-        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
         listed = await client.get("/v1/workspaces")
 
         assert first.status_code == 202
@@ -1987,7 +1947,7 @@ class TestCreateWorkspaceV2DiskPressure:
             ok=True,
         )
 
-        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        response = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
         listed = await client.get("/v1/workspaces")
 
         assert response.status_code == 202
@@ -2018,19 +1978,19 @@ class TestCreateWorkspaceV2DiskPressure:
         app.dependency_overrides[get_settings] = lambda: settings
         app.state.workspace_admission_disk_check = admission_check
 
-        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        response = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
 
         assert response.status_code == 202
         assert seen["settings"] is settings
 
 
-class TestCreateWorkspaceV2MonitorPolicy:
+class TestCreateWorkspaceMonitorPolicy:
     @pytest.mark.unit
     async def test_old_v2_payload_defaults_to_auto_merge_and_profile_grace(
         self,
         client: AsyncClient,
     ) -> None:
-        create = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        create = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2052,7 +2012,7 @@ class TestCreateWorkspaceV2MonitorPolicy:
             },
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2086,8 +2046,8 @@ class TestCreateWorkspaceV2MonitorPolicy:
             },
         }
 
-        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -2096,7 +2056,7 @@ class TestCreateWorkspaceV2MonitorPolicy:
         _assert_no_internal_error_fields(body)
 
 
-class TestCreateWorkspaceV2ResourceIdempotency:
+class TestCreateWorkspaceResourceIdempotency:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("resources", "expected_steady_cpu"),
@@ -2133,9 +2093,9 @@ class TestCreateWorkspaceV2ResourceIdempotency:
             "Idempotency-Key": f"resource-default-replay-{expected_steady_cpu:g}",
         }
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
         active_settings = new_settings
-        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -2172,8 +2132,8 @@ class TestCreateWorkspaceV2ResourceIdempotency:
             },
         }
 
-        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -2195,7 +2155,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         app, client = disk_app_and_client
         app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
 
-        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        response = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
 
         assert response.status_code == 409
         body = response.json()
@@ -2224,7 +2184,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
             },
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
 
         assert response.status_code == 202
         preflight = response.json()["provider_readiness_preflight"]
@@ -2250,8 +2210,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         }
         headers = {"Idempotency-Key": "provider-readiness-blank-reason-replay"}
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -2272,10 +2232,10 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         headers = {"Idempotency-Key": "provider-readiness-replay"}
 
-        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        first = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
         (codex_home / "auth.json").unlink()
         codex_home.rmdir()
-        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -2303,8 +2263,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         }
         headers = {"Idempotency-Key": "provider-readiness-ready-override-replay"}
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -2338,8 +2298,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         }
         headers = {"Idempotency-Key": "provider-readiness-redacted-reason-replay"}
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=payload, headers=headers)
 
         assert first.status_code == 202
         assert (
@@ -2373,8 +2333,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         }
         headers = {"Idempotency-Key": "provider-readiness-literal-redacted-conflict"}
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -2412,9 +2372,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         }
         headers = {"Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"}
 
-        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=payload, headers=headers)
         active_settings = new_settings
-        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=payload, headers=headers)
 
         assert first.status_code == 202
         assert first.json()["provider_readiness_preflight"]["override_reason"] == (
@@ -2438,7 +2398,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 "provider_readiness_override_reason": "operator verified local auth",
             },
         }
-        created = await client.post("/v2/workspaces", json=payload)
+        created = await client.post("/v1/workspaces", json=payload)
         workspace_id = created.json()["workspace_id"]
 
         detail = await client.get(f"/v1/workspaces/{workspace_id}")
@@ -2460,20 +2420,20 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     ) -> None:
         _set_codex_auth_env(monkeypatch)
         headers = {"Idempotency-Key": "direct-v2-replay"}
-        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        first = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
         assert first.status_code == 202
 
         factory = make_session_factory(engine)
         async with factory() as session:
-            replay = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+            replay = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(_V2_MINIMAL_BODY),
                 _request_with_disk_check(),
                 idempotency_key="direct-v2-replay",
                 settings=Settings(_env_file=None),
                 session=session,
             )
-            conflict = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(
+            conflict = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(
                     {
                         **_V2_MINIMAL_BODY,
                         "task": {
@@ -2487,8 +2447,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 settings=Settings(_env_file=None),
                 session=session,
             )
-            tier_conflict = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(
+            tier_conflict = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(
                     {
                         **_V2_MINIMAL_BODY,
                         "validation": {
@@ -2502,8 +2462,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 settings=Settings(_env_file=None),
                 session=session,
             )
-            resource_conflict = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(
+            resource_conflict = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(
                     {
                         **_V2_MINIMAL_BODY,
                         "resources": {"steady_state_cpu_cores": 4.0},
@@ -2542,8 +2502,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         replay_payload = json.loads(json.dumps(_V2_MINIMAL_BODY))
         replay_payload.pop("workspace")
 
-        first = await client.post("/v2/workspaces", json=initial_payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=initial_payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -2564,8 +2524,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         )
         second_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
 
-        first = await client.post("/v2/workspaces", json=first_payload)
-        second = await client.post("/v2/workspaces", json=second_payload)
+        first = await client.post("/v1/workspaces", json=first_payload)
+        second = await client.post("/v1/workspaces", json=second_payload)
 
         assert first.status_code == 202
         assert second.status_code == 409
@@ -2580,6 +2540,42 @@ class TestWorkspaceCreateProviderReadinessPreflight:
             "detail": {"external_id": "WAVE-1"},
         }
         _assert_no_internal_error_fields(body)
+
+    @pytest.mark.unit
+    async def test_v2_external_id_scope_conflict_rolls_back_rejected_workspace(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_codex_auth_env(monkeypatch)
+        repo_url = "git@github.com:example/external-id-conflict-rollback.git"
+        external_id = "WAVE-ROLLBACK"
+        first_payload = _v2_body(
+            repo_url=repo_url,
+            title="docs slice",
+            owned_paths=["docs/**"],
+        )
+        first_payload["task"]["external_id"] = external_id  # type: ignore[index]
+        second_payload = _v2_body(
+            repo_url=repo_url,
+            title="api slice",
+            owned_paths=["src/awf/api/**"],
+        )
+        second_payload["task"]["external_id"] = external_id  # type: ignore[index]
+
+        first = await client.post("/v1/workspaces", json=first_payload)
+        second = await client.post("/v1/workspaces", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(repo_url=repo_url, limit=10)
+
+        matching_rows = [row for row in rows if row.task_external_id == external_id]
+        assert [row.task_title for row in matching_rows] == ["docs slice"]
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_title(
@@ -2599,8 +2595,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         )
         second_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
 
-        first = await client.post("/v2/workspaces", json=first_payload)
-        second = await client.post("/v2/workspaces", json=second_payload)
+        first = await client.post("/v1/workspaces", json=first_payload)
+        second = await client.post("/v1/workspaces", json=second_payload)
 
         assert first.status_code == 202
         assert second.status_code == 409
@@ -2616,7 +2612,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
             "workspace": {"profile_ref": "missing-profile", "profile": None},
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
 
         assert response.status_code == 422
         assert response.json()["error_code"] == "INVALID_PROFILE"
@@ -2646,7 +2642,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
             },
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
         body = response.json()
 
         assert response.status_code == 422
@@ -2664,8 +2660,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         _set_codex_auth_env(monkeypatch)
         factory = make_session_factory(engine)
         async with factory() as session:
-            accepted = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+            accepted = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(_V2_MINIMAL_BODY),
                 _request_with_disk_check(),
                 idempotency_key=None,
                 settings=Settings(_env_file=None),
@@ -2685,8 +2681,8 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         _set_codex_auth_env(monkeypatch)
         factory = make_session_factory(engine)
         async with factory() as session:
-            accepted = await workspaces_route.create_workspace_v2(
-                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+            accepted = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(_V2_MINIMAL_BODY),
                 _request_with_disk_check(),
                 idempotency_key="fresh-direct-v2-key",
                 settings=Settings(_env_file=None),
@@ -2701,7 +2697,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert workspace.id == accepted.workspace_id
 
 
-class TestCreateWorkspaceV2PolicyMetadata:
+class TestCreateWorkspacePolicyMetadata:
     @pytest.mark.unit
     async def test_persists_policy_metadata_and_exposes_workspace_responses(
         self,
@@ -2716,7 +2712,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2741,7 +2737,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             "workspace": {"profile_ref": "inline", "profile": _endpoint_profile_body()},
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2811,7 +2807,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2852,7 +2848,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         detail = await client.get(f"/v1/workspaces/{create.json()['workspace_id']}")
@@ -2873,7 +2869,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
     ) -> None:
         payload = _v2_body(model="ollama/glm-5.1:cloud")
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -2919,7 +2915,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             "provider_readiness_override_reason": "identity projection test",
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
         workspace_id = create.json()["workspace_id"]
 
@@ -2964,8 +2960,8 @@ class TestCreateWorkspaceV2PolicyMetadata:
     ) -> None:
         headers = {"Idempotency-Key": "default-model-idempotency"}
 
-        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
-        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        first = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 202
@@ -3000,7 +2996,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
 
         ws_id = create.json()["workspace_id"]
@@ -3043,7 +3039,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
         client: AsyncClient,
         engine: AsyncEngine,
     ) -> None:
-        create = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        create = await client.post("/v1/workspaces", json=_V2_MINIMAL_BODY)
         assert create.status_code == 202
         ws_id = create.json()["workspace_id"]
         raw_ref = "sk-live-do-not-appear-in-api"
@@ -3108,7 +3104,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             "resources": {"disk_mb": 0},
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
 
         assert response.status_code == 422
 
@@ -3141,8 +3137,13 @@ class TestCreateWorkspaceV2PolicyMetadata:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             assert workspace is not None
+            state_events = [
+                event
+                for event in workspace.events
+                if event.event_type in {"workspace.created", "workspace.state_changed"}
+            ]
             for event, occurred_at in zip(
-                sorted(workspace.events, key=lambda item: item.occurred_at),
+                sorted(state_events, key=lambda item: item.occurred_at),
                 [
                     base,
                     base + timedelta(seconds=10),
@@ -3196,8 +3197,13 @@ class TestCreateWorkspaceV2PolicyMetadata:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             assert workspace is not None
+            state_events = [
+                event
+                for event in workspace.events
+                if event.event_type in {"workspace.created", "workspace.state_changed"}
+            ]
             for event, occurred_at in zip(
-                sorted(workspace.events, key=lambda item: item.occurred_at),
+                sorted(state_events, key=lambda item: item.occurred_at),
                 [
                     base,
                     base + timedelta(seconds=10),
@@ -3237,7 +3243,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             "task": {**_V2_MINIMAL_BODY["task"], "task_class": task_class},
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
 
         assert response.status_code == 422
 
@@ -3260,7 +3266,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             "task": {**_V2_MINIMAL_BODY["task"], "owned_paths": owned_paths},
         }
 
-        response = await client.post("/v2/workspaces", json=payload)
+        response = await client.post("/v1/workspaces", json=payload)
 
         assert response.status_code == 422
 
@@ -3287,8 +3293,8 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -3327,8 +3333,8 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
-        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+        first = await client.post("/v1/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v1/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -3351,7 +3357,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             },
         }
 
-        create_response = await client.post("/v2/workspaces", json=payload)
+        create_response = await client.post("/v1/workspaces", json=payload)
         assert create_response.status_code == 202
 
         detail_response = await client.get(
@@ -3386,7 +3392,15 @@ class TestCreateWorkspaceV2PolicyMetadata:
             resolved_profile={"validation": "tier-two"},
             task_policy={},
         )
-        policy_payload = WorkspaceCreateV2Request.model_validate(
+        non_mapping_profile_workspace = SimpleNamespace(
+            resolved_profile=["legacy-corrupt-profile"],
+            task_policy={},
+        )
+        bool_tier_workspace = SimpleNamespace(
+            resolved_profile={"validation": {"requested_tier": True}},
+            task_policy={},
+        )
+        policy_payload = WorkspaceCreateRequest.model_validate(
             {
                 **_V2_MINIMAL_BODY,
                 "task": {
@@ -3395,7 +3409,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
                 },
             }
         )
-        payload = WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY)
+        payload = WorkspaceCreateRequest.model_validate(_V2_MINIMAL_BODY)
 
         assert workspaces_service._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]  # noqa: SLF001
         assert workspaces_service._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
@@ -3405,6 +3419,18 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert (
             workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
                 malformed_validation_workspace
+            )
+            is None
+        )  # type: ignore[arg-type]
+        assert (
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                non_mapping_profile_workspace
+            )
+            is None
+        )  # type: ignore[arg-type]
+        assert (
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                bool_tier_workspace
             )
             is None
         )  # type: ignore[arg-type]
@@ -3421,20 +3447,20 @@ class TestCreateWorkspaceV2PolicyMetadata:
         }
 
 
-class TestCreateWorkspaceV2OwnedPathPolicy:
+class TestCreateWorkspaceOwnedPathPolicy:
     @pytest.mark.unit
     async def test_no_requested_owned_paths_do_not_block(
         self,
         client: AsyncClient,
     ) -> None:
-        await _create_v2_workspace(
+        await _create_workspace(
             client,
             title="existing",
             owned_paths=["src/awf/api/**"],
         )
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(title="new without owned paths", owned_paths=[]),
         )
 
@@ -3445,14 +3471,14 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         self,
         client: AsyncClient,
     ) -> None:
-        await _create_v2_workspace(
+        await _create_workspace(
             client,
             title="existing",
             owned_paths=["src/awf/api/**"],
         )
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(title="docs", owned_paths=["docs/**"]),
         )
 
@@ -3463,14 +3489,14 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         self,
         client: AsyncClient,
     ) -> None:
-        await _create_v2_workspace(
+        await _create_workspace(
             client,
             repo_url="git@github.com:example/other.git",
             base_branch="development",
             title="other repo",
             owned_paths=["src/awf/api/**"],
         )
-        await _create_v2_workspace(
+        await _create_workspace(
             client,
             repo_url="git@github.com:example/app.git",
             base_branch="main",
@@ -3479,7 +3505,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         )
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(owned_paths=["src/awf/api/routes/workspaces.py"]),
         )
 
@@ -3502,7 +3528,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         engine: AsyncEngine,
         existing_status: WorkspaceStatus,
     ) -> None:
-        existing_id = await _create_v2_workspace(
+        existing_id = await _create_workspace(
             client,
             title=f"existing {existing_status.value}",
             owned_paths=["src/awf/api/**"],
@@ -3510,7 +3536,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         await _set_workspace_status(engine, existing_id, existing_status)
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(
                 title=f"new after {existing_status.value}",
                 owned_paths=["src/awf/api/routes/workspaces.py"],
@@ -3537,7 +3563,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         existing_path: str,
         requested_path: str,
     ) -> None:
-        existing_id = await _create_v2_workspace(
+        existing_id = await _create_workspace(
             client,
             title=f"existing {existing_path}",
             task_class="refactor_task",
@@ -3545,7 +3571,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         )
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(
                 title=f"new {requested_path}",
                 task_class="docs_task",
@@ -3601,7 +3627,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         client: AsyncClient,
         task_class: str,
     ) -> None:
-        existing_id = await _create_v2_workspace(
+        existing_id = await _create_workspace(
             client,
             title=f"existing {task_class}",
             task_class=task_class,
@@ -3609,7 +3635,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         )
 
         response = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(
                 title=f"new {task_class}",
                 task_class=task_class,
@@ -3627,7 +3653,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         self,
         client: AsyncClient,
     ) -> None:
-        existing_id = await _create_v2_workspace(
+        existing_id = await _create_workspace(
             client,
             title="existing migration",
             task_class="migration_task",
@@ -3635,7 +3661,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         )
 
         create = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(
                 title="new concrete migration",
                 task_class="migration_task",
@@ -3678,14 +3704,14 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         self,
         client: AsyncClient,
     ) -> None:
-        existing_id = await _create_v2_workspace(
+        existing_id = await _create_workspace(
             client,
             title="existing service work",
             task_class="refactor_task",
             owned_paths=["src/awf/service/**"],
         )
         create = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body(
                 title="new service file work",
                 task_class="docs_task",
@@ -4059,7 +4085,7 @@ class TestGetWorkspace:
         engine: AsyncEngine,
     ) -> None:
         create = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body_with_preflight_override(task_class="refactor_task"),
         )
         assert create.status_code == 202
@@ -4118,7 +4144,7 @@ class TestGetWorkspace:
         engine: AsyncEngine,
     ) -> None:
         create = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body_with_preflight_override(task_class="refactor_task"),
         )
         assert create.status_code == 202
@@ -4159,7 +4185,7 @@ class TestGetWorkspace:
         client: AsyncClient,
     ) -> None:
         create = await client.post(
-            "/v2/workspaces",
+            "/v1/workspaces",
             json=_v2_body_with_preflight_override(task_class="dependency_task"),
         )
         assert create.status_code == 202
@@ -4232,7 +4258,7 @@ class TestGetWorkspace:
                 "provider_readiness_override_reason": "unit test bypasses provider auth",
             },
         }
-        create = await client.post("/v2/workspaces", json=payload)
+        create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
         ws_id = create.json()["workspace_id"]
 
@@ -4462,7 +4488,9 @@ class TestWorkspaceDirectRoutes:
         listed = await workspaces_route.list_workspaces(session_factory=factory)
         detail = await workspaces_route.get_workspace(workspace_id, session_factory=factory)
 
-        assert [event.event_type for event in events.items] == ["workspace.created"]
+        event_types = {event.event_type for event in events.items}
+        assert "workspace.created" in event_types
+        assert "workspace.provider_readiness_preflight" in event_types
         assert stale.items == []
         assert events.limit == 50
         assert events.cursor is None

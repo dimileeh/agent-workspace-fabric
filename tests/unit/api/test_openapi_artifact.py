@@ -75,7 +75,6 @@ _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
         ("post", "/v1/workspaces/{workspace_id}/stop"),
         ("post", "/v1/workspaces/{workspace_id}/validate"),
         ("get", "/v1/workspaces/{workspace_id}/validation"),
-        ("post", "/v2/workspaces"),
     }
 )
 
@@ -113,7 +112,6 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
         "/readyz",
         "/release-readiness",
         "/v1/workspaces",
-        "/v2/workspaces",
         "/v1/events",
         "/v1/tasks",
         "/v1/callbacks",
@@ -131,10 +129,40 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
 
 
 @pytest.mark.unit
+def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec: dict) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+
+    assert "WorkspaceV2" not in json.dumps(schemas, sort_keys=True)
+    assert {
+        "WorkspaceRepo",
+        "WorkspaceTask",
+        "WorkspaceProfileSelection",
+        "WorkspaceValidation",
+        "WorkspaceResources",
+    }.issubset(schemas)
+    assert schemas["WorkspaceCreateRequest"]["properties"]["repo"]["$ref"] == (
+        "#/components/schemas/WorkspaceRepo"
+    )
+    assert schemas["WorkspaceCreateRequest"]["properties"]["task"]["$ref"] == (
+        "#/components/schemas/WorkspaceTask"
+    )
+
+
+@pytest.mark.unit
+def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: dict) -> None:
+    command_items = openapi_spec["components"]["schemas"]["WorkspaceValidation"]["properties"][
+        "commands"
+    ]["items"]
+
+    assert command_items["type"] == "string"
+    assert command_items["minLength"] == 1
+
+
+@pytest.mark.unit
 def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
     paths = openapi_spec.get("paths", {})
     expected_methods: list[tuple[str, str]] = [
-        ("POST", "/v2/workspaces"),
+        ("POST", "/v1/workspaces"),
         ("GET", "/v1/workspaces/{workspace_id}"),
         ("GET", "/v1/workspaces"),
         ("GET", "/v1/events"),
@@ -337,7 +365,6 @@ def test_release_readiness_503_documents_failed_scorecard_body(openapi_spec: dic
     [
         ("post", "/v1/callbacks"),
         ("post", "/v1/workspaces"),
-        ("post", "/v2/workspaces"),
     ],
 )
 def test_rate_limited_posts_document_retry_after_header(
@@ -383,7 +410,7 @@ async def test_api_token_runtime_failures_match_documented_contract(
             assert wrong.headers["WWW-Authenticate"] == "Bearer"
             assert wrong.json()["detail"]["error_code"] == "UNAUTHORIZED"
 
-            monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+            monkeypatch.setenv("AWF_API_TOKEN", "")
             get_settings.cache_clear()
 
             unconfigured = await client.get("/v1/operations")

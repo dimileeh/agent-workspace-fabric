@@ -69,7 +69,7 @@ async def _create_v1_workspace(client: AsyncClient) -> str:
     return str(response.json()["workspace_id"])
 
 
-async def _create_v2_workspace(
+async def _create_workspace(
     client: AsyncClient,
     *,
     external_id: str | None = "TICKET-123",
@@ -86,7 +86,7 @@ async def _create_v2_workspace(
             "provider_readiness_override_reason": "test fixture only observes task identity",
         }
     response = await client.post(
-        "/v2/workspaces",
+        "/v1/workspaces",
         json=payload,
         headers=headers,
     )
@@ -101,7 +101,7 @@ class TestTaskList:
         client: AsyncClient,
     ) -> None:
         legacy_workspace_id = await _create_v1_workspace(client)
-        new_workspace_id = await _create_v2_workspace(
+        new_workspace_id = await _create_workspace(
             client,
             external_id="TICKET-NEW",
             title="First-class task",
@@ -120,8 +120,8 @@ class TestTaskList:
         new = items_by_workspace[new_workspace_id]
 
         assert legacy["task_id"] == "LEGACY-1"
-        assert legacy["attempt_id"] is None
-        assert legacy["attempt_number"] is None
+        assert legacy["attempt_id"].startswith("att_")
+        assert legacy["attempt_number"] == 1
 
         assert new["task_id"] == "TICKET-NEW"
         assert new["attempt_id"].startswith("att_")
@@ -138,7 +138,7 @@ class TestTaskList:
         client: AsyncClient,
     ) -> None:
         legacy_workspace_id = await _create_v1_workspace(client)
-        attempt_workspace_id = await _create_v2_workspace(
+        attempt_workspace_id = await _create_workspace(
             client,
             external_id="TICKET-OBSERVE",
             title="Observe model identity",
@@ -180,7 +180,7 @@ class TestTaskList:
         engine: AsyncEngine,
     ) -> None:
         legacy_workspace_id = await _create_v1_workspace(client)
-        new_workspace_id = await _create_v2_workspace(
+        new_workspace_id = await _create_workspace(
             client,
             external_id="TICKET-DIRECT",
             title="Direct route task",
@@ -192,7 +192,8 @@ class TestTaskList:
 
         items_by_workspace = {item.workspace_id: item for item in response.items}
         assert set(items_by_workspace) == {legacy_workspace_id, new_workspace_id}
-        assert items_by_workspace[legacy_workspace_id].attempt_id is None
+        assert items_by_workspace[legacy_workspace_id].attempt_id is not None
+        assert items_by_workspace[legacy_workspace_id].attempt_number == 1
         assert items_by_workspace[new_workspace_id].attempt_id is not None
         assert items_by_workspace[new_workspace_id].task_id == "TICKET-DIRECT"
 
@@ -206,13 +207,13 @@ class TestTaskList:
 
         headers = {"Idempotency-Key": "task-attempt-idem"}
 
-        first_id = await _create_v2_workspace(
+        first_id = await _create_workspace(
             client,
             external_id="TICKET-IDEM",
             title="Idempotent task",
             headers=headers,
         )
-        second_id = await _create_v2_workspace(
+        second_id = await _create_workspace(
             client,
             external_id="TICKET-IDEM",
             title="Idempotent task",
@@ -295,7 +296,7 @@ class TestTaskList:
         client: AsyncClient,
         engine: AsyncEngine,
     ) -> None:
-        workspace_id = await _create_v2_workspace(
+        workspace_id = await _create_workspace(
             client,
             external_id="TICKET-CANONICAL",
             title="Canonical task",
@@ -355,7 +356,7 @@ class TestTaskList:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         workspace_ids = [
-            await _create_v2_workspace(
+            await _create_workspace(
                 client,
                 external_id=f"TICKET-CANONICAL-BATCH-{number}",
                 title=f"Canonical batch task {number}",

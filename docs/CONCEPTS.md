@@ -77,7 +77,7 @@ A `WorkspaceProfile` can describe:
 
 Resolution order:
 
-1. Inline profile in the v2 request.
+1. Inline profile in the workspace create request.
 2. Repo-local `.awf/workspace.yml`.
 3. Central built-in profile registry by `profile_ref`.
 4. Auto-detection.
@@ -632,26 +632,23 @@ If the work-dir corruption came from a partially deleted workspace, prefer
 workspace state. If Postgres itself is suspect, capture a backup before any
 destructive cleanup, then use the restore flow in [Control-Plane Postgres Backup And Restore](#control-plane-postgres-backup-and-restore).
 
-## Stranded PR Watchdog
+## PR Monitor Recovery
 
 The monitor is supposed to stay alive until the PR merges, closes, or fails. If
-the host restarts, Docker dies, or a process is killed, an open `awf/` feature
-PR can be stranded with no process reading new comments.
-
-Run one watchdog per host:
+the host restarts, Docker dies, or a worker process is restarted, use the
+control-plane adoption and remonitor surfaces instead of legacy helper scripts:
 
 ```bash
-uv run --python 3.12 --extra dev awf-watchdog \
-  --work-dir ~/.awf/runs \
-  --poll-seconds 300 \
-  --repo dimileeh/aira-agent-workspace-fabric
+uv run --python 3.12 --extra dev awf workspace adopt-pr \
+  --repo dimileeh/aira-agent-workspace-fabric \
+  --pr 123 \
+  --auto-merge \
+  --format pretty
 ```
 
-The watchdog lists open `awf/` PRs with `gh pr list`, checks whether a matching
-`run_awf.py` monitor process is already running, and calls
-`scripts/attach_feature_pr_monitor.py` for any stranded PR. The attach script is
-idempotent and uses a file lock so repeated watchdog scans do not double-spawn a
-monitor for the same PR.
+Existing monitor workspaces can also be recovered with
+`awf workspace remonitor`, the matching REST control route, or
+`awf_remonitor_workspace` through MCP.
 
 ## Working With Dockerized Projects
 

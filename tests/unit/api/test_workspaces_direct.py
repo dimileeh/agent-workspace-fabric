@@ -57,7 +57,11 @@ async def session(
             await s.commit()
 
 
-def _payload(**overrides: object) -> WorkspaceCreateRequest:
+def _payload(
+    *,
+    provider_readiness_override: bool = False,
+    **overrides: object,
+) -> WorkspaceCreateRequest:
     defaults: dict[str, object] = {
         "repo_url": "git@github.com:dimileeh/aira-web.git",
         "branch_base": "development",
@@ -67,6 +71,11 @@ def _payload(**overrides: object) -> WorkspaceCreateRequest:
         "test_commands": ["pytest -q"],
         "requires_database": False,
     }
+    if provider_readiness_override:
+        defaults["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "direct workspace route fixture",
+        }
     defaults.update(overrides)
     return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
 
@@ -83,7 +92,7 @@ class TestCreateDirect:
     @pytest.mark.unit
     async def test_creates_new_workspace_without_idempotency(self, session: AsyncSession) -> None:
         result = await create_workspace(
-            payload=_payload(),
+            payload=_payload(provider_readiness_override=True),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -110,7 +119,7 @@ class TestCreateDirect:
     async def test_replays_idempotent_match(self, session: AsyncSession) -> None:
         """Same key + same body: the second call returns the SAME
         workspace row (covers the replay path at line 60)."""
-        payload = _payload(task_title="idem")
+        payload = _payload(provider_readiness_override=True, task_title="idem")
         first = await create_workspace(
             payload=payload,
             idempotency_key="IDEM-OK",
@@ -133,13 +142,13 @@ class TestCreateDirect:
         """Same key + different body: returns a 409 JSONResponse (covers
         lines 50-58)."""
         await create_workspace(
-            payload=_payload(task_title="first"),
+            payload=_payload(provider_readiness_override=True, task_title="first"),
             idempotency_key="IDEM-CONFLICT",
             settings=_route_settings(),
             session=session,
         )
         result = await create_workspace(
-            payload=_payload(task_title="second"),
+            payload=_payload(provider_readiness_override=True, task_title="second"),
             idempotency_key="IDEM-CONFLICT",
             settings=_route_settings(),
             session=session,
@@ -160,7 +169,7 @@ class TestGetDirect:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         created = await create_workspace(
-            payload=_payload(task_title="look-me-up"),
+            payload=_payload(provider_readiness_override=True, task_title="look-me-up"),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -181,7 +190,10 @@ class TestGetDirect:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         created = await create_workspace(
-            payload=_payload(task_title="route helper coverage"),
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="route helper coverage",
+            ),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -215,7 +227,10 @@ class TestGetDirect:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         created = await create_workspace(
-            payload=_payload(task_title="transient audit cleanup"),
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="transient audit cleanup",
+            ),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -255,7 +270,10 @@ class TestGetDirect:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         created = await create_workspace(
-            payload=_payload(task_title="non-transient audit cleanup"),
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="non-transient audit cleanup",
+            ),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -296,7 +314,10 @@ class TestGetDirect:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         created = await create_workspace(
-            payload=_payload(task_title="invalid audit payload"),
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="invalid audit payload",
+            ),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -341,13 +362,13 @@ class TestListDirect:
     @pytest.mark.unit
     async def test_returns_rows(self, session: AsyncSession) -> None:
         await create_workspace(
-            payload=_payload(task_title="a"),
+            payload=_payload(provider_readiness_override=True, task_title="a"),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
         )
         await create_workspace(
-            payload=_payload(task_title="b"),
+            payload=_payload(provider_readiness_override=True, task_title="b"),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
@@ -380,6 +401,36 @@ class TestPayloadsMatch:
             test_commands=["x"],
         )
         assert _payloads_match(ws, payload) is True
+
+    @pytest.mark.unit
+    async def test_legacy_null_auto_merge_matches_default_true(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=["x"],
+            requires_database=False,
+            idempotency_key="k",
+        )
+        payload = _payload(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            test_commands=["x"],
+        )
+
+        try:
+            ws.auto_merge = None  # type: ignore[assignment]
+            assert _payloads_match(ws, payload) is True
+        finally:
+            ws.auto_merge = True
 
     @pytest.mark.unit
     async def test_mismatch_on_repo_url(self, session: AsyncSession) -> None:
