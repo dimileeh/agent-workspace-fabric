@@ -448,7 +448,7 @@ async def _create_workspace(
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
 ) -> str:
-    body = _v2_body(
+    body = _v2_body_with_preflight_override(
         repo_url=repo_url,
         base_branch=base_branch,
         title=task_title or title,
