@@ -1375,6 +1375,101 @@ class TestCreateWorkspace:
         assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
 
     @pytest.mark.unit
+    async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/matched-aliases.git",
+                "base_branch": "main",
+                "branch_base": "main",
+                "task_title": "Matched MCP create aliases",
+                "task_prompt": "Accept callers that send both alias forms with matching values.",
+                "validation_commands": ["uv run pytest tests/unit/mcp -q"],
+                "test_commands": ["uv run pytest tests/unit/mcp -q"],
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp matched alias compatibility",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "main"
+        assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
+
+    @pytest.mark.unit
+    async def test_create_workspace_rejects_conflicting_branch_aliases(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/conflicting-branch.git",
+                "base_branch": "main",
+                "branch_base": "release/next",
+                "task_title": "Conflicting branch aliases",
+                "task_prompt": "Reject mismatched base branch alias values.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp branch alias conflict regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": "Provide either base_branch or branch_base, or ensure they match.",
+            "detail": None,
+        }
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
+    async def test_create_workspace_rejects_conflicting_validation_command_aliases(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/conflicting-validation.git",
+                "base_branch": "main",
+                "task_title": "Conflicting validation aliases",
+                "task_prompt": "Reject mismatched validation command alias values.",
+                "validation_commands": ["uv run pytest tests/unit -q"],
+                "test_commands": ["uv run pytest tests/unit/mcp -q"],
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp validation alias conflict regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": (
+                "Provide either validation_commands or test_commands, or ensure they match."
+            ),
+            "detail": None,
+        }
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
     async def test_policy_metadata_round_trips_through_create_get_and_list(
         self,
         mcp,

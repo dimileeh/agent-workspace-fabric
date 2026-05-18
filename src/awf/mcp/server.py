@@ -193,9 +193,15 @@ def build_mcp_server(
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
         repo_url: str = Field(..., description="Git URL the workspace should check out."),
-        base_branch: str = Field(
-            default="main",
-            description="Branch to branch FROM; feature branch is created off it.",
+        base_branch: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            json_schema_extra={"default": "main"},
+            description=(
+                "Branch to branch FROM; feature branch is created off it. "
+                "Defaults to main when omitted."
+            ),
         ),
         branch_base: str | None = Field(
             default=None,
@@ -249,8 +255,9 @@ def build_mcp_server(
             default=None,
             description="Optional inline workspace profile dictionary.",
         ),
-        validation_commands: list[str] = Field(
-            default_factory=list,
+        validation_commands: list[str] | None = Field(
+            default=None,
+            json_schema_extra={"default": []},
             description="Shell commands to validate the change.",
         ),
         test_commands: list[str] | None = Field(
@@ -307,9 +314,24 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Create a new AWF workspace using the canonical rich v1 contract."""
-        effective_base_branch = branch_base or base_branch
+        if branch_base is not None and base_branch is not None and branch_base != base_branch:
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either base_branch or branch_base, or ensure they match.",
+            )
+        if (
+            test_commands is not None
+            and validation_commands is not None
+            and test_commands != validation_commands
+        ):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either validation_commands or test_commands, or ensure they match.",
+            )
+
+        effective_base_branch = branch_base or base_branch or "main"
         effective_validation_commands = (
-            test_commands if test_commands is not None else validation_commands
+            test_commands if test_commands is not None else validation_commands or []
         )
         effective_profile_ref = "aira" if requires_database else profile_ref
         req = WorkspaceCreateRequest(
