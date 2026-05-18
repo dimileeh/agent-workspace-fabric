@@ -48,6 +48,12 @@ _SECRET_NAME_RE = re.compile(
     r"(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|ACCESS_KEY)",
     re.IGNORECASE,
 )
+_PROFILE_MARKER_PATHS = (
+    ".awf/workspace.yml",
+    ".awf/workspace.yaml",
+    "awf.workspace.yml",
+    "awf.workspace.yaml",
+)
 _HTTP_COMPOSE_PORTS = frozenset({80, 3000, 3001, 4173, 5000, 5173, 8000, 8080, 8081, 8888})
 _HTTPS_COMPOSE_PORTS = frozenset({443, 8443})
 
@@ -296,10 +302,17 @@ def preview_workspace_profile(
         confidence=resolution.profile.confidence,
         signals=tuple(resolution.candidates_considered),
     )
+    profile_path = next(
+        (project / rel for rel in _PROFILE_MARKER_PATHS if (project / rel).is_file()),
+        None,
+    )
+    draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
+    if draft_yaml == "":
+        draft_yaml = _profile_yaml(resolution.profile)
     draft = DraftProfile(
         template=resolution.profile.name,
         profile=resolution.profile,
-        yaml=_profile_yaml(resolution.profile),
+        yaml=draft_yaml,
         diagnostics=PreviewDiagnostics(
             missing_services=(),
             missing_secrets=(),
