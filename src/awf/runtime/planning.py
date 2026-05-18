@@ -674,12 +674,29 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
         "unit",
         "integration",
     )
+    work_objects = (
+        "assertion",
+        "assertions",
+        "case",
+        "cases",
+        "fixture",
+        "fixtures",
+        "scenario",
+        "scenarios",
+    )
+    location_prepositions = ("for", "in", "inside", "into", "to", "under", "within")
+    work_verb_pattern = rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
+    modifier_pattern = rf"(?:\s+(?:{'|'.join(modifiers)}))*"
     path_prefix = r"(?:(?:\./|\.\\)|[a-z0-9_.-]+[/\\])*"
+    prefix = text[:path_match_start]
+    if re.search(rf"{work_verb_pattern}{modifier_pattern}\s+{path_prefix}$", prefix) is not None:
+        return True
     return (
         re.search(
-            rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
-            rf"(?:\s+(?:{'|'.join(modifiers)}))*\s+{path_prefix}$",
-            text[:path_match_start],
+            rf"{work_verb_pattern}{modifier_pattern}\s+"
+            rf"(?:{'|'.join(work_objects)})\s+"
+            rf"(?:{'|'.join(location_prepositions)})\s+{path_prefix}$",
+            prefix,
         )
         is not None
     )
