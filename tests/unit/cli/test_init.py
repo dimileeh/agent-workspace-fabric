@@ -484,6 +484,42 @@ def test_init_without_path_prefers_compose_env_example_over_root(
 
 
 @pytest.mark.unit
+def test_init_without_path_does_not_seed_non_root_compose_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only seed compose env files from verified AWF roots."""
+    from awf.service import bootstrap as bootstrap_mod
+
+    unrelated_root = tmp_path / "unrelated-repo"
+    compose = unrelated_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_example = compose / ".env.example"
+    compose_example.write_text("AWF_API_TOKEN=wrong\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace-root"
+    workspace_compose = workspace_root / "docker" / "compose"
+    workspace_compose.mkdir(parents=True)
+    (workspace_compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    workspace_example = workspace_root / ".env.example"
+    workspace_example.write_text("AWF_API_TOKEN=correct\n", encoding="utf-8")
+
+    monkeypatch.chdir(unrelated_root)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(bootstrap_mod, "_resolve_bootstrap_asset_root", lambda: workspace_root)
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    expected_env_file = workspace_compose / ".env"
+    assert expected_env_file.exists()
+    assert expected_env_file.read_bytes() == workspace_example.read_bytes()
+    assert not (compose / ".env").exists()
+    assert f"wrote {expected_env_file} from {workspace_example}" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
