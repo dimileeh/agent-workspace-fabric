@@ -484,6 +484,8 @@ def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_
         "Run pytest during AWF validation and add tests/unit/runtime/test_planning.py.",
         "Rerun pytest under validation after updating tests/unit/test_widget.py.",
         "Run pytest in validation, then create test/unit/test_cli.py for the new case.",
+        "Run pytest during AWF validation and add src/tests/unit/test_widget.py.",
+        "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
     ),
 )
 def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(

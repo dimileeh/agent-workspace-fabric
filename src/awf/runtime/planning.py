@@ -674,10 +674,11 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
         "unit",
         "integration",
     )
+    path_prefix = r"(?:(?:\./|\.\\)|[a-z0-9_.-]+[/\\])*"
     return (
         re.search(
             rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
-            rf"(?:\s+(?:{'|'.join(modifiers)}))*\s*$",
+            rf"(?:\s+(?:{'|'.join(modifiers)}))*\s+{path_prefix}$",
             text[:path_match_start],
         )
         is not None
