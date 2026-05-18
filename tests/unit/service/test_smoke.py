@@ -649,7 +649,7 @@ class TestCollectSmokeReportMockedMode:
         profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
-        assert "workspace profile" in profile_phase["message"].lower()
+        assert profile_phase.get("evidence", {}).get("error")
         assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
         workspace_request_phase = next(
@@ -677,7 +677,7 @@ class TestCollectSmokeReportMockedMode:
         profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
-        assert "workspace profile" in profile_phase["message"].lower()
+        assert profile_phase.get("evidence", {}).get("error")
         assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
         workspace_request_phase = next(
