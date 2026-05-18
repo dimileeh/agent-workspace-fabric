@@ -284,12 +284,15 @@ async def test_workspace_service_create_v1_and_event_listing(
         )
     )
 
+    fetched = await service.get(created.id)
     events = await service.list_events(created.id, event_type="workspace.created")
     missing_events = await service.list_events("ws_missing")
 
     assert created.repo_url == "git@github.com:example/v1.git"
     assert created.env_profile == "aira"
-    assert created.requires_database is False
+    assert created.requires_database is True
+    assert fetched is not None
+    assert fetched.requires_database is True
     assert events is not None
     assert [event.event_type for event in events] == ["workspace.created"]
     assert missing_events is None

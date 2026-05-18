@@ -1022,7 +1022,7 @@ async def create_workspace_row(
         requested_profile=requested_profile,
         resolved_profile=resolved_profile,
         test_commands=payload.validation.commands,
-        requires_database=False,
+        requires_database=payload.requires_database,
         idempotency_key=idempotency_key,
         task_kind=payload.task.kind,
     )

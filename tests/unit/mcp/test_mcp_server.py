@@ -1379,6 +1379,7 @@ class TestCreateWorkspace:
         assert ws is not None
         assert ws.branch_base == "legacy-base"
         assert ws.profile_ref == "aira"
+        assert ws.requires_database is True
         assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
 
     @pytest.mark.unit
