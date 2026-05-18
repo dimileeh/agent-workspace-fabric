@@ -160,6 +160,7 @@ async def _phase_service_readiness(
     mocked_local: bool,
     service_collector: ServiceCollector | None,
 ) -> dict[str, Any]:
+    """Probe AWF service health for smoke readiness."""
     try:
         collector = service_collector or _default_service_collector
         result = await collector(settings)
@@ -198,6 +199,7 @@ def _phase_auth_readiness(
     mocked_local: bool,
     auth_collector: AuthCollector | None,
 ) -> dict[str, Any]:
+    """Evaluate provider readiness and derive auth phase status."""
     try:
         collector = auth_collector or _default_auth_collector
         result = collector(settings)
@@ -319,6 +321,7 @@ def _phase_profile_preview(
 
 
 def _extract_validation_commands(preview: Any) -> list[str]:
+    """Extract ordered validate commands from a preview profile payload."""
     try:
         profile_phases = getattr(getattr(preview, "draft", None), "profile", None)
         if profile_phases is None:
@@ -336,6 +339,7 @@ def _extract_validation_commands(preview: Any) -> list[str]:
 
 
 def _phase_validation(validation_commands: list[str]) -> dict[str, Any]:
+    """Build validation phase status from discovered commands."""
     if validation_commands:
         return {
             "name": "validation",
@@ -359,6 +363,7 @@ def _phase_workspace_request(
     preview: Any,
     project: Path,
 ) -> dict[str, Any]:
+    """Build the workspace-request phase from the preview profile."""
     try:
         from awf.profiles.onboarding import _smoke_request
 
@@ -403,6 +408,7 @@ def _phase_pr_monitor(
     mocked_local: bool,
     settings: ServiceSettings,
 ) -> dict[str, Any]:
+    """Report PR monitor readiness for mocked-local versus live mode."""
     if mocked_local:
         return {
             "name": "pr_monitor",
@@ -438,6 +444,7 @@ def _resolve_config(
     settings: ServiceSettings,
     config_resolver: ConfigResolver | None,
 ) -> dict[str, Any]:
+    """Resolve smoke runtime config, with optional override support."""
     resolver = config_resolver or _default_config_resolver
     return resolver(settings)
 
@@ -524,6 +531,7 @@ async def _phase_console_links(
 
 
 def _compute_overall_status(phase_statuses: list[str]) -> str:
+    """Collapse per-phase status values into the overall smoke status."""
     has_fail = any(s == "fail" for s in phase_statuses)
     has_warn = any(s == "warn" for s in phase_statuses)
     if has_fail:
@@ -534,6 +542,7 @@ def _compute_overall_status(phase_statuses: list[str]) -> str:
 
 
 def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
+    """Collect non-no-op actionable hints from smoke phases."""
     actions: list[str] = []
     for phase in phases:
         action = phase.get("action", "")
@@ -543,6 +552,7 @@ def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
+    """Check AWF service healthz endpoint and return status map."""
     import httpx
 
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -553,6 +563,7 @@ async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any
 
 
 async def _default_console_checker(url: str) -> bool:
+    """Return whether a URL responds as reachable console endpoint."""
     import httpx
 
     try:
@@ -564,12 +575,14 @@ async def _default_console_checker(url: str) -> bool:
 
 
 def _default_auth_collector(settings: ServiceSettings) -> dict[str, Any]:
+    """Resolve current provider readiness from the auth provider subsystem."""
     from awf.service.provider_readiness import collect_agent_readiness
 
     return collect_agent_readiness(settings)
 
 
 def _default_profile_preview(project: Path) -> Any:
+    """Return an onboarding-generated preview for projects without an on-disk profile."""
     from awf.profiles.onboarding import preview_project_onboarding
 
     return preview_project_onboarding(project)
@@ -585,6 +598,7 @@ def _default_disk_profile_preview(project: Path) -> Any:
 
 
 def _default_config_resolver(settings: ServiceSettings) -> dict[str, Any]:
+    """Build smoke config values consumed by console-link reporting."""
     result: dict[str, Any] = {
         "api_base_url": settings.api_base_url,
     }

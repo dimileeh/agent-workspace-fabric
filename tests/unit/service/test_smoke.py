@@ -383,6 +383,7 @@ class TestCollectSmokeReportLiveMode:
         assert evidence.get("template") == "node-nextjs"
 
     async def test_profile_preview_prefers_on_disk_profile(self, tmp_path: Path) -> None:
+        """Ensure on-disk workspace profile path wins over autodetection."""
         (tmp_path / "apps" / "api").mkdir(parents=True)
         (tmp_path / "apps" / "worker").mkdir(parents=True)
         (tmp_path / ".awf").mkdir()
@@ -420,6 +421,7 @@ class TestCollectSmokeReportLiveMode:
         assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
 
     async def test_profile_preview_prefers_root_awf_workspace_yaml(self, tmp_path: Path) -> None:
+        """Prefer root workspace profile when a marker exists at repository root."""
         profile_path = tmp_path / "awf.workspace.yml"
         profile_path.write_text(
             "awf:\n  name: root-profile\n  phases:\n    validate:\n      - pytest -q\n",
@@ -632,6 +634,7 @@ class TestCollectSmokeReportMockedMode:
     async def test_invalid_on_disk_profile_fails_with_profile_preview_error(
         self, tmp_path: Path
     ) -> None:
+        """Report preview failure when .awf/workspace.yml is invalid."""
         (tmp_path / ".awf").mkdir()
         (tmp_path / ".awf" / "workspace.yml").write_text(
             "name: bad\nservices:\n  - name: db\n",
@@ -665,6 +668,7 @@ class TestCollectSmokeReportMockedMode:
     async def test_invalid_root_awf_workspace_yaml_fails_with_profile_preview_error(
         self, tmp_path: Path
     ) -> None:
+        """Report preview failure when awf.workspace.yml is invalid."""
         (tmp_path / "awf.workspace.yml").write_text(
             "awf:\n  name: bad\n  services:\n    - name: db\n",
             encoding="utf-8",
