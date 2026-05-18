@@ -1311,6 +1311,22 @@ class TestCollectSmokeReportExceptionPaths:
             result = _default_profile_preview(Path("/tmp"))
         assert result is not None
 
+    def test_default_disk_profile_preview_direct_call(self, tmp_path: Path) -> None:
+        workspace_dir = tmp_path / ".awf"
+        workspace_dir.mkdir()
+        (workspace_dir / "workspace.yml").write_text(
+            "awf:\n  name: generic\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        from awf.service.smoke import _default_disk_profile_preview
+
+        result = _default_disk_profile_preview(tmp_path)
+        assert result.draft.template == "generic"
+        assert result.draft.yaml
+        assert "awf:" in result.draft.yaml
+        assert result.inspection.detected_template == "generic"
+
     async def test_workspace_request_fails_when_smoke_returns_non_dict(
         self, tmp_path: Path
     ) -> None:
