@@ -124,7 +124,12 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
-        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        assert kwargs == {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "env": {},
+        }
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = asyncio.run(
@@ -217,6 +222,36 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
     assert result.service_status["status"] == "ok"
     assert calls
     assert all(call["env"] == service_env for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls
+    assert [call.get("env") for call in calls] == [{}] * len(calls)
 
 
 @pytest.mark.unit

@@ -411,7 +411,7 @@ def _run_stage(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ) if environ else None,
+                env=dict(environ),
             ),
         )
     except FileNotFoundError as exc:

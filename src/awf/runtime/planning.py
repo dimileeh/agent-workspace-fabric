@@ -689,7 +689,14 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
     modifier_pattern = rf"(?:\s+(?:{'|'.join(modifiers)}))*"
     path_prefix = r"(?:(?:\./|\.\\)|[a-z0-9_.-]+[/\\])*"
     prefix = text[:path_match_start]
-    if re.search(rf"{work_verb_pattern}{modifier_pattern}\s+{path_prefix}$", prefix) is not None:
+    if (
+        re.search(
+            rf"{work_verb_pattern}{modifier_pattern}\s+{path_prefix}$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    ):
         return True
     return (
         re.search(
@@ -697,6 +704,7 @@ def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
             rf"(?:{'|'.join(work_objects)})\s+"
             rf"(?:{'|'.join(location_prepositions)})\s+{path_prefix}$",
             prefix,
+            flags=re.IGNORECASE,
         )
         is not None
     )

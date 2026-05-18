@@ -506,6 +506,18 @@ def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_pa
 @pytest.mark.parametrize(
     "gap",
     (
+        "Add tests/unit/test_widget.py to cover the new case.",
+        "Update assertions in tests/unit/test_widget.py after the refactor.",
+    ),
+)
+def test_test_path_work_context_accepts_sentence_case_work_verbs(gap: str) -> None:
+    assert planning_mod._has_test_path_work_context(gap, gap.index("tests/"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "AWF test suite, coverage report is missing.",
         "AWF test run: coverage evidence is absent.",
     ),
