@@ -41,7 +41,7 @@ def test_legacy_flat_workspace_create_requires_database_selects_aira_profile() -
 
 
 @pytest.mark.unit
-def test_legacy_flat_workspace_create_omitted_branch_base_matches_nested_default() -> None:
+def test_legacy_flat_workspace_create_omitted_branch_base_preserves_development() -> None:
     request = api_schemas.WorkspaceCreateRequest.model_validate(
         {
             "repo_url": "git@github.com:example/app.git",
@@ -56,8 +56,9 @@ def test_legacy_flat_workspace_create_omitted_branch_base_matches_nested_default
     nested_default = api_schemas.WorkspaceRepo.model_validate(
         {"url": "git@github.com:example/app.git"}
     ).base_branch
-    assert request.repo.base_branch == nested_default == "main"
-    assert request.branch_base == nested_default
+    assert nested_default == "main"
+    assert request.repo.base_branch == "development"
+    assert request.branch_base == "development"
 
 
 @pytest.mark.unit

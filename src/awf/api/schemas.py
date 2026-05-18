@@ -62,6 +62,7 @@ NetworkPosture = Literal["offline", "restricted", "open"]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
+_LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
 
 
@@ -224,7 +225,7 @@ class WorkspaceCreateRequest(BaseModel):
             **extras,
             "repo": {
                 "url": data.get("repo_url"),
-                "base_branch": data.get("branch_base", _DEFAULT_REPO_BASE_BRANCH),
+                "base_branch": data.get("branch_base", _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT),
             },
             "task": {
                 "title": data.get("task_title"),
