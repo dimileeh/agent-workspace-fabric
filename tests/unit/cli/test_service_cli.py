@@ -690,6 +690,7 @@ def test_readme_documents_service_logs_command() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_service_bootstrap_command() -> None:
+    """Verify concepts docs keep the service bootstrap command discoverable."""
     readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "awf service bootstrap" in readme
