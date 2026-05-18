@@ -630,6 +630,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     # around test/test(s) remain validation evidence.
     for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
         if named_validation_command_handoff and text[match.end() :].startswith(("/", "\\")):
+            if _has_test_path_work_context(text, match.start()):
+                return False
             continue
         if re.match(
             r"[\s\-,:]+(?:coverage|evidence|provenance|logs?|"
@@ -640,6 +642,46 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             continue
         return False
     return True
+
+
+def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
+    work_verbs = (
+        "add",
+        "adding",
+        "create",
+        "creating",
+        "edit",
+        "editing",
+        "modify",
+        "modifying",
+        "revise",
+        "revising",
+        "update",
+        "updating",
+        "write",
+        "writing",
+    )
+    modifiers = (
+        "a",
+        "an",
+        "the",
+        "new",
+        "missing",
+        "additional",
+        "focused",
+        "regression",
+        "targeted",
+        "unit",
+        "integration",
+    )
+    return (
+        re.search(
+            rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
+            rf"(?:\s+(?:{'|'.join(modifiers)}))*\s*$",
+            text[:path_match_start],
+        )
+        is not None
+    )
 
 
 def _has_migration_validation_evidence_context(text: str) -> bool:
