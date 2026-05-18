@@ -249,7 +249,12 @@ def _phase_profile_preview(
     profile_preview: ProfilePreview | None,
 ) -> tuple[Any, dict[str, Any]]:
     try:
-        preview_fn = profile_preview or _default_profile_preview
+        if profile_preview is not None:
+            preview_fn = profile_preview
+        elif _project_has_awf_profile(project):
+            preview_fn = _default_disk_profile_preview
+        else:
+            preview_fn = _default_profile_preview
         preview = preview_fn(project)
     except Exception as exc:
         return None, {
@@ -542,6 +547,42 @@ def _default_profile_preview(project: Path) -> Any:
     from awf.profiles.onboarding import preview_project_onboarding
 
     return preview_project_onboarding(project)
+
+
+def _default_disk_profile_preview(project: Path) -> Any:
+    from awf.profiles import resolve_workspace_profile
+    from awf.profiles.onboarding import (
+        DraftProfile,
+        PreviewDiagnostics,
+        ProjectInspection,
+        ProjectOnboardingPreview,
+    )
+
+    resolution = resolve_workspace_profile(worktree_path=project)
+    inspection = ProjectInspection(
+        path=project,
+        detected_template=resolution.profile.name,
+        confidence=resolution.profile.confidence,
+        signals=tuple(resolution.candidates_considered),
+    )
+    draft = DraftProfile(
+        template=resolution.profile.name,
+        profile=resolution.profile,
+        yaml="",
+        diagnostics=PreviewDiagnostics(
+            missing_services=(),
+            missing_secrets=(),
+            missing_validation_commands=(),
+            missing_healthchecks=(),
+            missing_ports=(),
+        ),
+    )
+    return ProjectOnboardingPreview(
+        path=project,
+        inspection=inspection,
+        draft=draft,
+        diagnostics=draft.diagnostics,
+    )
 
 
 def _default_config_resolver(settings: ServiceSettings) -> dict[str, Any]:

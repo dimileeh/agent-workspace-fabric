@@ -381,6 +381,43 @@ class TestCollectSmokeReportLiveMode:
         evidence = profile_phase.get("evidence", {})
         assert evidence.get("template") == "node-nextjs"
 
+    async def test_profile_preview_prefers_on_disk_profile(self, tmp_path: Path) -> None:
+        (tmp_path / "apps" / "api").mkdir(parents=True)
+        (tmp_path / "apps" / "worker").mkdir(parents=True)
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yml").write_text(
+            "awf:\n"
+            "  name: multi-service\n"
+            "  confidence: medium\n"
+            "  phases:\n"
+            "    validate:\n"
+            "      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "ok"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_READY"
+        assert profile_phase["evidence"]["template"] == "multi-service"
+
+        validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
+        assert validation_phase["reason_code"] == "SMOKE_VALIDATION_READY"
+        assert validation_phase["evidence"]["commands"] == ["pytest -q"]
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
+
 
 @pytest.mark.unit
 class TestCollectSmokeReportMockedMode:
@@ -560,6 +597,30 @@ class TestCollectSmokeReportMockedMode:
 
         validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
         assert validation_phase["reason_code"] == "SMOKE_VALIDATION_MISSING"
+
+    async def test_invalid_on_disk_profile_fails_with_profile_preview_error(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yml").write_text(
+            "name: bad\nservices:\n  - name: db\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "fail"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
+        assert "workspace profile" in profile_phase["message"].lower()
+        assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
     async def test_workspace_request_ready_when_smoke_request_valid(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
