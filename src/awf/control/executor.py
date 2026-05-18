@@ -4753,6 +4753,7 @@ class WorkspaceExecutor:
             return f"planning profile is invalid: {exc}"
 
         before_plan = await self._changed_paths(worktree_path)
+        plan_file_digest_before = _digest_file_if_present(worktree_path / plan_path)
         baseline_sha: str | None = None
         rev_r = await self._runner.run(
             [
@@ -4791,6 +4792,13 @@ class WorkspaceExecutor:
             else set()
         )
         after_plan = dirty_paths | committed_paths
+        plan_file_digest_after = _digest_file_if_present(worktree_path / plan_path)
+        if (
+            plan_path not in after_plan
+            and plan_file_digest_after is not None
+            and plan_file_digest_after != plan_file_digest_before
+        ):
+            after_plan = {*after_plan, plan_path}
         if plan_path not in after_plan:
             return _build_planning_scope_failure(
                 scope_phase="planning",
@@ -7693,6 +7701,15 @@ def _read_text_if_present(path: Path) -> str | None:
         if path.is_file():
             text = path.read_text(encoding="utf-8").strip()
             return text or None
+    except OSError:
+        return None
+    return None
+
+
+def _digest_file_if_present(path: Path) -> str | None:
+    try:
+        if path.is_file():
+            return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
     return None

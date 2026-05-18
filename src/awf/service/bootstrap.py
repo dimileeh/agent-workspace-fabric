@@ -42,6 +42,7 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
+        env: Mapping[str, str] | None = None,
     ) -> CompletedProcessLike: ...  # pragma: no cover
 
 
@@ -190,7 +191,14 @@ async def run_service_bootstrap(
         compose_file=compose_file,
         environ=service_env,
     ):
-        completed.append(await asyncio.to_thread(_run_stage, stage, run_subprocess=runner))
+        completed.append(
+            await asyncio.to_thread(
+                _run_stage,
+                stage,
+                run_subprocess=runner,
+                environ=service_env,
+            )
+        )
 
     service_status = await _poll_status(
         settings,
@@ -385,14 +393,24 @@ def _run_stage(
     stage: _BootstrapStage,
     *,
     run_subprocess: SubprocessRun,
+    environ: Mapping[str, str],
 ) -> ServiceBootstrapStageResult:
     try:
-        result = run_subprocess(
-            list(stage.command),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        if environ:
+            result = run_subprocess(
+                list(stage.command),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=dict(environ),
+            )
+        else:
+            result = run_subprocess(
+                list(stage.command),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
     except FileNotFoundError as exc:
         raise ServiceBootstrapError(
             reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
@@ -501,5 +519,14 @@ def _run_subprocess(
     check: bool,
     capture_output: bool,
     text: Literal[True],
+    env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
+    if env is not None:
+        return subprocess.run(
+            args,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            env=dict(env),
+        )
     return subprocess.run(args, check=check, capture_output=capture_output, text=text)

@@ -183,6 +183,42 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_bootstrap_passes_merged_service_environment_to_docker_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service_env = {
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:compose-secret@localhost:5433/awf",
+        "AWF_POSTGRES_PASSWORD": "compose-secret",
+    }
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(service_env))
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls
+    assert all(call["env"] == service_env for call in calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_passes_compose_env_file_when_available(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

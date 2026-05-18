@@ -2739,6 +2739,62 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_plan_ignored.md"
+
+    class _IgnoredPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text("# Plan\n\nUse the on-disk profile.\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+    runner.queue_result(returncode=0, stdout="")  # dirty_paths: ignored plan is hidden
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _IgnoredPlanAdapter(
+        "plan written",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-ignored",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_ignored", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
 async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) -> None:
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     adapter = _PlanningAdapter()
