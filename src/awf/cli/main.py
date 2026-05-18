@@ -1007,7 +1007,7 @@ def _run_init_service_bootstrap(
             env_action = "no_example"
             if pretty:
                 typer.echo(
-                    "  no .env.example found in current directory; skipped "
+                    "  no .env.example found; skipped "
                     f"{env_file} "
                     "creation (run `awf init` from the AWF repository root if "
                     "you expected one)"

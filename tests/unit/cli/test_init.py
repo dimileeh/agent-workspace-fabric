@@ -704,6 +704,7 @@ def test_init_without_path_warns_when_env_example_missing(
     assert result.exit_code == 0, result.output
     assert not (tmp_path / ".env").exists()
     assert "no .env.example found" in result.output
+    assert "current directory" not in result.output
     assert "AWF repository root" in result.output
 
 
