@@ -343,6 +343,11 @@ def build_mcp_server(
                 "INVALID_REQUEST",
                 "Provide either profile_ref or env_profile, or ensure they match.",
             )
+        if requires_database and profile_ref not in (None, "auto", "aira"):
+            return _error_result(
+                "INVALID_REQUEST",
+                "Provide either requires_database or profile_ref='aira'.",
+            )
 
         effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
         effective_validation_commands = (

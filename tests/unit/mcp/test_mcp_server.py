@@ -1530,6 +1530,38 @@ class TestCreateWorkspace:
         assert rows == []
 
     @pytest.mark.unit
+    async def test_create_workspace_rejects_database_shortcut_conflicting_profile_ref(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/conflicting-database-profile.git",
+                "base_branch": "main",
+                "task_title": "Conflicting database profile shortcut",
+                "task_prompt": "Reject requires_database when profile_ref is explicit.",
+                "profile_ref": "python",
+                "requires_database": True,
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp database profile conflict regression",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": "Provide either requires_database or profile_ref='aira'.",
+            "detail": None,
+        }
+        assert_no_internal_error_fields(result.structuredContent)
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
     async def test_create_workspace_rejects_conflicting_validation_command_aliases(
         self,
         mcp,
