@@ -63,6 +63,7 @@ def _stub_bootstrap_mode(
     docker_status: str = "ok",
     bootstrap_result: Any = None,
     bootstrap_error: Exception | None = None,
+    asset_root: Path | None = None,
 ) -> dict[str, Any]:
     """Stub doctor + service bootstrap for ``awf init`` (no-path) tests."""
 
@@ -101,6 +102,7 @@ def _stub_bootstrap_mode(
         return bootstrap_result
 
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+    monkeypatch.setattr(bootstrap_mod, "_resolve_bootstrap_asset_root", lambda: asset_root)
     return captured
 
 
@@ -447,7 +449,7 @@ def test_init_without_path_seeds_source_compose_env_when_missing(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     example = tmp_path / ".env.example"
     example.write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
     result = _runner.invoke(app, ["init"])
 
@@ -472,7 +474,7 @@ def test_init_without_path_prefers_compose_env_example_over_root(
     compose_example = compose / ".env.example"
     compose_example.write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
     result = _runner.invoke(app, ["init"])
 
@@ -489,8 +491,6 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Only seed compose env files from verified AWF roots."""
-    from awf.service import bootstrap as bootstrap_mod
-
     unrelated_root = tmp_path / "unrelated-repo"
     compose = unrelated_root / "docker" / "compose"
     compose.mkdir(parents=True)
@@ -507,8 +507,7 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
 
     monkeypatch.chdir(unrelated_root)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(bootstrap_mod, "_resolve_bootstrap_asset_root", lambda: workspace_root)
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
 
     result = _runner.invoke(app, ["init"])
 
@@ -538,10 +537,7 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     monkeypatch.chdir(project_subdir)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
 
-    from awf.service import bootstrap
-
-    monkeypatch.setattr(bootstrap, "_resolve_bootstrap_asset_root", lambda: workspace_root)
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
 
     result = _runner.invoke(app, ["init"])
 
@@ -566,7 +562,7 @@ def test_init_without_path_does_not_overwrite_existing_source_compose_env(
     env_file.write_text("AWF_API_TOKEN=already_set\n", encoding="utf-8")
     example = tmp_path / ".env.example"
     example.write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
     result = _runner.invoke(app, ["init"])
 
@@ -625,7 +621,7 @@ def test_init_without_path_does_not_emit_seeded_compose_token_values(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     example = compose / ".env.example"
     example.write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
-    _stub_bootstrap_mode(monkeypatch)
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
     result = _runner.invoke(app, ["init"])
 

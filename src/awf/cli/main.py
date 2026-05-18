@@ -869,11 +869,16 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
     if asset_root is not None:
         compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
         if compose_local_service.exists():
-            compose_env = compose_local_service.parent / ".env"
+            if asset_root.resolve() == Path.cwd().resolve():
+                compose_env = Path("docker/compose/.env")
+                fallback_example = Path(".env.example")
+            else:
+                compose_env = compose_local_service.parent / ".env"
+                fallback_example = asset_root / ".env.example"
             compose_example = compose_env.with_name(".env.example")
             if compose_example.exists():
                 return compose_env, compose_example
-            return compose_env, asset_root / ".env.example"
+            return compose_env, fallback_example
 
     compose_local_service = Path("docker/compose/local-service.yml")
     if compose_local_service.exists():
