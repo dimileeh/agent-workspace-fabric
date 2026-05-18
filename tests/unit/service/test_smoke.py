@@ -680,6 +680,13 @@ class TestCollectSmokeReportMockedMode:
         assert "workspace profile" in profile_phase["message"].lower()
         assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
 
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["status"] == "fail"
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_FAILED"
+        assert "workspace request" in workspace_request_phase["message"].lower()
+
     async def test_workspace_request_ready_when_smoke_request_valid(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
 
