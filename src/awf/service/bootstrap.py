@@ -190,7 +190,9 @@ async def run_service_bootstrap(
     runner = run_subprocess or _run_subprocess
     collector = status_collector or collect_service_status
     completed: list[ServiceBootstrapStageResult] = []
-    service_env = local_service_environ() if provider_environ is None else provider_environ
+    service_env = local_service_environ()
+    if provider_environ is not None:
+        service_env.update(provider_environ)
 
     for stage in _bootstrap_stages(
         settings,
