@@ -643,6 +643,7 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
+    """Bootstrap the local AWF service or run project-onboarding checks."""
     if path is None:
         if include_smoke_request:
             typer.echo(
@@ -856,7 +857,11 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
 
 
 def _resolve_init_env_paths() -> tuple[Path, Path]:
-    """Return the `(target_env, source_example)` pair for bootstrap env seeding."""
+    """Return the target env file and example file used for init env seeding.
+
+    If the source checkout contains local Compose assets, prefer the
+    `docker/compose/.env` target and use a sibling `.env.example` if present.
+    """
 
     compose_local_service = Path("docker/compose/local-service.yml")
     if compose_local_service.exists():
@@ -887,6 +892,7 @@ def _run_init_service_bootstrap(
     providers: list[str],
     fmt: OutputFormat,
 ) -> None:
+    """Run local-service bootstrap with environment seeding and status output."""
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,

@@ -702,6 +702,7 @@ def test_readme_documents_service_bootstrap_command() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_compose_env_bootstrap_path() -> None:
+    """Verify quickstart docs mention the compose env bootstrap target."""
     quickstart = Path("docs/QUICKSTART.md").read_text()
 
     assert "docker/compose/.env" in quickstart

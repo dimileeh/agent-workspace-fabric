@@ -439,6 +439,7 @@ def test_init_without_path_runs_service_bootstrap(
 def test_init_without_path_seeds_source_compose_env_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Verify init seeds the compose env target when missing."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -486,6 +487,7 @@ def test_init_without_path_prefers_compose_env_example_over_root(
 def test_init_without_path_does_not_overwrite_existing_source_compose_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Keep existing compose `.env` values during bootstrap seeding."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -528,6 +530,7 @@ def test_init_without_path_seeds_env_when_missing(
 def test_init_without_path_does_not_emit_seeded_token_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Avoid printing secret values copied during `awf init` seeding."""
     secret = "super-secret-token"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
@@ -865,6 +868,7 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 
 @pytest.mark.unit
 def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
+    """Assert README guidance matches compose env bootstrap behavior."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
 
     assert "awf init" in readme
