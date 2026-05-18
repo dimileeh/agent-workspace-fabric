@@ -1003,6 +1003,7 @@ class TestCollectSmokeReportExceptionPaths:
     async def test_default_disk_profile_preview_preserves_profile_yaml(
         self, tmp_path: Path
     ) -> None:
+        """Smoke preview should preserve raw workspace YAML from disk."""
         (tmp_path / ".awf").mkdir()
         profile_path = tmp_path / ".awf" / "workspace.yml"
         profile_yaml = (
@@ -1341,6 +1342,7 @@ class TestCollectSmokeReportExceptionPaths:
         assert result is not None
 
     def test_default_disk_profile_preview_direct_call(self, tmp_path: Path) -> None:
+        """Call the on-disk profile preview helper and return the parsed preview."""
         workspace_dir = tmp_path / ".awf"
         workspace_dir.mkdir()
         (workspace_dir / "workspace.yml").write_text(

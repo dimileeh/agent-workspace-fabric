@@ -333,6 +333,7 @@ def test_draft_yaml_round_trips_through_workspace_profile_schema(tmp_path: Path)
 
 @pytest.mark.unit
 def test_preview_workspace_profile_uses_original_profile_yaml(tmp_path: Path) -> None:
+    """Verify on-disk workspace profiles are preserved verbatim in previews."""
     workspace_dir = tmp_path / ".awf"
     workspace_dir.mkdir()
     original_yaml = (
