@@ -484,6 +484,37 @@ def test_init_without_path_prefers_compose_env_example_over_root(
 
 
 @pytest.mark.unit
+def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+
+    example = workspace_root / ".env.example"
+    example.write_text("AWF_API_TOKEN=from_asset_root\n", encoding="utf-8")
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    from awf.service import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_resolve_bootstrap_asset_root", lambda: workspace_root)
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    env_file = compose / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == example.read_bytes()
+    assert f"wrote {env_file} from {example}" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_overwrite_existing_source_compose_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

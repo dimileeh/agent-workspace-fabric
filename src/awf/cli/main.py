@@ -870,6 +870,19 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
         if compose_example.exists():
             return compose_env, compose_example
         return compose_env, Path(".env.example")
+
+    from awf.service import bootstrap as bootstrap_mod
+
+    asset_root = bootstrap_mod._resolve_bootstrap_asset_root()
+    if asset_root is not None:
+        compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
+        if compose_local_service.exists():
+            compose_env = compose_local_service.parent / ".env"
+            compose_example = compose_env.with_name(".env.example")
+            if compose_example.exists():
+                return compose_env, compose_example
+            return compose_env, asset_root / ".env.example"
+
     return Path(".env"), Path(".env.example")
 
 
