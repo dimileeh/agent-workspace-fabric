@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,12 +112,13 @@ def _fail_path_write_bytes(
     failing_path: str,
     message: str = "permission denied",
 ) -> None:
-    """Patch Path.write_bytes to fail for one expected relative path."""
+    """Patch Path.write_bytes to fail for one expected path."""
     original_write_bytes = Path.write_bytes
+    failing_path_resolved = Path(failing_path).resolve()
 
     def _write_bytes(self: Path, data: bytes) -> int:
         """Raise a synthetic write failure only for the configured path."""
-        if str(self) == failing_path:
+        if self.resolve() == failing_path_resolved:
             raise OSError(message)
         return original_write_bytes(self, data)
 
@@ -177,11 +177,10 @@ def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.unit
 def test_init_write_env_help_names_compose_target() -> None:
     """Document the concrete Compose env target in init help text."""
-    from awf.cli import main as cli_main
+    result = _runner.invoke(app, ["init", "--help"], env={"COLUMNS": "240"})
 
-    write_env_option = inspect.signature(cli_main.init).parameters["write_env"].default
-
-    assert "docker/compose/.env" in write_env_option.help
+    assert result.exit_code == 0, result.output
+    assert "docker/compose/.env" in result.output
 
 
 @pytest.mark.unit
