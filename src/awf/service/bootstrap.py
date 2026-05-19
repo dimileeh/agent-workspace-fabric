@@ -14,6 +14,7 @@ from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     ServiceSettings,
     local_service_environ,
+    resolve_local_service_compose_env_file,
 )
 from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
@@ -362,15 +363,10 @@ def _resolve_user_path(path: Path) -> Path:
 
 
 def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
-    if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
-        return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
-    if asset_root is not None:
-        candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        if candidate.exists():
-            return candidate
-    if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
-        return LOCAL_SERVICE_COMPOSE_ENV_FILE.resolve()
-    return None
+    return resolve_local_service_compose_env_file(
+        LOCAL_SERVICE_COMPOSE_ENV_FILE,
+        asset_root=asset_root,
+    )
 
 
 def _bootstrap_assets_not_found_error(compose_file: Path) -> ServiceBootstrapError:

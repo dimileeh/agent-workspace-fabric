@@ -151,13 +151,52 @@ def local_service_environ(
     """
 
     merged: dict[str, str] = {}
-    if env_file.exists():
+    resolved_env_file = resolve_local_service_compose_env_file(env_file)
+    if resolved_env_file is not None:
         merged.update(
-            {key: value for key, value in dotenv_values(env_file).items() if value is not None}
+            {
+                key: value
+                for key, value in dotenv_values(resolved_env_file).items()
+                if value is not None
+            }
         )
     merged.update(os.environ if environ is None else dict(environ))
     _populate_compose_postgres_password(merged)
     return merged
+
+
+def resolve_local_service_compose_env_file(
+    env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    *,
+    asset_root: Path | None = None,
+) -> Path | None:
+    """Resolve the default local service Compose env file from nested commands."""
+
+    expanded = env_file.expanduser()
+    if expanded.is_absolute():
+        return expanded if expanded.exists() else None
+
+    candidates: list[Path] = []
+    if asset_root is not None:
+        candidates.append(asset_root / expanded)
+
+    if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
+        cwd = Path.cwd().resolve()
+        candidates.extend(root / expanded for root in (cwd, *cwd.parents))
+        module_file = Path(__file__).resolve()
+        candidates.extend(parent / expanded for parent in module_file.parents)
+    else:
+        candidates.append(expanded.resolve())
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
 
 
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
