@@ -1450,8 +1450,6 @@ class TestCollectSmokeReportExceptionPaths:
             encoding="utf-8",
         )
 
-        from awf.service.smoke import _default_disk_profile_preview
-
         result = _default_disk_profile_preview(tmp_path)
         assert result.draft.template == "generic"
         assert result.draft.yaml

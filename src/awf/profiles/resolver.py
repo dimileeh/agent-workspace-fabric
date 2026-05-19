@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from awf.common.profile_paths import _PROFILE_MARKER_PATHS
+from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.profiles.lint import lint_workspace_profile
 from awf.profiles.models import (
     ProfileLintFinding,
@@ -17,9 +17,6 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
-
-PROFILE_MARKER_PATHS = _PROFILE_MARKER_PATHS
-
 
 class ProfileResolutionError(Exception):
     """Raised when a requested profile cannot be parsed or found."""
