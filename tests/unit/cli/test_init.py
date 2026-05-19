@@ -509,6 +509,7 @@ def test_init_without_path_runs_service_bootstrap(
     assert "AWF_GITHUB_TOKEN" in result.output
     assert "awf init <path>" in result.output
     assert len(captured["bootstrap_calls"]) == 1
+    assert captured["bootstrap_calls"][0]["env_file"] == Path(".env")
 
 
 @pytest.mark.unit
@@ -734,6 +735,7 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     assert secret not in preflight_environ.values()
     provider_environ = bootstrap_call["provider_environ"]
     assert provider_environ["AWF_GITHUB_TOKEN"] == secret
+    assert bootstrap_call["env_file"] == workspace_root / "docker" / "compose" / ".env"
     assert secret not in result.output
 
 
@@ -787,6 +789,7 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
 
 
 @pytest.mark.unit
@@ -841,6 +844,7 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
 
 
 @pytest.mark.unit

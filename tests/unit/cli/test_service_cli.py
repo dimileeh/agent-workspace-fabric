@@ -524,6 +524,7 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
     assert payload["status"] == "ok"
     assert payload["service_status"]["status"] == "ok"
     assert captured["settings"] is settings
+    assert captured["env_file"] == Path(".env")
     options = captured["options"]
     assert options.timeout_seconds == 180
     assert options.poll_interval_seconds == 2
@@ -582,6 +583,7 @@ def test_service_bootstrap_cli_resolves_settings_from_compose_env(
     assert settings.database_url == database_url
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
+    assert captured["env_file"] == Path("docker/compose/.env")
     provider_environ = captured["provider_environ"]
     assert provider_environ["AWF_DATABASE_URL"] == database_url
     assert provider_environ["AWF_DOCKER_HOST"] == docker_host
@@ -1681,10 +1683,12 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
 def test_service_status_pretty_output_includes_disk_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
     monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: os.environ)
 
@@ -1717,10 +1721,12 @@ def test_service_status_pretty_output_includes_disk_check(
 def test_service_status_pretty_output_includes_network_posture_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
@@ -1764,10 +1770,12 @@ def test_service_status_pretty_output_includes_network_posture_check(
 def test_service_status_pretty_output_includes_provider_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
@@ -1802,11 +1810,13 @@ def test_service_status_pretty_output_includes_provider_reason(
 def test_service_status_provider_option_requests_strict_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
     service_env = {"AWF_GITHUB_TOKEN": "ghp_compose_token"}
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
     monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: service_env)
 
@@ -1847,10 +1857,12 @@ def test_service_status_provider_option_requests_strict_provider(
 def test_service_status_provider_option_accepts_codex(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
@@ -2109,9 +2121,11 @@ def test_service_doctor_unknown_provider_exits_two_without_traceback() -> None:
 def test_service_doctor_does_not_change_status_pretty_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> dict[str, object]:

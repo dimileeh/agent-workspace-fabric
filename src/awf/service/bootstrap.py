@@ -6,7 +6,7 @@ import asyncio
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict
 
@@ -178,6 +178,7 @@ async def run_service_bootstrap(
     *,
     options: ServiceBootstrapOptions | None = None,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    env_file: Path | None = None,
     run_subprocess: SubprocessRun | None = None,
     status_collector: StatusCollector | None = None,
     sleep: Sleep = asyncio.sleep,
@@ -194,7 +195,9 @@ async def run_service_bootstrap(
         compose_file,
         require_agent_runtime=not resolved_options.skip_agent_runtime_build,
     )
-    service_env = local_service_environ(env_file=_bootstrap_environment_file(assets))
+    if env_file is not None:
+        assets = replace(assets, compose_env_file=env_file if env_file.exists() else None)
+    service_env = local_service_environ(env_file=env_file or _bootstrap_environment_file(assets))
     if provider_environ is not None:
         service_env.update(provider_environ)
 

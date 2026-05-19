@@ -1167,6 +1167,7 @@ def _run_init_service_bootstrap(
             run_service_bootstrap(
                 settings,
                 options=options,
+                env_file=env_file,
                 provider_environ=service_env,
             ),
         )
@@ -1484,6 +1485,7 @@ def service_bootstrap(
             run_service_bootstrap(
                 settings,
                 options=options,
+                env_file=env_file,
                 provider_environ=service_env,
             )
         )
