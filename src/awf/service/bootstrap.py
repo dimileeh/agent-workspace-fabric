@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -194,18 +195,19 @@ async def run_service_bootstrap(
     if provider_environ is not None:
         service_env.update(provider_environ)
 
+    subprocess_env = {**os.environ, **service_env}
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,
         compose_file=compose_file,
-        environ=service_env,
+        environ=subprocess_env,
     ):
         completed.append(
             await asyncio.to_thread(
                 _run_stage,
                 stage,
                 run_subprocess=runner,
-                environ=service_env,
+                environ=subprocess_env,
             )
         )
 
@@ -398,6 +400,14 @@ def _compose_command(
     return tuple(args)
 
 
+def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Return ``environ`` as a dict, or ``None`` when it adds nothing beyond current env."""
+    env_dict = dict(environ)
+    if env_dict == dict(os.environ):
+        return None
+    return env_dict
+
+
 def _run_stage(
     stage: _BootstrapStage,
     *,
@@ -411,7 +421,7 @@ def _run_stage(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ),
+                env=_bootstrap_subprocess_env(environ),
             ),
         )
     except FileNotFoundError as exc:

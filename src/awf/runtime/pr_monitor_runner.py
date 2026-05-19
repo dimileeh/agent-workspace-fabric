@@ -132,6 +132,7 @@ from awf.service.provider_recovery import (
     PROVIDER_AUTH_FAILED,
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
+    PROVIDER_RECOVERY_STATE_KEY,
     _is_auth_failure_metadata,
     create_provider_recovery_attempt_row,
     provider_cooldown_not_before,
@@ -157,6 +158,34 @@ class VerdictResult:
 class _BaseFetchHandlingResult:
     retry: bool
     reason_code: str
+
+
+def _task_policy_with_monitor_circuit_retry_state(
+    task_policy: Mapping[str, Any] | None,
+    *,
+    provider: str,
+    model: str,
+    cooldown_until: datetime | None,
+    last_reason_code: str | None,
+) -> dict[str, Any]:
+    """Return workspace task policy with monitor retry metadata for provider recovery."""
+    policy = dict(task_policy or {})
+    raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
+    recovery_state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+    recovery_state.update(
+        {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            "source_provider": provider,
+            "source_model": model,
+            "source_reason_code": last_reason_code or PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            "target_provider": provider,
+            "target_model": model,
+        }
+    )
+    recovery_state["not_before"] = (cooldown_until or datetime.now(UTC)).isoformat()
+    policy[PROVIDER_RECOVERY_STATE_KEY] = recovery_state
+    return policy
 
 
 class PostMergeTargetReconciler(Protocol):
@@ -858,6 +887,13 @@ class PullRequestMonitorRunner:
             return tuple(command for command in raw_test_commands if isinstance(command, str))
 
     async def _provider_recovery_suppresses_cli(self, workspace_id: str) -> bool:
+        """Return whether provider recovery cooldown suppresses immediate CLI monitor actions.
+
+        If an open breaker is detected for the workspace's current provider/model,
+        this updates monitor task policy so the suppression can survive restarts and
+        returns ``True`` to short-circuit CLI execution. ``False`` is returned only
+        when the workspace cannot be resolved or no cooldown applies.
+        """
         now = datetime.now(UTC)
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -879,6 +915,31 @@ class PullRequestMonitorRunner:
             if breaker is None:
                 await s.commit()
                 return False
+            task_policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
+            recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
+            if (
+                isinstance(recovery_state, Mapping)
+                and recovery_state.get("action") == "retry"
+                and recovery_state.get("decision_reason_code") == PROVIDER_MODEL_CIRCUIT_OPEN_REASON
+                and recovery_state.get("source_provider") == provider
+                and recovery_state.get("source_model") == model
+                and recovery_state.get("target_provider") == provider
+                and recovery_state.get("target_model") == model
+            ):
+                if (
+                    breaker.cooldown_until is not None
+                    and provider_cooldown_not_before(task_policy) != breaker.cooldown_until
+                ):
+                    ws.task_policy = _task_policy_with_monitor_circuit_retry_state(
+                        task_policy,
+                        provider=provider,
+                        model=model,
+                        cooldown_until=breaker.cooldown_until,
+                        last_reason_code=breaker.last_reason_code,
+                    )
+                    await repo.advance_workspace_version(ws)
+                    await s.commit()
+                return True
             await repo.add_event(
                 ws,
                 event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
@@ -894,6 +955,14 @@ class PullRequestMonitorRunner:
                     "last_reason_code": breaker.last_reason_code,
                 },
             )
+            ws.task_policy = _task_policy_with_monitor_circuit_retry_state(
+                task_policy,
+                provider=provider,
+                model=model,
+                cooldown_until=breaker.cooldown_until,
+                last_reason_code=breaker.last_reason_code,
+            )
+            await repo.advance_workspace_version(ws)
             await s.commit()
             return True
 
