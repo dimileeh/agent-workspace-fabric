@@ -73,7 +73,7 @@ workspaces/
 # canonical execution protocol tracked, but do not publish generated runs.
 docs/awf-plans/*
 !docs/awf-plans/README.md
-plans/
+plans/*
 !plans/PLAN_EXECUTION_PROTOCOL.md
 
 # Docker
