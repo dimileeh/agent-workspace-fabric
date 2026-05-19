@@ -240,7 +240,7 @@ def _compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for key in _COMPOSE_CLI_ENV_KEYS:
         found, value = _env_lookup(environ, key)
-        if found:
+        if found and value:
             resolved[key] = value
     return resolved
 
