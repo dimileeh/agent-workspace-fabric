@@ -182,12 +182,12 @@ AWF’s local service compose stack keeps container ports stable (`postgres:5432
 Postgres stays loopback-bound (`127.0.0.1`) by default. The API preserves Docker's
 legacy default host bind behavior for `8000:8000`, so existing local clients that
 reach the host IP continue to work. If `AWF_API_HOST_PORT` changes, client calls
-(including `awf service status`, `awf service doctor`, and `/readyz` checks) that
-target the local API host must use `AWF_API_BASE_URL` (for example
-`http://localhost:${AWF_API_HOST_PORT}`) so operator tooling and manual requests
-remain aligned with the running service.
-Set `AWF_API_BASE_URL` to that host value before running local status or doctor
-diagnostics against a custom API port.
+that target the local API host must use the matching host URL. `awf service
+status` and `awf service doctor` derive `http://localhost:<port>` automatically
+when `AWF_API_HOST_PORT` is set in the same shell. Set `AWF_API_BASE_URL` only
+when those CLI checks run from a shell that does not carry `AWF_API_HOST_PORT`,
+when targeting a non-derived API base URL, or for manual HTTP requests such as
+`/readyz` checks.
 
 ## Workspace Lifecycle
 
@@ -432,8 +432,9 @@ curl 'http://localhost:8000/release-readiness'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
 
-If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` first and use it for
-local API diagnostics:
+If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` for manual HTTP
+diagnostics or when CLI checks run from a shell that does not carry the host-port
+override:
 
 ```bash
 export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
