@@ -1907,12 +1907,14 @@ def test_service_status_provider_option_accepts_codex(
 def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: os.environ)
 
     report = SimpleNamespace(
         status="ok",
@@ -1952,13 +1954,81 @@ def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
 
 
 @pytest.mark.unit
+def test_service_doctor_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        },
+    )
+
+    async def _collect(settings: object, **kwargs: object) -> object:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    provider_environ = captured["provider_environ"]
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert captured["environ"] is provider_environ
+
+
+@pytest.mark.unit
 def test_service_doctor_json_output_is_structured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="ok",
         to_dict=lambda: {
@@ -1984,10 +2054,12 @@ def test_service_doctor_json_output_is_structured(
 def test_service_doctor_failing_diagnostics_exit_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="fail",
         to_dict=lambda: {
@@ -2035,10 +2107,12 @@ def test_service_doctor_failing_diagnostics_exit_one(
 def test_service_doctor_preserves_typer_exit_from_collector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
         raise typer.Exit(code=7)
@@ -2055,10 +2129,12 @@ def test_service_doctor_preserves_typer_exit_from_collector(
 def test_service_doctor_does_not_mask_unexpected_collection_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
         raise RuntimeError("diagnostic collector exploded")
@@ -2076,11 +2152,13 @@ def test_service_doctor_does_not_mask_unexpected_collection_errors(
 def test_service_doctor_provider_options_are_validated_and_passed_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="ok",
         to_dict=lambda: {

@@ -1086,6 +1086,30 @@ def test_init_without_path_warns_when_env_write_fails(
 
 
 @pytest.mark.unit
+def test_init_env_warning_uses_display_ready_payload_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Do not reinterpret already-normalized env error payload paths."""
+    from awf.cli import main as cli_main
+
+    monkeypatch.chdir(tmp_path)
+
+    warning = cli_main._init_env_warning(  # noqa: SLF001
+        {
+            "operation": "write_env",
+            "path": "/display/env",
+            "env_file": "/display/env",
+            "env_example": "/display/env.example",
+            "message": "permission denied",
+        }
+    )
+
+    assert warning == (
+        "  warning: could not write /display/env from /display/env.example: permission denied"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("failure_mode", "expected_operation", "expected_path"),
     (

@@ -978,10 +978,10 @@ def _init_env_warning(env_error: Mapping[str, str]) -> str:
 
     operation = env_error["operation"]
     message = env_error["message"]
-    env_file = _init_display_path(env_error["env_file"])
-    env_example = _init_display_path(env_error["env_example"])
+    env_file = env_error["env_file"]
+    env_example = env_error["env_example"]
     if operation == "create_parent_directory":
-        parent = _init_display_path(env_error["path"])
+        parent = env_error["path"]
         return f"  warning: could not create parent directory {parent} for {env_file}: {message}"
     if operation == "read_example":
         return f"  warning: could not read {env_example} while seeding {env_file}: {message}"
@@ -1288,6 +1288,7 @@ def service_doctor(
     ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
@@ -1299,8 +1300,12 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    settings = resolve_service_settings()
-    service_env = local_service_environ()
+    env_file, _ = _resolve_service_env_paths()
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
 
     if bundle:
         bundle_payload = asyncio.run(
