@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from datetime import UTC, datetime
@@ -146,6 +147,13 @@ def test_settings_constructor_fields_are_not_pydantic_private_dual_storage() -> 
     )
     assert "_awf_init_fields" not in settings.__dict__
     assert "_awf_init_fields" not in (getattr(settings, "__pydantic_private__", {}) or {})
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_does_not_expose_asset_root_override() -> None:
+    signature = inspect.signature(service_config.resolve_local_service_compose_env_file)
+
+    assert "asset_root" not in signature.parameters
 
 
 @pytest.mark.unit

@@ -186,8 +186,6 @@ def local_service_environ(
 
 def resolve_local_service_compose_env_file(
     env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
-    *,
-    asset_root: Path | None = None,
 ) -> Path | None:
     """Resolve the default local service Compose env file from nested commands."""
 
@@ -196,9 +194,6 @@ def resolve_local_service_compose_env_file(
         return expanded if expanded.exists() else None
 
     candidates: list[Path] = []
-    if asset_root is not None:
-        candidates.append(asset_root / expanded)
-
     if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
         cwd = Path.cwd().resolve()
         candidates.extend(root / expanded for root in _bounded_env_search_roots(cwd))
