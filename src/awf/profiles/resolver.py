@@ -80,7 +80,8 @@ class ProfileResolver:
             repo_profile = self._load_repo_profile(worktree_path, considered)
             if repo_profile is not None:
                 profile = repo_profile
-                reason = "repo-local .awf/workspace.yml profile"
+                source = repo_profile.source or "repo:<unknown>"
+                reason = f"repo-local {source.removeprefix('repo:')} profile"
 
         if profile is None and profile_ref and profile_ref != "auto":
             considered.append(f"registry:{profile_ref}")
