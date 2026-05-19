@@ -861,8 +861,8 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
 def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     """Return the compose, env, and example files used by service commands.
 
-    If the verified source checkout contains local Compose assets, prefer the
-    checkout's local compose assets and use a sibling `.env.example` if present.
+    If the verified source checkout contains local Compose assets, return those
+    assets as absolute paths and use a sibling `.env.example` if present.
     """
 
     from awf.service import bootstrap as bootstrap_mod
@@ -871,19 +871,15 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
 
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
-        compose_local_service = asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        resolved_asset_root = asset_root.resolve()
+        compose_local_service = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
         # get_bootstrap_asset_root() verifies this in production; keep the
         # guard so tests or stubs that bypass validation fall back to root .env.
-        if compose_local_service.is_file() and asset_root.resolve() == Path.cwd().resolve():
-            compose_file = LOCAL_SERVICE_COMPOSE_FILE
-            compose_env = LOCAL_SERVICE_COMPOSE_ENV_FILE
-            fallback_example = Path(".env.example")
-        elif compose_local_service.is_file():
-            compose_file = compose_local_service
-            compose_env = compose_local_service.parent / ".env"
-            fallback_example = asset_root / ".env.example"
-        else:
+        if not compose_local_service.is_file():
             return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
+        compose_file = compose_local_service
+        compose_env = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        fallback_example = resolved_asset_root / ".env.example"
         compose_example = compose_env.with_name(".env.example")
         if compose_example.exists():
             return compose_file, compose_env, compose_example

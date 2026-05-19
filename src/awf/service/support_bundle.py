@@ -9,7 +9,7 @@ import os
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any
 
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
@@ -25,10 +25,6 @@ _SAFE_EXAMPLE_KEYS = frozenset(
     {"workspace_id", "failure_reason", "reason_code", "status", "updated_at", "count"}
 )
 _SAFE_CLUSTER_KEYS = frozenset({"failure_reason", "reason_code", "count", "sample_workspace_ids"})
-
-
-class _DoctorCollectorKwargs(TypedDict):
-    compose_file: NotRequired[Path]
 
 
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:
@@ -68,16 +64,21 @@ async def collect_support_bundle(
 
     service_status_result: dict[str, object] | BaseException
     doctor_result: dict[str, object] | BaseException | Any
-    doctor_kwargs: _DoctorCollectorKwargs = {}
-    if compose_file is not None:
-        doctor_kwargs["compose_file"] = compose_file
-    doctor_task = _doctor_collector(
-        settings,
-        strict_providers=strict_providers,
-        provider_environ=provider_env,
-        environ=env,
-        **doctor_kwargs,
-    )
+    if compose_file is None:
+        doctor_task = _doctor_collector(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=provider_env,
+            environ=env,
+        )
+    else:
+        doctor_task = _doctor_collector(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=provider_env,
+            environ=env,
+            compose_file=compose_file,
+        )
 
     service_status_result, doctor_result = await asyncio.gather(
         _status_collector(

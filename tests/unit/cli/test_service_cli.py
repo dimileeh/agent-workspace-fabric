@@ -583,8 +583,8 @@ def test_service_bootstrap_cli_resolves_settings_from_compose_env(
     assert settings.database_url == database_url
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
-    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
-    assert captured["env_file"] == Path("docker/compose/.env")
+    assert captured["compose_file"] == compose / "local-service.yml"
+    assert captured["env_file"] == compose / ".env"
     provider_environ = captured["provider_environ"]
     assert provider_environ["AWF_DATABASE_URL"] == database_url
     assert provider_environ["AWF_DOCKER_HOST"] == docker_host

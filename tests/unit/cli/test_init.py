@@ -492,6 +492,31 @@ def test_init_includes_smoke_workspace_hints(
 
 
 @pytest.mark.unit
+def test_resolve_service_compose_paths_returns_absolute_asset_root_paths_from_root_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verified AWF asset paths should not depend on launch directory shape."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+
+    monkeypatch.chdir(tmp_path)
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: tmp_path)
+
+    compose_file, env_file, env_example = cli_main._resolve_service_compose_paths()  # noqa: SLF001
+
+    assert compose_file == compose / "local-service.yml"
+    assert compose_file.is_absolute()
+    assert env_file == compose / ".env"
+    assert env_file.is_absolute()
+    assert env_example == compose / ".env.example"
+    assert env_example.is_absolute()
+
+
+@pytest.mark.unit
 def test_init_without_path_runs_service_bootstrap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
