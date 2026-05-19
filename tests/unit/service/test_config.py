@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import Field
 
 import awf.common.config as common_config
 import awf.service.config as service_config
@@ -199,6 +200,29 @@ def test_settings_constructor_fields_are_tracked_per_equal_settings_instance() -
     assert service_config._settings_init_fields(explicit_default_settings) == frozenset(  # noqa: SLF001
         {"api_base_url"}
     )
+
+
+@pytest.mark.unit
+def test_settings_constructor_fields_track_pydantic_alias_input() -> None:
+    class AliasSettings(Settings):
+        api_base_url: str = Field(
+            default=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+            alias="apiBaseUrl",
+        )
+
+    settings = AliasSettings(
+        _env_file=None,
+        apiBaseUrl=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+    )
+
+    assert service_config._settings_init_fields(settings) == frozenset({"api_base_url"})  # noqa: SLF001
+
+    service_settings = resolve_service_settings(
+        settings,
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert service_settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
 
 
 @pytest.mark.unit

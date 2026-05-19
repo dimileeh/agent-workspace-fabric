@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -244,7 +244,7 @@ class Settings(BaseSettings):
 
     def __init__(self, **values: Any) -> None:
         """Initialize settings while remembering direct constructor overrides."""
-        init_fields = frozenset(name for name in type(self).model_fields if name in values)
+        init_fields = _settings_constructor_fields_from_values(type(self), values)
         super().__init__(**values)
         _record_settings_constructor_fields(self, init_fields)
 
@@ -476,6 +476,37 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+
+def _settings_constructor_fields_from_values(
+    settings_type: type[Settings],
+    values: Mapping[str, Any],
+) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, field in settings_type.model_fields.items()
+        if name in values
+        or _settings_alias_is_present(field.alias, values)
+        or _settings_alias_is_present(field.validation_alias, values)
+    )
+
+
+def _settings_alias_is_present(alias: Any, values: Mapping[str, Any]) -> bool:
+    if alias is None:
+        return False
+    if isinstance(alias, str):
+        return alias in values
+
+    choices = getattr(alias, "choices", None)
+    if isinstance(choices, (list, tuple)):
+        return any(_settings_alias_is_present(choice, values) for choice in choices)
+
+    path = getattr(alias, "path", None)
+    if isinstance(path, (list, tuple)) and path:
+        first = path[0]
+        return isinstance(first, str) and first in values
+
+    return False
 
 
 class _SettingsIdentityRef(weakref.ref[Settings]):

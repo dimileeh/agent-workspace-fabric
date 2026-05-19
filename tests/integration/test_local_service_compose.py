@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,34 @@ import yaml
 
 
 def _compose_template_value(value: str, env: dict[str, str]) -> str:
-    if not (value.startswith("${") and value.endswith("}") and ":-" in value):
+    if not (value.startswith("${") and value.endswith("}")):
         return value
-    key, default = value[2:-1].split(":-", 1)
+    inner = value[2:-1]
+    if not inner:
+        raise ValueError("Compose template variable name must not be empty")
+
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:\?|:\+|-|\?|\+)(.*))?", inner)
+    if match is None:
+        raise ValueError(f"Unsupported Compose template: {value}")
+    key, operator, operand = match.groups(default="")
     resolved = env.get(key)
-    return default if resolved in (None, "") else resolved
+    if operator == "":
+        return env.get(key, "")
+    if operator == ":-":
+        return operand if resolved in (None, "") else resolved
+    if operator == "-":
+        return operand if resolved is None else resolved
+    if operator == ":?":
+        if resolved in (None, ""):
+            raise ValueError(operand or f"{key} is required")
+        return resolved
+    if operator == "?":
+        if resolved is None:
+            raise ValueError(operand or f"{key} is required")
+        return resolved
+    if operator == ":+":
+        return operand if resolved not in (None, "") else ""
+    return operand if resolved is not None else ""
 
 
 def _compose_published_host_port(mapping: str) -> str:
@@ -185,3 +209,20 @@ def test_local_service_compose_port_templates_support_default_and_override_value
     }
     assert _compose_template_value(postgres_host, override_env) == "55333"
     assert _compose_template_value(api_host, override_env) == "9100"
+
+
+@pytest.mark.integration
+def test_compose_template_value_matches_common_interpolation_forms() -> None:
+    assert _compose_template_value("${AWF_BARE}", {"AWF_BARE": "resolved"}) == "resolved"
+    assert _compose_template_value("${AWF_BARE}", {}) == ""
+    assert _compose_template_value("${AWF_DEFAULT-default}", {}) == "default"
+    assert _compose_template_value("${AWF_DEFAULT-default}", {"AWF_DEFAULT": ""}) == ""
+    assert _compose_template_value("${AWF_DEFAULT:-default}", {"AWF_DEFAULT": ""}) == "default"
+    assert (
+        _compose_template_value("${AWF_REQUIRED?set-AWF_REQUIRED}", {"AWF_REQUIRED": "ok"}) == "ok"
+    )
+    assert (
+        _compose_template_value("${AWF_REQUIRED:?set AWF_REQUIRED}", {"AWF_REQUIRED": "ok"}) == "ok"
+    )
+    with pytest.raises(ValueError, match="AWF_REQUIRED"):
+        _compose_template_value("${AWF_REQUIRED:?set AWF_REQUIRED}", {})
