@@ -176,6 +176,30 @@ idempotency for adoption; do not pass an adoption idempotency key. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub readiness, permissions,
 terminal adoption retry behavior, console inspection, REST/MCP examples, and the
 mocked-local docs-tested demo path.
+`awf` applies `/v1/` path normalization to all workspace calls that go through
+this CLI, so reverse-proxy prefixes (for example `/awf`) are preserved and any
+duplicate `/v1` is suppressed.
+On non-2xx responses, the CLI prints request context in stderr before the
+response payload, for example: `error: POST <normalized_url> -> HTTP 404`.
+Sensitive query values in that URL context are redacted.
+
+`awf workspace adopt-pr` accepts `AWF_CLI_BASE_URL`/`--base-url` in any of these
+equivalent API-root forms:
+
+```bash
+awf workspace adopt-pr --base-url http://host:8000 --repo ...
+awf workspace adopt-pr --base-url http://host:8000/ --repo ...
+awf workspace adopt-pr --base-url http://host:8000/v1 --repo ...
+awf workspace adopt-pr --base-url http://host:8000/v1/ --repo ...
+```
+
+If your API is behind a reverse proxy prefix, use the prefix and keep `/v1`
+in the path:
+
+```bash
+awf workspace adopt-pr --base-url http://host:8000/awf --repo ...
+awf workspace adopt-pr --base-url http://host:8000/awf/v1 --repo ...
+```
 
 Show a workspace:
 
