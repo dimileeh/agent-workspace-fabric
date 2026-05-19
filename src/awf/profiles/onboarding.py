@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.profiles.models import (
     DockerMode,
     EgressAllowlistTemplate,
@@ -300,8 +301,16 @@ def preview_workspace_profile(
     source = resolution.profile.source or ""
     if source.startswith("repo:"):
         rel = source[len("repo:") :]
-        candidate = project / rel
-        profile_path: Path | None = candidate if candidate.is_file() else None
+        project_root = project.resolve()
+        candidate = (project_root / rel).resolve()
+        if (
+            rel in PROFILE_MARKER_PATHS
+            and candidate.is_file()
+            and candidate.is_relative_to(project_root)
+        ):
+            profile_path: Path | None = candidate
+        else:
+            profile_path = None
     else:
         profile_path = None
     draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
