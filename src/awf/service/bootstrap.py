@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -209,28 +210,29 @@ async def run_service_bootstrap(
         if env_file is not None and env_file.exists()
         else _bootstrap_environment_file(assets)
     )
-    service_env = (
+    raw_service_env = (
         dict(service_environ)
         if service_environ is not None
         else local_service_environ(env_file=resolved_env_file)
     )
     if provider_environ is not None:
-        service_env.update(provider_environ)
-    service_env = _docker_cli_environ(service_env)
+        raw_service_env.update(provider_environ)
+    service_env = _docker_cli_environ(raw_service_env)
 
+    subprocess_env = _docker_cli_environ({**os.environ, **raw_service_env})
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,
         compose_file=compose_file,
         assets=assets,
-        environ=service_env,
+        environ=subprocess_env,
     ):
         completed.append(
             await asyncio.to_thread(
                 _run_stage,
                 stage,
                 run_subprocess=runner,
-                environ=service_env,
+                environ=subprocess_env,
             )
         )
 
@@ -488,6 +490,14 @@ def _compose_command(
     return tuple(args)
 
 
+def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Return ``environ`` as a dict, or ``None`` when it adds nothing beyond current env."""
+    env_dict = dict(environ)
+    if env_dict == dict(os.environ):
+        return None
+    return env_dict
+
+
 def _run_stage(
     stage: _BootstrapStage,
     *,
@@ -503,7 +513,7 @@ def _run_stage(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ),
+                env=_bootstrap_subprocess_env(environ),
             ),
         )
     except FileNotFoundError as exc:

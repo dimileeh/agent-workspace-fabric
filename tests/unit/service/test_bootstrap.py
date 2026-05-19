@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping
@@ -74,6 +75,14 @@ def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         tmp_path / "missing.env",
         raising=False,
     )
+    for key in (
+        "AWF_DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "COMPOSE_PROFILES",
+        "COMPOSE_PROJECT_NAME",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -160,15 +169,18 @@ def test_bootstrap_runs_expected_command_sequence(
 ) -> None:
     calls: list[list[str]] = []
     source_root = source_checkout_root
+    expected_env = None
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
-        assert kwargs == {
+        expected_kwargs = {
             "check": False,
             "capture_output": True,
             "text": True,
-            "env": {},
         }
+        if expected_env is not None:
+            expected_kwargs["env"] = expected_env
+        assert kwargs == expected_kwargs
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = asyncio.run(
@@ -260,7 +272,8 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    assert all(call["env"] == service_env for call in calls)
+    expected_env = dict(os.environ, **service_env)
+    assert all(call["env"] == expected_env for call in calls)
 
 
 @pytest.mark.unit
@@ -314,7 +327,8 @@ def test_bootstrap_uses_explicit_service_environment_without_reloading_env_file(
     assert result.service_status["status"] == "ok"
     assert collected_provider_environ == service_env
     assert calls
-    assert all(call["env"] == service_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **service_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
 
 
 @pytest.mark.unit
@@ -362,7 +376,8 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
     assert result.service_status["status"] == "ok"
     assert collected_provider_environ == expected_env
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
@@ -414,7 +429,8 @@ def test_bootstrap_mirrors_mixed_case_awf_docker_host_to_docker_cli_environment(
     assert result.service_status["status"] == "ok"
     assert collected_provider_environ == expected_env
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all(not any(key.upper() == "AWF_DOCKER_HOST" for key in call["env"]) for call in calls)
 
 
@@ -451,7 +467,8 @@ def test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
@@ -504,7 +521,8 @@ def test_bootstrap_overrides_stale_docker_host_with_runtime_awf_docker_host(
     assert result.service_status["status"] == "ok"
     assert collected_provider_environ == expected_env
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
@@ -556,7 +574,8 @@ def test_bootstrap_clears_docker_context_when_awf_docker_host_is_forced(
     assert result.service_status["status"] == "ok"
     assert collected_provider_environ == expected_env
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
     assert all("DOCKER_CONTEXT" not in call["env"] for call in calls)
 
@@ -588,7 +607,8 @@ def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    assert [call.get("env") for call in calls] == [{}] * len(calls)
+    expected_env = None
+    assert [call.get("env") for call in calls] == [expected_env] * len(calls)
 
 
 @pytest.mark.unit
@@ -602,7 +622,8 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
         "DOCKER_HOST": "unix:///var/run/docker.sock",
     }
     provider_env = {"COMPOSE_PROFILES": "metrics,ollama-bridge"}
-    expected_env = {**local_env, **provider_env}
+    expected_provider_environ = {**local_env, **provider_env}
+    expected_subprocess_environ = {**os.environ, **expected_provider_environ}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(local_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
@@ -639,9 +660,54 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
     )
 
     assert result.service_status["status"] == "ok"
-    assert collected_provider_environ == expected_env
+    assert collected_provider_environ == expected_provider_environ
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    assert all(call["env"] == expected_subprocess_environ for call in calls)
+    assert any(call["args"][-1] == "ollama-bridge" for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_uses_ambient_compose_profiles_for_ollama_bridge_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("COMPOSE_PROFILES", "metrics,ollama-bridge")
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: {})
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == {}
     assert any(call["args"][-1] == "ollama-bridge" for call in calls)
 
 
