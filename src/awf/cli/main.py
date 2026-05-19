@@ -1154,6 +1154,7 @@ def _merge_env_seed_contents_with_overlay_keys(
         key = _env_assignment_key(line)
         if key is not None:
             seed_keys.add(key)
+    seed_has_leading_context = bool(seed_lines and _env_assignment_key(seed_lines[0]) is None)
 
     overlay_last_assignment_index: dict[str, int] = {}
     for index, line in enumerate(overlay_lines):
@@ -1182,6 +1183,8 @@ def _merge_env_seed_contents_with_overlay_keys(
             pending_context = []
         if overlay_last_assignment_index.get(key) == index:
             if key in seed_keys:
+                if last_assignment_key is None and seed_has_leading_context:
+                    pending_context = []
                 seed_leading_context[key] = pending_context
             else:
                 overlay_only_lines.extend(pending_context)
@@ -1194,7 +1197,7 @@ def _merge_env_seed_contents_with_overlay_keys(
     elif pending_context:
         overlay_only_lines.extend(pending_context)
 
-    merged_lines: list[str] = list(file_header_context)
+    merged_lines: list[str] = [] if seed_has_leading_context else list(file_header_context)
     emitted_seed_leading_context: set[str] = set()
     emitted_seed_trailing_context: set[str] = set()
     for line in seed_lines:

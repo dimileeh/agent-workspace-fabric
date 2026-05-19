@@ -866,6 +866,105 @@ def test_init_without_path_preserves_root_env_file_header_at_top(
 
 
 @pytest.mark.unit
+def test_init_without_path_avoids_duplicate_overlay_and_seed_file_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Do not prepend the root header when the seed already has a file header."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "# Keep local service settings here.",
+                "AWF_API_TOKEN=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "# Existing root .env migrated by awf init.",
+                "# Operators may keep workspace overrides here.",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "# Keep local service settings here.",
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_init_without_path_avoids_single_overlay_header_when_seed_has_header(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Treat a first overlay comment as redundant when seed has a header."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "AWF_API_TOKEN=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "# Custom local settings",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_init_without_path_keeps_single_leading_comment_with_overlay_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
