@@ -3181,6 +3181,245 @@ class TestRunOnceMonitorRecovery:
         assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
 
     @pytest.mark.unit
+    async def test_stale_active_scan_preserves_monitor_provider_no_cooldown_open_circuit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-open-circuit-no-cooldown-stale-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        async with session_factory() as session:
+            breaker_repo = ProviderModelCircuitBreakerRepository(session)
+            breaker = await breaker_repo.record_failure(
+                provider="openai",
+                model="gpt-5.3-codex-spark",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:openai:gpt-5.3-codex-spark",
+                workspace_id=monitor_id,
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            breaker.cooldown_until = None
+            await session.commit()
+
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert inspector.calls == []
+        assert cleaner.calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_scan_preserves_due_monitor_provider_retry_for_resume(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-expired-retry-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == [monitor_id]
+        assert inspector.calls == [compose_project]
+        assert cleaner.calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_scan_recovering_provider_retry_uses_runtime_classification_for_running_monitor(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-retry-running-monitor-unhealthy",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector(
+            {
+                compose_project: RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="postgres",
+                            container_id="pg",
+                            image="postgres:16",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=monitor_id, event_type="workspace.runtime_stranded_detected"
+            )
+
+        assert runtime_events
+        assert runtime_events[0].reason_code == "AGENT_CONTAINER_MISSING"
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["decision"] == "remonitor_workspace"
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
+    async def test_stale_active_scan_recovers_monitor_provider_retry_after_breaker_close(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-closed-circuit-retry-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: RuntimeSnapshot(stack_state="stopped", services=[])}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert inspector.calls == [compose_project]
+
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert any(
+            event.event_type == "workspace.runtime_stranded_detected"
+            and event.reason_code == "STRANDED_WORKSPACE"
+            and event.payload is not None
+            and event.payload.get("decision") == "remonitor_workspace"
+            for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_scan_preserves_due_monitor_provider_fallback_for_resume(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -4491,6 +4730,66 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
         assert db_events == []
+
+    @pytest.mark.unit
+    async def test_stale_running_with_retry_provider_state_continues_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "retry-provider-state-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_retry_provider_state_running",
+            node_id="node-a",
+            task_policy={"provider_recovery_state": {"action": "retry"}},
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "orphan-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {"awf_retry_provider_state_running": _live_agent_snapshot()}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert len(preserved_events) == 1
+        assert preserved_events[0].reason_code == PRESERVED_EXECUTION_REASON_CODE
+        assert stale_events == []
+        assert inspector.calls == ["awf_retry_provider_state_running"]
 
     @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
