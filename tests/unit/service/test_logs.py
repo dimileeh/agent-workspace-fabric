@@ -241,6 +241,45 @@ services:
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_removes_awf_docker_host_after_compose_interpolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      AWF_DOCKER_HOST: "${AWF_DOCKER_HOST:?set AWF_DOCKER_HOST}"
+""",
+    )
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {"AWF_DOCKER_HOST": docker_host}
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in ("AWF_DOCKER_HOST", "AWF_DATABASE_URL", "AWF_TEST_DATABASE_URL", "AWF_API_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///stale-docker.sock")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert env.get("AWF_DOCKER_HOST") is None
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

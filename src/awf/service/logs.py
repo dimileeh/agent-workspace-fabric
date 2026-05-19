@@ -228,9 +228,9 @@ def _docker_cli_environ(
     resolved = dict(os.environ)
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
-    resolved.pop("AWF_DOCKER_HOST", None)
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
+    resolved.pop("AWF_DOCKER_HOST", None)
     return resolved
 
 
