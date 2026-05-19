@@ -182,8 +182,9 @@ def _task_policy_with_monitor_circuit_retry_state(
             "target_model": model,
         }
     )
-    if cooldown_until is not None:
-        recovery_state["not_before"] = cooldown_until.isoformat()
+    recovery_state["not_before"] = (
+        cooldown_until or datetime.now(UTC)
+    ).isoformat()
     policy[PROVIDER_RECOVERY_STATE_KEY] = recovery_state
     return policy
 

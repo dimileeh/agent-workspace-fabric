@@ -3745,7 +3745,7 @@ async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_
     assert second_suppressed is True
     assert recovery_state["action"] == "retry"
     assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
-    assert "not_before" not in recovery_state
+    assert isinstance(recovery_state["not_before"], str)
     assert len(cooldown_events) == 1
 
 
