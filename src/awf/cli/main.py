@@ -69,6 +69,10 @@ _MIN_RICH_HELP_WIDTH = 80
 _ENV_ASSIGNMENT_RE = re.compile(r"\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
+class _EnvSeedMergeError(ValueError):
+    """Raised when env seed merging cannot preserve dotenv semantics."""
+
+
 class _MinRichHelpWidthCommand(typer.core.TyperCommand):
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         configured_width = typer_rich_utils.MAX_WIDTH
@@ -938,7 +942,7 @@ def _service_compose_env_file(env_file: Path, active_env_file: Path) -> Path | N
 
     if not active_env_file.exists():
         return None
-    if active_env_file == env_file:
+    if active_env_file == env_file and _is_local_service_compose_env_file(active_env_file):
         return active_env_file
     if _is_local_service_compose_env_file(active_env_file):
         return active_env_file
@@ -999,7 +1003,7 @@ def _init_env_error_payload(
     path: Path,
     env_file: Path,
     env_example: Path,
-    exc: OSError,
+    exc: Exception,
 ) -> dict[str, str]:
     """Return a machine-readable env seeding failure without env contents."""
 
@@ -1048,6 +1052,40 @@ def _env_assignment_key(line: str) -> str | None:
     return match.group("key")
 
 
+def _env_value_has_same_line_closing_quote(value: str, quote: str) -> bool:
+    """Return whether a quoted dotenv value closes on its assignment line."""
+
+    escaped = False
+    for char in value[1:]:
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char == quote and not escaped:
+            return True
+        escaped = False
+    return False
+
+
+def _env_contents_have_multiline_values(text: str) -> bool:
+    """Return true when dotenv assignments span physical lines."""
+
+    for line in text.splitlines(keepends=True):
+        key = _env_assignment_key(line)
+        if key is None:
+            continue
+        _assignment, _separator, value = line.partition("=")
+        stripped_value = value.lstrip()
+        if not stripped_value:
+            continue
+        quote = stripped_value[0]
+        if quote in {"'", '"'} and not _env_value_has_same_line_closing_quote(
+            stripped_value,
+            quote,
+        ):
+            return True
+    return False
+
+
 def _env_context_looks_like_file_header(lines: list[str]) -> bool:
     """Return whether leading non-assignment lines look like a file header."""
 
@@ -1073,6 +1111,13 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     # This merge is deliberately line-oriented to preserve comments and ordering.
     # Multi-line dotenv values are unsupported in seed and overlay files; keep
     # template entries single-line unless this is replaced with a dotenv parser.
+    if _env_contents_have_multiline_values(seed_text) or _env_contents_have_multiline_values(
+        overlay_text
+    ):
+        raise _EnvSeedMergeError(
+            "unsupported multi-line dotenv values; env seeding merge only supports "
+            "single-line assignments"
+        )
     seed_lines = seed_text.splitlines(keepends=True)
     overlay_lines = overlay_text.splitlines(keepends=True)
 
@@ -1204,7 +1249,19 @@ def _seed_env_file(
                     exc=exc,
                 ),
             )
-        env_contents = _merge_env_seed_contents(env_contents, overlay_contents)
+        try:
+            env_contents = _merge_env_seed_contents(env_contents, overlay_contents)
+        except _EnvSeedMergeError as exc:
+            return (
+                "write_failed",
+                _init_env_error_payload(
+                    operation="merge_overlay",
+                    path=env_overlay,
+                    env_file=env_file,
+                    env_example=env_example,
+                    exc=exc,
+                ),
+            )
 
     try:
         with env_file.open("xb") as handle:
@@ -1254,6 +1311,12 @@ def _init_env_warning(env_error: Mapping[str, str]) -> str:
         overlay = env_error["path"]
         return (
             f"  warning: could not read {overlay} while seeding {env_file} "
+            f"from {env_example}: {message}"
+        )
+    if operation == "merge_overlay":
+        overlay = env_error["path"]
+        return (
+            f"  warning: could not merge {overlay} while seeding {env_file} "
             f"from {env_example}: {message}"
         )
     return f"  warning: could not write {env_file} from {env_example}: {message}"

@@ -1241,6 +1241,28 @@ def test_service_env_resolution_ignores_current_compose_env_without_asset_root(
 
 
 @pytest.mark.unit
+def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Root `.env` remains a read source, not a Docker Compose `--env-file`."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("GITHUB_TOKEN=operator-secret\n", encoding="utf-8")
+
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(Path(".env"))  # noqa: SLF001
+
+    assert active_env_file == Path(".env")
+    assert compose_env_file is None
+
+
+@pytest.mark.unit
 def test_service_env_resolution_uses_current_compose_env_when_explicitly_allowed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1925,6 +1947,65 @@ def test_init_without_path_json_marks_env_overlay_read_failed(
         "env_example": "docker/compose/.env.example",
         "message": "permission denied",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("seed_text", "overlay_text"),
+    (
+        ('AWF_API_TOKEN="template\ncontinued"\n', "AWF_API_TOKEN=root\n"),
+        ("AWF_API_TOKEN=template\n", 'AWF_API_TOKEN="root\ncontinued"\n'),
+    ),
+)
+def test_merge_env_seed_contents_rejects_multiline_dotenv_values(
+    seed_text: str,
+    overlay_text: str,
+) -> None:
+    """Do not let the line-oriented merge mangle multi-line dotenv values."""
+    from awf.cli import main as cli_main
+
+    with pytest.raises(ValueError, match="multi-line dotenv"):
+        cli_main._merge_env_seed_contents(  # noqa: SLF001
+            seed_text.encode("utf-8"),
+            overlay_text.encode("utf-8"),
+        )
+
+
+@pytest.mark.unit
+def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose unsupported multi-line overlay merges instead of writing corruption."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        'AWF_API_TOKEN="root-token-line-one\nroot-token-line-two"\n',
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["env_action"] == "write_failed"
+    assert payload["env_error"] == {
+        "operation": "merge_overlay",
+        "path": ".env",
+        "env_file": "docker/compose/.env",
+        "env_example": "docker/compose/.env.example",
+        "message": (
+            "unsupported multi-line dotenv values; env seeding merge only supports "
+            "single-line assignments"
+        ),
+    }
+    assert not (compose / ".env").exists()
+    assert "root-token-line-one" not in result.output
+    assert "root-token-line-two" not in result.output
 
 
 @pytest.mark.unit
