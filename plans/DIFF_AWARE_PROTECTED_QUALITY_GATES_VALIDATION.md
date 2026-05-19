@@ -40,7 +40,7 @@ Validation commands:
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py tests/unit/control/test_executor_validation_fix_cycle.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q
-# 186 passed in 107.65s
+# 188 passed in 128.36s
 
 uv run --python 3.12 --extra dev ruff check src/awf/control/quality_gates.py src/awf/control/executor.py src/awf/runtime/pr_monitor_runner.py tests/unit/control/test_quality_gates.py tests/unit/control/test_executor_validation_fix_cycle.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py
 # All checks passed.
@@ -52,3 +52,30 @@ uv run --python 3.12 --extra dev mypy src/awf
 ## Gaps
 
 None identified for this P1 slice.
+
+## Iteration 1
+
+Plan-conformance gap found after the initial validation: workflow classification
+compared `jobs` semantically but did not fail closed for changed top-level
+workflow fields such as `on` or `permissions`, even though
+`docs/PROTECTED_FILES.md` blocks workflow field changes outside the explicit
+job/step allowances.
+
+Resolution:
+
+- Added regression coverage for unowned workflow trigger and permissions
+  changes in `tests/unit/control/test_quality_gates.py`.
+- Updated `src/awf/control/quality_gates.py` to compare all top-level workflow
+  fields except `jobs` before applying the existing job/step classifier.
+- Normalized PyYAML's parsed `on` key back to `workflow.on` for section and line
+  reporting.
+
+TDD evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py -q
+# initial result after adding the regression: 2 failed, 18 passed
+# final result after implementation: 20 passed in 0.69s
+```
+
+Full validation evidence is reflected in the validation commands above.

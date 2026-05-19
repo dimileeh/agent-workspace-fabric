@@ -324,6 +324,75 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_header", "new_header", "section", "line", "reason"),
+    [
+        (
+            "name: CI\non: [pull_request]",
+            "name: CI\non: [push, pull_request]",
+            "workflow.on",
+            2,
+            "workflow top-level field changed outside allowed cases: on",
+        ),
+        (
+            "name: CI\non: [pull_request]\npermissions:\n  contents: read",
+            (
+                "name: CI\non: [pull_request]\npermissions:\n"
+                "  contents: read\n  pull-requests: write"
+            ),
+            "workflow.permissions",
+            3,
+            "workflow top-level field changed outside allowed cases: permissions",
+        ),
+    ],
+)
+def test_workflow_top_level_field_change_is_blocked(
+    old_header: str,
+    new_header: str,
+    section: str,
+    line: int,
+    reason: str,
+) -> None:
+    old_text = f"""
+{old_header}
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+{new_header}
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.path == ".github/workflows/ci.yml"
+    assert violation.section == section
+    assert violation.line == line
+    assert violation.reason == reason
+
+
+@pytest.mark.unit
 def test_violation_message_includes_file_section_line_and_reason() -> None:
     old_text = """
 [tool.coverage.report]

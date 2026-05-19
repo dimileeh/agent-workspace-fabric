@@ -779,7 +779,14 @@ def _classify_workflow_change(
             )
         ]
 
-    violations: list[QualityGateViolation] = []
+    violations = _workflow_top_level_violations(
+        path=path,
+        protected_pattern=protected_pattern,
+        old_workflow=old_workflow,
+        new_workflow=new_workflow,
+        old_text=diff.old_text,
+        new_text=diff.new_text,
+    )
     for job_id in sorted(set(old_jobs) - set(new_jobs)):
         violations.append(
             _violation(
@@ -874,6 +881,50 @@ def _workflow_jobs(workflow: Mapping[str, Any]) -> Mapping[str, object] | None:
     if not isinstance(jobs, Mapping):
         return None
     return cast(Mapping[str, object], jobs)
+
+
+def _workflow_top_level_violations(
+    *,
+    path: str,
+    protected_pattern: str,
+    old_workflow: Mapping[str, Any],
+    new_workflow: Mapping[str, Any],
+    old_text: str,
+    new_text: str,
+) -> list[QualityGateViolation]:
+    old_fields = _workflow_top_level_fields(old_workflow, old_text)
+    new_fields = _workflow_top_level_fields(new_workflow, new_text)
+    violations: list[QualityGateViolation] = []
+    sentinel = object()
+    for field in sorted((set(old_fields) | set(new_fields)) - {"jobs"}):
+        old_value = old_fields.get(field, sentinel)
+        new_value = new_fields.get(field, sentinel)
+        if old_value == new_value:
+            continue
+        line_text = new_text if field in new_fields else old_text
+        violations.append(
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section=f"workflow.{field}",
+                line=_line_for_yaml_top_level_key(line_text, field),
+                reason=f"workflow top-level field changed outside allowed cases: {field}",
+            )
+        )
+    return violations
+
+
+def _workflow_top_level_fields(
+    workflow: Mapping[str, Any],
+    text: str,
+) -> dict[str, object]:
+    return {_workflow_top_level_field_name(key, text): value for key, value in workflow.items()}
+
+
+def _workflow_top_level_field_name(key: object, text: str) -> str:
+    if key is True and _line_for_yaml_top_level_key(text, "on") is not None:
+        return "on"
+    return str(key)
 
 
 def _workflow_existing_job_violations(
@@ -1244,6 +1295,10 @@ def _line_for_toml_key(text: str, *, section: str, key: str) -> int | None:
 
 def _line_for_yaml_key(text: str, key: str) -> int | None:
     return _line_matching(text, rf"^\s*{re.escape(key)}\s*:")
+
+
+def _line_for_yaml_top_level_key(text: str, key: str) -> int | None:
+    return _line_matching(text, rf"^{re.escape(key)}\s*:")
 
 
 def _line_for_workflow_job(text: str, job_id: str) -> int | None:
