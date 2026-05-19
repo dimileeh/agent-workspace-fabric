@@ -1770,7 +1770,6 @@ def service_logs(
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
     env_file, compose_env_file = _resolve_service_env_files(env_file)
-    logs_compose_env_file = env_file if env_file.exists() else compose_env_file
     service_env = local_service_environ(env_file=env_file)
     try:
         result = run_service_logs(
@@ -1778,7 +1777,7 @@ def service_logs(
             tail=tail,
             follow=follow,
             compose_file=compose_file,
-            compose_env_file=logs_compose_env_file,
+            compose_env_file=compose_env_file,
             service_environ=service_env,
         )
     except KeyboardInterrupt:

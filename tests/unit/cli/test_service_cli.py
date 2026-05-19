@@ -648,7 +648,7 @@ def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
 
 
 @pytest.mark.unit
-def test_service_logs_passes_existing_root_env_file_when_compose_env_is_missing(
+def test_service_logs_omits_root_env_file_when_compose_env_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -679,8 +679,6 @@ def test_service_logs_passes_existing_root_env_file_when_compose_env_is_missing(
     assert calls[0][0] == [
         "docker",
         "compose",
-        "--env-file",
-        str(root_env),
         "-f",
         str(compose_file),
         "logs",
