@@ -904,7 +904,7 @@ def test_init_without_path_warns_when_compose_env_parent_creation_fails(
     _fail_path_mkdir(monkeypatch, failing_path="docker/compose")
 
     result = _runner.invoke(app, ["init"])
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
 
     assert result.exit_code == 0, output
     assert not (compose / ".env").exists()
@@ -929,7 +929,7 @@ def test_init_without_path_warns_when_env_write_fails(
     _fail_path_write_bytes(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init"])
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
 
     assert result.exit_code == 0, output
     assert not (tmp_path / ".env").exists()
@@ -1087,7 +1087,7 @@ def test_init_without_path_handles_bootstrap_failure_without_traceback(
     assert payload["status"] == "failed"
     assert payload["reason_code"] == "SERVICE_BOOTSTRAP_TIMEOUT"
     assert payload["last_status"]["status"] == "fail"
-    combined = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    combined = result.output
     assert "Traceback" not in combined
 
 
@@ -1100,7 +1100,7 @@ def test_init_without_path_rejects_unknown_provider_without_traceback(
 
     result = _runner.invoke(app, ["init", "--provider", "bogus"])
 
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
     assert result.exit_code == 2
     assert "error: unknown provider(s): bogus" in output
     assert "Traceback" not in output
@@ -1165,7 +1165,7 @@ def test_init_with_path_rejects_bootstrap_only_flags_with_clear_error(
         ["init", str(tmp_path), "--skip-agent-runtime-build"],
     )
 
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
     assert result.exit_code == 2
     assert "--skip-agent-runtime-build" in output
     assert "without a project path" in output or "no path" in output
@@ -1183,7 +1183,7 @@ def test_init_with_path_rejects_no_write_env_flag(
         ["init", str(tmp_path), "--no-write-env"],
     )
 
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
     assert result.exit_code == 2
     assert "--no-write-env" in output
     assert "without a project path" in output or "no path" in output
@@ -1201,7 +1201,7 @@ def test_init_with_path_rejects_format_json_flag(
         ["init", str(tmp_path), "--format", "json"],
     )
 
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
     assert result.exit_code == 2
     assert "--format" in output
     assert "without a project path" in output or "no path" in output
@@ -1225,7 +1225,7 @@ def test_init_with_path_rejects_explicit_default_bootstrap_flags(
     for extra, expected_flag in cases:
         result = _runner.invoke(app, ["init", str(tmp_path), *extra])
 
-        output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+        output = result.output
         assert result.exit_code == 2, f"expected exit 2 for {extra}: {output}"
         assert expected_flag in output, f"expected {expected_flag} in error for {extra}: {output}"
         assert "Traceback" not in output
@@ -1245,7 +1245,7 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 
     result = _runner.invoke(app, ["init", "--include-smoke-request"])
 
-    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    output = result.output
     assert result.exit_code == 2
     assert "--include-smoke-request" in output
     assert "project path" in output

@@ -870,6 +870,8 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
         compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
+        # get_bootstrap_asset_root() verifies this in production; keep the
+        # guard so tests or stubs that bypass validation fall back to root .env.
         if compose_local_service.is_file() and asset_root.resolve() == Path.cwd().resolve():
             compose_env = Path("docker/compose/.env")
             fallback_example = Path(".env.example")
