@@ -3175,8 +3175,8 @@ class TestRunOnceMonitorRecovery:
         async with session_factory() as session:
             workspace = await WorkspaceRepository(session).get(monitor_id)
             assert workspace is not None
-        assert workspace.status == WorkspaceStatus.monitoring_pr.value
-        events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
 
         assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
 
