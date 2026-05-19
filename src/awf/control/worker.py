@@ -2655,17 +2655,12 @@ async def _monitor_provider_recovery_resume_pending(
     if not isinstance(raw_state, Mapping):
         return False
     action = raw_state.get("action")
-    if action == "fallback":
-        return True
-    if action == "retry":
-        # Retry monitors can be in one of two states:
-        # - cooldown not yet elapsed, or
-        # - cooldown elapsed and ready for resumed provider recovery.
-        # In both cases, avoid stale-runtime terminal cleanup until the monitor path
-        # has a chance to claim and run the workspace.
-        return True
-
-    return action == "fallback"
+    # Retry monitors can be in one of two states:
+    # - cooldown not yet elapsed, or
+    # - cooldown elapsed and ready for resumed provider recovery.
+    # In both cases, avoid stale-runtime terminal cleanup until the monitor path
+    # has a chance to claim and run the workspace.
+    return action in {"fallback", "retry"}
 
 
 def _claim_recheck_conditions(
