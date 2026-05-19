@@ -154,16 +154,18 @@ AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 If you change `AWF_POSTGRES_HOST_PORT` and set `AWF_DATABASE_URL` to a
 non-default value, update its localhost port to match.
 
-If you change `AWF_API_HOST_PORT`, update host-side CLI targeting for
-`awf service status` and `awf service doctor`, plus local HTTP checks, to use a
-matching API base URL. For example:
+If you change `AWF_API_HOST_PORT` in the same shell that runs
+`awf service status` or `awf service doctor`, the CLI derives
+`http://localhost:<port>` automatically. Set `AWF_API_BASE_URL` explicitly only
+when running host-side CLI or HTTP checks from a different shell that does not
+carry `AWF_API_HOST_PORT`, or when targeting a non-derived API base URL. For
+example:
 
 ```bash
 export AWF_API_HOST_PORT=9001
-export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
 awf service status --format pretty
 awf service doctor
-curl "${AWF_API_BASE_URL}/readyz?provider=github"
+curl "http://localhost:${AWF_API_HOST_PORT}/readyz?provider=github"
 ```
 
 ### Local vs Production Configuration
