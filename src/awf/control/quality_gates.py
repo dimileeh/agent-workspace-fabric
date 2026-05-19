@@ -287,15 +287,7 @@ def _classify_pyproject_change(
             )
         ]
     if diff.old_text == diff.new_text:
-        return [
-            _violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                section="pyproject.toml",
-                line=None,
-                reason="diff unavailable for protected pyproject.toml change",
-            )
-        ]
+        return []
 
     old_doc, old_error = _parse_toml(diff.old_text, path, protected_pattern)
     if old_error is not None:
@@ -761,15 +753,7 @@ def _classify_workflow_change(
             )
         ]
     if diff.old_text == diff.new_text:
-        return [
-            _violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                section=path,
-                line=None,
-                reason="diff unavailable for protected workflow change",
-            )
-        ]
+        return []
     old_workflow, old_error = _parse_workflow_yaml(diff.old_text, path, protected_pattern)
     if old_error is not None:
         return [old_error]

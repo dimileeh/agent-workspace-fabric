@@ -495,6 +495,59 @@ def test_missing_protected_file_diff_blocks_conservatively() -> None:
 
 
 @pytest.mark.unit
+def test_identical_pyproject_diff_has_no_quality_gate_violation() -> None:
+    text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=text,
+                new_text=text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_identical_workflow_diff_has_no_quality_gate_violation() -> None:
+    text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=text,
+                new_text=text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_parse_failure_blocks_conservatively() -> None:
     violations = find_protected_quality_gate_changes(
         changed_paths=["pyproject.toml"],
