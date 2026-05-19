@@ -1,7 +1,11 @@
 # `awf smoke run` — DX Smoke Proof
 
 `awf smoke run` proves that AWF is correctly installed and configured from any
-project with an `.awf/workspace.yml` profile (or the built-in demo project).
+project with a workspace profile (`.awf/workspace.yml`, `.awf/workspace.yaml`, `awf.workspace.yml`, or `awf.workspace.yaml`) or the built-in demo project.
+
+When a profile file is present, smoke uses it directly.
+If no profile file exists, it falls back to auto-detection.
+If a profile file is present but unreadable or invalid, smoke fails with `SMOKE_PROFILE_PREVIEW_FAILED` instead of silently falling back.
 
 It validates seven phases in order:
 
