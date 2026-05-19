@@ -89,7 +89,7 @@ def resolve_service_settings(
     service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
 
-    database_url_explicit = _database_url_env_is_explicit(env)
+    database_url_explicit = _database_url_env_is_explicit(env, service_env)
     if not database_url_explicit:
         database_url_explicit = _settings_database_url_is_explicit(
             settings,
@@ -374,21 +374,46 @@ def _settings_database_url_is_explicit(
     )
 
 
-def _database_url_env_is_explicit(environ: Mapping[str, str]) -> bool:
+def _database_url_env_is_explicit(
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+) -> bool:
     """Return true when the host environment carries a non-derivable database URL.
 
     A default-valued ``AWF_DATABASE_URL`` is treated as non-explicit when
     ``AWF_POSTGRES_HOST_PORT`` is also present, allowing the port-derived URL to
-    replace a stale default that was left unchanged.
+    replace a stale default that was left unchanged. If a project ``.env`` was
+    sourced into the host shell, a matching default URL is also non-explicit
+    when the merged Compose environment carries the Postgres host-port override.
     """
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
     if database_url is None:
         return False
+    if database_url != DEFAULT_LOCAL_SERVICE_DATABASE_URL:
+        return True
+    if _env_value(environ, "AWF_POSTGRES_HOST_PORT"):
+        return False
     return not (
-        database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
-        and _env_value(environ, "AWF_POSTGRES_HOST_PORT")
+        _env_value(service_environ, "AWF_POSTGRES_HOST_PORT")
+        and _project_dotenv_value("AWF_DATABASE_URL") == database_url
     )
+
+
+def _project_dotenv_value(key: str) -> str | None:
+    """Return a value from the nearest project .env visible from the cwd."""
+
+    for root in _bounded_env_search_roots(Path.cwd().resolve()):
+        env_file = root / ".env"
+        if not env_file.exists():
+            continue
+        values = {
+            env_key: env_value
+            for env_key, env_value in dotenv_values(env_file).items()
+            if env_value is not None
+        }
+        return _env_value(values, key)
+    return None
 
 
 def _settings_init_fields(settings: Settings) -> frozenset[str]:

@@ -377,6 +377,25 @@ def test_service_settings_host_default_database_url_ignores_compose_env_postgres
 
 
 @pytest.mark.unit
+def test_service_settings_sourced_env_default_database_url_uses_compose_env_postgres_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n")
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
     explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
 
