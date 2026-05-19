@@ -1179,9 +1179,13 @@ def _step_label(step: Mapping[str, Any]) -> str:
 
 
 def _is_comment_or_notify_step(step: Mapping[str, Any]) -> bool:
-    label = " ".join(
+    label_parts = [
         value for key in ("id", "name") if (value := _string_value(step.get(key))) is not None
-    ).lower()
+    ]
+    uses = _string_value(step.get("uses"))
+    if uses is not None:
+        label_parts.append(_uses_action(uses) or uses)
+    label = " ".join(label_parts).lower()
     return any(marker in label for marker in _COMMENT_STEP_MARKERS)
 
 
