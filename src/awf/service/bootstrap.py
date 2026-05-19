@@ -345,7 +345,9 @@ def _docker_cli_environ(
     resolved = dict(environ)
     # Keep Docker CLI host selection scoped to the resolved service environment;
     # falling back to ServiceSettings would reintroduce process-environment drift.
-    docker_host = _non_empty_env_value(resolved, "AWF_DOCKER_HOST")
+    docker_host = _non_empty_env_value(resolved, "AWF_DOCKER_HOST") or _non_empty_env_value(
+        resolved, "DOCKER_HOST"
+    )
     scrubbed_keys = {"AWF_DOCKER_HOST"}
     if docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})

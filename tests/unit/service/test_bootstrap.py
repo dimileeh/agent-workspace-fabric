@@ -629,6 +629,64 @@ def test_bootstrap_clears_docker_context_when_awf_docker_host_is_forced(
     assert collected_provider_environ == expected_env
     assert calls
     expected_subprocess_env = dict(os.environ, **expected_env)
+    expected_subprocess_env.pop("DOCKER_CONTEXT", None)
+    assert all(call["env"] == expected_subprocess_env for call in calls)
+    assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
+    assert all("DOCKER_CONTEXT" not in call["env"] for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_clears_docker_context_when_docker_host_is_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_docker_host = f"unix://{tmp_path / 'runtime-docker.sock'}"
+    service_env = {
+        "DOCKER_HOST": runtime_docker_host,
+        "DOCKER_CONTEXT": "service-stale-context",
+    }
+    expected_env = {"DOCKER_HOST": runtime_docker_host}
+    monkeypatch.setenv("DOCKER_HOST", "unix:///caller-stale-docker.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "caller-stale-context")
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            replace(_settings(tmp_path), docker_host=runtime_docker_host),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == expected_env
+    assert calls
+    expected_subprocess_env = dict(os.environ, **expected_env)
+    expected_subprocess_env.pop("DOCKER_CONTEXT", None)
     assert all(call["env"] == expected_subprocess_env for call in calls)
     assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
     assert all("DOCKER_CONTEXT" not in call["env"] for call in calls)

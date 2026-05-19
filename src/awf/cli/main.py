@@ -1170,6 +1170,8 @@ def _merge_env_seed_contents_with_overlay_keys(
     overlay_only_lines: list[str] = []
     overlay_only_keys: list[str] = []
     pending_context: list[str] = []
+    duplicate_context: dict[str, list[str]] = {}
+    seen_overlay_assignment_keys: set[str] = set()
     last_assignment_key: str | None = None
     for index, line in enumerate(overlay_lines):
         key = _env_assignment_key(line)
@@ -1183,16 +1185,20 @@ def _merge_env_seed_contents_with_overlay_keys(
         ):
             file_header_context = pending_context
             pending_context = []
+        context = [*duplicate_context.pop(key, []), *pending_context]
         if overlay_last_assignment_index.get(key) == index:
             if key in seed_keys:
                 if last_assignment_key is None and seed_has_leading_context:
-                    pending_context = []
-                seed_leading_context[key] = pending_context
+                    context = []
+                seed_leading_context[key] = context
             else:
-                overlay_only_lines.extend(pending_context)
+                overlay_only_lines.extend(context)
                 overlay_only_lines.append(line)
                 overlay_only_keys.append(key)
+        elif key in seen_overlay_assignment_keys:
+            duplicate_context.setdefault(key, []).extend(pending_context)
         pending_context = []
+        seen_overlay_assignment_keys.add(key)
         last_assignment_key = key
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
         seed_trailing_context[last_assignment_key] = pending_context

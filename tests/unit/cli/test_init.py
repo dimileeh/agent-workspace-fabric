@@ -2220,6 +2220,56 @@ def test_merge_env_seed_contents_rejects_multiline_dotenv_values(
 
 
 @pytest.mark.unit
+def test_merge_env_seed_contents_preserves_context_between_duplicate_overlay_keys() -> None:
+    """Keep comments between duplicate overlay assignments with the final value."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_DOCKER_HOST=",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=migrated-token",
+                    "AWF_DOCKER_HOST=unix:///tmp/first-docker.sock",
+                    "",
+                    "# Regenerated duplicate Docker host context",
+                    "AWF_DOCKER_HOST=unix:///tmp/second-docker.sock",
+                    "",
+                    "# Operator final Docker host context",
+                    "AWF_DOCKER_HOST=unix:///tmp/final-docker.sock",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# Regenerated duplicate Docker host context",
+                "",
+                "# Operator final Docker host context",
+                "AWF_DOCKER_HOST=unix:///tmp/final-docker.sock",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
