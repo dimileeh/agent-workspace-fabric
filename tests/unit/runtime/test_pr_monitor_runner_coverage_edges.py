@@ -135,6 +135,49 @@ def _status_for_helpers(
     )
 
 
+_PROTECTED_WORKFLOW_OLD = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run ruff
+        run: uv run ruff check
+""".strip()
+
+_PROTECTED_WORKFLOW_BLOCKED = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+        continue-on-error: true
+""".strip()
+
+
+def _queue_protected_workflow_diff(
+    cmd: FakeCommandRunner,
+    *,
+    old_text: str = _PROTECTED_WORKFLOW_OLD,
+    new_text: str = _PROTECTED_WORKFLOW_BLOCKED,
+) -> None:
+    cmd.queue_result(returncode=0, stdout=old_text)
+    cmd.queue_result(returncode=0, stdout=new_text)
+    cmd.queue_result(
+        returncode=0,
+        stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n",
+    )
+
+
 class _FailingLogSink:
     async def write(self, data: str) -> None:
         del data
@@ -3668,6 +3711,73 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
 
 
 @pytest.mark.unit
+async def test_protected_scope_push_check_allows_safe_pinned_workflow_uses_bump(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout=old_text)  # git show merge-base:path
+    cmd.queue_result(returncode=0, stdout=new_text)  # git show HEAD:path
+    cmd.queue_result(
+        returncode=0, stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    block = await runner._protected_scope_push_block(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert block is None
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"] and "show" in args and "merge-base-sha:.github/workflows/ci.yml" in args
+        for args in call_args
+    )
+
+
+@pytest.mark.unit
 async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -4021,6 +4131,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # repair agent committed locally itself
@@ -4028,6 +4139,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
     adapter.queue(stdout="Still committed protected workflow edit.")
@@ -4102,6 +4214,9 @@ async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
+    cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
+    cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # post-repair dirty worktree
     cmd.queue_result(returncode=0)  # git add -A
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
@@ -4656,6 +4771,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
     cmd.queue_result(
@@ -4729,6 +4845,7 @@ async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
     cmd.queue_result(

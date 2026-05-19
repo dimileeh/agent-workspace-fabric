@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from awf.control.quality_gates import (
+    ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
     plan_only_output_message,
@@ -54,6 +55,333 @@ def test_regular_source_changes_are_not_protected() -> None:
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_pyproject_dependency_addition_is_allowed() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_pyproject_lower_coverage_fail_under_is_blocked() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 80
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.path == "pyproject.toml"
+    assert violation.section == "tool.coverage.report.fail_under"
+    assert violation.line == 5
+    assert "lowered from 99 to 80" in violation.reason
+
+
+@pytest.mark.unit
+def test_pyproject_dependency_deletion_is_blocked() -> None:
+    old_text = """
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+""".strip()
+    new_text = """
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "project.optional-dependencies.dev"
+    assert "dependency removed: pytest-cov" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_comment_continue_on_error_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_workflow_pytest_continue_on_error_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+        continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.tests.steps.Run pytest.continue-on-error"
+    assert violations[0].line == 9
+    assert "continue-on-error is only allowed for comment/notify steps" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_removed_job_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv run pytest
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv run ruff check
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.lint"
+    assert "workflow job removed" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_pinned_uses_bump_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_violation_message_includes_file_section_line_and_reason() -> None:
+    old_text = """
+[tool.coverage.report]
+fail_under = 99
+""".strip()
+    new_text = """
+[tool.coverage.report]
+fail_under = 80
+""".strip()
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    message = quality_gate_violation_message(violations)
+
+    assert "pyproject.toml" in message
+    assert "tool.coverage.report.fail_under" in message
+    assert "line 2" in message
+    assert "lowered from 99 to 80" in message
+    assert "lowering or bypassing" not in message
+
+
+@pytest.mark.unit
+def test_missing_protected_file_diff_blocks_conservatively() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "pyproject.toml"
+    assert "diff unavailable" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_parse_failure_blocks_conservatively() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text="[project]\nname = 'demo'\n",
+                new_text="[project\nname = 'demo'\n",
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert "could not parse pyproject.toml" in violations[0].reason
 
 
 @pytest.mark.unit

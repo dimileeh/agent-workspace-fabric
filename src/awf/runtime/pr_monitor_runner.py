@@ -50,9 +50,12 @@ from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.control.quality_gates import (
+    ProtectedFileDiff,
     QualityGateViolation,
     find_protected_quality_gate_changes,
+    quality_gate_violation_details,
     quality_gate_violation_message,
+    requires_protected_file_diff,
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -4565,7 +4568,7 @@ class PullRequestMonitorRunner:
             )
 
         violations = list(protected_scope_block.violations)
-        paths = [violation.path for violation in violations]
+        paths = _quality_gate_violation_paths(violations)
         prompt = await self._protected_scope_committed_repair_prompt(
             workspace_id=workspace_id,
             violations=violations,
@@ -4587,6 +4590,7 @@ class PullRequestMonitorRunner:
                 "phase": "pre_push_committed_diff",
                 "paths": paths,
                 "protected_patterns": [violation.protected_pattern for violation in violations],
+                "violations": quality_gate_violation_details(violations),
                 "message": protected_scope_block.message,
             },
         )
@@ -4768,7 +4772,7 @@ class PullRequestMonitorRunner:
         _log.warning(
             "monitor.protected_scope_repair_requested",
             workspace_id=workspace_id,
-            paths=[violation.path for violation in violations],
+            paths=_quality_gate_violation_paths(violations),
         )
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
@@ -4810,7 +4814,7 @@ class PullRequestMonitorRunner:
             _log.warning(
                 "monitor.protected_scope_repair_failed",
                 workspace_id=workspace_id,
-                paths=[violation.path for violation in remaining],
+                paths=_quality_gate_violation_paths(remaining),
                 cli_failed=agent_run_err is not None,
             )
             await self._append_workspace_events(
@@ -4820,10 +4824,11 @@ class PullRequestMonitorRunner:
                         event_type="workspace.monitor_protected_scope_repair_failed",
                         reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                         payload={
-                            "paths": [violation.path for violation in remaining],
+                            "paths": _quality_gate_violation_paths(remaining),
                             "protected_patterns": [
                                 violation.protected_pattern for violation in remaining
                             ],
+                            "violations": quality_gate_violation_details(remaining),
                             "message": quality_gate_violation_message(remaining),
                         },
                     )
@@ -4833,7 +4838,7 @@ class PullRequestMonitorRunner:
         _log.info(
             "monitor.protected_scope_repair_succeeded",
             workspace_id=workspace_id,
-            paths=[violation.path for violation in violations],
+            paths=_quality_gate_violation_paths(violations),
         )
         return repaired_status
 
@@ -4980,9 +4985,14 @@ class PullRequestMonitorRunner:
             if workspace is None:
                 return []
             owned_paths = list(workspace.owned_paths)
+        protected_file_diffs = await self._protected_file_diffs_for_status_paths(
+            worktree_path=self._worktrees_root / workspace_id,
+            changed_paths=changed_paths,
+        )
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _protected_scope_violations_for_unpushed_commits(
@@ -5002,16 +5012,22 @@ class PullRequestMonitorRunner:
                 )
             owned_paths = list(workspace.owned_paths)
 
-        changed_paths = await self._changed_paths_since_remote_branch(
+        local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
         )
         if not changed_paths:
             return []
+        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+            worktree_path=worktree_path,
+            base_ref=local_base,
+            changed_paths=changed_paths,
+        )
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _changed_paths_since_remote_branch(
@@ -5021,6 +5037,20 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         remote_push_url: str | None = None,
     ) -> tuple[str, ...]:
+        _, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        return changed_paths
+
+    async def _remote_branch_diff_base_and_changed_paths(
+        self,
+        *,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
         remote = remote_push_url or "origin"
         fetch_result = await self._deps.runner.run(
             [
@@ -5045,11 +5075,12 @@ class PullRequestMonitorRunner:
             ref="FETCH_HEAD",
             error_context="against the remote PR branch",
         )
-        return await self._changed_paths_between_ref_and_head(
+        changed_paths = await self._changed_paths_between_ref_and_head(
             worktree_path=worktree_path,
             ref=local_base,
             error_context="against the remote PR branch",
         )
+        return local_base, changed_paths
 
     async def _merge_base_with_head(
         self,
@@ -5092,6 +5123,76 @@ class PullRequestMonitorRunner:
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
         return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
+
+    async def _protected_file_diffs_for_status_paths(
+        self,
+        *,
+        worktree_path: Path,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in _diff_classified_protected_paths(changed_paths):
+            worktree_file = worktree_path / path
+            if not worktree_file.exists():
+                diffs[path] = ProtectedFileDiff(
+                    path=path,
+                    old_text=None,
+                    new_text=None,
+                    unified_diff=None,
+                )
+                continue
+            old_text = await self._git_show_text(
+                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            )
+            new_text = _read_worktree_text(worktree_file)
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+                unified_diff=None,
+            )
+        return diffs
+
+    async def _protected_file_diffs_for_committed_paths(
+        self,
+        *,
+        worktree_path: Path,
+        base_ref: str,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in _diff_classified_protected_paths(changed_paths):
+            old_text = await self._git_show_text(
+                worktree_path=worktree_path,
+                refspec=f"{base_ref}:{path}",
+            )
+            new_text = await self._git_show_text(
+                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            )
+            unified_diff = await self._git_diff_text(
+                worktree_path=worktree_path,
+                args=["diff", "--unified=0", f"{base_ref}..HEAD", "--", path],
+            )
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+                unified_diff=unified_diff,
+            )
+        return diffs
+
+    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
+        result = await self._deps.runner.run(["git", "-C", str(worktree_path), "show", refspec])
+        return result.stdout if result.ok else None
+
+    async def _git_diff_text(
+        self,
+        *,
+        worktree_path: Path,
+        args: Sequence[str],
+    ) -> str | None:
+        result = await self._deps.runner.run(["git", "-C", str(worktree_path), *args])
+        return result.stdout if result.ok else None
 
     async def _protected_scope_violations_for_sync_base_push(
         self,
@@ -5149,9 +5250,15 @@ class PullRequestMonitorRunner:
         )
         if not sync_base_authored_paths:
             return []
+        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+            worktree_path=worktree_path,
+            base_ref=merged_base,
+            changed_paths=sync_base_authored_paths,
+        )
         return find_protected_quality_gate_changes(
             changed_paths=sync_base_authored_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _protected_scope_diff_unavailable_block(
@@ -5249,10 +5356,11 @@ class PullRequestMonitorRunner:
                     event_type="workspace.monitor_protected_scope_push_blocked",
                     reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
                     payload={
-                        "paths": [violation.path for violation in violations],
+                        "paths": _quality_gate_violation_paths(violations),
                         "protected_patterns": [
                             violation.protected_pattern for violation in violations
                         ],
+                        "violations": quality_gate_violation_details(violations),
                         "message": message,
                     },
                 )
@@ -5327,7 +5435,10 @@ class PullRequestMonitorRunner:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             owned_paths = list(workspace.owned_paths) if workspace is not None else []
         paths = "\n".join(
-            f"  - {violation.path} (protected by {violation.protected_pattern})"
+            "  - "
+            f"{violation.path} :: {violation.section or violation.protected_pattern} :: "
+            f"line {violation.line if violation.line is not None else 'unknown'} :: "
+            f"{violation.reason}"
             for violation in violations
         )
         owned = "\n".join(f"  - {path}" for path in owned_paths) or "  - (none declared)"
@@ -7419,6 +7530,28 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def _diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for raw_path in changed_paths:
+        path = raw_path.strip().replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if path and requires_protected_file_diff(path):
+            paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
+def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
+    return list(dict.fromkeys(violation.path for violation in violations))
+
+
+def _read_worktree_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:

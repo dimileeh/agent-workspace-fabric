@@ -54,10 +54,12 @@ from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
+    ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
     plan_only_output_message,
     quality_gate_violation_message,
+    requires_protected_file_diff,
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.validation_fix_cycle import (
@@ -2244,9 +2246,14 @@ class WorkspaceExecutor:
                         ):
                             return
                     has_known_non_plan_output = True
+                    protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
+                        worktree_path=worktree_path,
+                        changed_paths=staged_paths,
+                    )
                     violations = find_protected_quality_gate_changes(
                         changed_paths=staged_paths,
                         owned_paths=list(ws.owned_paths),
+                        protected_file_diffs=protected_file_diffs,
                     )
                     if violations:
                         await self._mark_failed(
@@ -3239,9 +3246,14 @@ class WorkspaceExecutor:
                     )
                     return
                 has_known_non_plan_output = True
+                protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
+                    worktree_path=worktree_path,
+                    changed_paths=fix_staged_paths,
+                )
                 violations = find_protected_quality_gate_changes(
                     changed_paths=fix_staged_paths,
                     owned_paths=list(ws.owned_paths),
+                    protected_file_diffs=protected_file_diffs,
                 )
                 if violations:
                     message = quality_gate_violation_message(violations)
@@ -5292,6 +5304,88 @@ class WorkspaceExecutor:
             )
         return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
 
+    async def _protected_file_diffs_for_staged_paths(
+        self,
+        *,
+        worktree_path: Path,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in _diff_classified_protected_paths(changed_paths):
+            old_text = await self._git_show_text(
+                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            )
+            new_text = await self._git_show_text(worktree_path=worktree_path, refspec=f":{path}")
+            unified_diff = await self._git_diff_text(
+                worktree_path=worktree_path,
+                args=["diff", "--cached", "--unified=0", "--", path],
+            )
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+                unified_diff=unified_diff,
+            )
+        return diffs
+
+    async def _protected_file_diffs_for_committed_paths(
+        self,
+        *,
+        worktree_path: Path,
+        base_ref: str,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in _diff_classified_protected_paths(changed_paths):
+            old_text = await self._git_show_text(
+                worktree_path=worktree_path,
+                refspec=f"{base_ref}:{path}",
+            )
+            new_text = await self._git_show_text(
+                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            )
+            unified_diff = await self._git_diff_text(
+                worktree_path=worktree_path,
+                args=["diff", "--unified=0", f"{base_ref}..HEAD", "--", path],
+            )
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+                unified_diff=unified_diff,
+            )
+        return diffs
+
+    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "show",
+                refspec,
+            ]
+        )
+        return result.stdout if result.ok else None
+
+    async def _git_diff_text(
+        self,
+        *,
+        worktree_path: Path,
+        args: Sequence[str],
+    ) -> str | None:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *args,
+            ]
+        )
+        return result.stdout if result.ok else None
+
     async def _verify_recovered_post_agent_commit(
         self,
         *,
@@ -5324,9 +5418,15 @@ class WorkspaceExecutor:
             expected_status=expected_status,
         ):
             return False
+        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+            worktree_path=worktree_path,
+            base_ref=base_commit,
+            changed_paths=changed_paths,
+        )
         violations = find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
         if violations:
             await self._mark_failed(
@@ -6176,6 +6276,10 @@ class WorkspaceExecutor:
         violations = find_protected_quality_gate_changes(
             changed_paths=repair_staged_paths,
             owned_paths=list(ws.owned_paths),
+            protected_file_diffs=await self._protected_file_diffs_for_staged_paths(
+                worktree_path=worktree_path,
+                changed_paths=repair_staged_paths,
+            ),
         )
         if violations:
             result = CommandResult(
@@ -8296,6 +8400,17 @@ def _post_validation_conformance_agent_failure_details(
 
 def _git_name_lines(output: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for raw_path in changed_paths:
+        path = raw_path.strip().replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if path and requires_protected_file_diff(path):
+            paths.append(path)
+    return tuple(dict.fromkeys(paths))
 
 
 def _format_duration_for_message(value: int | float) -> str:

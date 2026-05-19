@@ -594,6 +594,53 @@ class TestFixCycleMissingWorktree:
 
 class TestProtectedQualityGateChanges:
     @pytest.mark.unit
+    async def test_initial_agent_can_commit_allowed_pyproject_dependency_addition(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+]
+""".strip()
+        new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+]
+""".strip()
+
+        fake.queue_result(returncode=0)  # adapter.run (initial)
+        fake.queue_result(returncode=0, stdout="")  # rev-parse --abbrev-ref HEAD
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
+        fake.queue_result(returncode=0, stdout=old_text)  # git show HEAD:pyproject.toml
+        fake.queue_result(returncode=0, stdout=new_text)  # git show :pyproject.toml
+        fake.queue_result(returncode=0, stdout="diff --git a/pyproject.toml b/pyproject.toml\n")
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
+        fake.queue_result(returncode=0)  # validation passes
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/1"
+
+    @pytest.mark.unit
     async def test_initial_agent_cannot_commit_unowned_quality_gate_change(
         self,
         fake: FakeCommandRunner,
