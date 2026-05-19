@@ -17,6 +17,7 @@ DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
+_COMPOSE_INTERPOLATION_ENV_KEYS = ("AWF_POSTGRES_PASSWORD",)
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -188,18 +189,51 @@ def _run_subprocess(
 
 
 def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
-    """Return a minimal Docker CLI env when a daemon host is configured."""
+    """Return the minimal subprocess env needed by Docker Compose logs."""
 
-    docker_host = (
-        (environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")) if environ else None
+    if environ is None:
+        return None
+    docker_host = _non_empty_env_value(environ, "AWF_DOCKER_HOST") or _non_empty_env_value(
+        environ, "DOCKER_HOST"
     )
-    if not docker_host:
-        # Compose reads service values through --env-file; only pass an explicit
-        # subprocess environment when we need to select a Docker daemon.
+    compose_env = _compose_interpolation_environ(environ)
+    if not docker_host and not compose_env:
+        # Compose reads ordinary service values through --env-file; only pass an
+        # explicit subprocess environment when a resolved value must override the
+        # caller environment for Docker client selection or Compose interpolation.
         return None
     resolved = dict(os.environ)
-    resolved["DOCKER_HOST"] = docker_host
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
+    resolved.pop("AWF_DOCKER_HOST", None)
+    resolved.update(compose_env)
     return resolved
+
+
+def _compose_interpolation_environ(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return resolved service values Docker Compose still interpolates."""
+
+    resolved: dict[str, str] = {}
+    for key in _COMPOSE_INTERPOLATION_ENV_KEYS:
+        found, value = _env_lookup(environ, key)
+        if found:
+            resolved[key] = value
+    return resolved
+
+
+def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:
+    found, value = _env_lookup(environ, key)
+    if found and value:
+        return value
+    return None
+
+
+def _env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
+    wanted = key.upper()
+    for existing, value in environ.items():
+        if existing.upper() == wanted:
+            return True, value
+    return False, ""
 
 
 def _failure_detail(*, stdout: str, stderr: str, follow: bool = False) -> str:

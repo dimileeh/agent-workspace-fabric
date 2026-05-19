@@ -133,6 +133,88 @@ def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_passes_derived_compose_postgres_password_to_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service.config import local_service_environ
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_DATABASE_URL=postgresql+asyncpg://awf:derived-secret@db:5432/awf\n",
+        encoding="utf-8",
+    )
+    service_environ = local_service_environ({}, env_file=env_file)
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in (
+        "AWF_DOCKER_HOST",
+        "DOCKER_HOST",
+        "AWF_POSTGRES_PASSWORD",
+        "AWF_DATABASE_URL",
+        "AWF_API_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert service_environ["AWF_POSTGRES_PASSWORD"] == "derived-secret"
+    assert env["AWF_POSTGRES_PASSWORD"] == "derived-secret"
+    assert "AWF_DATABASE_URL" not in env
+    assert "AWF_API_TOKEN" not in env
+    assert "DOCKER_HOST" not in env
+    assert "AWF_DOCKER_HOST" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_resolved_compose_password_overrides_stale_caller_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {
+        "AWF_DOCKER_HOST": docker_host,
+        "AWF_POSTGRES_PASSWORD": "resolved-secret",
+        "AWF_API_TOKEN": "service-token",
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:resolved-secret@db:5432/awf",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("AWF_POSTGRES_PASSWORD", "stale-secret")
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///stale-docker.sock")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert env["AWF_POSTGRES_PASSWORD"] == "resolved-secret"
+    assert "AWF_DOCKER_HOST" not in env
+    assert "AWF_API_TOKEN" not in env
+    assert "AWF_DATABASE_URL" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
