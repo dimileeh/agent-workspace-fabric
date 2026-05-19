@@ -1459,7 +1459,8 @@ class ControlWorker:
             and monitor_recovery_state.get("action") == "retry"
         )
         if (
-            is_retry_recovery
+            candidate.status == WorkspaceStatus.monitoring_pr
+            and is_retry_recovery
             and candidate.compose_project_name
             and snapshot.stack_state == "running"
         ):

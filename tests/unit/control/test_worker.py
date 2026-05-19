@@ -4666,6 +4666,66 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert db_events == []
 
     @pytest.mark.unit
+    async def test_stale_running_with_retry_provider_state_continues_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "retry-provider-state-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_retry_provider_state_running",
+            node_id="node-a",
+            task_policy={"provider_recovery_state": {"action": "retry"}},
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "orphan-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {"awf_retry_provider_state_running": _live_agent_snapshot()}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert len(preserved_events) == 1
+        assert preserved_events[0].reason_code == PRESERVED_EXECUTION_REASON_CODE
+        assert stale_events == []
+        assert inspector.calls == ["awf_retry_provider_state_running"]
+
+    @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
         self,
         session_factory: async_sessionmaker[AsyncSession],
