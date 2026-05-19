@@ -12,7 +12,7 @@ from typing import Any, Literal, Protocol, cast
 
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.onboarding import preview_project_onboarding
-from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE, ServiceSettings
+from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE, ServiceSettings, local_service_environ
 from awf.service.doctor import collect_doctor_report
 from awf.service.doctor.models import DoctorReport
 from awf.service.metrics import (
@@ -178,8 +178,13 @@ async def collect_core_readiness_report(
 ) -> CoreReadinessReport:
     """Collect the local open-source Core release gate from public service surfaces."""
 
-    provider_env = os.environ if provider_environ is None else provider_environ
     env = os.environ if environ is None else environ
+    provider_env = _resolve_readiness_provider_environ(
+        provider_environ=provider_environ,
+        environ=env,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     strict = frozenset(strict_providers or ())
 
     checks: list[CoreReadinessCheck] = []
@@ -334,6 +339,28 @@ def _cached_status_collector(payload: dict[str, object] | None) -> StatusCollect
         return payload
 
     return cast(StatusCollector, _collect)
+
+
+def _resolve_readiness_provider_environ(
+    *,
+    provider_environ: Mapping[str, str] | None,
+    environ: Mapping[str, str],
+    compose_file: Path,
+    compose_env_file: Path | None,
+) -> Mapping[str, str]:
+    """Return the provider env used by readiness status and doctor collection."""
+
+    if provider_environ is not None:
+        return provider_environ
+
+    env_file = compose_env_file
+    if env_file is None:
+        candidate = compose_file.parent / ".env"
+        if candidate.exists():
+            env_file = candidate
+    if env_file is None:
+        return environ
+    return local_service_environ(environ, env_file=env_file)
 
 
 def _service_status_check(payload: Mapping[str, object]) -> CoreReadinessCheck:

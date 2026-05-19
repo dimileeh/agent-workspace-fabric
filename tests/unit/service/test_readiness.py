@@ -599,6 +599,61 @@ async def test_core_readiness_reuses_collected_service_status_for_doctor(
 
 
 @pytest.mark.unit
+async def test_core_readiness_resolves_provider_environment_from_compose_env_file(
+    tmp_path: Path,
+) -> None:
+    demo_path = tmp_path / "demo"
+    _write_demo_project(demo_path)
+    compose_env_file = tmp_path / "compose.env"
+    compose_token = "ghp_core_readiness_compose_token"
+    compose_env_file.write_text(f"AWF_GITHUB_TOKEN={compose_token}\n", encoding="utf-8")
+    base_environ = {"PATH": "/usr/bin"}
+    captured_status: dict[str, object] = {}
+    captured_doctor: dict[str, object] = {}
+
+    async def _status_collector(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
+        return {
+            "status": "ok",
+            "checks": {
+                "workspace_cleanup": {"ok": True},
+                "orphan_resources": {"ok": True},
+                "stranded_workspaces": {"ok": True},
+            },
+            "agent_readiness": {"status": "ok"},
+        }
+
+    async def _doctor_collector(*_args: object, **kwargs: object) -> DoctorReport:
+        captured_doctor.update(kwargs)
+        return DoctorReport(service="awf-local", status="ok", diagnostics=())
+
+    report = await collect_core_readiness_report(
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
+        demo_path=demo_path,
+        strict_providers=frozenset({"github"}),
+        environ=base_environ,
+        compose_env_file=compose_env_file,
+        status_collector=_status_collector,
+        doctor_collector=_doctor_collector,
+        failure_analysis_collector=_classified_failure_collector,  # type: ignore[arg-type]
+        slo_metrics_collector=_ok_slo_collector,
+    )
+
+    assert report.status == "ok"
+    status_provider_env = captured_status["provider_environ"]
+    doctor_provider_env = captured_doctor["provider_environ"]
+    assert isinstance(status_provider_env, dict)
+    assert isinstance(doctor_provider_env, dict)
+    assert status_provider_env["AWF_GITHUB_TOKEN"] == compose_token
+    assert doctor_provider_env["AWF_GITHUB_TOKEN"] == compose_token
+    assert status_provider_env["PATH"] == "/usr/bin"
+    assert doctor_provider_env["PATH"] == "/usr/bin"
+    assert captured_doctor["environ"] is base_environ
+
+
+@pytest.mark.unit
 async def test_readiness_collectors_use_database_fallbacks_when_not_injected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
