@@ -1078,7 +1078,7 @@ def _run_init_service_bootstrap(
                 )
             raise typer.Exit(code=1)
 
-        state_dir = _resolve_state_directory(os.environ)
+        state_dir = _resolve_state_directory(service_env)
         created = not state_dir.exists()
         state_dir.mkdir(parents=True, exist_ok=True)
     except typer.Exit:

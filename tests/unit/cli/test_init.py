@@ -1208,6 +1208,34 @@ def test_init_without_path_ensures_state_directory_and_prints_path(
 
 
 @pytest.mark.unit
+def test_init_without_path_uses_compose_env_host_work_dir_for_state_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Prepare the host state directory that Docker Compose will mount."""
+    monkeypatch.chdir(tmp_path)
+    host_home = tmp_path / "home"
+    compose_state_dir = tmp_path / "compose-state"
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env").write_text(
+        f"AWF_HOST_WORK_DIR={compose_state_dir}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert compose_state_dir.exists()
+    assert compose_state_dir.is_dir()
+    assert not (host_home / ".awf" / "service").exists()
+    assert str(compose_state_dir.resolve()) in result.output
+
+
+@pytest.mark.unit
 def test_init_with_path_keeps_existing_project_onboarding_behavior(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
