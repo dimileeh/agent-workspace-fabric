@@ -129,6 +129,9 @@ def _default_local_service_compose_file(
 
 
 def _write_non_source_compose_env(tmp_path: Path, contents: str) -> Path:
+    profile_dir = tmp_path / ".awf"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "workspace.yml").write_text("version: 1\n", encoding="utf-8")
     compose_env = tmp_path / "docker" / "compose" / ".env"
     compose_env.parent.mkdir(parents=True)
     (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")

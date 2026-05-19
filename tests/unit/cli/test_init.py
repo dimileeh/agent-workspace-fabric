@@ -1484,6 +1484,31 @@ def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
 
 
 @pytest.mark.unit
+def test_service_env_resolution_ignores_current_compose_env_without_project_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Even explicit service fallback requires an AWF project marker."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env").write_text("AWF_API_TOKEN=wrong-project\n", encoding="utf-8")
+
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(  # noqa: SLF001
+        Path(".env"),
+        allow_current_compose_env_without_asset_root=True,
+    )
+
+    assert active_env_file == Path(".env")
+    assert compose_env_file is None
+
+
+@pytest.mark.unit
 def test_service_env_resolution_uses_current_compose_env_when_explicitly_allowed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1494,6 +1519,8 @@ def test_service_env_resolution_uses_current_compose_env_when_explicitly_allowed
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
 
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_text("version: 1\n", encoding="utf-8")
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")

@@ -1006,6 +1006,8 @@ def _resolve_existing_local_service_compose_env_file(
 
     if not allow_current_directory:
         return None
+    if _existing_project_profile_path(Path.cwd()) is None:
+        return None
 
     compose_file = LOCAL_SERVICE_COMPOSE_FILE
     compose_env = LOCAL_SERVICE_COMPOSE_ENV_FILE
