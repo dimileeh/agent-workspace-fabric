@@ -819,7 +819,10 @@ def test_readme_documents_service_bootstrap_command() -> None:
     assert "awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
-    assert "docker compose -f docker/compose/local-service.yml up --build" in readme
+    assert (
+        "docker compose --env-file docker/compose/.env "
+        "-f docker/compose/local-service.yml up --build" in readme
+    )
     assert "safe to re-run" in readme
     assert "docker/compose/.env" in readme
 
