@@ -3247,7 +3247,7 @@ class TestRunOnceMonitorRecovery:
         assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
 
     @pytest.mark.unit
-    async def test_stale_active_scan_allows_monitor_provider_retry_recovery_after_cooldown(
+    async def test_stale_active_scan_preserves_due_monitor_provider_retry_for_resume(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -3279,24 +3279,24 @@ class TestRunOnceMonitorRecovery:
             runtime_cleaner=cleaner,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
-                max_concurrent_executions=0,
+                max_concurrent_executions=1,
                 stale_active_execution_scan_interval_seconds=0.0,
             ),
         )
 
-        assert await worker.run_once() == 0
+        assert await worker.run_once() == 1
         await worker.wait_for_execution_tasks()
 
-        assert executor.resume_calls == []
-        assert inspector.calls == [compose_project]
-        assert cleaner.calls != []
+        assert executor.resume_calls == [monitor_id]
+        assert inspector.calls == []
+        assert cleaner.calls == []
         async with session_factory() as session:
             workspace = await WorkspaceRepository(session).get(monitor_id)
             assert workspace is not None
-            assert workspace.status == WorkspaceStatus.failed.value
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
             events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
 
-        assert any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
 
     @pytest.mark.unit
     async def test_stale_active_scan_preserves_due_monitor_provider_fallback_for_resume(

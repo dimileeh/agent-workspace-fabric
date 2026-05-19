@@ -1422,10 +1422,7 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
-        if await _monitor_provider_recovery_resume_pending(
-            self._session_factory,
-            candidate,
-        ):
+        if await _monitor_provider_recovery_resume_pending(candidate):
             _log.info(
                 "worker.monitor_provider_recovery_resume_pending",
                 workspace_id=candidate.workspace_id,
@@ -2645,7 +2642,6 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
 
 
 async def _monitor_provider_recovery_resume_pending(
-    session_factory: async_sessionmaker[AsyncSession],
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
     if candidate.status != WorkspaceStatus.monitoring_pr:
@@ -2663,32 +2659,12 @@ async def _monitor_provider_recovery_resume_pending(
     not_before = provider_cooldown_not_before(task_policy)
     if not_before is not None and not_before > datetime.now(UTC):
         return True
-
-    model = raw_state.get("source_model")
-    if not isinstance(model, str):
-        model = raw_state.get("target_model")
-    if not isinstance(model, str):
-        model = agent_model_from_task_policy(task_policy)
-    if model is None:
-        return False
-
-    provider = raw_state.get("source_provider")
-    if not isinstance(provider, str):
-        provider = raw_state.get("target_provider")
-    if not isinstance(provider, str):
-        provider = provider_for_agent_model(candidate.agent or "", model)
-    if not isinstance(provider, str):
-        return False
-
-    async with session_factory() as session:
-        return (
-            await ProviderModelCircuitBreakerRepository(session).open_breaker(
-                provider=provider,
-                model=model,
-                now=datetime.now(UTC),
-            )
-            is not None
-        )
+    # Retry monitors can be in one of two states:
+    # - cooldown not yet elapsed (covered above), or
+    # - cooldown elapsed and ready for resumed provider recovery.
+    # In both cases, avoid stale-runtime terminal cleanup until the monitor path
+    # has a chance to claim and run the workspace.
+    return True
 
 
 def _claim_recheck_conditions(
