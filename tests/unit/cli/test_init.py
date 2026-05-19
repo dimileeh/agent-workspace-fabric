@@ -119,23 +119,70 @@ def _stub_bootstrap_mode(
     return captured
 
 
-def _fail_path_write_bytes(
+def _fail_path_write(
     monkeypatch: pytest.MonkeyPatch,
     *,
     failing_path: str,
     message: str = "permission denied",
 ) -> None:
-    """Patch Path.write_bytes to fail for one expected path."""
-    original_write_bytes = Path.write_bytes
+    """Patch Path.open to fail writes for one expected path."""
+    original_open = Path.open
     failing_path_resolved = Path(failing_path).resolve()
 
-    def _write_bytes(self: Path, data: bytes) -> int:
+    def _open(
+        self: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> Any:
         """Raise a synthetic write failure only for the configured path."""
-        if self.resolve() == failing_path_resolved:
+        if self.resolve() == failing_path_resolved and {"w", "a", "x", "+"}.intersection(mode):
             raise OSError(message)
-        return original_write_bytes(self, data)
+        return original_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
 
-    monkeypatch.setattr(Path, "write_bytes", _write_bytes)
+    monkeypatch.setattr(Path, "open", _open)
+
+
+def _create_path_before_exclusive_open(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target_path: str,
+    contents: bytes,
+) -> None:
+    """Create a path just before an exclusive open attempts to seed it."""
+    original_open = Path.open
+    target_path_resolved = Path(target_path).resolve()
+
+    def _open(
+        self: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> Any:
+        if self.resolve() == target_path_resolved and "x" in mode and not self.exists():
+            with original_open(self, "wb") as handle:
+                handle.write(contents)
+        return original_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(Path, "open", _open)
 
 
 def _fail_path_read_bytes(
@@ -1204,6 +1251,29 @@ def test_init_without_path_does_not_overwrite_existing_source_compose_env(
 
 
 @pytest.mark.unit
+def test_init_without_path_preserves_env_created_during_seed_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep an env file that appears after the pre-write existence check."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    example = tmp_path / ".env.example"
+    example.write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch)
+    _create_path_before_exclusive_open(
+        monkeypatch,
+        target_path=".env",
+        contents=b"AWF_API_TOKEN=concurrent\n",
+    )
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".env").read_bytes() == b"AWF_API_TOKEN=concurrent\n"
+    assert "kept existing .env" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_seeds_env_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1389,7 +1459,7 @@ def test_init_without_path_warns_when_env_write_fails(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch)
-    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+    _fail_path_write(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init"])
     output = result.output
@@ -1477,7 +1547,7 @@ def test_init_without_path_json_marks_env_write_failed(
     elif failure_mode == "read":
         _fail_path_read_bytes(monkeypatch, failing_path=".env.example")
     else:
-        _fail_path_write_bytes(monkeypatch, failing_path=".env")
+        _fail_path_write(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init", "--format", "json"])
 
@@ -1510,7 +1580,7 @@ def test_init_without_path_json_normalizes_asset_root_env_write_failure(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
 
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
-    _fail_path_write_bytes(monkeypatch, failing_path="../docker/compose/.env")
+    _fail_path_write(monkeypatch, failing_path="../docker/compose/.env")
 
     result = _runner.invoke(app, ["init", "--format", "json"])
 
@@ -1627,7 +1697,7 @@ def test_init_without_path_json_includes_env_error_when_docker_preflight_fails(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
-    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+    _fail_path_write(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init", "--format", "json"])
 
@@ -1688,7 +1758,7 @@ def test_init_without_path_warns_when_env_write_and_docker_preflight_fail(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
-    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+    _fail_path_write(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init"])
 
@@ -1814,7 +1884,7 @@ def test_init_without_path_json_includes_env_error_when_bootstrap_fails(
         stderr="AWF_API_TOKEN is required",
     )
     _stub_bootstrap_mode(monkeypatch, bootstrap_error=error)
-    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+    _fail_path_write(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init", "--format", "json"])
 

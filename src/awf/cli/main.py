@@ -1136,7 +1136,10 @@ def _seed_env_file(
         env_contents = _merge_env_seed_contents(env_contents, overlay_contents)
 
     try:
-        env_file.write_bytes(env_contents)
+        with env_file.open("xb") as handle:
+            handle.write(env_contents)
+    except FileExistsError:
+        return "kept_existing", None
     except OSError as exc:
         return (
             "write_failed",
