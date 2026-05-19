@@ -177,6 +177,42 @@ dev = [
 
 
 @pytest.mark.unit
+def test_pyproject_new_dependency_group_is_blocked() -> None:
+    old_text = """
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+""".strip()
+    new_text = """
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+lint = [
+    "ruff>=0.9.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "dependency-groups.lint"
+    assert violations[0].line == 5
+    assert "dependency group added: dependency-groups.lint" in violations[0].reason
+
+
+@pytest.mark.unit
 def test_workflow_comment_continue_on_error_is_allowed() -> None:
     old_text = """
 name: CI

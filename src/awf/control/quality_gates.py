@@ -433,6 +433,7 @@ def _pyproject_dependency_violations(
             new_value=_nested_value(new_doc, ("project", "optional-dependencies")),
             old_text=old_text,
             new_text=new_text,
+            allow_new_groups=True,
         )
     )
     violations.extend(
@@ -444,6 +445,7 @@ def _pyproject_dependency_violations(
             new_value=_nested_value(new_doc, ("dependency-groups",)),
             old_text=old_text,
             new_text=new_text,
+            allow_new_groups=False,
         )
     )
     return violations
@@ -458,6 +460,7 @@ def _dependency_group_violations(
     new_value: object,
     old_text: str,
     new_text: str,
+    allow_new_groups: bool,
 ) -> list[QualityGateViolation]:
     if old_value is None and new_value is None:
         return []
@@ -519,6 +522,18 @@ def _dependency_group_violations(
                     section=section,
                     line=_line_for_toml_section(new_text, section),
                     reason=f"dependency group has unsupported format: {section}",
+                )
+            )
+            continue
+        if not allow_new_groups:
+            violations.append(
+                _violation(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    section=section,
+                    line=_line_for_toml_key(new_text, section=section_prefix, key=group)
+                    or _line_for_toml_section(new_text, section),
+                    reason=f"dependency group added: {section}",
                 )
             )
     return violations
