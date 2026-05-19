@@ -79,6 +79,7 @@ class ProjectInspection:
     service_directories: tuple[str, ...] = ()
 
     def scripts(self) -> Mapping[str, str]:
+        """Return project script mappings from package metadata."""
         return self.package_scripts or {}
 
 
@@ -93,6 +94,7 @@ class PreviewDiagnostics:
     missing_healthchecks: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        """Normalize diagnostic tuples during dataclass initialization."""
         for field_name in (
             "missing_services",
             "missing_secrets",
@@ -103,6 +105,7 @@ class PreviewDiagnostics:
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
 
     def to_dict(self) -> dict[str, list[str]]:
+        """Export diagnostics to a JSON-serializable dictionary."""
         return {
             "missing_services": list(self.missing_services),
             "missing_secrets": list(self.missing_secrets),
@@ -122,6 +125,7 @@ class DraftProfile:
     diagnostics: PreviewDiagnostics
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize draft profile payload for API and CLI output."""
         return {
             "template": self.template,
             "profile": self.profile.model_dump(mode="json", by_alias=True, exclude_none=True),
@@ -140,6 +144,7 @@ class ProjectOnboardingPreview:
     smoke_request: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the full onboarding preview for consumers."""
         payload: dict[str, object] = {
             "path": str(self.path),
             "inspection": {
@@ -161,7 +166,6 @@ class ProjectOnboardingPreview:
 
 def inspect_project(path: Path) -> ProjectInspection:
     """Inspect a repository and select the best onboarding template."""
-
     root = path.expanduser().resolve()
     if not root.exists():
         raise ValueError(f"project path does not exist: {root}")
@@ -249,7 +253,6 @@ def draft_workspace_profile(
     template: str = "auto",
 ) -> DraftProfile:
     """Generate a draft workspace profile from a project inspection."""
-
     selected = inspection.detected_template if template == "auto" else template
     if selected not in _SUPPORTED_TEMPLATES:
         raise ValueError(f"unsupported onboarding template: {selected}")
@@ -270,7 +273,6 @@ def preview_project_onboarding(
     include_smoke_request: bool = False,
 ) -> ProjectOnboardingPreview:
     """Return an onboarding preview without writing files or launching workspaces."""
-
     inspection = inspect_project(path)
     draft = draft_workspace_profile(inspection, template=template)
     smoke_request = (
@@ -290,7 +292,6 @@ def preview_workspace_profile(
     resolution: ProfileResolution,
 ) -> ProjectOnboardingPreview:
     """Construct an onboarding preview from a resolved on-disk workspace profile."""
-
     inspection = ProjectInspection(
         path=project,
         detected_template=resolution.profile.name,
@@ -326,7 +327,6 @@ def preview_workspace_profile(
 
 def write_workspace_profile(preview: ProjectOnboardingPreview, force: bool = False) -> Path:
     """Write the previewed draft to ``.awf/workspace.yml``."""
-
     profile_path = preview.path / ".awf" / "workspace.yml"
     if profile_path.exists() and not force:
         raise FileExistsError(f"{profile_path} already exists; pass --force to overwrite")

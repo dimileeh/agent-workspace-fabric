@@ -18,6 +18,15 @@ from awf.profiles.models import (
 )
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
 
+__all__ = (
+    "PROFILE_MARKER_PATHS",
+    "ProfileResolution",
+    "ProfileResolutionError",
+    "ProfileResolver",
+    "resolve_workspace_profile",
+)
+
+
 class ProfileResolutionError(Exception):
     """Raised when a requested profile cannot be parsed or found."""
 
@@ -28,6 +37,7 @@ class ProfileResolutionError(Exception):
         reason_code: str | None = None,
         findings: tuple[ProfileLintFinding, ...] = (),
     ) -> None:
+        """Create a profile resolution error with optional lint diagnostics."""
         self.reason_code = reason_code
         self.findings = findings
         self.detail = _resolution_error_detail(
@@ -48,6 +58,7 @@ class ProfileResolver:
         profile_ref: str | None = None,
         validation_commands: list[str] | None = None,
     ) -> ProfileResolution:
+        """Resolve a workspace profile using local, inline, and registry sources."""
         considered: list[str] = []
         profile: WorkspaceProfile | None = None
         reason = ""
@@ -151,6 +162,7 @@ def resolve_workspace_profile(
     profile_ref: str | None = None,
     validation_commands: list[str] | None = None,
 ) -> ProfileResolution:
+    """Resolve a workspace profile from local path, inline payload, or registry."""
     return ProfileResolver().resolve(
         worktree_path=worktree_path,
         inline_profile=inline_profile,

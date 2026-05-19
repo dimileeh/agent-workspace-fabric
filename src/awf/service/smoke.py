@@ -50,6 +50,7 @@ async def collect_smoke_report(
 
     Returns:
         Structured smoke report including phase statuses, evidence, and next actions.
+
     """
     mode = "mocked_local" if mocked_local else "live"
     phases: list[dict[str, Any]] = []
