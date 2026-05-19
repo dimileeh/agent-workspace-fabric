@@ -182,16 +182,15 @@ def _default_local_service_database_url(environ: Mapping[str, str]) -> str:
     host_port = _env_value(environ, "AWF_POSTGRES_HOST_PORT")
     if not host_port:
         return DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    invalid_port_message = (
+        f"AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}"
+    )
     try:
         parsed_port = int(host_port)
-    except ValueError as exc:
-        raise ValueError(
-            f"AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}"
-        ) from exc
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(invalid_port_message) from exc
     if not 1 <= parsed_port <= 65535:
-        raise ValueError(
-            f"AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}"
-        )
+        raise ValueError(invalid_port_message)
     url = make_url(DEFAULT_LOCAL_SERVICE_DATABASE_URL).set(port=parsed_port)
     return url.render_as_string(hide_password=False)
 

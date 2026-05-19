@@ -95,6 +95,27 @@ def test_service_settings_rejects_invalid_postgres_host_port(host_port: str) -> 
 
 
 @pytest.mark.unit
+def test_service_settings_rejects_postgres_host_port_conversion_overflow() -> None:
+    class OverflowingPort(str):
+        def __new__(cls) -> OverflowingPort:
+            return super().__new__(cls, "overflow-port")
+
+        def __int__(self) -> int:
+            raise OverflowError("port conversion failed")
+
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_POSTGRES_HOST_PORT": OverflowingPort()},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_POSTGRES_HOST_PORT" in message
+    assert repr("overflow-port") in message
+    assert "integer between 1 and 65535" in message
+
+
+@pytest.mark.unit
 def test_service_settings_default_database_url_uses_compose_env_host_port_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
