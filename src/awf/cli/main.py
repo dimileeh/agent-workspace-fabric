@@ -1243,6 +1243,7 @@ def service_status(
     ),
 ) -> None:
     """Check local AWF service dependencies."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.status import collect_service_status
@@ -1253,11 +1254,17 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    env_file, _ = _resolve_init_env_paths()
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     payload = asyncio.run(
         collect_service_status(
-            resolve_service_settings(),
+            settings,
             strict_providers=strict_providers,
-            provider_environ=local_service_environ(),
+            provider_environ=service_env,
         )
     )
     _emit(payload, fmt)

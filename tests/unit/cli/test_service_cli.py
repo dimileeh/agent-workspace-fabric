@@ -1395,6 +1395,57 @@ def test_service_config_command_prints_redacted_json(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.unit
+def test_service_status_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import status as status_mod
+    from awf.service.config import ServiceSettings
+
+    compose_env = tmp_path / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True)
+    (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_database_url = "postgresql+asyncpg://awf:compose-secret@compose-db:5432/awf"
+    compose_api_base_url = "http://compose-api:8123"
+    compose_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={compose_database_url}",
+                f"AWF_API_BASE_URL={compose_api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: tmp_path)
+    for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
+        captured["settings"] = settings
+        captured["provider_environ"] = kwargs["provider_environ"]
+        return {"service": "awf", "status": "ok", "checks": {}}
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert isinstance(settings, ServiceSettings)
+    assert settings.database_url == compose_database_url
+    assert settings.api_base_url == compose_api_base_url
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert provider_environ["AWF_DATABASE_URL"] == compose_database_url
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+
+
+@pytest.mark.unit
 def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Path) -> None:
     from awf.service.config import ServiceSettings
     from awf.service.status import collect_service_status
@@ -1634,8 +1685,8 @@ def test_service_status_pretty_output_includes_disk_check(
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: os.environ)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1670,7 +1721,7 @@ def test_service_status_pretty_output_includes_network_posture_check(
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1717,7 +1768,7 @@ def test_service_status_pretty_output_includes_provider_reason(
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1756,8 +1807,8 @@ def test_service_status_provider_option_requests_strict_provider(
 
     settings = object()
     service_env = {"AWF_GITHUB_TOKEN": "ghp_compose_token"}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: service_env)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: service_env)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1800,7 +1851,7 @@ def test_service_status_provider_option_accepts_codex(
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -2061,7 +2112,7 @@ def test_service_doctor_does_not_change_status_pretty_output(
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> dict[str, object]:
         return {
