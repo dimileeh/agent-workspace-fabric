@@ -1048,6 +1048,19 @@ def _env_assignment_key(line: str) -> str | None:
     return match.group("key")
 
 
+def _env_context_looks_like_file_header(lines: list[str]) -> bool:
+    """Return whether leading non-assignment lines look like a file header."""
+
+    comment_count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "":
+            return True
+        if stripped.startswith("#"):
+            comment_count += 1
+    return comment_count > 1
+
+
 def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
     """Return compose-template env contents with root env assignments overlaid."""
 
@@ -1092,7 +1105,11 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         if key is None:
             pending_context.append(line)
             continue
-        if last_assignment_key is None and key in seed_keys and pending_context:
+        if (
+            last_assignment_key is None
+            and pending_context
+            and (key in seed_keys or _env_context_looks_like_file_header(pending_context))
+        ):
             file_header_context = pending_context
             pending_context = []
         if overlay_last_assignment_index.get(key) == index:
