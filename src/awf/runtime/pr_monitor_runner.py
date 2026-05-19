@@ -46,6 +46,7 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
@@ -5182,7 +5183,16 @@ class PullRequestMonitorRunner:
         return diffs
 
     async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
-        result = await self._deps.runner.run(["git", "-C", str(worktree_path), "show", refspec])
+        result = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "show",
+                refspec,
+            ]
+        )
         return result.stdout if result.ok else None
 
     async def _git_diff_text(
@@ -5191,7 +5201,15 @@ class PullRequestMonitorRunner:
         worktree_path: Path,
         args: Sequence[str],
     ) -> str | None:
-        result = await self._deps.runner.run(["git", "-C", str(worktree_path), *args])
+        result = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *args,
+            ]
+        )
         return result.stdout if result.ok else None
 
     async def _protected_scope_violations_for_sync_base_push(

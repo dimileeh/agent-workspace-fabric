@@ -258,6 +258,45 @@ async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
 
 
 @pytest.mark.unit
+async def test_git_helpers_mark_worktree_safe_directory(tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="old text")
+    cmd.queue_result(returncode=0, stdout="diff text")
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+
+    show_text = await runner._git_show_text(worktree_path=worktree, refspec="HEAD:README.md")
+    diff_text = await runner._git_diff_text(
+        worktree_path=worktree,
+        args=["diff", "--unified=0", "origin/main..HEAD", "--", "README.md"],
+    )
+
+    assert show_text == "old text"
+    assert diff_text == "diff text"
+    assert cmd.calls[0].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "show",
+        "HEAD:README.md",
+    ]
+    assert cmd.calls[1].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "diff",
+        "--unified=0",
+        "origin/main..HEAD",
+        "--",
+        "README.md",
+    ]
+
+
+@pytest.mark.unit
 async def test_address_review_comment_prompt_receives_workspace_runtime_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
