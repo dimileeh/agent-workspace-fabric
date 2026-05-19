@@ -218,10 +218,25 @@ def test_service_settings_explicit_api_base_url_ignores_api_host_port_override()
 
     settings = resolve_service_settings(
         Settings(_env_file=None, api_base_url=explicit_url),
-        environ={"AWF_API_BASE_URL": explicit_url, "AWF_API_HOST_PORT": "9100"},
+        environ={"AWF_API_HOST_PORT": "9100"},
     )
 
     assert settings.api_base_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_ignores_ambient_api_base_url_for_custom_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_API_BASE_URL", "http://host-shell.example:9300")
+    base = Settings(_env_file=None)
+
+    settings = resolve_service_settings(
+        base,
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == "http://localhost:9100"
 
 
 @pytest.mark.unit

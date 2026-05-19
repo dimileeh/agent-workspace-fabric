@@ -93,7 +93,12 @@ def resolve_service_settings(
     if not database_url_explicit:
         database_url = _default_local_service_database_url(service_env)
 
-    api_base_url = _resolve_service_api_base_url(settings, env, service_env)
+    api_base_url = _resolve_service_api_base_url(
+        settings,
+        env,
+        service_env,
+        require_init_field=environ is not None,
+    )
     work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
 
@@ -237,13 +242,18 @@ def _resolve_service_api_base_url(
     settings: Settings,
     environ: Mapping[str, str],
     service_environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
 ) -> str:
     """Return the host-side API base URL matching Compose port overrides."""
 
     host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
     if host_api_base_url is not None:
         return host_api_base_url
-    if "api_base_url" in settings.model_fields_set:
+    explicit_fields: frozenset[str] | set[str] = (
+        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
+    )
+    if "api_base_url" in explicit_fields:
         return settings.api_base_url
     service_api_base_url = _env_value(service_environ, "AWF_API_BASE_URL")
     if service_api_base_url is not None:
