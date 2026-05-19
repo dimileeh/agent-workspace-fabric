@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, NotRequired, Protocol, TypedDict
 
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
@@ -42,6 +42,7 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
+        env: Mapping[str, str] | None = None,
     ) -> CompletedProcessLike: ...  # pragma: no cover
 
 
@@ -57,6 +58,13 @@ class StatusCollector(Protocol):
 
 Sleep = Callable[[float], Awaitable[None]]
 Monotonic = Callable[[], float]
+
+
+class _SubprocessRunKwargs(TypedDict):
+    check: bool
+    capture_output: bool
+    text: Literal[True]
+    env: NotRequired[Mapping[str, str]]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -182,7 +190,9 @@ async def run_service_bootstrap(
     runner = run_subprocess or _run_subprocess
     collector = status_collector or collect_service_status
     completed: list[ServiceBootstrapStageResult] = []
-    service_env = local_service_environ() if provider_environ is None else provider_environ
+    service_env = local_service_environ()
+    if provider_environ is not None:
+        service_env.update(provider_environ)
 
     for stage in _bootstrap_stages(
         settings,
@@ -190,7 +200,14 @@ async def run_service_bootstrap(
         compose_file=compose_file,
         environ=service_env,
     ):
-        completed.append(await asyncio.to_thread(_run_stage, stage, run_subprocess=runner))
+        completed.append(
+            await asyncio.to_thread(
+                _run_stage,
+                stage,
+                run_subprocess=runner,
+                environ=service_env,
+            )
+        )
 
     service_status = await _poll_status(
         settings,
@@ -385,13 +402,17 @@ def _run_stage(
     stage: _BootstrapStage,
     *,
     run_subprocess: SubprocessRun,
+    environ: Mapping[str, str],
 ) -> ServiceBootstrapStageResult:
     try:
         result = run_subprocess(
             list(stage.command),
-            check=False,
-            capture_output=True,
-            text=True,
+            **_subprocess_run_kwargs(
+                check=False,
+                capture_output=True,
+                text=True,
+                env=dict(environ),
+            ),
         )
     except FileNotFoundError as exc:
         raise ServiceBootstrapError(
@@ -501,5 +522,31 @@ def _run_subprocess(
     check: bool,
     capture_output: bool,
     text: Literal[True],
+    env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
-    return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+    return subprocess.run(
+        args,
+        **_subprocess_run_kwargs(
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            env=env,
+        ),
+    )
+
+
+def _subprocess_run_kwargs(
+    *,
+    check: bool,
+    capture_output: bool,
+    text: Literal[True],
+    env: Mapping[str, str] | None,
+) -> _SubprocessRunKwargs:
+    kwargs: _SubprocessRunKwargs = {
+        "check": check,
+        "capture_output": capture_output,
+        "text": text,
+    }
+    if env is not None:
+        kwargs["env"] = dict(env)
+    return kwargs
