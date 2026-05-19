@@ -861,7 +861,7 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
 def _resolve_init_env_paths() -> tuple[Path, Path]:
     """Return the target env file and example file used for init env seeding.
 
-    If the source checkout contains local Compose assets, prefer the
+    If the verified source checkout contains local Compose assets, prefer the
     `docker/compose/.env` target and use a sibling `.env.example` if present.
     """
 
@@ -870,18 +870,39 @@ def _resolve_init_env_paths() -> tuple[Path, Path]:
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
         compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
-        if asset_root.resolve() == Path.cwd().resolve():
+        if compose_local_service.is_file() and asset_root.resolve() == Path.cwd().resolve():
             compose_env = Path("docker/compose/.env")
             fallback_example = Path(".env.example")
-        else:
+        elif compose_local_service.is_file():
             compose_env = compose_local_service.parent / ".env"
             fallback_example = asset_root / ".env.example"
+        else:
+            return Path(".env"), Path(".env.example")
         compose_example = compose_env.with_name(".env.example")
         if compose_example.exists():
             return compose_env, compose_example
         return compose_env, fallback_example
 
     return Path(".env"), Path(".env.example")
+
+
+def _init_env_error_payload(
+    *,
+    operation: str,
+    path: Path,
+    env_file: Path,
+    env_example: Path,
+    exc: OSError,
+) -> dict[str, str]:
+    """Return a machine-readable env seeding failure without env contents."""
+
+    return {
+        "operation": operation,
+        "path": str(path),
+        "env_file": str(env_file),
+        "env_example": str(env_example),
+        "message": str(exc),
+    }
 
 
 def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
@@ -1003,6 +1024,7 @@ def _run_init_service_bootstrap(
         typer.echo(f"  created: {'true' if created else 'false'}")
 
     env_action = "skipped"
+    env_error: dict[str, str] | None = None
     if write_env:
         env_file, env_example = _resolve_init_env_paths()
         if env_file.exists():
@@ -1014,6 +1036,13 @@ def _run_init_service_bootstrap(
                 env_file.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 env_action = "write_failed"
+                env_error = _init_env_error_payload(
+                    operation="create_parent_directory",
+                    path=env_file.parent,
+                    env_file=env_file,
+                    env_example=env_example,
+                    exc=exc,
+                )
                 if pretty:
                     typer.echo(
                         "  warning: could not create parent directory "
@@ -1025,6 +1054,13 @@ def _run_init_service_bootstrap(
                     env_contents = env_example.read_bytes()
                 except OSError as exc:
                     env_action = "write_failed"
+                    env_error = _init_env_error_payload(
+                        operation="read_example",
+                        path=env_example,
+                        env_file=env_file,
+                        env_example=env_example,
+                        exc=exc,
+                    )
                     if pretty:
                         typer.echo(
                             f"  warning: could not read {env_example} "
@@ -1036,6 +1072,13 @@ def _run_init_service_bootstrap(
                         env_file.write_bytes(env_contents)
                     except OSError as exc:
                         env_action = "write_failed"
+                        env_error = _init_env_error_payload(
+                            operation="write_env",
+                            path=env_file,
+                            env_file=env_file,
+                            env_example=env_example,
+                            exc=exc,
+                        )
                         if pretty:
                             typer.echo(
                                 f"  warning: could not write {env_file} from {env_example}: {exc}",
@@ -1089,6 +1132,8 @@ def _run_init_service_bootstrap(
         payload["state_directory"] = str(state_dir)
         payload["state_directory_created"] = created
         payload["env_action"] = env_action
+        if env_error is not None:
+            payload["env_error"] = env_error
         _emit(payload, fmt)
 
 

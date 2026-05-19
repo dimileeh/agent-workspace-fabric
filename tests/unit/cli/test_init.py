@@ -125,6 +125,25 @@ def _fail_path_write_bytes(
     monkeypatch.setattr(Path, "write_bytes", _write_bytes)
 
 
+def _fail_path_read_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failing_path: str,
+    message: str = "permission denied",
+) -> None:
+    """Patch Path.read_bytes to fail for one expected path."""
+    original_read_bytes = Path.read_bytes
+    failing_path_resolved = Path(failing_path).resolve()
+
+    def _read_bytes(self: Path) -> bytes:
+        """Raise a synthetic read failure only for the configured path."""
+        if self.resolve() == failing_path_resolved:
+            raise OSError(message)
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+
 def _fail_path_mkdir(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -599,6 +618,32 @@ def test_init_without_path_does_not_seed_current_compose_dir_without_asset_root(
 
 
 @pytest.mark.unit
+def test_init_without_path_does_not_seed_asset_root_without_compose_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Require the Compose service file before targeting compose `.env`."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_example = compose / ".env.example"
+    compose_example.write_text("AWF_API_TOKEN=wrong\n", encoding="utf-8")
+    root_example = tmp_path / ".env.example"
+    root_example.write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert not (compose / ".env").exists()
+    env_file = tmp_path / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == root_example.read_bytes()
+    assert "wrote .env from .env.example" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -831,21 +876,45 @@ def test_init_without_path_warns_when_env_write_fails(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_operation", "expected_path"),
+    (
+        ("mkdir", "create_parent_directory", "."),
+        ("read", "read_example", ".env.example"),
+        ("write", "write_env", ".env"),
+    ),
+)
 def test_init_without_path_json_marks_env_write_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_mode: str,
+    expected_operation: str,
+    expected_path: str,
 ) -> None:
     """Expose env copy failures in machine-readable init output."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch)
-    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+    if failure_mode == "mkdir":
+        _fail_path_mkdir(monkeypatch, failing_path=".")
+    elif failure_mode == "read":
+        _fail_path_read_bytes(monkeypatch, failing_path=".env.example")
+    else:
+        _fail_path_write_bytes(monkeypatch, failing_path=".env")
 
     result = _runner.invoke(app, ["init", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["env_action"] == "write_failed"
+    assert payload["env_error"] == {
+        "operation": expected_operation,
+        "path": expected_path,
+        "env_file": ".env",
+        "env_example": ".env.example",
+        "message": "permission denied",
+    }
 
 
 @pytest.mark.unit
