@@ -313,6 +313,9 @@ def preview_workspace_profile(
             profile_path = None
     else:
         profile_path = None
+    # Keep a separate read for the raw YAML preview payload that smoke reports
+    # should emit. This intentionally duplicates I/O from resolver parsing; if
+    # the file changes between reads, the parsed model and raw YAML can diverge.
     draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
     if not draft_yaml:
         draft_yaml = _profile_yaml(resolution.profile)
