@@ -354,6 +354,42 @@ def test_preview_workspace_profile_uses_original_profile_yaml(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_preview_workspace_profile_populates_diagnostics_for_disk_profiles(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / ".awf"
+    workspace_dir.mkdir()
+    workspace_yaml = (
+        "awf:\n"
+        "  name: docker-compose\n"
+        "  docker:\n"
+        "    mode: dind\n"
+        "    compose_files:\n"
+        "      - compose.yml\n"
+        "  phases:\n"
+        "    validate: []\n"
+    )
+    (workspace_dir / "workspace.yml").write_text(workspace_yaml, encoding="utf-8")
+    (tmp_path / "compose.yml").write_text(
+        "services:\n"
+        "  api:\n"
+        "    image: example/api:latest\n"
+        "    environment:\n"
+        "      API_TOKEN: ${API_TOKEN}\n",
+        encoding="utf-8",
+    )
+
+    resolution = resolve_workspace_profile(worktree_path=tmp_path)
+    preview = preview_workspace_profile(tmp_path, resolution)
+
+    assert preview.draft.yaml == workspace_yaml
+    assert "No validation command was detected; add lint, test, or build commands." in (
+        preview.diagnostics.missing_validation_commands
+    )
+    assert preview.diagnostics.missing_secrets == ("API_TOKEN",)
+    assert preview.diagnostics.missing_ports == ("api",)
+    assert preview.diagnostics.missing_healthchecks == ("api",)
+
+
+@pytest.mark.unit
 def test_smoke_request_shape_is_optional_and_does_not_launch(tmp_path: Path) -> None:
     preview = preview_project_onboarding(tmp_path)
     with_smoke = preview_project_onboarding(tmp_path, include_smoke_request=True)

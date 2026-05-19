@@ -292,11 +292,18 @@ def preview_workspace_profile(
     resolution: ProfileResolution,
 ) -> ProjectOnboardingPreview:
     """Construct an onboarding preview from a resolved on-disk workspace profile."""
+    existing = inspect_project(project)
     inspection = ProjectInspection(
         path=project,
         detected_template=resolution.profile.name,
         confidence=resolution.profile.confidence,
         signals=tuple(resolution.candidates_considered),
+        package_manager=existing.package_manager,
+        package_scripts=existing.package_scripts,
+        package_dependencies=existing.package_dependencies,
+        compose_file=existing.compose_file,
+        compose_services=existing.compose_services,
+        service_directories=existing.service_directories,
     )
     source = resolution.profile.source or ""
     if source.startswith("repo:"):
@@ -319,17 +326,17 @@ def preview_workspace_profile(
     draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
     if not draft_yaml:
         draft_yaml = _profile_yaml(resolution.profile)
+
+    diagnostics = _diagnostics_for(
+        inspection,
+        profile=resolution.profile,
+        template=resolution.profile.name,
+    )
     draft = DraftProfile(
         template=resolution.profile.name,
         profile=resolution.profile,
         yaml=draft_yaml,
-        diagnostics=PreviewDiagnostics(
-            missing_services=(),
-            missing_secrets=(),
-            missing_ports=(),
-            missing_validation_commands=(),
-            missing_healthchecks=(),
-        ),
+        diagnostics=diagnostics,
     )
     return ProjectOnboardingPreview(
         path=project,
