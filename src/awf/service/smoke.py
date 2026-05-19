@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from awf.profiles.resolver import PROFILE_MARKER_PATHS
+from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
