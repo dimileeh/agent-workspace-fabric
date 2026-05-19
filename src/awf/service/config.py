@@ -284,15 +284,22 @@ def _resolve_service_api_base_url(
     """Return the host-side API base URL matching Compose port overrides."""
 
     host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
-    if host_api_base_url is not None:
+    if host_api_base_url is not None and _api_base_url_is_explicit(
+        host_api_base_url,
+        service_environ,
+    ):
         return host_api_base_url
-    explicit_fields: frozenset[str] | set[str] = (
-        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
-    )
-    if "api_base_url" in explicit_fields:
+    if _settings_api_base_url_is_explicit(
+        settings,
+        service_environ,
+        require_init_field=require_init_field,
+    ):
         return settings.api_base_url
     service_api_base_url = _env_value(service_environ, "AWF_API_BASE_URL")
-    if service_api_base_url is not None:
+    if service_api_base_url is not None and _api_base_url_is_explicit(
+        service_api_base_url,
+        service_environ,
+    ):
         return service_api_base_url
     return _default_local_service_api_base_url(service_environ)
 
@@ -318,6 +325,31 @@ def _parse_host_port(env_key: str, value: str) -> int:
     if not 1 <= parsed_port <= 65535:
         raise ValueError(invalid_port_message)
     return parsed_port
+
+
+def _settings_api_base_url_is_explicit(
+    settings: Settings,
+    environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
+) -> bool:
+    """Return true when settings carries a non-derivable API base URL."""
+
+    explicit_fields: frozenset[str] | set[str] = (
+        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
+    )
+    if "api_base_url" not in explicit_fields:
+        return False
+    return _api_base_url_is_explicit(settings.api_base_url, environ)
+
+
+def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> bool:
+    """Return true when the API base URL should not be derived from Compose ports."""
+
+    return not (
+        api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+        and _env_value(environ, "AWF_API_HOST_PORT")
+    )
 
 
 def _settings_database_url_is_explicit(

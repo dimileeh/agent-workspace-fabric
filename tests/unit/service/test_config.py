@@ -283,6 +283,25 @@ def test_service_settings_default_api_base_url_uses_compose_env_api_host_port_ov
 
 
 @pytest.mark.unit
+def test_service_settings_default_env_file_api_base_url_uses_compose_env_api_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_BASE_URL=http://localhost:8000\n", encoding="utf-8")
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings())
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_api_base_url_ignores_api_host_port_override() -> None:
     explicit_url = "http://127.0.0.1:9300"
 
