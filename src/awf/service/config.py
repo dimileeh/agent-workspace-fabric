@@ -77,17 +77,17 @@ def resolve_service_settings(
 
     settings = base or Settings()
     env = os.environ if environ is None else environ
-    work_dir_env = local_service_environ(env) if environ is None else env
+    service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
 
     database_url_explicit = _has_env_key(env, "AWF_DATABASE_URL")
-    if environ is None:
-        database_url_explicit = database_url_explicit or "database_url" in settings.model_fields_set
+    if environ is None and not database_url_explicit:
+        database_url_explicit = _settings_database_url_is_explicit(settings, service_env)
 
     if not database_url_explicit:
-        database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
+        database_url = _default_local_service_database_url(service_env)
 
-    work_dir = _resolve_service_work_dir(settings, work_dir_env, host_environ=env)
+    work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
 
     return ServiceSettings(
@@ -174,6 +174,30 @@ def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
         return
     if password:
         environ["AWF_POSTGRES_PASSWORD"] = password
+
+
+def _default_local_service_database_url(environ: Mapping[str, str]) -> str:
+    """Return the host-side local Postgres URL matching Compose port overrides."""
+
+    host_port = _env_value(environ, "AWF_POSTGRES_HOST_PORT")
+    if not host_port:
+        return DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    url = make_url(DEFAULT_LOCAL_SERVICE_DATABASE_URL).set(port=int(host_port))
+    return url.render_as_string(hide_password=False)
+
+
+def _settings_database_url_is_explicit(
+    settings: Settings,
+    environ: Mapping[str, str],
+) -> bool:
+    """Return true when settings carries a non-derivable database URL."""
+
+    if "database_url" not in settings.model_fields_set:
+        return False
+    return not (
+        settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+        and _env_value(environ, "AWF_POSTGRES_HOST_PORT")
+    )
 
 
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
