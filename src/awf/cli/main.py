@@ -1129,6 +1129,8 @@ def _run_init_service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
+    # Re-read after seeding so provider checks see freshly written values while
+    # the Docker preflight and service settings stay bound to the pre-seed env.
     bootstrap_provider_environ = local_service_environ(env_file=env_file)
     try:
         result = asyncio.run(

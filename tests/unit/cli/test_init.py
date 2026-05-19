@@ -680,6 +680,10 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Provider readiness should use the same env file seeded from an asset root."""
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
     workspace_root = tmp_path / "workspace"
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
@@ -692,16 +696,41 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     project_subdir = workspace_root / "project"
     project_subdir.mkdir()
     monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_ENV", "local")
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     for key in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(key.lower(), raising=False)
 
-    captured = _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
+    captured: dict[str, Any] = {"bootstrap_calls": []}
+
+    async def _collect_doctor_report(settings: Any, **kwargs: Any) -> Any:
+        captured["doctor_settings"] = settings
+        captured["doctor_kwargs"] = kwargs
+        return _doctor_report(_docker_diagnostic())
+
+    async def _bootstrap(received_settings: Any, **kwargs: Any) -> Any:
+        captured["bootstrap_calls"].append({"settings": received_settings, **kwargs})
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
 
     result = _runner.invoke(app, ["init", "--provider", "github"])
 
     assert result.exit_code == 0, result.output
-    provider_environ = captured["bootstrap_calls"][0]["provider_environ"]
+    bootstrap_call = captured["bootstrap_calls"][0]
+    settings = bootstrap_call["settings"]
+    assert settings.github_token is None
+    assert captured["doctor_settings"] is settings
+    preflight_environ = captured["doctor_kwargs"]["provider_environ"]
+    assert "AWF_GITHUB_TOKEN" not in preflight_environ
+    assert secret not in preflight_environ.values()
+    provider_environ = bootstrap_call["provider_environ"]
     assert provider_environ["AWF_GITHUB_TOKEN"] == secret
     assert secret not in result.output
 
