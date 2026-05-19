@@ -140,6 +140,43 @@ def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_preserves_resolved_docker_tls_client_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"tcp://{tmp_path / 'docker-host'}:2376"
+    cert_path = str(tmp_path / "certs")
+    service_environ = {
+        "AWF_DOCKER_HOST": docker_host,
+        "DOCKER_TLS_VERIFY": "1",
+        "DOCKER_CERT_PATH": cert_path,
+        "AWF_API_TOKEN": "service-token",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in ("AWF_DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "AWF_API_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert env["DOCKER_TLS_VERIFY"] == "1"
+    assert env["DOCKER_CERT_PATH"] == cert_path
+    assert "AWF_DOCKER_HOST" not in env
+    assert "AWF_API_TOKEN" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_removes_stale_caller_docker_host_variants_when_awf_host_is_forced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

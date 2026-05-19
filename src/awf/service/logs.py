@@ -23,6 +23,14 @@ DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
 _COMPOSE_CLI_ENV_KEYS = ("COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME")
+_DOCKER_CLI_CLIENT_ENV_KEYS = (
+    "DOCKER_API_VERSION",
+    "DOCKER_CERT_PATH",
+    "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+    "DOCKER_TLS",
+    "DOCKER_TLS_VERIFY",
+)
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)|"
     r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
@@ -219,13 +227,15 @@ def _docker_cli_environ(
         compose_env_file=compose_env_file,
     )
     compose_cli_env = _compose_cli_environ(environ)
-    if not docker_host and not compose_env and not compose_cli_env:
+    docker_cli_env = _docker_cli_client_environ(environ)
+    if not docker_host and not compose_env and not compose_cli_env and not docker_cli_env:
         # Compose reads ordinary service values through --env-file; only pass an
         # explicit subprocess environment when a resolved value must override the
         # caller environment for Docker client selection, Compose interpolation,
         # or Compose project/profile selection.
         return None
     resolved = dict(os.environ)
+    resolved.update(docker_cli_env)
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
     scrubbed_keys = {"AWF_DOCKER_HOST"}
@@ -236,6 +246,21 @@ def _docker_cli_environ(
             del resolved[key]
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
+    return resolved
+
+
+def _docker_cli_client_environ(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return resolved Docker CLI controls needed to reach the selected daemon."""
+
+    resolved: dict[str, str] = {}
+    for key in _DOCKER_CLI_CLIENT_ENV_KEYS:
+        found, value = _env_lookup(environ, key)
+        if found and value:
+            resolved[key] = value
+            continue
+        caller_found, caller_value = _env_lookup(os.environ, key)
+        if found and caller_found and caller_value:
+            resolved[key] = ""
     return resolved
 
 
