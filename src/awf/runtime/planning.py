@@ -629,6 +629,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     # Test work is deterministic agent work; only coverage artifact phrases
     # around test/test(s) remain validation evidence.
     for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
+        if named_validation_command_handoff and text[match.end() :].startswith(("/", "\\")):
+            if _has_test_path_work_context(text, match.start()):
+                return False
+            continue
         if re.match(
             r"[\s\-,:]+(?:coverage|evidence|provenance|logs?|"
             r"(?:suites?|runners?|runs?|reports?)[\s\-,:]+"
@@ -638,6 +642,72 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             continue
         return False
     return True
+
+
+def _has_test_path_work_context(text: str, path_match_start: int) -> bool:
+    work_verbs = (
+        "add",
+        "adding",
+        "create",
+        "creating",
+        "edit",
+        "editing",
+        "modify",
+        "modifying",
+        "revise",
+        "revising",
+        "update",
+        "updating",
+        "write",
+        "writing",
+    )
+    modifiers = (
+        "a",
+        "an",
+        "the",
+        "new",
+        "missing",
+        "additional",
+        "focused",
+        "regression",
+        "targeted",
+        "unit",
+        "integration",
+    )
+    work_objects = (
+        "assertion",
+        "assertions",
+        "case",
+        "cases",
+        "fixture",
+        "fixtures",
+        "scenario",
+        "scenarios",
+    )
+    location_prepositions = ("for", "in", "inside", "into", "to", "under", "within")
+    work_verb_pattern = rf"(?<![a-z0-9_])(?:{'|'.join(work_verbs)})"
+    modifier_pattern = rf"(?:\s+(?:{'|'.join(modifiers)}))*"
+    path_prefix = r"(?:(?:\./|\.\\)|[a-z0-9_.-]+[/\\])*"
+    prefix = text[:path_match_start]
+    if (
+        re.search(
+            rf"{work_verb_pattern}{modifier_pattern}\s+{path_prefix}$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    ):
+        return True
+    return (
+        re.search(
+            rf"{work_verb_pattern}{modifier_pattern}\s+"
+            rf"(?:{'|'.join(work_objects)})\s+"
+            rf"(?:{'|'.join(location_prepositions)})\s+{path_prefix}$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _has_migration_validation_evidence_context(text: str) -> bool:
