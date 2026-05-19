@@ -1517,6 +1517,53 @@ def test_init_without_path_runs_docker_availability_check_first(
 
 
 @pytest.mark.unit
+def test_init_without_path_prints_env_success_before_docker_preflight_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Show the created env file even when Docker blocks bootstrap."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1, result.output
+    assert captured["bootstrap_calls"] == []
+    env_message = "wrote .env from .env.example"
+    docker_failure = "Docker is not available; cannot bootstrap local service."
+    assert env_message in result.stdout
+    assert result.stdout.index(env_message) < result.stdout.index(docker_failure)
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "AWF_API_TOKEN=local\n"
+    assert not (tmp_path / "state").exists()
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_includes_env_action_when_docker_preflight_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose successful env seeding in Docker preflight failure payloads."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    assert captured["bootstrap_calls"] == []
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "DOCKER_DAEMON_UNREACHABLE"
+    assert payload["env_action"] == "wrote_from_example"
+    assert "env_error" not in payload
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "AWF_API_TOKEN=local\n"
+    assert not (tmp_path / "state").exists()
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_json_includes_env_error_when_docker_preflight_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1541,6 +1588,38 @@ def test_init_without_path_json_includes_env_error_when_docker_preflight_fails(
         "env_example": ".env.example",
         "message": "permission denied",
     }
+    assert not (tmp_path / "state").exists()
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_includes_env_action_when_local_checks_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose successful env seeding when local checks fail before bootstrap."""
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch)
+
+    async def _fail_to_collect_doctor_report(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("doctor probe failed")
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _fail_to_collect_doctor_report)
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    assert captured["bootstrap_calls"] == []
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "BOOTSTRAP_LOCAL_CHECKS_FAILED"
+    assert payload["message"] == "doctor probe failed"
+    assert payload["env_action"] == "wrote_from_example"
+    assert "env_error" not in payload
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "AWF_API_TOKEN=local\n"
     assert not (tmp_path / "state").exists()
     assert "Traceback" not in result.output
 

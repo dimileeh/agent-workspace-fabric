@@ -1224,6 +1224,24 @@ def _run_init_service_bootstrap(
         typer.echo("AWF init: local service bootstrap")
         if env_action == "write_failed" and env_error is not None:
             typer.echo(_init_env_warning(env_error))
+        if write_env:
+            if env_action == "kept_existing":
+                typer.echo(f"  kept existing {_init_display_path(env_file)}")
+            elif env_action == "wrote_from_example":
+                typer.echo(
+                    f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
+                )
+            elif env_action == "no_example":
+                search_paths = ", ".join(
+                    _init_display_path(path)
+                    for path in _init_env_example_search_paths(env_file, env_example)
+                )
+                typer.echo(
+                    "  no env template found; skipped "
+                    f"{_init_display_path(env_file)} "
+                    f"creation (looked for {search_paths}; run `awf init` from "
+                    "the AWF repository root if you expected one)"
+                )
 
     try:
         service_env = local_service_environ(env_file=active_env_file)
@@ -1270,6 +1288,7 @@ def _run_init_service_bootstrap(
                     "reason_code": reason,
                     "message": message,
                     "action": action,
+                    "env_action": env_action,
                 }
                 if env_error is not None:
                     docker_payload["env_error"] = env_error
@@ -1289,6 +1308,7 @@ def _run_init_service_bootstrap(
                 "status": "failed",
                 "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
                 "message": str(exc),
+                "env_action": env_action,
             }
             if env_error is not None:
                 local_checks_payload["env_error"] = env_error
@@ -1298,25 +1318,6 @@ def _run_init_service_bootstrap(
     if pretty:
         typer.echo(f"  state directory: {state_dir}")
         typer.echo(f"  created: {'true' if created else 'false'}")
-
-    if write_env and pretty:
-        if env_action == "kept_existing":
-            typer.echo(f"  kept existing {_init_display_path(env_file)}")
-        elif env_action == "wrote_from_example":
-            typer.echo(
-                f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
-            )
-        elif env_action == "no_example":
-            search_paths = ", ".join(
-                _init_display_path(path)
-                for path in _init_env_example_search_paths(env_file, env_example)
-            )
-            typer.echo(
-                "  no env template found; skipped "
-                f"{_init_display_path(env_file)} "
-                f"creation (looked for {search_paths}; run `awf init` from "
-                "the AWF repository root if you expected one)"
-            )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
