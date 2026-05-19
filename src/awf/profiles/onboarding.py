@@ -298,12 +298,14 @@ def preview_workspace_profile(
         signals=tuple(resolution.candidates_considered),
     )
     source = resolution.profile.source or ""
-    rel_from_source = source.removeprefix("repo:") if source.startswith("repo:") else ""
-    profile_path = (project / rel_from_source) if rel_from_source else None
-    if profile_path is not None and not profile_path.is_file():
+    if source.startswith("repo:"):
+        rel = source[len("repo:") :]
+        candidate = project / rel
+        profile_path: Path | None = candidate if candidate.is_file() else None
+    else:
         profile_path = None
     draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
-    if draft_yaml == "":
+    if not draft_yaml:
         draft_yaml = _profile_yaml(resolution.profile)
     draft = DraftProfile(
         template=resolution.profile.name,
