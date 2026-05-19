@@ -80,6 +80,21 @@ def test_service_settings_default_database_url_uses_postgres_host_port_override(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+def test_service_settings_rejects_invalid_postgres_host_port(host_port: str) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_POSTGRES_HOST_PORT": host_port},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_POSTGRES_HOST_PORT" in message
+    assert repr(host_port) in message
+    assert "integer between 1 and 65535" in message
+
+
+@pytest.mark.unit
 def test_service_settings_default_database_url_uses_compose_env_host_port_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
