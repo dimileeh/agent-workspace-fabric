@@ -267,7 +267,7 @@ def _parse_host_port(env_key: str, value: str) -> int:
     invalid_port_message = f"{env_key} must be an integer between 1 and 65535; got {value!r}"
     try:
         parsed_port = int(value)
-    except (ValueError, OverflowError) as exc:
+    except ValueError as exc:
         raise ValueError(invalid_port_message) from exc
     if not 1 <= parsed_port <= 65535:
         raise ValueError(invalid_port_message)
