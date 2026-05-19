@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -261,6 +262,10 @@ def _compose_interpolation_environ(
             continue
         caller_found, caller_value = _env_lookup(os.environ, key)
         env_file_found, env_file_value = _env_lookup(env_file_values, key)
+        # Equal values from the caller environment or the Compose env file can
+        # stay out of this override map because _docker_cli_environ starts from
+        # dict(os.environ) and the docker compose command also receives
+        # compose_env_file via --env-file.
         if (
             (caller_found and caller_value != value)
             or (env_file_found and env_file_value != value)
@@ -285,7 +290,27 @@ def _compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
 
     compose_file = compose_file.expanduser().resolve()
     try:
-        payload: object = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        stat = compose_file.stat()
+    except OSError:
+        return ()
+    return _cached_compose_interpolation_keys(
+        str(compose_file),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+
+
+@lru_cache(maxsize=32)
+def _cached_compose_interpolation_keys(
+    compose_file: str,
+    _mtime_ns: int,
+    _size: int,
+) -> tuple[str, ...]:
+    """Return cached Compose interpolation keys for one file version."""
+
+    compose_path = Path(compose_file)
+    try:
+        payload: object = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
         return ()
 

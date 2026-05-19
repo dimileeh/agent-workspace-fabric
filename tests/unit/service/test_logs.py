@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from awf.service.logs import (
     DEFAULT_LOG_TAIL,
@@ -470,6 +471,57 @@ services:
     assert env["AWF_PLAIN_INTERPOLATION"] == "plain-value"
     assert "AWF_ESCAPED_INTERPOLATION" not in env
     assert "AWF_API_TOKEN" not in env
+
+
+@pytest.mark.unit
+def test_service_logs_caches_compose_interpolation_keys_until_file_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHE_TOKEN:?set AWF_CACHE_TOKEN}"
+""",
+    )
+    service_environ = {"AWF_CACHE_TOKEN": "token"}
+    calls: list[dict[str, object]] = []
+    yaml_parse_count = 0
+
+    original_safe_load = yaml.safe_load
+
+    def _safe_load(payload: str) -> object:
+        nonlocal yaml_parse_count
+        yaml_parse_count += 1
+        return original_safe_load(payload)
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("awf.service.logs.yaml.safe_load", _safe_load)
+    monkeypatch.delenv("AWF_CACHE_TOKEN", raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    assert yaml_parse_count == 1
+    for call in calls:
+        env = call["env"]
+        assert isinstance(env, dict)
+        assert env["AWF_CACHE_TOKEN"] == "token"
 
 
 @pytest.mark.unit
