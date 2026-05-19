@@ -427,10 +427,9 @@ def _database_url_env_is_explicit(
 
 
 def _project_dotenv_value(key: str) -> str | None:
-    """Return a value from the nearest project .env visible from the cwd."""
+    """Return a value from the project .env associated with local Compose."""
 
-    for root in _bounded_env_search_roots(Path.cwd().resolve()):
-        env_file = root / ".env"
+    for env_file in _project_dotenv_candidates():
         if not env_file.exists():
             continue
         values = {
@@ -440,6 +439,20 @@ def _project_dotenv_value(key: str) -> str | None:
         }
         return _env_value(values, key)
     return None
+
+
+def _project_dotenv_candidates() -> tuple[Path, ...]:
+    resolved_env_file = resolve_local_service_compose_env_file()
+    if resolved_env_file is not None:
+        return (_project_dotenv_from_compose_env_file(resolved_env_file),)
+    return tuple(root / ".env" for root in _bounded_env_search_roots(Path.cwd().resolve()))
+
+
+def _project_dotenv_from_compose_env_file(env_file: Path) -> Path:
+    project_root = env_file
+    for _ in LOCAL_SERVICE_COMPOSE_ENV_FILE.parts:
+        project_root = project_root.parent
+    return project_root / ".env"
 
 
 def _settings_init_fields(settings: Settings) -> frozenset[str]:
