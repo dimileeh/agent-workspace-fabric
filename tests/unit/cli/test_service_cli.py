@@ -135,6 +135,7 @@ def test_service_readiness_emits_json_scorecard(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     settings = SimpleNamespace(service_name="awf-local")
     report = CoreReadinessReport(
@@ -157,8 +158,13 @@ def test_service_readiness_emits_json_scorecard(
         return report
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
-    monkeypatch.setattr(config_module, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(
+        config_module,
+        "resolve_service_settings",
+        lambda *_args, **_kwargs: settings,
+    )
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(
         app,
@@ -192,10 +198,93 @@ def test_service_readiness_emits_json_scorecard(
             "strict_providers": frozenset({"codex"}),
             "provider_environ": os.environ,
             "environ": os.environ,
+            "compose_file": Path("docker/compose/local-service.yml"),
+            "compose_env_file": Path(".env"),
             "allow_generic_failures": False,
             "allow_slo_breach": False,
         }
     ]
+
+
+@pytest.mark.unit
+def test_service_readiness_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    github_token = "ghp_compose_token"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+                f"AWF_GITHUB_TOKEN={github_token}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    for key in (
+        "AWF_DATABASE_URL",
+        "AWF_DOCKER_HOST",
+        "AWF_API_BASE_URL",
+        "AWF_GITHUB_TOKEN",
+        "AWF_POSTGRES_PASSWORD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _collect(**kwargs: object) -> CoreReadinessReport:
+        captured.update(kwargs)
+        return CoreReadinessReport(
+            status="ok",
+            checks=(
+                CoreReadinessCheck(
+                    name="service_status",
+                    status="ok",
+                    reason_code="SERVICE_STATUS_OK",
+                    message="service dependencies are ready",
+                    evidence={"status": "ok"},
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+
+    result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    assert settings.github_token == github_token
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert provider_environ["AWF_GITHUB_TOKEN"] == github_token
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+    assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == compose_file
+    assert captured["compose_env_file"] == compose / ".env"
 
 
 @pytest.mark.unit
@@ -204,6 +293,7 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -221,10 +311,11 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
 
     result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
@@ -241,6 +332,7 @@ def test_service_readiness_pretty_labels_release_gate_and_summarizes_checks(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -273,12 +365,13 @@ def test_service_readiness_pretty_labels_release_gate_and_summarizes_checks(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(app, ["service", "readiness", "--format", "pretty"])
 
@@ -296,6 +389,7 @@ def test_service_release_readiness_alias_matches_readiness_json(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -312,12 +406,13 @@ def test_service_release_readiness_alias_matches_readiness_json(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(app, ["service", "release-readiness", "--format", "json"])
 

@@ -1538,6 +1538,7 @@ def service_readiness(
     ),
 ) -> None:
     """Run the executable local AWF Core release-readiness gate."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.readiness import (
@@ -1552,16 +1553,24 @@ def service_readiness(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    service_env = local_service_environ()
+    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     report = asyncio.run(
         collect_core_readiness_report(
-            settings=resolve_service_settings(),
+            settings=settings,
             demo_path=demo_path if demo_path is not None else DEFAULT_DEMO_PATH,
             failure_window_hours=failure_window_hours,
             slo_window_hours=slo_window_hours,
             strict_providers=frozenset(strict_providers),
             provider_environ=service_env,
             environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=env_file,
             allow_generic_failures=allow_generic_failures,
             allow_slo_breach=allow_slo_breach,
         )

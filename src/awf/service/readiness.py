@@ -15,6 +15,7 @@ from awf.profiles.onboarding import preview_project_onboarding
 from awf.service.config import ServiceSettings
 from awf.service.doctor import collect_doctor_report
 from awf.service.doctor.models import DoctorReport
+from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
     UNKNOWN_FAILURE_REASON,
@@ -57,6 +58,8 @@ class DoctorCollector(Protocol):
         provider_environ: Mapping[str, str] | None = None,
         environ: Mapping[str, str] | None = None,
         status_collector: StatusCollector | None = None,
+        compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file: Path | None = None,
     ) -> Awaitable[DoctorReport]: ...
 
 
@@ -161,6 +164,8 @@ async def collect_core_readiness_report(
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
+    compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
     allow_generic_failures: bool = False,
     allow_slo_breach: bool = False,
     status_collector: StatusCollector = collect_service_status,
@@ -204,6 +209,8 @@ async def collect_core_readiness_report(
             provider_environ=provider_env,
             environ=env,
             status_collector=cached_status_collector,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
         )
         checks.append(_doctor_check(doctor_report))
     except Exception as exc:
