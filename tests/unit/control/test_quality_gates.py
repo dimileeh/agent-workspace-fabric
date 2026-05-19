@@ -683,6 +683,96 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_existing_step_reorder_is_blocked() -> None:
+    old_text = """
+name: Release
+on: [pull_request]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: uv run pytest
+      - name: Publish package
+        run: python -m build && twine upload dist/*
+""".strip()
+    new_text = """
+name: Release
+on: [pull_request]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish package
+        run: python -m build && twine upload dist/*
+      - name: Run tests
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/release.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/release.yml": ProtectedFileDiff(
+                path=".github/workflows/release.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.release.steps.Publish package"
+    assert violation.line == 7
+    assert "workflow step order changed" in violation.reason
+
+
+@pytest.mark.unit
+def test_workflow_added_informational_step_preserves_existing_step_order() -> None:
+    old_text = """
+name: Release
+on: [pull_request]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: uv run pytest
+      - name: Publish package
+        run: python -m build && twine upload dist/*
+""".strip()
+    new_text = """
+name: Release
+on: [pull_request]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify reviewers
+        run: echo "workflow started"
+      - name: Run tests
+        run: uv run pytest
+      - name: Publish package
+        run: python -m build && twine upload dist/*
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/release.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/release.yml": ProtectedFileDiff(
+                path=".github/workflows/release.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_pinned_uses_bump_is_allowed() -> None:
     old_text = """
 name: CI

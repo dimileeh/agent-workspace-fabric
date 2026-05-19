@@ -976,6 +976,8 @@ def _workflow_existing_job_violations(
         return violations
 
     matched_new_indexes: set[int] = set()
+    last_ordered_match_index = -1
+    reported_order_violation = False
     for old_step in old_steps:
         match_index = _matching_step_index(old_step, new_steps, matched_new_indexes)
         old_label = _step_label(old_step)
@@ -991,13 +993,28 @@ def _workflow_existing_job_violations(
             )
             continue
         matched_new_indexes.add(match_index)
+        matched_step = new_steps[match_index]
+        if match_index < last_ordered_match_index and not reported_order_violation:
+            label = _step_label(matched_step)
+            violations.append(
+                _violation(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    section=f"jobs.{job_id}.steps.{label}",
+                    line=_line_for_workflow_step(new_text, matched_step),
+                    reason=f"workflow step order changed: jobs.{job_id}.steps.{label}",
+                )
+            )
+            reported_order_violation = True
+        else:
+            last_ordered_match_index = match_index
         violations.extend(
             _workflow_existing_step_violations(
                 path=path,
                 protected_pattern=protected_pattern,
                 job_id=job_id,
                 old_step=old_step,
-                new_step=new_steps[match_index],
+                new_step=matched_step,
                 new_text=new_text,
             )
         )
