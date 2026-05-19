@@ -34,6 +34,7 @@ import typer.rich_utils as typer_rich_utils
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.urls import normalize_api_url
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
@@ -108,27 +109,6 @@ class OutputFormat(StrEnum):
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
 _CALL_CONTEXT: dict[int, tuple[str, str]] = {}
-
-
-def _normalize_api_url(base_url: str, path: str) -> str:
-    if not path.startswith("/v1/"):
-        return f"{base_url.rstrip('/')}{path}"
-
-    parsed_base = urllib.parse.urlsplit(base_url)
-    base_path = (parsed_base.path or "").rstrip("/")
-    if base_path.endswith("/v1"):
-        base_path = base_path[:-3]
-    base_path = base_path.rstrip("/")
-    normalized_path = f"{base_path}{path}" if base_path else path
-    return urllib.parse.urlunsplit(
-        (
-            parsed_base.scheme,
-            parsed_base.netloc,
-            normalized_path,
-            parsed_base.query,
-            parsed_base.fragment,
-        )
-    )
 
 
 def _sanitize_request_url(url: str) -> str:
@@ -619,7 +599,7 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
-    url = _normalize_api_url(base_url, path)
+    url = normalize_api_url(base_url, path)
     try:
         response = httpx.request(method, url, timeout=30.0, **kwargs)
         _CALL_CONTEXT[id(response)] = (method, url)
