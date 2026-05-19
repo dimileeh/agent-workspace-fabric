@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -2736,6 +2737,134 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
     assert scope["salvage_policy"] == "explicit_salvage_required"
     assert "Retry planning from a clean workspace" in scope["recommended_action"]
     assert len(adapter.prompts) == 1
+
+
+@pytest.mark.unit
+async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = worktree / "docs" / "awf-plans" / "ws_plan_ignored.md"
+
+    class _IgnoredPlanAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            result = await super().run(**kwargs)
+            if len(self.prompts) == 1:
+                plan_path.parent.mkdir(parents=True, exist_ok=True)
+                plan_path.write_text("# Plan\n\nUse the on-disk profile.\n", encoding="utf-8")
+            return result
+
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+    runner.queue_result(returncode=0, stdout="")  # dirty_paths: ignored plan is hidden
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _IgnoredPlanAdapter(
+        "plan written",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-ignored",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_ignored", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
+async def test_planning_required_skips_digest_fallback_when_git_reports_plan_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_plan_tracked.md")
+    digest_paths: list[Path] = []
+
+    def _digest(path: Path) -> str | None:
+        digest_paths.append(path.relative_to(worktree))
+        return None
+
+    monkeypatch.setattr(executor_mod, "_digest_file_if_present", _digest)
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+    runner.queue_result(returncode=0, stdout=f"?? {plan_path.as_posix()}\n")  # dirty_paths
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+    runner.queue_result(returncode=0, stdout=f"?? {plan_path.as_posix()}\n")  # before_compare
+    runner.queue_result(returncode=0, stdout=f"?? {plan_path.as_posix()}\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan written",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-tracked",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_tracked", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert message is None
+    assert digest_paths == [plan_path]
+
+
+@pytest.mark.unit
+def test_digest_file_if_present_streams_file_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = (b"0123456789abcdef" * 8192) + b"tail"
+    path = tmp_path / "large-plan.md"
+    path.write_bytes(payload)
+
+    def _read_bytes_should_not_be_used(self: Path) -> bytes:
+        raise AssertionError(f"unexpected read_bytes for {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes_should_not_be_used)
+
+    assert executor_mod._digest_file_if_present(path) == hashlib.sha256(payload).hexdigest()
 
 
 @pytest.mark.unit

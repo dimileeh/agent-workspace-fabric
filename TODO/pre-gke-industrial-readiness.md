@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-16
+Last updated: 2026-05-19
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -78,6 +78,8 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Local Service Readiness | Make local service host ports configurable | `ws_8e051db584564e9d9bd97566` | Codex / `gpt-5.3-codex-spark` | running | Retry of failed `ws_dba771cf034b4be8b936977e`; launched 2026-05-18 after local AWF fixes for validation-handoff conformance classification and salvage safe-directory handling. |
+| P1 MCP And Project Onboarding Client Parity | Harden CLI `adopt-pr` API root handling | `ws_eba3d6c717f3491bb4d2c367` | Codex / `gpt-5.3-codex-spark` | running | Retry of failed `ws_304d823a6c084c82990de920`; launched 2026-05-18 after local AWF fixes for validation-handoff conformance classification and salvage safe-directory handling. |
 
 ### Reschedule Required Slices
 
@@ -260,6 +262,8 @@ under Failed / Superseded Slices for root-cause history.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | Harden CLI `adopt-pr` API root handling | `ws_304d823a6c084c82990de920` | none | superseded | Failed 2026-05-18 in conformance despite completing implementation and focused validation. Root cause was an AWF conformance-classifier bug: `CONFORMANCE_REQUIRES_AWF_VALIDATION` gaps that explicitly named validation commands were rejected when the command text included `tests/...` or `src/...` paths, so AWF looped the agent instead of handing off to AWF-owned validation. First retry was also blocked by salvage Git `safe.directory` handling; local fix now permits retry `ws_eba3d6c717f3491bb4d2c367`. |
+| P1 Local Service Readiness | Make local service host ports configurable | `ws_dba771cf034b4be8b936977e` | none | superseded | Failed 2026-05-18 in conformance despite completing implementation and focused validation. Root cause was an AWF conformance-classifier bug: `CONFORMANCE_REQUIRES_AWF_VALIDATION` gaps that explicitly named validation commands were rejected when the command text included `tests/...` or `src/...` paths, so AWF looped the agent instead of handing off to AWF-owned validation. First retry was also blocked by salvage Git `safe.directory` handling; local fix now permits retry `ws_8e051db584564e9d9bd97566`. |
 | P1 Security, Secrets, And Egress Policy | Add production configuration footgun guardrails | `ws_6f426618098f4361be6e4354` | none | superseded | Cancelled 2026-05-15 because the local worker image was stale and ignored the already-merged `final_gate: none` executor policy, causing repeated local full-coverage repair loops before PR creation. Branch/worktree/logs are preserved as evidence, but the branch was polluted by broad coverage-threshold repair commits; clean retry `ws_084580a1fa544b95bcbcab98` now owns the slice. |
 | P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_b7017872938042129fd09d33` | none | superseded | Cancelled 2026-05-15 because the local worker image was stale and ignored the already-merged `final_gate: none` executor policy, causing repeated local full-coverage repair loops before PR creation. Branch/worktree/logs are preserved as evidence, but the branch was polluted by broad coverage-threshold repair commits; clean retry `ws_8b76839898f1400abc16ad08` now owns the slice. |
 | P0 Test Coverage And Quality Gates | Make workspace-local parallel final coverage deterministic | `ws_82b51b498cd044d2b4646d67` | none | superseded | Attempt had one local commit plus dirty follow-up files, but no PR. It failed 2026-05-14 because a local service restart interrupted the running agent and stale-active cleanup stopped the runtime. Evidence is retained in the failed worktree; clean retry `ws_716851d0d48f4ff69bcc41ad` now owns the slice from current base. |
