@@ -28,7 +28,7 @@ DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
-_PROJECT_ROOT_MARKERS = ("pyproject.toml", ".git")
+_PROJECT_ROOT_MARKER = ".git"
 _AWF_SOURCE_ROOT_MARKERS = (
     "pyproject.toml",
     "src/awf/__init__.py",
@@ -235,7 +235,7 @@ def _bounded_env_search_roots(
 
 
 def _is_project_root(candidate: Path) -> bool:
-    return any((candidate / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
+    return (candidate / _PROJECT_ROOT_MARKER).exists()
 
 
 def _is_awf_source_root(candidate: Path) -> bool:
