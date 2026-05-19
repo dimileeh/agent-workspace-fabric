@@ -1124,6 +1124,39 @@ def test_init_without_path_json_marks_env_write_failed(
 
 
 @pytest.mark.unit
+def test_init_without_path_json_normalizes_asset_root_env_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep machine-readable env failure paths relative to the launch directory."""
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (workspace_root / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
+    _fail_path_write_bytes(monkeypatch, failing_path="../docker/compose/.env")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["env_action"] == "write_failed"
+    assert payload["env_error"] == {
+        "operation": "write_env",
+        "path": "../docker/compose/.env",
+        "env_file": "../docker/compose/.env",
+        "env_example": "../.env.example",
+        "message": "permission denied",
+    }
+
+
+@pytest.mark.unit
 def test_init_without_path_runs_docker_availability_check_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

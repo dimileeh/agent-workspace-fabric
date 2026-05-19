@@ -900,9 +900,9 @@ def _init_env_error_payload(
 
     return {
         "operation": operation,
-        "path": str(path),
-        "env_file": str(env_file),
-        "env_example": str(env_example),
+        "path": _init_display_path(path),
+        "env_file": _init_display_path(env_file),
+        "env_example": _init_display_path(env_example),
         "message": str(exc),
     }
 
