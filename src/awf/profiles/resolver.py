@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.profiles.lint import lint_workspace_profile
 from awf.profiles.models import (
     ProfileLintFinding,
@@ -17,11 +18,11 @@ from awf.profiles.models import (
 )
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
 
-_PROFILE_PATHS = (
-    ".awf/workspace.yml",
-    ".awf/workspace.yaml",
-    "awf.workspace.yml",
-    "awf.workspace.yaml",
+__all__ = (
+    "ProfileResolution",
+    "ProfileResolutionError",
+    "ProfileResolver",
+    "resolve_workspace_profile",
 )
 
 
@@ -35,6 +36,7 @@ class ProfileResolutionError(Exception):
         reason_code: str | None = None,
         findings: tuple[ProfileLintFinding, ...] = (),
     ) -> None:
+        """Create a profile resolution error with optional lint diagnostics."""
         self.reason_code = reason_code
         self.findings = findings
         self.detail = _resolution_error_detail(
@@ -55,6 +57,7 @@ class ProfileResolver:
         profile_ref: str | None = None,
         validation_commands: list[str] | None = None,
     ) -> ProfileResolution:
+        """Resolve a workspace profile using local, inline, and registry sources."""
         considered: list[str] = []
         profile: WorkspaceProfile | None = None
         reason = ""
@@ -76,7 +79,8 @@ class ProfileResolver:
             repo_profile = self._load_repo_profile(worktree_path, considered)
             if repo_profile is not None:
                 profile = repo_profile
-                reason = "repo-local .awf/workspace.yml profile"
+                source = repo_profile.source or "repo:<unknown>"
+                reason = f"repo-local {source.removeprefix('repo:')} profile"
 
         if profile is None and profile_ref and profile_ref != "auto":
             considered.append(f"registry:{profile_ref}")
@@ -123,14 +127,15 @@ class ProfileResolver:
     def _load_repo_profile(
         self, worktree_path: Path, considered: list[str]
     ) -> WorkspaceProfile | None:
-        for rel in _PROFILE_PATHS:
+        """Load the first valid workspace profile from known repository marker files."""
+        for rel in PROFILE_MARKER_PATHS:
             path = worktree_path / rel
             considered.append(f"repo:{rel}")
             if not path.is_file():
                 continue
             try:
                 raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-            except (OSError, yaml.YAMLError) as exc:
+            except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
                 raise ProfileResolutionError(
                     f"could not read workspace profile {path}: {exc}"
                 ) from exc
@@ -158,6 +163,7 @@ def resolve_workspace_profile(
     profile_ref: str | None = None,
     validation_commands: list[str] | None = None,
 ) -> ProfileResolution:
+    """Resolve a workspace profile from local path, inline payload, or registry."""
     return ProfileResolver().resolve(
         worktree_path=worktree_path,
         inline_profile=inline_profile,
@@ -167,6 +173,7 @@ def resolve_workspace_profile(
 
 
 def _validation_error_message(exc: ValidationError) -> str:
+    """Extract a short path-aware validation error message from a Pydantic error."""
     errors = exc.errors(include_input=False)
     if not errors:
         return "schema validation failed"
@@ -182,6 +189,7 @@ def _resolution_error_detail(
     reason_code: str | None,
     findings: tuple[ProfileLintFinding, ...],
 ) -> dict[str, Any] | None:
+    """Assemble optional machine-readable reason-code details for failures."""
     if reason_code is None and not findings:
         return None
     return {

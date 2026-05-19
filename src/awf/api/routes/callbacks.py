@@ -16,6 +16,7 @@ from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
     admit_request_async,
+    ensure_bearer_auth_verified_from_header,
     request_app_state,
 )
 from awf.api.responses import RATE_LIMITED_ERROR_RESPONSE
@@ -187,6 +188,10 @@ async def register_callback(
     settings: object = Depends(get_settings),
 ) -> CallbackSubscriptionResponse | JSONResponse:
     route_settings = resolve_settings_dependency(settings)
+    ensure_bearer_auth_verified_from_header(
+        request,
+        expected_token=route_settings.api_token,
+    )
     _ensure_callbacks_enabled(route_settings)
     key = _require_idempotency_key(idempotency_key)
     replay_cache = _callback_idempotency_replay_cache(request)

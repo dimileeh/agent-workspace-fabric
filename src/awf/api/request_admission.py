@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import math
 import threading
 import time
@@ -13,7 +14,7 @@ from typing import Final
 
 from starlette.requests import Request
 
-from awf.api.auth_context import request_has_verified_bearer_auth
+from awf.api.auth_context import mark_bearer_auth_verified, request_has_verified_bearer_auth
 from awf.common.logging import get_logger
 
 WORKSPACE_CREATE_ENDPOINT_FAMILY: Final = "workspace_create"
@@ -237,6 +238,26 @@ def extract_request_identity(
         identity_type=CLIENT_HOST_IDENTITY_TYPE,
         identity_digest=_digest("client-host", f"{endpoint_family}\x00{client_host}"),
     )
+
+
+def ensure_bearer_auth_verified_from_header(
+    request: Request | object | None,
+    *,
+    expected_token: str | None,
+) -> None:
+    """Best-effort restore bearer verification state from request headers."""
+
+    if expected_token is None or request is None:
+        return
+    if request_has_verified_bearer_auth(request):
+        return
+
+    token = _bearer_token(request)
+    if token is None:
+        return
+    if not hmac.compare_digest(token, expected_token):
+        return
+    mark_bearer_auth_verified(request)
 
 
 def admit_request(
@@ -463,6 +484,7 @@ __all__ = [
     "admit_request_async",
     "check_request_async",
     "extract_request_identity",
+    "ensure_bearer_auth_verified_from_header",
     "request_app_state",
     "request_admission_limiter",
 ]
