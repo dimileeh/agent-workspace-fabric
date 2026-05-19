@@ -231,7 +231,7 @@ def _docker_cli_environ(
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
     scrubbed_keys = {"AWF_DOCKER_HOST"}
-    if awf_docker_host:
+    if docker_host:
         scrubbed_keys.add("DOCKER_CONTEXT")
     for key in list(resolved):
         if key.upper() in scrubbed_keys:
