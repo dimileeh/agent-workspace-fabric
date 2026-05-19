@@ -5134,18 +5134,10 @@ class PullRequestMonitorRunner:
         diffs: dict[str, ProtectedFileDiff] = {}
         for path in diff_classified_protected_paths(changed_paths):
             worktree_file = worktree_path / path
-            if not worktree_file.exists():
-                diffs[path] = ProtectedFileDiff(
-                    path=path,
-                    old_text=None,
-                    new_text=None,
-                    unified_diff=None,
-                )
-                continue
             old_text = await self._git_show_text(
                 worktree_path=worktree_path, refspec=f"HEAD:{path}"
             )
-            new_text = _read_worktree_text(worktree_file)
+            new_text = _read_worktree_text(worktree_file) if worktree_file.exists() else None
             diffs[path] = ProtectedFileDiff(
                 path=path,
                 old_text=old_text,

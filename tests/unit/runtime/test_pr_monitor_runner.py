@@ -297,6 +297,35 @@ async def test_git_helpers_mark_worktree_safe_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_protected_status_diff_for_deleted_file_keeps_head_text(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    diffs = await runner._protected_file_diffs_for_status_paths(
+        worktree_path=worktree,
+        changed_paths=["pyproject.toml"],
+    )
+
+    diff = diffs["pyproject.toml"]
+    assert diff.old_text == '[project]\nname = "demo"\n'
+    assert diff.new_text is None
+    assert cmd.calls[0].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "show",
+        "HEAD:pyproject.toml",
+    ]
+
+
+@pytest.mark.unit
 async def test_address_review_comment_prompt_receives_workspace_runtime_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

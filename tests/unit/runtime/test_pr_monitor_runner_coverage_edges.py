@@ -3223,6 +3223,7 @@ async def test_execute_sync_base_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -3657,6 +3658,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    _queue_protected_workflow_diff(cmd)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -4778,6 +4780,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
         returncode=0,
         stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
     )
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for protected revert check
     cmd.queue_result(returncode=0)  # workflow file now matches the remote PR branch baseline
     cmd.queue_result(returncode=0)  # git add -A
@@ -4852,6 +4855,7 @@ async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
         returncode=0,
         stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
     )
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=128, stderr="network reset")  # protected revert baseline fetch
     cmd.queue_result(returncode=0, stdout="")  # would continue to push without the fix
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6655,6 +6659,7 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="removed workflow edit")
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
     runner = make_runner(
         factory=factory,
@@ -6828,6 +6833,7 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="tool crashed before cleanup")
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
     runner = make_runner(
         factory=factory,
