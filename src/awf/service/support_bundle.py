@@ -48,6 +48,7 @@ async def collect_support_bundle(
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
+    compose_file: Path | None = None,
     failure_window_hours: int = 24,
     status_collector: Any = None,
     doctor_collector: Any = None,
@@ -63,6 +64,21 @@ async def collect_support_bundle(
 
     service_status_result: dict[str, object] | BaseException
     doctor_result: dict[str, object] | BaseException | Any
+    if compose_file is None:
+        doctor_task = _doctor_collector(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=provider_env,
+            environ=env,
+        )
+    else:
+        doctor_task = _doctor_collector(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=provider_env,
+            environ=env,
+            compose_file=compose_file,
+        )
 
     service_status_result, doctor_result = await asyncio.gather(
         _status_collector(
@@ -70,12 +86,7 @@ async def collect_support_bundle(
             strict_providers=strict_providers,
             provider_environ=provider_env,
         ),
-        _doctor_collector(
-            settings,
-            strict_providers=strict_providers,
-            provider_environ=provider_env,
-            environ=env,
-        ),
+        doctor_task,
         return_exceptions=True,
     )
 

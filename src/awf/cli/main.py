@@ -858,34 +858,45 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
     return (Path(home) / ".awf" / "service").expanduser().resolve()
 
 
-def _resolve_service_env_paths() -> tuple[Path, Path]:
-    """Return the target env file and example file used by service commands.
+def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
+    """Return the compose, env, and example files used by service commands.
 
     If the verified source checkout contains local Compose assets, prefer the
-    `docker/compose/.env` target and use a sibling `.env.example` if present.
+    checkout's local compose assets and use a sibling `.env.example` if present.
     """
 
     from awf.service import bootstrap as bootstrap_mod
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE
+    from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
-        compose_local_service = asset_root / "docker" / "compose" / "local-service.yml"
+        compose_local_service = asset_root / LOCAL_SERVICE_COMPOSE_FILE
         # get_bootstrap_asset_root() verifies this in production; keep the
         # guard so tests or stubs that bypass validation fall back to root .env.
         if compose_local_service.is_file() and asset_root.resolve() == Path.cwd().resolve():
-            compose_env = Path("docker/compose/.env")
+            compose_file = LOCAL_SERVICE_COMPOSE_FILE
+            compose_env = LOCAL_SERVICE_COMPOSE_ENV_FILE
             fallback_example = Path(".env.example")
         elif compose_local_service.is_file():
+            compose_file = compose_local_service
             compose_env = compose_local_service.parent / ".env"
             fallback_example = asset_root / ".env.example"
         else:
-            return Path(".env"), Path(".env.example")
+            return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
         compose_example = compose_env.with_name(".env.example")
         if compose_example.exists():
-            return compose_env, compose_example
-        return compose_env, fallback_example
+            return compose_file, compose_env, compose_example
+        return compose_file, compose_env, fallback_example
 
-    return Path(".env"), Path(".env.example")
+    return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
+
+
+def _resolve_service_env_paths() -> tuple[Path, Path]:
+    """Return the target env file and example file used by service commands."""
+
+    _, env_file, env_example = _resolve_service_compose_paths()
+    return env_file, env_example
 
 
 def _init_env_error_payload(
@@ -1300,7 +1311,7 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    env_file, _ = _resolve_service_env_paths()
+    compose_file, env_file, _ = _resolve_service_compose_paths()
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1314,6 +1325,7 @@ def service_doctor(
                 strict_providers=strict_providers,
                 provider_environ=service_env,
                 environ=service_env,
+                compose_file=compose_file,
             )
         )
         path = write_support_bundle(bundle_payload)
@@ -1329,6 +1341,7 @@ def service_doctor(
             strict_providers=strict_providers,
             provider_environ=service_env,
             environ=service_env,
+            compose_file=compose_file,
         )
     )
 

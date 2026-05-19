@@ -2017,6 +2017,7 @@ def test_service_doctor_resolves_settings_from_compose_env(
     assert provider_environ["AWF_DOCKER_HOST"] == docker_host
     assert provider_environ["AWF_API_BASE_URL"] == api_base_url
     assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
 
 
 @pytest.mark.unit

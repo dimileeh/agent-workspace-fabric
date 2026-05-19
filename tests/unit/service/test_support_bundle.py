@@ -205,6 +205,38 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_support_bundle_forwards_compose_file_to_doctor_collector(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    captured: dict[str, object] = {}
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **kwargs: object) -> DoctorReportProxy:
+        captured.update(kwargs)
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            compose_file=compose_file,
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    assert captured["compose_file"] == compose_file
+
+
+@pytest.mark.unit
 def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
     api_secret = "awf-api-bundle-secret"
     github_secret = "ghp_bundlesecret123456"
