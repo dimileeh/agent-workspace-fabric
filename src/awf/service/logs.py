@@ -247,6 +247,10 @@ def _compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
         found, value = _env_lookup(environ, key)
         if found and value:
             resolved[key] = value
+            continue
+        caller_found, caller_value = _env_lookup(os.environ, key)
+        if found and caller_found and caller_value:
+            resolved[key] = ""
     return resolved
 
 

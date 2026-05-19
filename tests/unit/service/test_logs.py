@@ -521,6 +521,36 @@ def test_service_logs_ignores_blank_compose_cli_vars_from_resolved_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_blank_compose_cli_vars_clear_stale_caller_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_environ = {
+        "COMPOSE_PROJECT_NAME": "",
+        "COMPOSE_PROFILES": "",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "stale-project")
+    monkeypatch.setenv("COMPOSE_PROFILES", "stale-profile")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["COMPOSE_PROJECT_NAME"] == ""
+    assert env["COMPOSE_PROFILES"] == ""
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_uses_env_file_instead_of_copying_interpolation_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
