@@ -673,6 +673,37 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
 
 
 @pytest.mark.unit
+def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Provider readiness should use the same env file seeded from an asset root."""
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+
+    secret = "ghp_seeded_from_asset_root"
+    example = workspace_root / ".env.example"
+    example.write_text(f"AWF_GITHUB_TOKEN={secret}\n", encoding="utf-8")
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    for key in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+
+    captured = _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
+
+    result = _runner.invoke(app, ["init", "--provider", "github"])
+
+    assert result.exit_code == 0, result.output
+    provider_environ = captured["bootstrap_calls"][0]["provider_environ"]
+    assert provider_environ["AWF_GITHUB_TOKEN"] == secret
+    assert secret not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -1096,8 +1096,8 @@ def _run_init_service_bootstrap(
 
     env_action = "skipped"
     env_error: dict[str, str] | None = None
+    env_file, env_example = _resolve_init_env_paths()
     if write_env:
-        env_file, env_example = _resolve_init_env_paths()
         env_action, env_error = _seed_env_file(env_file, env_example)
         if pretty:
             if env_action == "kept_existing":
@@ -1123,9 +1123,14 @@ def _run_init_service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
+    bootstrap_provider_environ = local_service_environ(env_file=env_file)
     try:
         result = asyncio.run(
-            run_service_bootstrap(settings, options=options),
+            run_service_bootstrap(
+                settings,
+                options=options,
+                provider_environ=bootstrap_provider_environ,
+            ),
         )
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
