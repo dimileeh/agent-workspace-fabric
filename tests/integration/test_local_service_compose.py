@@ -12,7 +12,8 @@ def _compose_template_value(value: str, env: dict[str, str]) -> str:
     if not (value.startswith("${") and value.endswith("}") and ":-" in value):
         return value
     key, default = value[2:-1].split(":-", 1)
-    return env.get(key, default)
+    resolved = env.get(key)
+    return default if resolved in (None, "") else resolved
 
 
 def _compose_host_port(mapping: str) -> str:
@@ -172,6 +173,8 @@ def test_local_service_compose_port_templates_support_default_and_override_value
 
     assert _compose_template_value(postgres_host, {}) == "5433"
     assert _compose_template_value(api_host, {}) == "8000"
+    assert _compose_template_value(postgres_host, {"AWF_POSTGRES_HOST_PORT": ""}) == "5433"
+    assert _compose_template_value(api_host, {"AWF_API_HOST_PORT": ""}) == "8000"
 
     override_env = {
         "AWF_POSTGRES_HOST_PORT": "55333",
