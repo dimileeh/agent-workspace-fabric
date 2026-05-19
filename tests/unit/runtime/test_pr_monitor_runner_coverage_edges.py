@@ -5312,6 +5312,64 @@ async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
 
 
 @pytest.mark.unit
+async def test_sync_base_protected_scope_diffs_use_remote_branch_base(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="remote-branch-base-sha\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=".github/workflows/ci.yml\n",
+    )  # diff against remote PR branch
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=".github/workflows/ci.yml\n",
+    )  # diff against merged base
+    cmd.queue_result(returncode=0, stdout=workflow_text)
+    cmd.queue_result(returncode=0, stdout=workflow_text)
+    cmd.queue_result(
+        returncode=0,
+        stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktree"
+
+    violations = await runner._protected_scope_violations_for_sync_base_push(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        base_branch="development",
+    )
+
+    assert violations == []
+    assert _git_worktree_command(
+        worktree,
+        "show",
+        "remote-branch-base-sha:.github/workflows/ci.yml",
+    ) in [call.args for call in cmd.calls]
+    assert _git_worktree_command(
+        worktree,
+        "diff",
+        "--unified=0",
+        "remote-branch-base-sha..HEAD",
+        "--",
+        ".github/workflows/ci.yml",
+    ) in [call.args for call in cmd.calls]
+
+
+@pytest.mark.unit
 async def test_protected_scope_push_check_blocks_when_diff_baseline_cannot_be_resolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

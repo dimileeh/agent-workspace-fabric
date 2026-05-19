@@ -5254,7 +5254,10 @@ class PullRequestMonitorRunner:
                 )
             owned_paths = list(workspace.owned_paths)
 
-        changed_from_remote = await self._changed_paths_since_remote_branch(
+        (
+            remote_branch_base,
+            changed_from_remote,
+        ) = await self._remote_branch_diff_base_and_changed_paths(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
@@ -5294,7 +5297,7 @@ class PullRequestMonitorRunner:
             return []
         protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
             worktree_path=worktree_path,
-            base_ref=merged_base,
+            base_ref=remote_branch_base,
             changed_paths=sync_base_authored_paths,
         )
         return find_protected_quality_gate_changes(
