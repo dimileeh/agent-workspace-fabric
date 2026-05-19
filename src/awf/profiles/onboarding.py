@@ -24,7 +24,6 @@ from awf.profiles.models import (
     ProfileValidation,
     WorkspaceProfile,
 )
-from awf.profiles.resolver import PROFILE_MARKER_PATHS
 
 _COMPOSE_FILENAMES = (
     "compose.yml",
@@ -298,10 +297,11 @@ def preview_workspace_profile(
         confidence=resolution.profile.confidence,
         signals=tuple(resolution.candidates_considered),
     )
-    profile_path = next(
-        (project / rel for rel in PROFILE_MARKER_PATHS if (project / rel).is_file()),
-        None,
-    )
+    source = resolution.profile.source or ""
+    rel_from_source = source.removeprefix("repo:") if source.startswith("repo:") else ""
+    profile_path = (project / rel_from_source) if rel_from_source else None
+    if profile_path is not None and not profile_path.is_file():
+        profile_path = None
     draft_yaml = profile_path.read_text(encoding="utf-8") if profile_path is not None else ""
     if draft_yaml == "":
         draft_yaml = _profile_yaml(resolution.profile)
