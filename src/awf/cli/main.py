@@ -905,6 +905,77 @@ def _init_env_error_payload(
     }
 
 
+def _seed_env_file(env_file: Path, env_example: Path) -> tuple[str, dict[str, str] | None]:
+    """Seed an env file from an example and return the action plus any failure payload."""
+
+    if env_file.exists():
+        return "kept_existing", None
+
+    if not env_example.exists():
+        return "no_example", None
+
+    try:
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="create_parent_directory",
+                path=env_file.parent,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+        )
+
+    try:
+        env_contents = env_example.read_bytes()
+    except OSError as exc:
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="read_example",
+                path=env_example,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+        )
+
+    try:
+        env_file.write_bytes(env_contents)
+    except OSError as exc:
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="write_env",
+                path=env_file,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+        )
+
+    return "wrote_from_example", None
+
+
+def _init_env_warning(env_error: Mapping[str, str]) -> str:
+    """Return the pretty warning for an env seeding failure payload."""
+
+    operation = env_error["operation"]
+    message = env_error["message"]
+    env_file = env_error["env_file"]
+    env_example = env_error["env_example"]
+    if operation == "create_parent_directory":
+        return (
+            "  warning: could not create parent directory "
+            f"{env_error['path']} for {env_file}: {message}"
+        )
+    if operation == "read_example":
+        return f"  warning: could not read {env_example} while seeding {env_file}: {message}"
+    return f"  warning: could not write {env_file} from {env_example}: {message}"
+
+
 def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
     """Return the env examples that explain what init checked before skipping."""
 
@@ -1027,70 +1098,15 @@ def _run_init_service_bootstrap(
     env_error: dict[str, str] | None = None
     if write_env:
         env_file, env_example = _resolve_init_env_paths()
-        if env_file.exists():
-            env_action = "kept_existing"
-            if pretty:
+        env_action, env_error = _seed_env_file(env_file, env_example)
+        if pretty:
+            if env_action == "kept_existing":
                 typer.echo(f"  kept existing {env_file}")
-        elif env_example.exists():
-            try:
-                env_file.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                env_action = "write_failed"
-                env_error = _init_env_error_payload(
-                    operation="create_parent_directory",
-                    path=env_file.parent,
-                    env_file=env_file,
-                    env_example=env_example,
-                    exc=exc,
-                )
-                if pretty:
-                    typer.echo(
-                        "  warning: could not create parent directory "
-                        f"{env_file.parent} for {env_file}: {exc}",
-                        err=True,
-                    )
-            else:
-                try:
-                    env_contents = env_example.read_bytes()
-                except OSError as exc:
-                    env_action = "write_failed"
-                    env_error = _init_env_error_payload(
-                        operation="read_example",
-                        path=env_example,
-                        env_file=env_file,
-                        env_example=env_example,
-                        exc=exc,
-                    )
-                    if pretty:
-                        typer.echo(
-                            f"  warning: could not read {env_example} "
-                            f"while seeding {env_file}: {exc}",
-                            err=True,
-                        )
-                else:
-                    try:
-                        env_file.write_bytes(env_contents)
-                    except OSError as exc:
-                        env_action = "write_failed"
-                        env_error = _init_env_error_payload(
-                            operation="write_env",
-                            path=env_file,
-                            env_file=env_file,
-                            env_example=env_example,
-                            exc=exc,
-                        )
-                        if pretty:
-                            typer.echo(
-                                f"  warning: could not write {env_file} from {env_example}: {exc}",
-                                err=True,
-                            )
-                    else:
-                        env_action = "wrote_from_example"
-                        if pretty:
-                            typer.echo(f"  wrote {env_file} from {env_example}")
-        else:
-            env_action = "no_example"
-            if pretty:
+            elif env_action == "wrote_from_example":
+                typer.echo(f"  wrote {env_file} from {env_example}")
+            elif env_action == "write_failed" and env_error is not None:
+                typer.echo(_init_env_warning(env_error), err=True)
+            elif env_action == "no_example":
                 search_paths = ", ".join(
                     str(path) for path in _init_env_example_search_paths(env_file, env_example)
                 )

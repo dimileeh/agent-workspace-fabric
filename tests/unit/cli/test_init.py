@@ -673,6 +673,38 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
 
 
 @pytest.mark.unit
+def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Prefer sibling compose examples from non-CWD AWF asset roots."""
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+
+    compose_example = compose / ".env.example"
+    compose_example.write_text("AWF_API_TOKEN=from_compose\n", encoding="utf-8")
+    root_example = workspace_root / ".env.example"
+    root_example.write_text("AWF_API_TOKEN=from_asset_root\n", encoding="utf-8")
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    env_file = compose / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == compose_example.read_bytes()
+    assert f"wrote {env_file} from {compose_example}" in result.output
+    assert not (workspace_root / ".env").exists()
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_overwrite_existing_source_compose_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
