@@ -1398,6 +1398,15 @@ def test_repo_profile_reason_uses_actual_marker_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_repo_profile_unicode_decode_error_reports_resolution_error(tmp_path: Path) -> None:
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_bytes(b"\xff")
+
+    with pytest.raises(ProfileResolutionError, match="could not read workspace profile"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+
+
+@pytest.mark.unit
 def test_resolve_workspace_profile_wrapper_appends_request_validation_commands() -> None:
     result = resolve_workspace_profile(
         worktree_path=None,

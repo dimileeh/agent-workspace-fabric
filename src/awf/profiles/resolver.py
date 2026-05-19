@@ -136,7 +136,7 @@ class ProfileResolver:
                 continue
             try:
                 raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-            except (OSError, yaml.YAMLError) as exc:
+            except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
                 raise ProfileResolutionError(
                     f"could not read workspace profile {path}: {exc}"
                 ) from exc
