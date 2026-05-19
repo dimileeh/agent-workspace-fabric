@@ -338,6 +338,7 @@ def write_workspace_profile(preview: ProjectOnboardingPreview, force: bool = Fal
 
 
 def _profile_for_template(inspection: ProjectInspection, template: str) -> WorkspaceProfile:
+    """Build a draft workspace profile for the selected onboarding template."""
     if template == "generic":
         profile = WorkspaceProfile(
             name="generic",
@@ -439,6 +440,7 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
 
 
 def _ensure_restricted_egress(profile: WorkspaceProfile) -> WorkspaceProfile:
+    """Enforce restricted egress defaults on profiles that opt into egress control."""
     if profile.security.egress.mode == EgressMode.restricted:
         profile.security.egress.mode = EgressMode.restricted
         profile.security.egress.allowlist_templates = list(_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES)
@@ -454,6 +456,7 @@ def _node_profile(
     fallback_validation: tuple[str, ...],
     fallback_commands: tuple[str, ...] = (),
 ) -> WorkspaceProfile:
+    """Build a node-based profile including install and validation command derivation."""
     package_manager = inspection.package_manager or "npm"
     scripts = inspection.scripts()
     validate_commands = [
@@ -487,6 +490,7 @@ def _diagnostics_for(
     profile: WorkspaceProfile,
     template: str,
 ) -> PreviewDiagnostics:
+    """Compute missing onboarding signal diagnostics from inspection and template."""
     declared_secrets = {
         item for secret in profile.secrets for item in (secret.name, secret.target) if item
     }
@@ -539,6 +543,7 @@ def _diagnostics_for(
 
 
 def _profile_yaml(profile: WorkspaceProfile) -> str:
+    """Render a workspace profile to the canonical on-disk YAML layout."""
     payload = {
         "awf": profile.model_dump(mode="json", by_alias=True, exclude_none=True),
     }
@@ -546,6 +551,7 @@ def _profile_yaml(profile: WorkspaceProfile) -> str:
 
 
 def _smoke_request(path: Path, profile: WorkspaceProfile) -> dict[str, object]:
+    """Build a smoke test request payload from a workspace profile."""
     validation_commands = [command.command for command in profile.phases.validate_commands]
     return {
         "repo": {"url": path.as_uri(), "base_branch": "main"},
@@ -566,6 +572,7 @@ def _smoke_request(path: Path, profile: WorkspaceProfile) -> dict[str, object]:
 
 
 def _read_package_json(path: Path) -> Mapping[str, object]:
+    """Read `package.json` as a JSON mapping when available."""
     if not path.is_file():
         return {}
     try:
@@ -578,6 +585,7 @@ def _read_package_json(path: Path) -> Mapping[str, object]:
 
 
 def _string_mapping(value: object) -> dict[str, str]:
+    """Normalize mapping-like values to a string-string dictionary."""
     if not isinstance(value, Mapping):
         return {}
     return {
@@ -588,6 +596,7 @@ def _string_mapping(value: object) -> dict[str, str]:
 
 
 def _package_dependency_names(package_data: Mapping[str, object]) -> set[str]:
+    """Collect unique dependency names from standard package metadata sections."""
     dependency_names: set[str] = set()
     for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
         value = package_data.get(key)
@@ -597,6 +606,7 @@ def _package_dependency_names(package_data: Mapping[str, object]) -> set[str]:
 
 
 def _detect_package_manager(root: Path) -> str:
+    """Detect the most specific JavaScript package manager from lock files."""
     if (root / "pnpm-lock.yaml").is_file():
         return "pnpm"
     if (root / "yarn.lock").is_file():
@@ -607,6 +617,7 @@ def _detect_package_manager(root: Path) -> str:
 
 
 def _detect_compose_file(root: Path) -> str | None:
+    """Return the first matching docker compose filename for this project."""
     for name in _COMPOSE_FILENAMES:
         if (root / name).is_file():
             return name
@@ -614,6 +625,7 @@ def _detect_compose_file(root: Path) -> str | None:
 
 
 def _inspect_compose_services(path: Path) -> tuple[ComposeServiceInspection, ...]:
+    """Parse compose services safely and return inspected metadata for discovered services."""
     try:
         raw: object = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
@@ -641,6 +653,7 @@ def _inspect_compose_services(path: Path) -> tuple[ComposeServiceInspection, ...
 
 
 def _compose_service_has_healthcheck(service: Mapping[object, object]) -> bool:
+    """Return True when a compose service defines an active healthcheck block."""
     healthcheck = service.get("healthcheck")
     return healthcheck is not None and not (
         isinstance(healthcheck, Mapping) and healthcheck.get("disable") is True
@@ -648,6 +661,7 @@ def _compose_service_has_healthcheck(service: Mapping[object, object]) -> bool:
 
 
 def _compose_service_ports(service: Mapping[object, object]) -> tuple[str, ...]:
+    """Extract rendered compose port entries from service configuration."""
     ports = service.get("ports")
     if not isinstance(ports, Sequence) or isinstance(ports, str):
         return ()
@@ -665,6 +679,7 @@ def _compose_service_ports(service: Mapping[object, object]) -> tuple[str, ...]:
 
 
 def _compose_service_secret_names(service: Mapping[object, object]) -> tuple[str, ...]:
+    """Collect secret-like variable names referenced by a compose service."""
     names: set[str] = set()
     environment = service.get("environment")
     if isinstance(environment, Mapping):
@@ -694,14 +709,17 @@ def _compose_service_secret_names(service: Mapping[object, object]) -> tuple[str
 
 
 def _secret_placeholders(value: str) -> set[str]:
+    """Extract `${VAR}`-style placeholder names from an environment token."""
     return {name for name in _PLACEHOLDER_RE.findall(value) if _looks_like_secret_name(name)}
 
 
 def _looks_like_secret_name(name: str) -> bool:
+    """Heuristically classify a token as likely representing a secret."""
     return bool(_SECRET_NAME_RE.search(name))
 
 
 def _has_python_signal(root: Path) -> bool:
+    """Check for common Python project signals in a repository root."""
     return any(
         (root / name).is_file()
         for name in ("pyproject.toml", "requirements.txt", "uv.lock", "pytest.ini")
@@ -709,6 +727,7 @@ def _has_python_signal(root: Path) -> bool:
 
 
 def _has_postgres_signal(root: Path) -> bool:
+    """Check for Postgres or database hints from common project files."""
     if (root / "alembic.ini").is_file():
         return True
     for name in ("pyproject.toml", "requirements.txt", ".env", ".env.example"):
@@ -725,6 +744,7 @@ def _has_postgres_signal(root: Path) -> bool:
 
 
 def _python_setup_command(root: Path) -> ProfileCommand:
+    """Choose a default Python setup command for onboarding profile generation."""
     if (root / "requirements.txt").is_file() and not (root / "pyproject.toml").is_file():
         return ProfileCommand(command="python -m pip install -r requirements.txt")
     if (root / "uv.lock").is_file():
@@ -733,6 +753,7 @@ def _python_setup_command(root: Path) -> ProfileCommand:
 
 
 def _node_install_command(root: Path, package_manager: str) -> str:
+    """Resolve the preferred install command for Node toolchains."""
     if package_manager == "pnpm":
         return "pnpm install --frozen-lockfile"
     if package_manager == "yarn":
@@ -745,6 +766,7 @@ def _node_install_command(root: Path, package_manager: str) -> str:
 
 
 def _script_command(package_manager: str, script: str) -> str:
+    """Translate npm-style scripts to package-manager-specific command invocations."""
     if package_manager == "pnpm":
         return "pnpm test" if script == "test" else f"pnpm run {script}"
     if package_manager == "yarn":
@@ -755,6 +777,7 @@ def _script_command(package_manager: str, script: str) -> str:
 
 
 def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, ...]:
+    """Detect package scripts suitable for playwright-driven validation."""
     scripts = inspection.scripts()
     for name in ("test:e2e", "e2e", "playwright", "test"):
         command = scripts.get(name)
@@ -764,6 +787,7 @@ def _playwright_validation_scripts(inspection: ProjectInspection) -> tuple[str, 
 
 
 def _playwright_command(package_manager: str) -> str:
+    """Build the package-manager-specific Playwright command for one-shot validation."""
     if package_manager == "pnpm":
         return "pnpm exec playwright test"
     if package_manager == "yarn":
@@ -774,6 +798,7 @@ def _playwright_command(package_manager: str) -> str:
 
 
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:
+    """Compute expected service endpoint URLs for discovered compose services."""
     ports: dict[str, str] = {}
     for service in inspection.compose_services:
         endpoint = _compose_service_endpoint(service)
@@ -783,6 +808,7 @@ def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:
 
 
 def _compose_service_endpoint(service: ComposeServiceInspection) -> str | None:
+    """Build an endpoint URL for a compose service based on exposed port and protocol."""
     port = _first_container_port(service.ports)
     if port is None:
         return None
@@ -793,6 +819,7 @@ def _compose_service_endpoint(service: ComposeServiceInspection) -> str | None:
 
 
 def _compose_web_port_scheme(port: str) -> str | None:
+    """Map common container ports to an inferred web scheme."""
     try:
         container_port = int(port)
     except ValueError:
@@ -805,6 +832,7 @@ def _compose_web_port_scheme(port: str) -> str | None:
 
 
 def _first_container_port(ports: tuple[str, ...]) -> str | None:
+    """Return the first numeric container port found in service port declarations."""
     for port in ports:
         numbers: list[str] = re.findall(r"\d+", port)
         if numbers:
@@ -813,6 +841,7 @@ def _first_container_port(ports: tuple[str, ...]) -> str | None:
 
 
 def _next_configs() -> tuple[str, ...]:
+    """Return candidate Next.js config filenames."""
     return (
         "next.config.js",
         "next.config.mjs",
@@ -822,6 +851,7 @@ def _next_configs() -> tuple[str, ...]:
 
 
 def _playwright_configs() -> tuple[str, ...]:
+    """Return candidate Playwright config filenames."""
     return (
         "playwright.config.js",
         "playwright.config.mjs",
@@ -831,4 +861,5 @@ def _playwright_configs() -> tuple[str, ...]:
 
 
 def _dedupe_sorted(values: list[str]) -> tuple[str, ...]:
+    """Return sorted unique values from a list."""
     return tuple(sorted(set(values)))

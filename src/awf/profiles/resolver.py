@@ -127,6 +127,7 @@ class ProfileResolver:
     def _load_repo_profile(
         self, worktree_path: Path, considered: list[str]
     ) -> WorkspaceProfile | None:
+        """Load the first valid workspace profile from known repository marker files."""
         for rel in PROFILE_MARKER_PATHS:
             path = worktree_path / rel
             considered.append(f"repo:{rel}")
@@ -172,6 +173,7 @@ def resolve_workspace_profile(
 
 
 def _validation_error_message(exc: ValidationError) -> str:
+    """Extract a short path-aware validation error message from a Pydantic error."""
     errors = exc.errors(include_input=False)
     if not errors:
         return "schema validation failed"
@@ -187,6 +189,7 @@ def _resolution_error_detail(
     reason_code: str | None,
     findings: tuple[ProfileLintFinding, ...],
 ) -> dict[str, Any] | None:
+    """Assemble optional machine-readable reason-code details for failures."""
     if reason_code is None and not findings:
         return None
     return {

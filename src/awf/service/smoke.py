@@ -450,6 +450,7 @@ async def _phase_console_links(
     *,
     console_checker: ConsoleChecker | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    """Resolve configured or local console URL and build smoke console-link evidence."""
     api_base = resolved_config.get("api_base_url", "http://localhost:8000")
     console_url = resolved_config.get("console_url")
     links: dict[str, str] = {
