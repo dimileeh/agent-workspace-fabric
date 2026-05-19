@@ -788,6 +788,60 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
 
 
 @pytest.mark.unit
+def test_init_without_path_uses_seeded_compose_env_for_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """First-run Docker preflight should see values copied from the env example."""
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    compose_example = compose / ".env.example"
+    compose_example.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, Any] = {}
+
+    async def _collect_doctor_report(settings: Any, **kwargs: Any) -> Any:
+        captured["preflight_settings"] = settings
+        captured["doctor_kwargs"] = kwargs
+        return _doctor_report(_docker_diagnostic())
+
+    async def _bootstrap(received_settings: Any, **kwargs: Any) -> Any:
+        captured["bootstrap_settings"] = received_settings
+        captured["bootstrap_kwargs"] = kwargs
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_bytes() == compose_example.read_bytes()
+    assert captured["preflight_settings"].docker_host == docker_host
+    doctor_kwargs = captured["doctor_kwargs"]
+    assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+
+
+@pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

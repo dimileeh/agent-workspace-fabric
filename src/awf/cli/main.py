@@ -998,6 +998,17 @@ def _docker_diagnostic_from_report(report: object) -> object | None:
     return None
 
 
+def _init_preflight_environ(
+    environ: Mapping[str, str],
+    *,
+    provider_secret_keys: frozenset[str],
+) -> dict[str, str]:
+    """Return init preflight env without provider credentials."""
+
+    secret_keys = {key.upper() for key in provider_secret_keys}
+    return {key: value for key, value in environ.items() if key.upper() not in secret_keys}
+
+
 def _run_init_service_bootstrap(
     *,
     write_env: bool,
@@ -1017,6 +1028,7 @@ def _run_init_service_bootstrap(
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report
     from awf.service.provider_readiness import (
+        KNOWN_SECRET_ENV_KEYS,
         ProviderReadinessError,
         validate_provider_names,
     )
@@ -1029,12 +1041,20 @@ def _run_init_service_bootstrap(
 
     pretty = fmt == OutputFormat.pretty
     env_file, env_example = _resolve_init_env_paths()
+    env_action = "skipped"
+    env_error: dict[str, str] | None = None
+    if write_env:
+        env_action, env_error = _seed_env_file(env_file, env_example)
 
     try:
         service_env = local_service_environ(env_file=env_file)
+        preflight_env = _init_preflight_environ(
+            service_env,
+            provider_secret_keys=KNOWN_SECRET_ENV_KEYS,
+        )
         settings = resolve_service_settings(
-            Settings(_env_file=env_file),
-            environ=service_env,
+            Settings(_env_file=env_file, github_token=None),
+            environ=preflight_env,
         )
 
         if pretty:
@@ -1044,8 +1064,8 @@ def _run_init_service_bootstrap(
             collect_doctor_report(
                 settings,
                 strict_providers=frozenset(),
-                provider_environ=service_env,
-                environ=service_env,
+                provider_environ=preflight_env,
+                environ=preflight_env,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -1101,27 +1121,23 @@ def _run_init_service_bootstrap(
         typer.echo(f"  state directory: {state_dir}")
         typer.echo(f"  created: {'true' if created else 'false'}")
 
-    env_action = "skipped"
-    env_error: dict[str, str] | None = None
-    if write_env:
-        env_action, env_error = _seed_env_file(env_file, env_example)
-        if pretty:
-            if env_action == "kept_existing":
-                typer.echo(f"  kept existing {env_file}")
-            elif env_action == "wrote_from_example":
-                typer.echo(f"  wrote {env_file} from {env_example}")
-            elif env_action == "write_failed" and env_error is not None:
-                typer.echo(_init_env_warning(env_error), err=True)
-            elif env_action == "no_example":
-                search_paths = ", ".join(
-                    str(path) for path in _init_env_example_search_paths(env_file, env_example)
-                )
-                typer.echo(
-                    "  no .env.example found; skipped "
-                    f"{env_file} "
-                    f"creation (looked for {search_paths}; run `awf init` from "
-                    "the AWF repository root if you expected one)"
-                )
+    if write_env and pretty:
+        if env_action == "kept_existing":
+            typer.echo(f"  kept existing {env_file}")
+        elif env_action == "wrote_from_example":
+            typer.echo(f"  wrote {env_file} from {env_example}")
+        elif env_action == "write_failed" and env_error is not None:
+            typer.echo(_init_env_warning(env_error), err=True)
+        elif env_action == "no_example":
+            search_paths = ", ".join(
+                str(path) for path in _init_env_example_search_paths(env_file, env_example)
+            )
+            typer.echo(
+                "  no .env.example found; skipped "
+                f"{env_file} "
+                f"creation (looked for {search_paths}; run `awf init` from "
+                "the AWF repository root if you expected one)"
+            )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
@@ -1129,15 +1145,12 @@ def _run_init_service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    # Re-read after seeding so provider checks see freshly written values while
-    # the Docker preflight and service settings stay bound to the pre-seed env.
-    bootstrap_provider_environ = local_service_environ(env_file=env_file)
     try:
         result = asyncio.run(
             run_service_bootstrap(
                 settings,
                 options=options,
-                provider_environ=bootstrap_provider_environ,
+                provider_environ=service_env,
             ),
         )
     except KeyboardInterrupt:
