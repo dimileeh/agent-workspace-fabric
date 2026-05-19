@@ -346,8 +346,11 @@ def _docker_cli_environ(
     docker_host = _non_empty_env_value(resolved, "AWF_DOCKER_HOST")
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
+    scrubbed_keys = {"AWF_DOCKER_HOST"}
+    if docker_host:
+        scrubbed_keys.add("DOCKER_CONTEXT")
     for key in list(resolved):
-        if key.upper() == "AWF_DOCKER_HOST":
+        if key.upper() in scrubbed_keys:
             del resolved[key]
     return resolved
 
