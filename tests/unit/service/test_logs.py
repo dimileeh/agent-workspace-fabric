@@ -32,6 +32,12 @@ def _default_local_service_compose_file(
     monkeypatch.chdir(tmp_path)
 
 
+def _write_compose_file(tmp_path: Path, contents: str) -> Path:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(contents, encoding="utf-8")
+    return compose_file
+
+
 @pytest.mark.unit
 def test_service_logs_command_defaults_and_follow_flag() -> None:
     command = service_logs_command(services=[], tail=25, compose_file=Path("compose.yml"))
@@ -138,6 +144,15 @@ def test_service_logs_passes_derived_compose_postgres_password_to_subprocess_env
 ) -> None:
     from awf.service.config import local_service_environ
 
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
+""",
+    )
     env_file = tmp_path / ".env"
     env_file.write_text(
         "AWF_DATABASE_URL=postgresql+asyncpg://awf:derived-secret@db:5432/awf\n",
@@ -161,6 +176,7 @@ def test_service_logs_passes_derived_compose_postgres_password_to_subprocess_env
 
     run_service_logs(
         services=[ServiceLogName.api],
+        compose_file=compose_file,
         service_environ=service_environ,
         run_subprocess=_run,
     )
@@ -180,6 +196,15 @@ def test_service_logs_passes_derived_compose_postgres_password_to_subprocess_env
 def test_service_logs_resolved_compose_password_overrides_stale_caller_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
+""",
+    )
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     service_environ = {
         "AWF_DOCKER_HOST": docker_host,
@@ -200,6 +225,7 @@ def test_service_logs_resolved_compose_password_overrides_stale_caller_env(
 
     run_service_logs(
         services=[ServiceLogName.api],
+        compose_file=compose_file,
         service_environ=service_environ,
         run_subprocess=_run,
     )
@@ -247,6 +273,101 @@ def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
     assert "AWF_DOCKER_HOST" not in env
     assert "AWF_API_TOKEN" not in env
     assert "AWF_DATABASE_URL" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_uses_env_file_instead_of_copying_interpolation_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      AWF_API_TOKEN: "${AWF_API_TOKEN:?set AWF_API_TOKEN}"
+      AWF_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+""",
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_API_TOKEN=file-token\nAWF_POSTGRES_PASSWORD=file-password\n",
+        encoding="utf-8",
+    )
+    service_environ = {
+        "AWF_API_TOKEN": "file-token",
+        "AWF_POSTGRES_PASSWORD": "file-password",
+    }
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in service_environ:
+        monkeypatch.delenv(key, raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        compose_env_file=env_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    args, kwargs = calls[0]
+    assert "--env-file" in args
+    assert kwargs["env"] is None
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_passes_compose_interpolation_values_to_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  postgres:
+    shm_size: ${AWF_POSTGRES_SHM_SIZE:-1g}
+    environment:
+      POSTGRES_USER: "${AWF_POSTGRES_USER:?set AWF_POSTGRES_USER}"
+      PLAIN: $AWF_PLAIN_INTERPOLATION
+      ESCAPED: "$${AWF_ESCAPED_INTERPOLATION}"
+""",
+    )
+    service_environ = {
+        "AWF_POSTGRES_USER": "compose-user",
+        "AWF_POSTGRES_SHM_SIZE": "2g",
+        "AWF_PLAIN_INTERPOLATION": "plain-value",
+        "AWF_ESCAPED_INTERPOLATION": "escaped-value",
+        "AWF_API_TOKEN": "service-token",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in service_environ:
+        monkeypatch.delenv(key, raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["AWF_POSTGRES_USER"] == "compose-user"
+    assert env["AWF_POSTGRES_SHM_SIZE"] == "2g"
+    assert env["AWF_PLAIN_INTERPOLATION"] == "plain-value"
+    assert "AWF_ESCAPED_INTERPOLATION" not in env
+    assert "AWF_API_TOKEN" not in env
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

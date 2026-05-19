@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -11,13 +12,19 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
+import yaml
+from dotenv import dotenv_values
+
 from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
-_COMPOSE_INTERPOLATION_ENV_KEYS = ("AWF_POSTGRES_PASSWORD",)
+_COMPOSE_INTERPOLATION_PATTERN = re.compile(
+    r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)|"
+    r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
+)
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -130,11 +137,15 @@ def run_service_logs(
     runner = run_subprocess or _run_subprocess
     capture_output = not follow
     compose_file = _resolve_local_service_compose_file(compose_file)
-    docker_env = _docker_cli_environ(service_environ)
     if compose_file == LOCAL_SERVICE_COMPOSE_FILE and not compose_file.exists():
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
+    docker_env = _docker_cli_environ(
+        service_environ,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     command = service_logs_command(
         services=services,
         tail=tail,
@@ -188,7 +199,12 @@ def _run_subprocess(
     return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
 
 
-def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
+def _docker_cli_environ(
+    environ: Mapping[str, str] | None,
+    *,
+    compose_file: Path,
+    compose_env_file: Path | None,
+) -> dict[str, str] | None:
     """Return the minimal subprocess env needed by Docker Compose logs."""
 
     if environ is None:
@@ -196,7 +212,11 @@ def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | N
     docker_host = _non_empty_env_value(environ, "AWF_DOCKER_HOST") or _non_empty_env_value(
         environ, "DOCKER_HOST"
     )
-    compose_env = _compose_interpolation_environ(environ)
+    compose_env = _compose_interpolation_environ(
+        environ,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     if not docker_host and not compose_env:
         # Compose reads ordinary service values through --env-file; only pass an
         # explicit subprocess environment when a resolved value must override the
@@ -210,15 +230,67 @@ def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | N
     return resolved
 
 
-def _compose_interpolation_environ(environ: Mapping[str, str]) -> dict[str, str]:
+def _compose_interpolation_environ(
+    environ: Mapping[str, str],
+    *,
+    compose_file: Path,
+    compose_env_file: Path | None,
+) -> dict[str, str]:
     """Return resolved service values Docker Compose still interpolates."""
 
     resolved: dict[str, str] = {}
-    for key in _COMPOSE_INTERPOLATION_ENV_KEYS:
+    env_file_values = _compose_env_file_values(compose_env_file)
+    for key in _compose_interpolation_keys(compose_file):
         found, value = _env_lookup(environ, key)
-        if found:
+        if not found:
+            continue
+        caller_found, caller_value = _env_lookup(os.environ, key)
+        env_file_found, env_file_value = _env_lookup(env_file_values, key)
+        if (
+            (caller_found and caller_value != value)
+            or (env_file_found and env_file_value != value)
+            or (not caller_found and not env_file_found)
+        ):
             resolved[key] = value
     return resolved
+
+
+def _compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
+    if compose_env_file is None or not compose_env_file.exists():
+        return {}
+    return {
+        key: value for key, value in dotenv_values(compose_env_file).items() if value is not None
+    }
+
+
+def _compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
+    """Return Compose interpolation variable names referenced by the YAML file."""
+
+    try:
+        payload: object = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return ()
+
+    keys: set[str] = set()
+    _collect_compose_interpolation_keys(payload, keys)
+    return tuple(sorted(keys))
+
+
+def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
+    if isinstance(value, str):
+        for match in _COMPOSE_INTERPOLATION_PATTERN.finditer(value):
+            key = match.group("braced") or match.group("plain")
+            if key:
+                keys.add(key)
+        return
+    if isinstance(value, Mapping):
+        for nested_key, nested_value in value.items():
+            _collect_compose_interpolation_keys(nested_key, keys)
+            _collect_compose_interpolation_keys(nested_value, keys)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        for nested in value:
+            _collect_compose_interpolation_keys(nested, keys)
 
 
 def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:

@@ -208,7 +208,7 @@ def test_service_readiness_emits_json_scorecard(
             "provider_environ": os.environ,
             "environ": os.environ,
             "compose_file": Path("docker/compose/local-service.yml"),
-            "compose_env_file": Path(".env"),
+            "compose_env_file": None,
             "allow_generic_failures": False,
             "allow_slo_breach": False,
         }
@@ -659,35 +659,39 @@ def test_service_logs_passes_existing_root_env_file_when_compose_env_is_missing(
     compose.mkdir(parents=True)
     compose_file = compose / "local-service.yml"
     root_env = workspace_root / ".env"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
     compose_file.write_text("services: {}\n", encoding="utf-8")
-    root_env.write_text("AWF_API_TOKEN=from-root-env\n", encoding="utf-8")
-    calls: list[list[str]] = []
+    root_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     monkeypatch.chdir(workspace_root)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
     monkeypatch.setattr(subprocess, "run", _run)
 
     result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
 
     assert result.exit_code == 0, result.output
-    assert calls == [
-        [
-            "docker",
-            "compose",
-            "--env-file",
-            str(root_env),
-            "-f",
-            str(compose_file),
-            "logs",
-            "--tail",
-            "100",
-            "worker",
-        ]
+    assert calls[0][0] == [
+        "docker",
+        "compose",
+        "--env-file",
+        str(root_env),
+        "-f",
+        str(compose_file),
+        "logs",
+        "--tail",
+        "100",
+        "worker",
     ]
+    env = calls[0][1]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert "AWF_DOCKER_HOST" not in env
 
 
 @pytest.mark.unit
@@ -856,7 +860,7 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
     assert payload["status"] == "ok"
     assert payload["service_status"]["status"] == "ok"
     assert captured["settings"] is settings
-    assert captured["env_file"] == Path(".env")
+    assert captured["env_file"] is None
     options = captured["options"]
     assert options.timeout_seconds == 180
     assert options.poll_interval_seconds == 2
@@ -1029,7 +1033,7 @@ def test_service_bootstrap_cli_resolves_settings_from_existing_root_env(
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
     assert captured["compose_file"] == compose / "local-service.yml"
-    assert captured["env_file"] == root_env
+    assert captured["env_file"] is None
     assert "provider_environ" not in captured
     service_environ = captured["service_environ"]
     assert service_environ["AWF_DATABASE_URL"] == database_url
@@ -2002,7 +2006,7 @@ def test_service_status_resolves_settings_from_existing_root_env(
     assert settings.database_url == root_database_url
     assert settings.api_base_url == root_api_base_url
     assert captured["compose_file"] == compose / "local-service.yml"
-    assert captured["compose_env_file"] == tmp_path / ".env"
+    assert captured["compose_env_file"] is None
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert provider_environ["AWF_DATABASE_URL"] == root_database_url
@@ -2706,7 +2710,7 @@ def test_service_doctor_resolves_settings_from_existing_root_env(
     assert provider_environ["AWF_API_BASE_URL"] == api_base_url
     assert captured["environ"] is provider_environ
     assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
-    assert captured["compose_env_file"] == root_env
+    assert captured["compose_env_file"] is None
 
 
 @pytest.mark.unit
@@ -2779,7 +2783,7 @@ def test_service_doctor_bundle_resolves_existing_root_env(
     assert provider_environ["AWF_API_BASE_URL"] == api_base_url
     assert captured["environ"] is provider_environ
     assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
-    assert captured["compose_env_file"] == root_env
+    assert captured["compose_env_file"] is None
 
 
 @pytest.mark.unit

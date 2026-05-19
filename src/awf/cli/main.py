@@ -908,6 +908,35 @@ def _resolve_existing_service_env_file(env_file: Path) -> Path:
     return env_file
 
 
+def _resolve_service_env_files(env_file: Path) -> tuple[Path, Path | None]:
+    """Return the env read source and actual Compose env-file path."""
+
+    active_env_file = _resolve_existing_service_env_file(env_file)
+    return active_env_file, _service_compose_env_file(env_file, active_env_file)
+
+
+def _service_compose_env_file(env_file: Path, active_env_file: Path) -> Path | None:
+    """Return the env file that should be passed to Docker Compose, if any."""
+
+    if not active_env_file.exists():
+        return None
+    if active_env_file == env_file:
+        return active_env_file
+    if _is_local_service_compose_env_file(active_env_file):
+        return active_env_file
+    return None
+
+
+def _is_local_service_compose_env_file(path: Path) -> bool:
+    """Return true for docker/compose/.env paths discovered from the current tree."""
+
+    return (
+        path.name == ".env"
+        and path.parent.name == "compose"
+        and path.parent.parent.name == "docker"
+    )
+
+
 def _resolve_existing_local_service_compose_env_file() -> Path | None:
     """Return an existing local Compose env file discovered from the current tree."""
 
@@ -1233,7 +1262,7 @@ def _run_init_service_bootstrap(
             env_example,
             env_overlay=_init_env_overlay_source(env_file, env_example),
         )
-    active_env_file = _resolve_existing_service_env_file(env_file)
+    active_env_file, compose_env_file = _resolve_service_env_files(env_file)
 
     if pretty:
         typer.echo("AWF init: local service bootstrap")
@@ -1276,7 +1305,7 @@ def _run_init_service_bootstrap(
                 provider_environ=preflight_env,
                 environ=preflight_env,
                 compose_file=compose_file,
-                compose_env_file=active_env_file,
+                compose_env_file=compose_env_file,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -1346,7 +1375,7 @@ def _run_init_service_bootstrap(
                 settings,
                 options=options,
                 compose_file=compose_file,
-                env_file=active_env_file,
+                env_file=compose_env_file,
                 service_environ=service_env,
             ),
         )
@@ -1435,7 +1464,7 @@ def service_status(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1447,7 +1476,7 @@ def service_status(
             strict_providers=strict_providers,
             provider_environ=service_env,
             compose_file=compose_file,
-            compose_env_file=env_file,
+            compose_env_file=compose_env_file,
         )
     )
     _emit(payload, fmt)
@@ -1483,7 +1512,7 @@ def service_doctor(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1498,7 +1527,7 @@ def service_doctor(
                 provider_environ=service_env,
                 environ=service_env,
                 compose_file=compose_file,
-                compose_env_file=env_file,
+                compose_env_file=compose_env_file,
             )
         )
         path = write_support_bundle(bundle_payload)
@@ -1515,7 +1544,7 @@ def service_doctor(
             provider_environ=service_env,
             environ=service_env,
             compose_file=compose_file,
-            compose_env_file=env_file,
+            compose_env_file=compose_env_file,
         )
     )
 
@@ -1596,7 +1625,7 @@ def service_readiness(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1612,7 +1641,7 @@ def service_readiness(
             provider_environ=service_env,
             environ=service_env,
             compose_file=compose_file,
-            compose_env_file=env_file,
+            compose_env_file=compose_env_file,
             allow_generic_failures=allow_generic_failures,
             allow_slo_breach=allow_slo_breach,
         )
@@ -1678,7 +1707,7 @@ def service_bootstrap(
         strict_providers=frozenset(strict_providers),
     )
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1690,7 +1719,7 @@ def service_bootstrap(
                 settings,
                 options=options,
                 compose_file=compose_file,
-                env_file=env_file,
+                env_file=compose_env_file,
                 service_environ=service_env,
             )
         )
@@ -1737,8 +1766,8 @@ def service_logs(
     from awf.service.logs import ServiceLogsError, run_service_logs
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file)
-    compose_env_file = env_file if env_file.exists() else None
+    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    logs_compose_env_file = env_file if env_file.exists() else compose_env_file
     service_env = local_service_environ(env_file=env_file)
     try:
         result = run_service_logs(
@@ -1746,7 +1775,7 @@ def service_logs(
             tail=tail,
             follow=follow,
             compose_file=compose_file,
-            compose_env_file=compose_env_file,
+            compose_env_file=logs_compose_env_file,
             service_environ=service_env,
         )
     except KeyboardInterrupt:

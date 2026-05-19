@@ -544,7 +544,7 @@ def test_init_without_path_runs_service_bootstrap(
     assert "AWF_GITHUB_TOKEN" in result.output
     assert "awf init <path>" in result.output
     assert len(captured["bootstrap_calls"]) == 1
-    assert captured["bootstrap_calls"][0]["env_file"] == Path(".env")
+    assert captured["bootstrap_calls"][0]["env_file"] is None
 
 
 @pytest.mark.unit
