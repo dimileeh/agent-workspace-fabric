@@ -1200,6 +1200,8 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
 
 
 def _is_informational_step(step: Mapping[str, Any]) -> bool:
+    if _string_value(step.get("uses")) is not None:
+        return False
     if not _is_comment_or_notify_step(step):
         label = _step_label(step).lower()
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
