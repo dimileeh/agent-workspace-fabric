@@ -238,6 +238,7 @@ def _resolve_provider_environ(
     compose_file: Path | None,
     compose_env_file: Path | None,
 ) -> Mapping[str, str] | None:
+    """Resolve provider readiness environment from explicit or adjacent Compose env files."""
     if provider_environ is not None:
         return provider_environ
     env_file = compose_env_file

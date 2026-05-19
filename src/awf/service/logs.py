@@ -222,6 +222,7 @@ def _compose_interpolation_environ(environ: Mapping[str, str]) -> dict[str, str]
 
 
 def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:
+    """Look up a case-insensitive environment value and ignore empty strings."""
     found, value = _env_lookup(environ, key)
     if found and value:
         return value
@@ -229,6 +230,7 @@ def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:
 
 
 def _env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
+    """Return whether an environment key is present using case-insensitive matching."""
     wanted = key.upper()
     for existing, value in environ.items():
         if existing.upper() == wanted:

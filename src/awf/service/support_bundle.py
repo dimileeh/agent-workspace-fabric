@@ -56,6 +56,7 @@ def _resolve_provider_environ(
     compose_file: Path | None,
     compose_env_file: Path | None,
 ) -> Mapping[str, str]:
+    """Resolve provider auth inputs from the selected Compose env file."""
     if provider_environ is not None:
         return provider_environ
     env_file = compose_env_file
