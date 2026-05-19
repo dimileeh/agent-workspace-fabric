@@ -78,11 +78,11 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | Make smoke validation honor repo profile | `ws_c046c2c6364340c298786c3e` | Codex / `gpt-5.3-codex-spark` | monitoring_pr / validation | Monitor-only adoption for PR [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263). Replaces failed Spark monitor `ws_b9fe80a12ae04c9b849c43ae`; PR is open and currently under monitor validation. |
 | P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_6b8303d60f8949d78b1237e7` | Codex / `gpt-5.5` | monitoring_pr / validation | Active PR monitor for PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), covering `awf init` and local service readiness env-file alignment. |
 | P1 Local Service Readiness | Make local service host ports configurable | `ws_5ffbf983ef9c45e1b5f74ee6` | Codex / `gpt-5.5` | monitoring_pr / validation | Monitor-only adoption for PR [#265](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/265). Replaces failed Spark retry `ws_8e051db584564e9d9bd97566` after AWF fix `200754ae` persisted monitor provider-circuit cooldown as durable provider-recovery state. |
 | P1 MCP And Project Onboarding Client Parity | Harden CLI `adopt-pr` API root handling | `ws_d8b9fd1a13c34e68a866be84` | Codex / `gpt-5.5` | monitoring_pr / validation | Monitor-only adoption for PR [#266](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/266). Replaces failed Spark retry `ws_eba3d6c717f3491bb4d2c367` after AWF fix `200754ae` persisted monitor provider-circuit cooldown as durable provider-recovery state. |
 | P0 / P1 AWF Dogfood Stability | Bootstrap env and PR-monitor recovery stability | `ws_677ab22a7f7b4b7abc02ea57` | Codex / `gpt-5.3-codex-spark` | monitoring_pr / validation | Active PR monitor for PR [#267](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/267), which carries local bootstrap env, validation-handoff, salvage safe-directory, and provider-circuit monitor recovery fixes. |
+| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_285b5bf215fd4b329eb1af65` | Codex / `gpt-5.5` / `xhigh` | running | Launched 2026-05-19 after PR [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263) merged and freed one slot. Scope: make `src/awf/control/quality_gates.py` diff-aware for `pyproject.toml` and `.github/workflows/*.yml`, improve block messages with file/section/line/reason details, add `docs/PROTECTED_FILES.md`, and cover the seven acceptance cases from the bug report. Do not add branch-protection API fetching in this first slice. |
 
 ### Reschedule Required Slices
 
@@ -94,7 +94,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | _not launched_ | Codex / `gpt-5.5` / `xhigh` | pending_capacity | Launch as soon as active workspaces drop below five. Scope: make `src/awf/control/quality_gates.py` diff-aware for `pyproject.toml` and `.github/workflows/*.yml`, improve block messages with file/section/line/reason details, add `docs/PROTECTED_FILES.md`, and cover the seven acceptance cases from the bug report. Do not add branch-protection API fetching in this first slice. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | All known P0/P1 backlog slices are either active, merged/completed, or represented by active PR monitors as of 2026-05-19T19:18Z. |
 
 Historical failed attempts are kept under Failed / Superseded Slices for
 root-cause history.
@@ -103,6 +103,7 @@ root-cause history.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | Make smoke validation honor repo profile | `ws_c046c2c6364340c298786c3e` | [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263) | merged | Monitor-only adoption merged 2026-05-19 after the local merge-queue head-of-line bug was fixed and AWF was rebuilt/restarted. Replaced failed Spark monitor `ws_b9fe80a12ae04c9b849c43ae`. |
 | P1 Test Coverage And Quality Gates | Add fallback focused repro commands for CI pytest evidence | `ws_a1b0d9e586c644d1ba4b5d60` | [#258](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/258) | merged | Completed and merged 2026-05-16 with GitHub CI green. PR #256 dogfood showed GitHub CI evidence can contain failing pytest node IDs while `suggested_repro_commands` remains empty; this slice adds generic bounded fallback repro commands without hardcoding AWF check names or asking agents to rediscover known failures through broad local coverage. |
 | P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) | merged | Clean retry completed and merged 2026-05-16 with GitHub CI green. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`; the final monitor repair addressed request-admission/idempotency ordering and coverage gaps before merge. |
 | P1 Security, Secrets, And Egress Policy | Complete low-risk security cleanup audit | `ws_7bad4fd57a2b4995acc9292a` | [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257) | merged | Completed and merged 2026-05-15 with GitHub CI green. Scope was intentionally narrow: replace fragile SQL interval interpolation, reduce selected 409/error internal field leakage, and prove doctor known-secret sets are redaction-only. |
