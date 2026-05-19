@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.runtime.planning import build_conformance_retry_prompt
 
 CONFORMANCE_SALVAGE_POLICY_KEY = "conformance_salvage"
@@ -302,7 +303,7 @@ def _run_git(
     failure_reason: str = SALVAGE_SOURCE_UNAVAILABLE,
 ) -> CompletedProcessLike:
     result = run(
-        ["git", "-C", str(worktree), *args],
+        ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
         check=False,
         capture_output=True,
         text=True,
