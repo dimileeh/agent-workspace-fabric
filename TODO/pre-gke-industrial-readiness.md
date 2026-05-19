@@ -78,13 +78,7 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_6b8303d60f8949d78b1237e7` | Codex / `gpt-5.5` | monitoring_pr / validation | Active PR monitor for PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), covering `awf init` and local service readiness env-file alignment. |
-| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_285b5bf215fd4b329eb1af65` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr / validation | Active PR monitor for PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268). Scope: make `src/awf/control/quality_gates.py` diff-aware for `pyproject.toml` and `.github/workflows/*.yml`, improve block messages with file/section/line/reason details, add `docs/PROTECTED_FILES.md`, and cover the seven acceptance cases from the bug report. Do not add branch-protection API fetching in this first slice. |
-| P1 Merge Safety And PR Monitor Correctness | Separate advisory PR feedback from merge-blocking reviews | `ws_e718fac4c82c41d4baa143af` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr / validation | Fresh PR monitor for salvaged PR [#269](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/269). Original workspace `ws_0d8e6ceeb322430daa745ad6` completed implementation and committed locally as `9c9ea191`, but failed after service restart because AWF preserved the running runtime without reattaching an execution task, then stale-active cleanup failed and released it. The clean committed branch was pushed and adopted instead of rerunning the task. |
-| P1 MCP And Project Onboarding Client Parity | Make smoke validation honor repo profile | `ws_c046c2c6364340c298786c3e` | Codex / `gpt-5.3-codex-spark` | monitoring_pr | Monitor-only adoption for PR [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263). Replaces failed Spark monitor `ws_b9fe80a12ae04c9b849c43ae`; PR is open with GitHub coverage/required-check repair still pending. |
-| P1 Local Service Readiness | Make local service host ports configurable | `ws_5ffbf983ef9c45e1b5f74ee6` | Codex / `gpt-5.5` | monitoring_pr | Monitor-only adoption for PR [#265](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/265). Replaces failed Spark retry `ws_8e051db584564e9d9bd97566` after AWF fix `200754ae` persisted monitor provider-circuit cooldown as durable provider-recovery state. |
-| P1 MCP And Project Onboarding Client Parity | Harden CLI `adopt-pr` API root handling | `ws_d8b9fd1a13c34e68a866be84` | Codex / `gpt-5.5` | monitoring_pr | Monitor-only adoption for PR [#266](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/266). Replaces failed Spark retry `ws_eba3d6c717f3491bb4d2c367` after AWF fix `200754ae` persisted monitor provider-circuit cooldown as durable provider-recovery state. |
-| P0 / P1 AWF Dogfood Stability | Bootstrap env and PR-monitor recovery stability | `ws_677ab22a7f7b4b7abc02ea57` | Codex / `gpt-5.3-codex-spark` | monitoring_pr | Active PR monitor for PR [#267](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/267), which carries the local bootstrap env, validation-handoff, salvage safe-directory, and provider-circuit monitor recovery fixes. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | No active AWF workspaces after the 2026-05-20 operator containment stop. PRs [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), and [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) remain open and require recovery/re-adoption after the local AWF rebuild. PRs [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263), [#265](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/265), [#266](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/266), [#267](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/267), [#269](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/269), and [#271](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/271) have landed on `development`. |
 
 ### Reschedule Required Slices
 
@@ -96,7 +90,9 @@ not listed here.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | No failed slice currently requires rescheduling. Ready-but-not-launched work is tracked under Pending Capacity Slices while AWF is at the five-active-workspace cap. |
+| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_6b8303d60f8949d78b1237e7` | Codex / `gpt-5.5` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
+| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_285b5bf215fd4b329eb1af65` | Codex / `gpt-5.5` / `xhigh` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
+| P0 AWF Dogfood Stability | Automate preserved-active restart recovery | `ws_77bb4cce4aea4892bb41e0e6` | Codex / `gpt-5.5` / `xhigh` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
 
 ### Pending Capacity Slices
 
@@ -541,8 +537,9 @@ root-cause history.
   bypasses, test-command narrowing, and job/step removals; include file,
   section/path, approximate line, and reason in block messages; document the
   policy in `docs/PROTECTED_FILES.md`; and pass the seven unit cases plus
-  executor/PR-monitor regressions. Active in workspace
-  `ws_285b5bf215fd4b329eb1af65` on Codex `gpt-5.5` / `xhigh`.
+  executor/PR-monitor regressions. PR #268 from cancelled workspace
+  `ws_285b5bf215fd4b329eb1af65` requires recovery/re-adoption after the
+  local AWF rebuild.
 - [x] Repair deterministic post-agent pre-commit hook rewrites before failing
   otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
   failed `ws_06ee567d44eb479bb0f68478`,
