@@ -161,6 +161,28 @@ def local_service_environ(
     return merged
 
 
+def resolve_local_service_provider_environ(
+    *,
+    provider_environ: Mapping[str, str] | None,
+    environ: Mapping[str, str],
+    compose_file: Path | None,
+    compose_env_file: Path | None,
+) -> Mapping[str, str]:
+    """Resolve provider auth inputs from explicit or adjacent Compose env files."""
+
+    if provider_environ is not None:
+        return provider_environ
+
+    env_file = compose_env_file
+    if env_file is None and compose_file is not None:
+        candidate = compose_file.parent / ".env"
+        if candidate.exists():
+            env_file = candidate
+    if env_file is None:
+        return environ
+    return local_service_environ(environ, env_file=env_file)
+
+
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
     """Expose the local Postgres password as the variable Compose interpolates."""
 

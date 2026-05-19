@@ -13,7 +13,11 @@ from typing import Any, TypedDict
 
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
-from awf.service.config import ServiceSettings, local_service_environ, service_config_payload
+from awf.service.config import (
+    ServiceSettings,
+    resolve_local_service_provider_environ,
+    service_config_payload,
+)
 from awf.service.doctor import _redact_text, _secret_values, collect_doctor_report
 from awf.service.metrics import summarize_failure_analysis
 from awf.service.status import collect_service_status
@@ -49,26 +53,6 @@ def _redact_value(value: object, secrets: frozenset[str]) -> Any:
     return _redact_text(str(value), secrets)
 
 
-def _resolve_provider_environ(
-    *,
-    provider_environ: Mapping[str, str] | None,
-    environ: Mapping[str, str],
-    compose_file: Path | None,
-    compose_env_file: Path | None,
-) -> Mapping[str, str]:
-    """Resolve provider auth inputs from the selected Compose env file."""
-    if provider_environ is not None:
-        return provider_environ
-    env_file = compose_env_file
-    if env_file is None and compose_file is not None:
-        candidate = compose_file.parent / ".env"
-        if candidate.exists():
-            env_file = candidate
-    if env_file is None:
-        return environ
-    return local_service_environ(environ, env_file=env_file)
-
-
 async def collect_support_bundle(
     settings: ServiceSettings,
     *,
@@ -84,7 +68,7 @@ async def collect_support_bundle(
 ) -> dict[str, object]:
     """Collect a telemetry-free, redacted support bundle."""
     env = os.environ if environ is None else environ
-    provider_env = _resolve_provider_environ(
+    provider_env = resolve_local_service_provider_environ(
         provider_environ=provider_environ,
         environ=env,
         compose_file=compose_file,

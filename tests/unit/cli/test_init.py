@@ -738,6 +738,59 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
 
 
 @pytest.mark.unit
+def test_init_without_path_preserves_context_before_seed_overlay_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep root `.env` comments attached to seed-template override keys."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "AWF_DOCKER_HOST=",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# My custom Docker host",
+                "AWF_DOCKER_HOST=" + docker_host,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# My custom Docker host",
+                "AWF_DOCKER_HOST=" + docker_host,
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_init_without_path_deduplicates_root_only_overlay_keys(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

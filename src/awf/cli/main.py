@@ -1036,9 +1036,10 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     overlay_last_assignment_index: dict[str, int] = {}
     for index, line in enumerate(overlay_lines):
         key = _env_assignment_key(line)
-        if key is not None and key not in seed_keys:
+        if key is not None:
             overlay_last_assignment_index[key] = index
 
+    seed_leading_context: dict[str, list[str]] = {}
     seed_trailing_context: dict[str, list[str]] = {}
     overlay_only_lines: list[str] = []
     pending_context: list[str] = []
@@ -1048,9 +1049,12 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         if key is None:
             pending_context.append(line)
             continue
-        if key not in seed_keys and overlay_last_assignment_index.get(key) == index:
-            overlay_only_lines.extend(pending_context)
-            overlay_only_lines.append(line)
+        if overlay_last_assignment_index.get(key) == index:
+            if key in seed_keys:
+                seed_leading_context[key] = pending_context
+            else:
+                overlay_only_lines.extend(pending_context)
+                overlay_only_lines.append(line)
         pending_context = []
         last_assignment_key = key
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
@@ -1059,12 +1063,16 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         overlay_only_lines.extend(pending_context)
 
     merged_lines: list[str] = []
+    emitted_seed_leading_context: set[str] = set()
     emitted_seed_trailing_context: set[str] = set()
     for line in seed_lines:
         key = _env_assignment_key(line)
         if key is None:
             merged_lines.append(line)
             continue
+        if key in seed_leading_context and key not in emitted_seed_leading_context:
+            merged_lines.extend(seed_leading_context[key])
+            emitted_seed_leading_context.add(key)
         merged_lines.append(overlay_assignments.get(key, line))
         if key in seed_trailing_context and key not in emitted_seed_trailing_context:
             merged_lines.extend(seed_trailing_context[key])
