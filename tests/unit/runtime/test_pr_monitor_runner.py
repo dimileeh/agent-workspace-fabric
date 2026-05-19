@@ -4322,7 +4322,7 @@ class TestNotificationAndGraceHelpers:
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
 
-        assert "external merge-blocking review policy comment" in (
+        assert "merge-blocking changes-requested review" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
         )
         assert "required protection" in (

@@ -141,7 +141,7 @@ class ReviewComment:
     author: str | None = None
     is_resolved: bool = False
     blocks_merge: bool = False
-    """Reserved for non-textual policy blockers supplied by future providers."""
+    """True only when this review-level item currently blocks GitHub merge."""
     body: str | None = None
     url: str | None = None
     created_at: datetime | None = None
@@ -197,6 +197,12 @@ class PRStatus:
     unresolved_inline_threads: tuple[ReviewThread, ...]
     unresolved_review_comments: tuple[ReviewComment, ...]
     base_behind_count: int  # commits on base not in head (local rev-list)
+    blocking_reviews: tuple[ReviewComment, ...] = ()
+    """Effective review-level blockers used only for merge gating.
+
+    ``unresolved_review_comments`` intentionally preserves advisory review
+    bodies and top-level issue comments for the address-comments loop.
+    """
     merge_state_status: MergeStateStatus = MergeStateStatus.UNKNOWN
     """GitHub's authoritative merge-state signal. Combined with
     ``base_behind_count`` to decide whether to run ``SyncBase`` — if
@@ -726,7 +732,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         stale; either way, gate forward to CI/merge checks.
         Review comments are routed to the coding agent so it can record a
         fix, false-positive, or defer verdict against the current evidence.
-    3.  Reserved policy blockers → NotifyHuman.
+    3.  Effective blocking reviews → NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
     5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
@@ -736,8 +742,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         `git merge origin/<base>` + fix cycle; runs AFTER comments so
         a mergeable-CONFLICTING PR's conflict + comments can be fixed
         in one CLI pass.
-    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection
-        or required-review) → NotifyHuman regardless of auto_merge.
+    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS relaxes to the normal
+        merge path when all other gates are green and no effective
+        blocking review or human defer remains.
     8.  Deferred HUMAN feedback still unresolved on GitHub →
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
@@ -810,20 +817,11 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
-    # 3. Policy/checklist blockers that cannot be code-fixed must stop
-    # auto-merge, but they must not terminate the monitor. Example:
-    # Review bots can post top-level policy/checklist blockers that require
-    # an external action rather than a code edit. The runner posts a single
-    # human-attention comment and keeps polling so later code-review comments
-    # are still handled.
-    if any(
-        c.blocks_merge
-        and (
-            _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
-            or state.threads_addressed_ids.get(c.comment_id) == "defer"
-        )
-        for c in status.unresolved_review_comments
-    ):
+    # 3. Effective review-state blockers stop auto-merge, but they must not
+    # terminate the monitor. Advisory review bodies and top-level issue
+    # comments stay in ``unresolved_review_comments`` for the agent path and
+    # are deliberately not consulted here.
+    if status.blocking_reviews:
         return NotifyHuman()
 
     # 4. CI failures.
@@ -868,17 +866,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return Abort(reason=AbortReason.merge_conflict_not_reproduced)
         return SyncBase()
 
-    # 7. Branch protection / required-review blocker → hand off to human
-    # regardless of auto_merge setting. Monitor can't bypass branch
-    # protection; the only useful action is to tell the maintainer the
-    # PR is otherwise ready.
-    if status.merge_state_status in (
-        MergeStateStatus.BLOCKED,
-        MergeStateStatus.HAS_HOOKS,
-    ):
-        return NotifyHuman()
-
-    # 8. Deferred HUMAN feedback still unresolved on GitHub → block
+    # 7. Deferred HUMAN feedback still unresolved on GitHub → block
     # auto-merge. Deferred BOT feedback does not block.
     #
     # "Defer" means the coding CLI decided a reviewer comment needs
@@ -899,6 +887,21 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         for c in status.unresolved_review_comments
     )
     if has_human_defer:
+        return NotifyHuman()
+
+    # 8. GitHub may report BLOCKED / HAS_HOOKS for branch-protection or
+    # required-review details that are stale or not inspectable from this
+    # slice. Once CI, mergeability, inline threads, human defers, and
+    # effective review blockers are clean, let the merge attempt be the
+    # final arbiter; merge failure handling already records the rejection.
+    if (
+        status.merge_state_status
+        in (
+            MergeStateStatus.BLOCKED,
+            MergeStateStatus.HAS_HOOKS,
+        )
+        and status.unresolved_inline_threads
+    ):
         return NotifyHuman()
 
     # 9. All green — terminal success action.

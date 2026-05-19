@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -75,6 +75,16 @@ class PullRequestMetadataError(Exception):
         self.message = message
         self.detail = detail
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class _FetchedReview:
+    comment: ReviewComment
+    reviewer_key: str
+    submitted_at: datetime | None
+    fetch_index: int
+    viewer_did_author: bool
+    has_body: bool
 
 
 # GraphQL: fetch PR state + review threads + review comments in one query.
@@ -719,9 +729,8 @@ class GitHubClient:
 
         # ── Review-level (outside-diff) comments ───────────────────────
         # A "review" is a top-level object that may or may not carry a
-        # body; we treat non-empty bodies as outside-diff comments that
-        # need to be addressed too.
-        reviews: list[ReviewComment] = []
+        # body. Non-empty bodies remain agent-triage feedback; the separate
+        # blocking view uses only effective latest CHANGES_REQUESTED state.
         review_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -729,26 +738,20 @@ class GitHubClient:
             connection_name="reviews",
             query=_GQL_PR_REVIEWS_PAGE,
         )
-        for node in review_nodes:
-            body = node.get("body") or ""
-            if node.get("viewerDidAuthor") or not body.strip():
-                continue
-            author = _dig(node, "author", "login")
-            state = (node.get("state") or "").upper()
-            reviews.append(
-                ReviewComment(
-                    comment_id=str(node["databaseId"]),
-                    body_excerpt=body[:400],
-                    author=author,
-                    is_resolved=False,
-                    body=body,
-                    url=_clean_optional_str(node.get("url")),
-                    created_at=_parse_github_datetime(node.get("submittedAt")),
-                    state=state,
-                    source_kind="review",
-                    viewer_did_author=False,
-                )
+        fetched_reviews = [
+            _parse_fetched_review(node, fetch_index=index)
+            for index, node in enumerate(review_nodes)
+        ]
+        blocking_reviews = _effective_blocking_reviews(fetched_reviews)
+        blocking_review_ids = {comment.comment_id for comment in blocking_reviews}
+        reviews: list[ReviewComment] = [
+            replace(
+                fetched.comment,
+                blocks_merge=fetched.comment.comment_id in blocking_review_ids,
             )
+            for fetched in fetched_reviews
+            if not fetched.viewer_did_author and fetched.has_body
+        ]
 
         # ── Top-level PR comments ──────────────────────────────────────
         # Review bots sometimes report feedback as top-level issue comments
@@ -802,6 +805,7 @@ class GitHubClient:
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
             merge_commit_sha=_clean_optional_str(_dig(pr, "mergeCommit", "oid")),
+            blocking_reviews=blocking_reviews,
         )
 
     async def _fetch_paginated_pr_connection_nodes(
@@ -1216,6 +1220,76 @@ def _parse_review_thread_comments(
             )
         )
     return tuple(comments)
+
+
+def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _FetchedReview:
+    raw_body = node.get("body")
+    body = raw_body if isinstance(raw_body, str) else ""
+    body_excerpt = body[:400] if body.strip() else ""
+    database_id = node.get("databaseId")
+    comment_id = str(database_id if database_id is not None else f"missing:{fetch_index}")
+    author = _clean_optional_str(_dig(node, "author", "login"))
+    submitted_at = _parse_github_datetime(node.get("submittedAt"))
+    comment = ReviewComment(
+        comment_id=comment_id,
+        body_excerpt=body_excerpt,
+        author=author,
+        is_resolved=False,
+        body=body,
+        url=_clean_optional_str(node.get("url")),
+        created_at=submitted_at,
+        state=(node.get("state") or "").upper(),
+        source_kind="review",
+        viewer_did_author=bool(node.get("viewerDidAuthor")),
+    )
+    return _FetchedReview(
+        comment=comment,
+        reviewer_key=_reviewer_effective_state_key(node, fetch_index=fetch_index),
+        submitted_at=submitted_at,
+        fetch_index=fetch_index,
+        viewer_did_author=comment.viewer_did_author,
+        has_body=bool(body.strip()),
+    )
+
+
+def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> str:
+    author = _clean_optional_str(_dig(node, "author", "login"))
+    if author is not None:
+        return f"author:{author.lower()}"
+    database_id = node.get("databaseId")
+    if database_id is not None:
+        return f"review:{database_id}"
+    return f"review-fetch-index:{fetch_index}"
+
+
+def _effective_blocking_reviews(
+    fetched_reviews: Sequence[_FetchedReview],
+) -> tuple[ReviewComment, ...]:
+    latest_by_reviewer: dict[str, _FetchedReview] = {}
+    for fetched in fetched_reviews:
+        current = latest_by_reviewer.get(fetched.reviewer_key)
+        if current is None or _review_is_later(fetched, current):
+            latest_by_reviewer[fetched.reviewer_key] = fetched
+    blockers = [
+        replace(fetched.comment, blocks_merge=True)
+        for fetched in sorted(latest_by_reviewer.values(), key=_review_fetch_order)
+        if fetched.comment.state == "CHANGES_REQUESTED"
+    ]
+    return tuple(blockers)
+
+
+def _review_is_later(candidate: _FetchedReview, current: _FetchedReview) -> bool:
+    if (
+        candidate.submitted_at is not None
+        and current.submitted_at is not None
+        and candidate.submitted_at != current.submitted_at
+    ):
+        return candidate.submitted_at > current.submitted_at
+    return candidate.fetch_index > current.fetch_index
+
+
+def _review_fetch_order(review: _FetchedReview) -> int:
+    return review.fetch_index
 
 
 def _connection_nodes(page: Any) -> list[dict[str, Any]]:

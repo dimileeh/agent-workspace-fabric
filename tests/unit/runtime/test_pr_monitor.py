@@ -59,6 +59,8 @@ def _review(
     is_resolved: bool = False,
     blocks_merge: bool = False,
     author: str | None = None,
+    source_kind: str = "review",
+    state: str | None = None,
 ) -> ReviewComment:
     return ReviewComment(
         comment_id=cid,
@@ -66,6 +68,8 @@ def _review(
         author=author,
         is_resolved=is_resolved,
         blocks_merge=blocks_merge,
+        source_kind=source_kind,
+        state=state,
     )
 
 
@@ -76,6 +80,7 @@ def _status(
     check_state: CheckState = CheckState.SUCCESS,
     inline: tuple[ReviewThread, ...] = (),
     reviews: tuple[ReviewComment, ...] = (),
+    blocking_reviews: tuple[ReviewComment, ...] | None = None,
     base_behind: int = 0,
     merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
@@ -89,6 +94,11 @@ def _status(
         check_state=check_state,
         unresolved_inline_threads=inline,
         unresolved_review_comments=reviews,
+        blocking_reviews=(
+            tuple(c for c in reviews if c.blocks_merge)
+            if blocking_reviews is None
+            else blocking_reviews
+        ),
         base_behind_count=base_behind,
         merge_state_status=merge_state_status,
         ci_failures=ci_failures,
@@ -119,8 +129,10 @@ def _status(
             None,
         ),
         (
-            "blocking policy checklist comment",
-            _status(reviews=(_review("C_policy", blocks_merge=True),)),
+            "blocking changes-requested review",
+            _status(
+                reviews=(_review("C_policy", blocks_merge=True, state="CHANGES_REQUESTED"),),
+            ),
             MonitorState(),
             NotifyHuman,
             None,
@@ -179,20 +191,6 @@ def _status(
             _status(mergeable=MergeableState.CONFLICTING),
             MonitorState(),
             SyncBase,
-            None,
-        ),
-        (
-            "branch protection blocked",
-            _status(merge_state_status=MergeStateStatus.BLOCKED),
-            MonitorState(),
-            NotifyHuman,
-            None,
-        ),
-        (
-            "branch protection hook pending",
-            _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
-            MonitorState(),
-            NotifyHuman,
             None,
         ),
         (
@@ -1053,21 +1051,52 @@ class TestMergeStateStatus:
         assert action.reason == AbortReason.merge_conflict_not_reproduced
 
     @pytest.mark.unit
-    def test_blocked_notifies_human_even_with_auto_merge(self) -> None:
-        """Branch-protection says no. Monitor can't override; fall back
-        to posting the ready-to-merge comment so the human knows to act."""
+    def test_blocked_with_no_review_blockers_reaches_merge_attempt(self) -> None:
+        """A BLOCKED merge-state alone may be stale or branch-protection
+        nuance that the final merge attempt can arbitrate."""
         action = decide(
             _status(merge_state_status=MergeStateStatus.BLOCKED),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_has_hooks_with_no_review_blockers_reaches_merge_attempt(self) -> None:
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_blocked_still_notifies_with_blocking_review(self) -> None:
+        review = _review(
+            "C_changes",
+            blocks_merge=True,
+            author="human-reviewer",
+            state="CHANGES_REQUESTED",
+        )
+        action = decide(
+            _status(
+                reviews=(review,),
+                blocking_reviews=(review,),
+                merge_state_status=MergeStateStatus.BLOCKED,
+            ),
             MonitorState(),
             MonitorConfig(auto_merge=True),
         )
         assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
-    def test_has_hooks_also_notifies_human(self) -> None:
+    def test_blocked_still_notifies_with_human_defer(self) -> None:
         action = decide(
-            _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
-            MonitorState(),
+            _status(
+                inline=(_thread("T_deferred", author="human-reviewer"),),
+                merge_state_status=MergeStateStatus.BLOCKED,
+            ),
+            MonitorState(threads_addressed_ids={"T_deferred": "defer"}),
             MonitorConfig(auto_merge=True),
         )
         assert isinstance(action, NotifyHuman)
@@ -1168,7 +1197,11 @@ class TestConflictingAbort:
 class TestTerminalSuccess:
     @pytest.mark.unit
     def test_all_green_auto_merge_returns_merge(self) -> None:
-        action = decide(_status(), MonitorState(), MonitorConfig(auto_merge=True))
+        action = decide(
+            _status(blocking_reviews=()),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
@@ -1191,6 +1224,95 @@ class TestTerminalSuccess:
             assert type(decide(s, MonitorState(), cfg_feat)) is type(
                 decide(s, MonitorState(), cfg_rel)
             )
+
+    @pytest.mark.unit
+    def test_commented_bot_reviews_do_not_block_after_triage(self) -> None:
+        reviews = (
+            _review("C_greptile", author="greptile-apps[bot]", state="COMMENTED"),
+            _review("C_coderabbit", author="coderabbitai[bot]", state="COMMENTED"),
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                "C_greptile": "false_positive",
+                "C_coderabbit": "false_positive",
+            }
+        )
+
+        action = decide(
+            _status(reviews=reviews, blocking_reviews=()),
+            state,
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_changes_requested_human_review_blocks_merge(self) -> None:
+        review = _review(
+            "C_changes",
+            blocks_merge=True,
+            author="human-reviewer",
+            state="CHANGES_REQUESTED",
+        )
+
+        action = decide(
+            _status(reviews=(review,), blocking_reviews=(review,)),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_later_approved_reviewer_status_can_merge_after_triage(self) -> None:
+        reviews = (
+            _review("C_old_changes", author="human-reviewer", state="CHANGES_REQUESTED"),
+            _review("C_new_approval", author="human-reviewer", state="APPROVED"),
+        )
+        state = MonitorState(
+            threads_addressed_ids={
+                "C_old_changes": "false_positive",
+                "C_new_approval": "false_positive",
+            }
+        )
+
+        action = decide(
+            _status(reviews=reviews, blocking_reviews=()),
+            state,
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_unresolved_inline_thread_still_gates_without_blocking_reviews(self) -> None:
+        thread = _thread("T_inline")
+
+        action = decide(
+            _status(inline=(thread,), blocking_reviews=()),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, AddressComments)
+        assert action.threads == (thread,)
+
+    @pytest.mark.unit
+    def test_top_level_bot_issue_comment_does_not_block_after_triage(self) -> None:
+        issue_comment = _review(
+            "issue:9501",
+            author="coderabbitai[bot]",
+            source_kind="issue",
+        )
+        state = MonitorState(threads_addressed_ids={"issue:9501": "false_positive"})
+
+        action = decide(
+            _status(reviews=(issue_comment,), blocking_reviews=()),
+            state,
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, Merge)
 
 
 # ── Deferred feedback gate ─────────────────────────────────────────────────
