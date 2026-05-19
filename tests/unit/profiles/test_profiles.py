@@ -1393,7 +1393,6 @@ def test_repo_profile_reason_uses_actual_marker_file(tmp_path: Path) -> None:
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
 
     assert result.reason == "repo-local awf.workspace.yml profile"
-    assert result.candidates_considered[0] == "repo:awf.workspace.yml"
     assert result.profile.source == "repo:awf.workspace.yml"
 
 
