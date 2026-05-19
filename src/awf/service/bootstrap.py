@@ -35,6 +35,8 @@ class CompletedProcessLike(Protocol):
 
 
 class SubprocessRun(Protocol):
+    """Callable protocol for running bootstrap subprocess commands."""
+
     def __call__(
         self,
         args: list[str],
@@ -43,7 +45,9 @@ class SubprocessRun(Protocol):
         capture_output: bool,
         text: Literal[True],
         env: Mapping[str, str] | None = None,
-    ) -> CompletedProcessLike: ...  # pragma: no cover
+    ) -> CompletedProcessLike:
+        """Run a command and return a completed-process-like object."""
+        ...  # pragma: no cover
 
 
 class StatusCollector(Protocol):
@@ -61,6 +65,8 @@ Monotonic = Callable[[], float]
 
 
 class _SubprocessRunKwargs(TypedDict):
+    """Keyword arguments forwarded to the injectable subprocess runner."""
+
     check: bool
     capture_output: bool
     text: Literal[True]
@@ -250,6 +256,8 @@ def _bootstrap_stages(
     assets: _BootstrapAssets | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[_BootstrapStage, ...]:
+    """Return the ordered Docker stages required for service bootstrap."""
+
     resolved_assets = assets or _resolve_bootstrap_assets(
         compose_file,
         require_agent_runtime=not options.skip_agent_runtime_build,
@@ -309,6 +317,8 @@ def _bootstrap_stages(
 
 
 def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
+    """Return whether a Compose profile is enabled in the service env."""
+
     raw = environ.get("COMPOSE_PROFILES", "")
     return profile in {
         item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
@@ -318,6 +328,8 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
 def _docker_cli_environ(
     environ: Mapping[str, str],
 ) -> dict[str, str]:
+    """Return subprocess env with Docker host selection from service settings."""
+
     resolved = dict(environ)
     # Keep Docker CLI host selection scoped to the resolved service environment;
     # falling back to ServiceSettings would reintroduce process-environment drift.
@@ -331,6 +343,8 @@ def _resolve_bootstrap_assets(
     *,
     require_agent_runtime: bool,
 ) -> _BootstrapAssets:
+    """Resolve compose, runtime Dockerfile, and env-file assets for bootstrap."""
+
     asset_root = _resolve_bootstrap_asset_root()
     default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE
 
@@ -407,6 +421,8 @@ def _is_bootstrap_asset_root(candidate: Path) -> bool:
 
 
 def _resolve_user_path(path: Path) -> Path:
+    """Resolve a user-provided path after expanding the home directory."""
+
     expanded = path.expanduser()
     if expanded.is_absolute():
         return expanded
@@ -414,6 +430,8 @@ def _resolve_user_path(path: Path) -> Path:
 
 
 def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
+    """Return the local service compose env file when it exists."""
+
     if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
         return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
     if asset_root is not None:
@@ -444,6 +462,8 @@ def _compose_command(
     *,
     compose_env_file: Path | None = None,
 ) -> tuple[str, ...]:
+    """Build the Docker Compose command prefix for a compose file."""
+
     args = ["docker", "compose"]
     if compose_env_file is not None:
         args.extend(["--env-file", str(compose_env_file)])
@@ -457,6 +477,8 @@ def _run_stage(
     run_subprocess: SubprocessRun,
     environ: Mapping[str, str],
 ) -> ServiceBootstrapStageResult:
+    """Run one bootstrap stage and normalize subprocess failures."""
+
     try:
         result = run_subprocess(
             list(stage.command),
@@ -555,6 +577,8 @@ def _status_collection_failed_status(
     settings: ServiceSettings,
     exc: Exception,
 ) -> dict[str, object]:
+    """Return a failed status payload for readiness collection errors."""
+
     return {
         "service": settings.service_name,
         "status": "fail",
@@ -577,6 +601,8 @@ def _run_subprocess(
     text: Literal[True],
     env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
+    """Run a subprocess using the same keyword filtering as test doubles."""
+
     return subprocess.run(
         args,
         **_subprocess_run_kwargs(
@@ -595,6 +621,8 @@ def _subprocess_run_kwargs(
     text: Literal[True],
     env: Mapping[str, str] | None,
 ) -> _SubprocessRunKwargs:
+    """Build subprocess runner kwargs while omitting absent env overrides."""
+
     kwargs: _SubprocessRunKwargs = {
         "check": check,
         "capture_output": capture_output,

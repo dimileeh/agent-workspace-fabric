@@ -28,6 +28,8 @@ _SAFE_CLUSTER_KEYS = frozenset({"failure_reason", "reason_code", "count", "sampl
 
 
 class _DoctorCollectorKwargs(TypedDict, total=False):
+    """Optional path context forwarded to the doctor collector."""
+
     compose_file: Path
     compose_env_file: Path
 

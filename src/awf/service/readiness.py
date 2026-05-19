@@ -49,6 +49,8 @@ class StatusCollector(Protocol):
 
 
 class DoctorCollector(Protocol):
+    """Callable protocol for collecting doctor diagnostics during readiness."""
+
     def __call__(  # pragma: no cover - Protocol declaration only.
         self,
         settings: ServiceSettings,
@@ -59,7 +61,9 @@ class DoctorCollector(Protocol):
         status_collector: StatusCollector | None = None,
         compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
         compose_env_file: Path | None = None,
-    ) -> Awaitable[DoctorReport]: ...
+    ) -> Awaitable[DoctorReport]:
+        """Collect a doctor report using the readiness command context."""
+        ...  # pragma: no cover
 
 
 class FailureAnalysisCollector(Protocol):

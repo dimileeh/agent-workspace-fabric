@@ -62,6 +62,8 @@ class CompletedProcessLike(Protocol):
 
 
 class SubprocessRun(Protocol):
+    """Callable protocol for invoking Docker log subprocess commands."""
+
     def __call__(
         self,
         args: list[str],
@@ -70,7 +72,9 @@ class SubprocessRun(Protocol):
         capture_output: bool,
         text: Literal[True],
         env: Mapping[str, str] | None = None,
-    ) -> CompletedProcessLike: ...  # pragma: no cover
+    ) -> CompletedProcessLike:
+        """Run a logs command and return a completed-process-like object."""
+        ...  # pragma: no cover
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,8 @@ def service_logs_command(
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
     compose_env_file: Path | None = None,
 ) -> list[str]:
+    """Build the Docker Compose logs command for the selected services."""
+
     selected_services = [service.value for service in services] or list(DEFAULT_LOG_SERVICES)
     args = [
         "docker",
@@ -174,12 +180,16 @@ def _run_subprocess(
     text: Literal[True],
     env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
+    """Run the logs subprocess, omitting env when no override is needed."""
+
     if env is None:
         return subprocess.run(args, check=check, capture_output=capture_output, text=text)
     return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
 
 
 def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Return a minimal Docker CLI env when a daemon host is configured."""
+
     docker_host = (
         (environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")) if environ else None
     )

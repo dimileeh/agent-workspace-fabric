@@ -953,6 +953,8 @@ def _init_env_error_payload(
 
 
 def _compose_root_env_file(env_file: Path) -> Path | None:
+    """Return the root `.env` paired with the local Compose env file."""
+
     if (
         env_file.name == ".env"
         and env_file.parent.name == "compose"
@@ -975,6 +977,8 @@ def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
 
 
 def _env_assignment_key(line: str) -> str | None:
+    """Return the key from an env assignment line, ignoring comments."""
+
     if line.lstrip().startswith("#"):
         return None
     match = _ENV_ASSIGNMENT_RE.match(line)
@@ -1157,6 +1161,8 @@ def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[P
 
 
 def _docker_diagnostic_from_report(report: object) -> object | None:
+    """Return the docker diagnostic entry from a readiness report if present."""
+
     from typing import cast
 
     diagnostics = getattr(report, "diagnostics", ())
@@ -1636,6 +1642,8 @@ def service_bootstrap(
         help=_PROVIDER_HELP,
     ),
 ) -> None:
+    """Start the local AWF service stack and emit structured bootstrap output."""
+
     from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
