@@ -1462,6 +1462,7 @@ class ControlWorker:
             candidate.status == WorkspaceStatus.monitoring_pr
             and is_retry_recovery
             and candidate.compose_project_name
+            and finding is None
             and snapshot.stack_state == "running"
         ):
             return

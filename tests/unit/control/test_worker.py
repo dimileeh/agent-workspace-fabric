@@ -3299,6 +3299,72 @@ class TestRunOnceMonitorRecovery:
         assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
 
     @pytest.mark.unit
+    async def test_stale_active_scan_recovering_provider_retry_uses_runtime_classification_for_running_monitor(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-retry-running-monitor-unhealthy",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector(
+            {
+                compose_project: RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="postgres",
+                            container_id="pg",
+                            image="postgres:16",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            runtime_events = await WorkspaceEventRepository(session).list(
+                workspace_id=monitor_id, event_type="workspace.runtime_stranded_detected"
+            )
+
+        assert runtime_events
+        assert runtime_events[0].reason_code == "AGENT_CONTAINER_MISSING"
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["decision"] == "remonitor_workspace"
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_stale_active_scan_recovers_monitor_provider_retry_after_breaker_close(
         self,
         session_factory: async_sessionmaker[AsyncSession],
