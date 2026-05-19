@@ -163,7 +163,7 @@ export AWF_API_HOST_PORT=9001
 export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
 awf service status --format pretty
 awf service doctor
-curl "http://localhost:9001/readyz?provider=github"
+curl "${AWF_API_BASE_URL}/readyz?provider=github"
 ```
 
 ### Local vs Production Configuration

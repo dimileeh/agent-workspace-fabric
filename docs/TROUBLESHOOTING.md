@@ -138,7 +138,7 @@ pointed at the matching API base URL, for example:
 export AWF_API_HOST_PORT=9001
 export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
 awf service status --format pretty
-curl "http://localhost:9001/readyz?provider=github"
+curl "${AWF_API_BASE_URL}/readyz?provider=github"
 ```
 
 1. Check readiness signals and status detail:
