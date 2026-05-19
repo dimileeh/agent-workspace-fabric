@@ -194,6 +194,7 @@ def resolve_local_service_compose_env_file(
 
     candidates: list[Path] = []
     if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
+        candidates.append(Path.cwd().resolve() / expanded)
         candidates.extend(
             root / expanded for root in _awf_source_search_roots(Path.cwd().resolve())
         )

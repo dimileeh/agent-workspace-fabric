@@ -293,6 +293,23 @@ def test_default_compose_env_lookup_does_not_expose_asset_root_override() -> Non
 
 
 @pytest.mark.unit
+def test_default_compose_env_lookup_accepts_current_directory_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_module = tmp_path / "install" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_HOST_WORK_DIR=/tmp/awf-service-state\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
+
+
+@pytest.mark.unit
 def test_default_compose_env_lookup_ignores_unmarked_module_ancestor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
