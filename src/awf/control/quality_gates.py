@@ -1047,7 +1047,6 @@ def _workflow_existing_step_violations(
     violations: list[QualityGateViolation] = []
     label = _step_label(new_step)
     section_prefix = f"jobs.{job_id}.steps.{label}"
-    allowed_changed_keys: set[str] = set()
 
     if old_step.get("if") != new_step.get("if"):
         violations.append(
@@ -1063,9 +1062,7 @@ def _workflow_existing_step_violations(
     old_continue = old_step.get("continue-on-error")
     new_continue = new_step.get("continue-on-error")
     if _is_true(new_continue) and not _is_true(old_continue):
-        if _is_comment_or_notify_step(new_step):
-            allowed_changed_keys.add("continue-on-error")
-        else:
+        if not _is_comment_or_notify_step(new_step):
             violations.append(
                 _violation(
                     path=path,
@@ -1089,13 +1086,12 @@ def _workflow_existing_step_violations(
     old_uses = _string_value(old_step.get("uses"))
     new_uses = _string_value(new_step.get("uses"))
     if old_uses != new_uses:
-        if (
+        is_allowed_pinned_bump = (
             old_uses is not None
             and new_uses is not None
             and _is_pinned_uses_bump(old_uses, new_uses)
-        ):
-            allowed_changed_keys.add("uses")
-        else:
+        )
+        if not is_allowed_pinned_bump:
             violations.append(
                 _violation(
                     path=path,
@@ -1119,9 +1115,7 @@ def _workflow_existing_step_violations(
                     reason="workflow validation command changed; test-command narrowing is blocked",
                 )
             )
-        elif _is_comment_or_notify_step(new_step):
-            allowed_changed_keys.add("run")
-        else:
+        elif not _is_comment_or_notify_step(new_step):
             violations.append(
                 _violation(
                     path=path,
@@ -1132,9 +1126,7 @@ def _workflow_existing_step_violations(
                 )
             )
 
-    if _step_remainder(old_step, allowed_changed_keys) != _step_remainder(
-        new_step, allowed_changed_keys
-    ):
+    if _step_remainder(old_step) != _step_remainder(new_step):
         violations.append(
             _violation(
                 path=path,
@@ -1278,9 +1270,7 @@ def _is_pinned_workflow_uses_ref(ref: str) -> bool:
 
 def _step_remainder(
     step: Mapping[str, Any],
-    allowed_changed_keys: set[str],
 ) -> dict[str, object]:
-    del allowed_changed_keys
     ignored = {"continue-on-error", "if", "run", "uses"}
     return {key: value for key, value in step.items() if key not in ignored}
 
