@@ -1118,14 +1118,17 @@ def _env_context_looks_like_file_header(lines: list[str]) -> bool:
     return comment_count > 1
 
 
-def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
-    """Return compose-template env contents with root env assignments overlaid."""
+def _merge_env_seed_contents_with_overlay_keys(
+    seed_contents: bytes,
+    overlay_contents: bytes,
+) -> tuple[bytes, tuple[str, ...]]:
+    """Return merged env contents plus root-only keys appended from the overlay."""
 
     try:
         seed_text = seed_contents.decode("utf-8")
         overlay_text = overlay_contents.decode("utf-8")
     except UnicodeDecodeError:
-        return seed_contents
+        return seed_contents, ()
 
     # This merge is deliberately line-oriented to preserve comments and ordering.
     # Multi-line dotenv values are unsupported in seed and overlay files; keep
@@ -1162,6 +1165,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     seed_trailing_context: dict[str, list[str]] = {}
     file_header_context: list[str] = []
     overlay_only_lines: list[str] = []
+    overlay_only_keys: list[str] = []
     pending_context: list[str] = []
     last_assignment_key: str | None = None
     for index, line in enumerate(overlay_lines):
@@ -1172,7 +1176,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         if (
             last_assignment_key is None
             and pending_context
-            and (key in seed_keys or _env_context_looks_like_file_header(pending_context))
+            and _env_context_looks_like_file_header(pending_context)
         ):
             file_header_context = pending_context
             pending_context = []
@@ -1182,6 +1186,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
             else:
                 overlay_only_lines.extend(pending_context)
                 overlay_only_lines.append(line)
+                overlay_only_keys.append(key)
         pending_context = []
         last_assignment_key = key
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
@@ -1209,7 +1214,17 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         merged_lines[-1] = f"{merged_lines[-1]}\n"
     merged_lines.extend(overlay_only_lines)
 
-    return "".join(merged_lines).encode("utf-8")
+    return "".join(merged_lines).encode("utf-8"), tuple(overlay_only_keys)
+
+
+def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
+    """Return compose-template env contents with root env assignments overlaid."""
+
+    merged_contents, _overlay_only_keys = _merge_env_seed_contents_with_overlay_keys(
+        seed_contents,
+        overlay_contents,
+    )
+    return merged_contents
 
 
 def _seed_env_file(
@@ -1217,14 +1232,14 @@ def _seed_env_file(
     env_example: Path,
     *,
     env_overlay: Path | None = None,
-) -> tuple[str, dict[str, str] | None]:
-    """Seed an env file from an example and return the action plus any failure payload."""
+) -> tuple[str, dict[str, str] | None, tuple[str, ...]]:
+    """Seed an env file and return action, failure payload, and copied overlay keys."""
 
     if env_file.exists():
-        return "kept_existing", None
+        return "kept_existing", None, ()
 
     if not env_example.exists():
-        return "no_example", None
+        return "no_example", None, ()
 
     try:
         env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1238,6 +1253,7 @@ def _seed_env_file(
                 env_example=env_example,
                 exc=exc,
             ),
+            (),
         )
 
     try:
@@ -1252,8 +1268,10 @@ def _seed_env_file(
                 env_example=env_example,
                 exc=exc,
             ),
+            (),
         )
 
+    env_overlay_keys: tuple[str, ...] = ()
     if env_overlay is not None and env_overlay.exists():
         try:
             overlay_contents = env_overlay.read_bytes()
@@ -1267,9 +1285,13 @@ def _seed_env_file(
                     env_example=env_example,
                     exc=exc,
                 ),
+                (),
             )
         try:
-            env_contents = _merge_env_seed_contents(env_contents, overlay_contents)
+            env_contents, env_overlay_keys = _merge_env_seed_contents_with_overlay_keys(
+                env_contents,
+                overlay_contents,
+            )
         except _EnvSeedMergeError as exc:
             return (
                 "write_failed",
@@ -1280,13 +1302,14 @@ def _seed_env_file(
                     env_example=env_example,
                     exc=exc,
                 ),
+                (),
             )
 
     try:
         with env_file.open("xb") as handle:
             handle.write(env_contents)
     except FileExistsError:
-        return "kept_existing", None
+        return "kept_existing", None, ()
     except OSError as exc:
         return (
             "write_failed",
@@ -1297,9 +1320,10 @@ def _seed_env_file(
                 env_example=env_example,
                 exc=exc,
             ),
+            (),
         )
 
-    return "wrote_from_example", None
+    return "wrote_from_example", None, env_overlay_keys
 
 
 def _init_display_path(path: Path | str) -> str:
@@ -1339,6 +1363,16 @@ def _init_env_warning(env_error: Mapping[str, str]) -> str:
             f"from {env_example}: {message}"
         )
     return f"  warning: could not write {env_file} from {env_example}: {message}"
+
+
+def _add_init_env_overlay_keys(
+    payload: dict[str, object],
+    env_overlay_keys: tuple[str, ...],
+) -> None:
+    """Add non-secret env overlay audit metadata to a JSON init payload."""
+
+    if env_overlay_keys:
+        payload["env_overlay_keys"] = list(env_overlay_keys)
 
 
 def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
@@ -1412,8 +1446,9 @@ def _run_init_service_bootstrap(
     compose_file, env_file, env_example = _resolve_service_compose_paths()
     env_action = "skipped"
     env_error: dict[str, str] | None = None
+    env_overlay_keys: tuple[str, ...] = ()
     if write_env:
-        env_action, env_error = _seed_env_file(
+        env_action, env_error, env_overlay_keys = _seed_env_file(
             env_file,
             env_example,
             env_overlay=_init_env_overlay_source(env_file, env_example),
@@ -1431,6 +1466,11 @@ def _run_init_service_bootstrap(
                 typer.echo(
                     f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
                 )
+                if env_overlay_keys:
+                    typer.echo(
+                        "  added root .env keys to "
+                        f"{_init_display_path(env_file)}: {', '.join(env_overlay_keys)}"
+                    )
             elif env_action == "no_example":
                 search_paths = ", ".join(
                     _init_display_path(path)
@@ -1492,6 +1532,7 @@ def _run_init_service_bootstrap(
                 }
                 if env_error is not None:
                     docker_payload["env_error"] = env_error
+                _add_init_env_overlay_keys(docker_payload, env_overlay_keys)
                 _emit(docker_payload, fmt)
             raise typer.Exit(code=1)
 
@@ -1512,6 +1553,7 @@ def _run_init_service_bootstrap(
             }
             if env_error is not None:
                 local_checks_payload["env_error"] = env_error
+            _add_init_env_overlay_keys(local_checks_payload, env_overlay_keys)
             _emit(local_checks_payload, fmt)
         raise typer.Exit(code=1) from exc
 
@@ -1541,6 +1583,7 @@ def _run_init_service_bootstrap(
         payload = exc.to_dict()
         if env_error is not None:
             payload["env_error"] = env_error
+        _add_init_env_overlay_keys(payload, env_overlay_keys)
         _emit(payload, fmt)
         raise typer.Exit(code=1) from None
 
@@ -1561,6 +1604,7 @@ def _run_init_service_bootstrap(
         payload["env_action"] = env_action
         if env_error is not None:
             payload["env_error"] = env_error
+        _add_init_env_overlay_keys(payload, env_overlay_keys)
         _emit(payload, fmt)
 
 

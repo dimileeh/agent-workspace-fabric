@@ -738,6 +738,81 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
 
 
 @pytest.mark.unit
+def test_init_without_path_reports_overlay_only_keys_without_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Audit root-only keys copied into compose env without leaking values."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "CI_DEPLOY_TOKEN=super-secret-ci-token",
+                "AWF_ROOT_ONLY=root-only-secret",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "added root .env keys to docker/compose/.env: CI_DEPLOY_TOKEN, AWF_ROOT_ONLY"
+        in result.output
+    )
+    assert "super-secret-ci-token" not in result.output
+    assert "root-only-secret" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_reports_overlay_only_keys_without_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose root-only copied key names in JSON without exposing values."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text("AWF_API_TOKEN=compose-example\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "CI_DEPLOY_TOKEN=super-secret-ci-token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["env_overlay_keys"] == ["CI_DEPLOY_TOKEN"]
+    assert "super-secret-ci-token" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_preserves_root_env_file_header_at_top(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -784,6 +859,53 @@ def test_init_without_path_preserves_root_env_file_header_at_top(
                 "AWF_API_TOKEN=migrated-token",
                 "AWF_COMPOSE_ONLY=compose-default",
                 "AWF_ROOT_ONLY=root-value",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_init_without_path_keeps_single_leading_comment_with_overlay_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A single leading comment should stay with the shared overlay key."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "AWF_API_TOKEN=compose-example",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "# Existing API token override",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "# Existing API token override",
+                "AWF_API_TOKEN=migrated-token",
             ]
         )
         + "\n"
