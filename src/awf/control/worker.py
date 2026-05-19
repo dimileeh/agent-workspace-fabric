@@ -1422,7 +1422,10 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
-        if await _monitor_provider_recovery_resume_pending(candidate):
+        if await _monitor_provider_recovery_resume_pending(
+            self._session_factory,
+            candidate,
+        ):
             _log.info(
                 "worker.monitor_provider_recovery_resume_pending",
                 workspace_id=candidate.workspace_id,
@@ -2642,6 +2645,7 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
 
 
 async def _monitor_provider_recovery_resume_pending(
+    session_factory: async_sessionmaker[AsyncSession],
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
     if candidate.status != WorkspaceStatus.monitoring_pr:
@@ -2657,14 +2661,30 @@ async def _monitor_provider_recovery_resume_pending(
         return False
 
     not_before = provider_cooldown_not_before(task_policy)
-    if not_before is not None and not_before > datetime.now(UTC):
+    now = datetime.now(UTC)
+    if not_before is not None and not_before > now:
         return True
-    # Retry monitors can be in one of two states:
-    # - cooldown not yet elapsed (covered above), or
-    # - cooldown elapsed and ready for resumed provider recovery.
-    # In both cases, avoid stale-runtime terminal cleanup until the monitor path
-    # has a chance to claim and run the workspace.
-    return True
+    if candidate.agent is None:
+        return False
+    model = agent_model_from_task_policy(task_policy)
+    provider = provider_for_agent_model(candidate.agent, model)
+    if provider is None or model is None:
+        return False
+    async with session_factory() as session:
+        breaker = await ProviderModelCircuitBreakerRepository(session).get(
+            provider=provider,
+            model=model,
+        )
+    if breaker is None:
+        return False
+    if breaker.state != "open":
+        return False
+    cooldown_until = breaker.cooldown_until
+    if cooldown_until is None:
+        return True
+    if cooldown_until.tzinfo is None:
+        cooldown_until = cooldown_until.replace(tzinfo=UTC)
+    return cooldown_until > now
 
 
 def _claim_recheck_conditions(
