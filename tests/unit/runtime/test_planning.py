@@ -428,6 +428,27 @@ def test_conformance_requires_awf_validation_accepts_named_validation_command_ha
 @pytest.mark.parametrize(
     "gap",
     (
+        "Run pytest under AWF validation and wire the API endpoint required by the plan.",
+        "Rerun mypy under validation after you implement the endpoint.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_mixed_named_command_handoff_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Validation command handoff and implementation work remain.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "No AWF-owned validation evidence is present for the required commands in "
         "this conformance phase; please run during validation: uv run --python 3.12 "
         "--extra dev pytest tests/integration/test_local_service_compose.py "
@@ -454,6 +475,43 @@ def test_conformance_requires_awf_validation_accepts_named_command_handoff_with_
     )
 
     assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Run pytest during AWF validation and add tests/unit/runtime/test_planning.py.",
+        "Run pytest during AWF validation and add assertions in tests/unit/runtime/test_planning.py.",
+        "Rerun pytest under validation after updating tests/unit/test_widget.py.",
+        "Run pytest in validation, then create test/unit/test_cli.py for the new case.",
+        "Run pytest during AWF validation and add src/tests/unit/test_widget.py.",
+        "Rerun pytest under validation after updating ./tests/unit/test_widget.py.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_mixed_named_command_test_path_work_gaps(
+    gap: str,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Validation command handoff and test work remain.",
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        gaps=(gap,),
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Add tests/unit/test_widget.py to cover the new case.",
+        "Update assertions in tests/unit/test_widget.py after the refactor.",
+    ),
+)
+def test_test_path_work_context_accepts_sentence_case_work_verbs(gap: str) -> None:
+    assert planning_mod._has_test_path_work_context(gap, gap.index("tests/"))
 
 
 @pytest.mark.unit

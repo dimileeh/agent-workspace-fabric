@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import subprocess
 import threading
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import pytest
@@ -123,7 +124,12 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
-        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        assert kwargs == {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "env": {},
+        }
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = asyncio.run(
@@ -216,6 +222,90 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
     assert result.service_status["status"] == "ok"
     assert calls
     assert all(call["env"] == service_env for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls
+    assert [call.get("env") for call in calls] == [{}] * len(calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_partial_provider_environment_preserves_local_service_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    local_env = {
+        "PATH": "/usr/local/bin:/usr/bin",
+        "HOME": str(tmp_path / "home"),
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+    }
+    provider_env = {"COMPOSE_PROFILES": "metrics,ollama-bridge"}
+    expected_env = {**local_env, **provider_env}
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(local_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+            provider_environ=provider_env,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == expected_env
+    assert calls
+    assert all(call["env"] == expected_env for call in calls)
+    assert any(call["args"][-1] == "ollama-bridge" for call in calls)
 
 
 @pytest.mark.unit

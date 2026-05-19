@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, NotRequired, Protocol, TypedDict
 
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
@@ -58,6 +58,13 @@ class StatusCollector(Protocol):
 
 Sleep = Callable[[float], Awaitable[None]]
 Monotonic = Callable[[], float]
+
+
+class _SubprocessRunKwargs(TypedDict):
+    check: bool
+    capture_output: bool
+    text: Literal[True]
+    env: NotRequired[Mapping[str, str]]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -183,7 +190,9 @@ async def run_service_bootstrap(
     runner = run_subprocess or _run_subprocess
     collector = status_collector or collect_service_status
     completed: list[ServiceBootstrapStageResult] = []
-    service_env = local_service_environ() if provider_environ is None else provider_environ
+    service_env = local_service_environ()
+    if provider_environ is not None:
+        service_env.update(provider_environ)
 
     for stage in _bootstrap_stages(
         settings,
@@ -396,21 +405,15 @@ def _run_stage(
     environ: Mapping[str, str],
 ) -> ServiceBootstrapStageResult:
     try:
-        if environ:
-            result = run_subprocess(
-                list(stage.command),
+        result = run_subprocess(
+            list(stage.command),
+            **_subprocess_run_kwargs(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ),
-            )
-        else:
-            result = run_subprocess(
-                list(stage.command),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+                env=dict(environ) if environ else None,
+            ),
+        )
     except FileNotFoundError as exc:
         raise ServiceBootstrapError(
             reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
@@ -521,12 +524,29 @@ def _run_subprocess(
     text: Literal[True],
     env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
-    if env is not None:
-        return subprocess.run(
-            args,
+    return subprocess.run(
+        args,
+        **_subprocess_run_kwargs(
             check=check,
             capture_output=capture_output,
             text=text,
-            env=dict(env),
-        )
-    return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+            env=env,
+        ),
+    )
+
+
+def _subprocess_run_kwargs(
+    *,
+    check: bool,
+    capture_output: bool,
+    text: Literal[True],
+    env: Mapping[str, str] | None,
+) -> _SubprocessRunKwargs:
+    kwargs: _SubprocessRunKwargs = {
+        "check": check,
+        "capture_output": capture_output,
+        "text": text,
+    }
+    if env is not None:
+        kwargs["env"] = dict(env)
+    return kwargs
