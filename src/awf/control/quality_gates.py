@@ -1258,8 +1258,10 @@ def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
         return False
     old_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(old_ref) is not None
     new_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(new_ref) is not None
-    if old_is_sha or new_is_sha:
+    if new_is_sha:
         return True
+    if old_is_sha:
+        return _is_full_workflow_version_ref(new_ref)
     return _is_workflow_version_ref_non_downgrade(old_ref, new_ref)
 
 
@@ -1269,6 +1271,14 @@ def _is_workflow_version_ref_non_downgrade(old_ref: str, new_ref: str) -> bool:
     if old_key is None or new_key is None:
         return False
     return new_key >= old_key
+
+
+def _is_full_workflow_version_ref(ref: str) -> bool:
+    if _PINNED_WORKFLOW_USES_VERSION_RE.fullmatch(ref) is None:
+        return False
+    raw_version = ref[1:] if ref.startswith(("v", "V")) else ref
+    core = raw_version.split("+", 1)[0].split("-", 1)[0]
+    return len(core.split(".")) >= 3
 
 
 def _workflow_version_ref_sort_key(ref: str) -> tuple[tuple[int, ...], int, str] | None:
