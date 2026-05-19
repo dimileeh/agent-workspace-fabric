@@ -3175,6 +3175,72 @@ class TestRunOnceMonitorRecovery:
         async with session_factory() as session:
             workspace = await WorkspaceRepository(session).get(monitor_id)
             assert workspace is not None
+        assert workspace.status == WorkspaceStatus.monitoring_pr.value
+        events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_scan_preserves_monitor_provider_no_cooldown_open_circuit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) - timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-open-circuit-no-cooldown-stale-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        async with session_factory() as session:
+            breaker_repo = ProviderModelCircuitBreakerRepository(session)
+            breaker = await breaker_repo.record_failure(
+                provider="openai",
+                model="gpt-5.3-codex-spark",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:openai:gpt-5.3-codex-spark",
+                workspace_id=monitor_id,
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            breaker.cooldown_until = None
+            await session.commit()
+
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert inspector.calls == []
+        assert cleaner.calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
             assert workspace.status == WorkspaceStatus.monitoring_pr.value
             events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
 
