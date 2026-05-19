@@ -269,7 +269,8 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
         "DOCKER_HOST": "unix:///var/run/docker.sock",
     }
     provider_env = {"COMPOSE_PROFILES": "metrics,ollama-bridge"}
-    expected_env = {**os.environ, **local_env, **provider_env}
+    expected_provider_environ = {**local_env, **provider_env}
+    expected_subprocess_environ = {**os.environ, **expected_provider_environ}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(local_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
@@ -306,9 +307,9 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
     )
 
     assert result.service_status["status"] == "ok"
-    assert collected_provider_environ == expected_env
+    assert collected_provider_environ == expected_provider_environ
     assert calls
-    assert all(call["env"] == expected_env for call in calls)
+    assert all(call["env"] == expected_subprocess_environ for call in calls)
     assert any(call["args"][-1] == "ollama-bridge" for call in calls)
 
 
