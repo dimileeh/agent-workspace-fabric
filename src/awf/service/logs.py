@@ -190,6 +190,8 @@ def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | N
         return None
     docker_host = environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")
     if not docker_host:
+        # Compose reads service values through --env-file; only pass an explicit
+        # subprocess environment when we need to select a Docker daemon.
         return None
     resolved = dict(environ)
     resolved["DOCKER_HOST"] = docker_host

@@ -1128,7 +1128,7 @@ def test_init_without_path_warns_when_compose_env_templates_missing(
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
     assert "no env template found" in result.stdout
-    assert "looked for .env, docker/compose/.env.example, .env.example" in result.stdout
+    assert "looked for docker/compose/.env.example, .env.example" in result.stdout
     assert "skipped docker/compose/.env creation" in result.stdout
     assert "no env template found" not in result.stderr
 
@@ -1141,11 +1141,11 @@ def test_init_env_example_search_paths_deduplicates_all_candidates(
     from awf.cli import main as cli_main
 
     env_file = tmp_path / "docker" / "compose" / ".env"
-    root_env = tmp_path / ".env"
+    root_example = tmp_path / ".env.example"
 
-    assert cli_main._init_env_example_search_paths(env_file, root_env) == (  # noqa: SLF001
-        root_env,
+    assert cli_main._init_env_example_search_paths(env_file, root_example) == (  # noqa: SLF001
         env_file.with_name(".env.example"),
+        root_example,
     )
 
 
