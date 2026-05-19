@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping
@@ -121,6 +122,7 @@ def test_bootstrap_stage_runner_does_not_block_event_loop(tmp_path: Path) -> Non
 def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     source_root = _source_checkout_root()
+    expected_env = dict(os.environ)
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -128,7 +130,7 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
             "check": False,
             "capture_output": True,
             "text": True,
-            "env": {},
+            "env": expected_env,
         }
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
@@ -221,7 +223,8 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    assert all(call["env"] == service_env for call in calls)
+    expected_env = dict(os.environ, **service_env)
+    assert all(call["env"] == expected_env for call in calls)
 
 
 @pytest.mark.unit
@@ -251,7 +254,8 @@ def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    assert [call.get("env") for call in calls] == [{}] * len(calls)
+    expected_env = dict(os.environ)
+    assert [call.get("env") for call in calls] == [expected_env] * len(calls)
 
 
 @pytest.mark.unit
@@ -265,7 +269,7 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
         "DOCKER_HOST": "unix:///var/run/docker.sock",
     }
     provider_env = {"COMPOSE_PROFILES": "metrics,ollama-bridge"}
-    expected_env = {**local_env, **provider_env}
+    expected_env = {**os.environ, **local_env, **provider_env}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(local_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None

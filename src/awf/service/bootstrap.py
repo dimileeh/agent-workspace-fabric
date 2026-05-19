@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -398,6 +399,10 @@ def _compose_command(
     return tuple(args)
 
 
+def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str]:
+    return {**os.environ, **dict(environ)}
+
+
 def _run_stage(
     stage: _BootstrapStage,
     *,
@@ -411,7 +416,7 @@ def _run_stage(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ) if environ else None,
+                env=_bootstrap_subprocess_env(environ),
             ),
         )
     except FileNotFoundError as exc:
