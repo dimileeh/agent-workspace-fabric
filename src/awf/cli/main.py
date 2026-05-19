@@ -955,16 +955,14 @@ def _resolve_service_env_files(
         env_file,
         allow_current_compose_env_without_asset_root=allow_current_compose_env_without_asset_root,
     )
-    return active_env_file, _service_compose_env_file(env_file, active_env_file)
+    return active_env_file, _service_compose_env_file(active_env_file)
 
 
-def _service_compose_env_file(env_file: Path, active_env_file: Path) -> Path | None:
+def _service_compose_env_file(active_env_file: Path) -> Path | None:
     """Return the env file that should be passed to Docker Compose, if any."""
 
     if not active_env_file.exists():
         return None
-    if active_env_file == env_file and _is_local_service_compose_env_file(active_env_file):
-        return active_env_file
     if _is_local_service_compose_env_file(active_env_file):
         return active_env_file
     return None
