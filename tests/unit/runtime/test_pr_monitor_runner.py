@@ -3631,7 +3631,7 @@ async def test_execute_sync_base_transient_exhaustion_records_terminal_reason(
 
 
 @pytest.mark.unit
-async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event(
+async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event_and_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3668,6 +3668,7 @@ async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
+        task_policy = workspace.task_policy
         events = [
             event
             for event in workspace.events
@@ -3682,6 +3683,13 @@ async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event
     assert events[0].payload["source"] == "pr_monitor"
     assert events[0].payload["failure_count"] == 1
     assert events[0].payload["last_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    recovery_state = task_policy["provider_recovery_state"]
+    assert recovery_state["action"] == "retry"
+    assert recovery_state["decision_reason_code"] == "PROVIDER_MODEL_CIRCUIT_OPEN"
+    assert recovery_state["source_provider"] == "openai"
+    assert recovery_state["source_model"] == "gpt-5.3-codex"
+    assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert isinstance(recovery_state["not_before"], str)
 
 
 @pytest.mark.unit
