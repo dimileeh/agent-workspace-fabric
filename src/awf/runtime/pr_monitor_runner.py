@@ -183,9 +183,7 @@ def _task_policy_with_monitor_circuit_retry_state(
             "target_model": model,
         }
     )
-    recovery_state["not_before"] = (
-        cooldown_until or datetime.now(UTC)
-    ).isoformat()
+    recovery_state["not_before"] = (cooldown_until or datetime.now(UTC)).isoformat()
     policy[PROVIDER_RECOVERY_STATE_KEY] = recovery_state
     return policy
 
@@ -910,12 +908,12 @@ class PullRequestMonitorRunner:
             if breaker is None:
                 await s.commit()
                 return False
-            recovery_state = ws.task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
+            task_policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
+            recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
             if (
                 isinstance(recovery_state, Mapping)
                 and recovery_state.get("action") == "retry"
-                and recovery_state.get("decision_reason_code")
-                == PROVIDER_MODEL_CIRCUIT_OPEN_REASON
+                and recovery_state.get("decision_reason_code") == PROVIDER_MODEL_CIRCUIT_OPEN_REASON
                 and recovery_state.get("source_provider") == provider
                 and recovery_state.get("source_model") == model
                 and recovery_state.get("target_provider") == provider
@@ -938,7 +936,7 @@ class PullRequestMonitorRunner:
                 },
             )
             ws.task_policy = _task_policy_with_monitor_circuit_retry_state(
-                ws.task_policy,
+                task_policy,
                 provider=provider,
                 model=model,
                 cooldown_until=breaker.cooldown_until,
