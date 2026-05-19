@@ -54,6 +54,7 @@ def _diagnostic_text(error: ProductionSettingsError) -> str:
     )
 
 
+@pytest.mark.unit
 def test_local_service_environ_preserves_host_port_overrides(tmp_path: Path) -> None:
     env_file = tmp_path / "docker" / "compose" / ".env"
     env_file.parent.mkdir(parents=True, exist_ok=True)
