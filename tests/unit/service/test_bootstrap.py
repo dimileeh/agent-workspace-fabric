@@ -274,6 +274,42 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
 
 
 @pytest.mark.unit
+def test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_docker_host = f"unix://{tmp_path / 'runtime-docker.sock'}"
+    settings_docker_host = f"unix://{tmp_path / 'settings-docker.sock'}"
+    service_env = {"AWF_DOCKER_HOST": runtime_docker_host}
+    expected_env = {**service_env, "DOCKER_HOST": runtime_docker_host}
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            replace(_settings(tmp_path), docker_host=settings_docker_host),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls
+    assert all(call["env"] == expected_env for call in calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
     tmp_path: Path,
 ) -> None:

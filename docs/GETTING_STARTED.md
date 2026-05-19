@@ -102,6 +102,13 @@ In source checkouts that include local Compose assets, `awf init` writes
 `docker/compose/.env` automatically. The repo-root `.env` is still useful for
 Python `awf` commands in package or non-source contexts.
 
+Transition note: `awf service status`, `awf service doctor`, and
+`awf service bootstrap` resolve `docker/compose/.env` only from verified AWF
+source checkouts with local service Compose assets. In package installs or other
+non-source directories, those commands read `.env`; copy any existing
+`docker/compose/.env` values to `.env` or run the service command from the AWF
+source checkout.
+
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,
 and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and

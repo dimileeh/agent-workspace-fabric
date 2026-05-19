@@ -306,12 +306,12 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
 
 
 def _docker_cli_environ(
-    settings: ServiceSettings,
+    _settings: ServiceSettings,
     environ: Mapping[str, str],
 ) -> dict[str, str]:
     resolved = dict(environ)
     if resolved.get("AWF_DOCKER_HOST") and "DOCKER_HOST" not in resolved:
-        resolved["DOCKER_HOST"] = settings.docker_host
+        resolved["DOCKER_HOST"] = resolved["AWF_DOCKER_HOST"]
     return resolved
 
 
