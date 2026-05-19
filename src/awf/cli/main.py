@@ -1195,8 +1195,11 @@ def _merge_env_seed_contents_with_overlay_keys(
                 overlay_only_lines.extend(context)
                 overlay_only_lines.append(line)
                 overlay_only_keys.append(key)
-        elif key in seen_overlay_assignment_keys:
-            duplicate_context.setdefault(key, []).extend(pending_context)
+        else:
+            if key in seed_keys:
+                duplicate_context.setdefault(key, []).extend(context)
+            elif key in seen_overlay_assignment_keys:
+                duplicate_context.setdefault(key, []).extend(pending_context)
         pending_context = []
         seen_overlay_assignment_keys.add(key)
         last_assignment_key = key
@@ -1316,12 +1319,21 @@ def _seed_env_file(
                 (),
             )
 
+    env_file_created = False
     try:
         with env_file.open("xb") as handle:
+            env_file_created = True
             handle.write(env_contents)
     except FileExistsError:
         return "kept_existing", None, ()
     except OSError as exc:
+        if env_file_created:
+            try:
+                env_file.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
         return (
             "write_failed",
             _init_env_error_payload(

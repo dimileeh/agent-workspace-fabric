@@ -2045,6 +2045,67 @@ def test_init_without_path_warns_when_env_write_fails(
 
 
 @pytest.mark.unit
+def test_seed_env_file_removes_partial_file_after_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not leave a broken env file when a write fails after creation."""
+    from awf.cli import main as cli_main
+
+    env_file = tmp_path / ".env"
+    env_example = tmp_path / ".env.example"
+    env_example.write_bytes(b"AWF_API_TOKEN=local\n")
+    original_open = Path.open
+
+    class FailingWriter:
+        def __init__(self, handle: Any) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> FailingWriter:
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._handle.__exit__(*args)
+
+        def write(self, contents: bytes) -> int:
+            self._handle.write(contents[:8])
+            self._handle.flush()
+            raise OSError("disk quota exceeded")
+
+    def _open(
+        self: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> Any:
+        handle = original_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+        if self == env_file and mode == "xb":
+            return FailingWriter(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", _open)
+
+    action, error, overlay_keys = cli_main._seed_env_file(env_file, env_example)  # noqa: SLF001
+
+    assert action == "write_failed"
+    assert error is not None
+    assert error["operation"] == "write_env"
+    assert error["message"] == "disk quota exceeded"
+    assert overlay_keys == ()
+    assert not env_file.exists()
+
+
+@pytest.mark.unit
 def test_init_env_warning_uses_display_ready_payload_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2260,6 +2321,51 @@ def test_merge_env_seed_contents_preserves_context_between_duplicate_overlay_key
                 "",
                 "# Regenerated duplicate Docker host context",
                 "",
+                "# Operator final Docker host context",
+                "AWF_DOCKER_HOST=unix:///tmp/final-docker.sock",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_merge_env_seed_contents_preserves_context_before_first_duplicate_overlay_key() -> None:
+    """Keep context before the first duplicate with the final overlay value."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_DOCKER_HOST=",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=migrated-token",
+                    "# Operator Docker host context",
+                    "AWF_DOCKER_HOST=unix:///tmp/first-docker.sock",
+                    "# Operator final Docker host context",
+                    "AWF_DOCKER_HOST=unix:///tmp/final-docker.sock",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "# Operator Docker host context",
                 "# Operator final Docker host context",
                 "AWF_DOCKER_HOST=unix:///tmp/final-docker.sock",
                 "AWF_COMPOSE_ONLY=compose-default",
