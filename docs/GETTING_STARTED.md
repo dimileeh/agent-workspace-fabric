@@ -104,8 +104,8 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 cp .env.example .env
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-export AWF_POSTGRES_HOST_PORT=5433
-export AWF_API_HOST_PORT=8000
+export AWF_POSTGRES_HOST_PORT=${AWF_POSTGRES_HOST_PORT:-5433}
+export AWF_API_HOST_PORT=${AWF_API_HOST_PORT:-8000}
 # Persist Compose-interpolated values into docker/compose/.env.
 {
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
@@ -151,8 +151,8 @@ AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
 AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ```
 
-If you change `AWF_POSTGRES_HOST_PORT`, update the localhost port in
-`AWF_DATABASE_URL` to match.
+If you change `AWF_POSTGRES_HOST_PORT` and set `AWF_DATABASE_URL` to a
+non-default value, update its localhost port to match.
 
 If you change `AWF_API_HOST_PORT`, update host-side CLI targeting for
 `awf service status` and `awf service doctor`, plus local HTTP checks, to use a
