@@ -865,8 +865,10 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
 
     If the verified source checkout contains local Compose assets, return those
     assets as absolute paths. Compose-specific examples are the seed base when
-    present; an existing root `.env` is applied as an overlay during seeding and
-    remains the fallback read source until the compose `.env` exists.
+    present. Otherwise, the root example remains the seed base when it exists so
+    template-only defaults are preserved; an existing root `.env` is applied as
+    an overlay during seeding and remains the fallback read source until the
+    compose `.env` exists.
     """
 
     from awf.service import bootstrap as bootstrap_mod
@@ -885,9 +887,12 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
         root_env = resolved_asset_root / ".env"
         compose_example = compose_env.with_name(".env.example")
         fallback_example = resolved_asset_root / ".env.example"
-        for seed_source in (compose_example, root_env, fallback_example):
-            if seed_source.exists():
-                return compose_file, compose_env, seed_source
+        if compose_example.exists():
+            return compose_file, compose_env, compose_example
+        if fallback_example.exists():
+            return compose_file, compose_env, fallback_example
+        if root_env.exists():
+            return compose_file, compose_env, root_env
         return compose_file, compose_env, fallback_example
 
     return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
@@ -1026,7 +1031,8 @@ def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
     if root_env is None or env_example == root_env or not root_env.exists():
         return None
     compose_example = env_file.with_name(".env.example")
-    if env_example != compose_example:
+    root_example = root_env.with_name(".env.example")
+    if env_example not in (compose_example, root_example):
         return None
     return root_env
 
@@ -1092,7 +1098,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         last_assignment_key = key
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
         seed_trailing_context[last_assignment_key] = pending_context
-    elif overlay_only_lines:
+    elif pending_context:
         overlay_only_lines.extend(pending_context)
 
     merged_lines: list[str] = []

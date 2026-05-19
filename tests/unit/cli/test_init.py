@@ -738,6 +738,61 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
 
 
 @pytest.mark.unit
+def test_init_without_path_merges_root_env_into_root_example_when_compose_example_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Preserve root-template-only defaults while applying existing root env values."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=root-example",
+                "AWF_POSTGRES_PASSWORD=root-example",
+                "AWF_TEMPLATE_ONLY=root-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# Existing operator override",
+                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_POSTGRES_PASSWORD=root-example",
+                "AWF_TEMPLATE_ONLY=root-default",
+                "",
+                "# Existing operator override",
+                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
+            ]
+        )
+        + "\n"
+    )
+    assert "wrote docker/compose/.env from .env.example" in result.output
+    assert "migrated-token" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_preserves_context_before_seed_overlay_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -895,6 +950,47 @@ def test_init_without_path_preserves_trailing_root_env_overlay_context(
                 "",
                 "# Keep this note with the migrated root-only setting",
                 "# It documents why AWF_ROOT_ONLY exists.",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_init_without_path_preserves_comment_only_root_env_overlay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep comment-only root env overlays as operator context."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "AWF_API_TOKEN=compose-example\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "# Operator left this file as documentation.",
+                "# Keep this note in the seeded compose env.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "# Operator left this file as documentation.",
+                "# Keep this note in the seeded compose env.",
             ]
         )
         + "\n"
