@@ -893,7 +893,11 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
 
 
-def _resolve_existing_service_env_file(env_file: Path) -> Path:
+def _resolve_existing_service_env_file(
+    env_file: Path,
+    *,
+    allow_current_compose_env_without_asset_root: bool = False,
+) -> Path:
     """Return the existing env file service commands should read."""
 
     if env_file.exists():
@@ -902,16 +906,25 @@ def _resolve_existing_service_env_file(env_file: Path) -> Path:
     if root_env is not None and root_env.exists():
         return root_env
     if env_file == Path(".env"):
-        compose_env = _resolve_existing_local_service_compose_env_file()
+        compose_env = _resolve_existing_local_service_compose_env_file(
+            allow_current_directory=allow_current_compose_env_without_asset_root,
+        )
         if compose_env is not None:
             return compose_env
     return env_file
 
 
-def _resolve_service_env_files(env_file: Path) -> tuple[Path, Path | None]:
+def _resolve_service_env_files(
+    env_file: Path,
+    *,
+    allow_current_compose_env_without_asset_root: bool = False,
+) -> tuple[Path, Path | None]:
     """Return the env read source and actual Compose env-file path."""
 
-    active_env_file = _resolve_existing_service_env_file(env_file)
+    active_env_file = _resolve_existing_service_env_file(
+        env_file,
+        allow_current_compose_env_without_asset_root=allow_current_compose_env_without_asset_root,
+    )
     return active_env_file, _service_compose_env_file(env_file, active_env_file)
 
 
@@ -937,30 +950,42 @@ def _is_local_service_compose_env_file(path: Path) -> bool:
     )
 
 
-def _resolve_existing_local_service_compose_env_file() -> Path | None:
-    """Return the verified local Compose env file when it exists."""
+def _resolve_existing_local_service_compose_env_file(
+    *,
+    allow_current_directory: bool = False,
+) -> Path | None:
+    """Return the local Compose env file when it exists in an allowed location."""
 
     from awf.service import bootstrap as bootstrap_mod
     from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
 
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
-    if asset_root is None:
+    if asset_root is not None:
+        resolved_asset_root = asset_root.resolve()
+        compose_file = (
+            LOCAL_SERVICE_COMPOSE_FILE
+            if LOCAL_SERVICE_COMPOSE_FILE.is_absolute()
+            else resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        )
+        if not compose_file.is_file():
+            return None
+        compose_env = (
+            LOCAL_SERVICE_COMPOSE_ENV_FILE
+            if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute()
+            else resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        )
+        return compose_env if compose_env.exists() else None
+
+    if not allow_current_directory:
         return None
 
-    resolved_asset_root = asset_root.resolve()
-    compose_file = (
-        LOCAL_SERVICE_COMPOSE_FILE
-        if LOCAL_SERVICE_COMPOSE_FILE.is_absolute()
-        else resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
-    )
+    compose_file = LOCAL_SERVICE_COMPOSE_FILE
+    compose_env = LOCAL_SERVICE_COMPOSE_ENV_FILE
     if not compose_file.is_file():
         return None
-    compose_env = (
-        LOCAL_SERVICE_COMPOSE_ENV_FILE
-        if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute()
-        else resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-    )
-    return compose_env if compose_env.exists() else None
+    if compose_env.is_absolute():
+        return compose_env if compose_env.exists() else None
+    return compose_env.resolve() if compose_env.exists() else None
 
 
 def _init_env_error_payload(
@@ -1483,7 +1508,10 @@ def service_status(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(
+        env_file,
+        allow_current_compose_env_without_asset_root=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1531,7 +1559,10 @@ def service_doctor(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(
+        env_file,
+        allow_current_compose_env_without_asset_root=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1644,7 +1675,10 @@ def service_readiness(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(
+        env_file,
+        allow_current_compose_env_without_asset_root=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1726,7 +1760,10 @@ def service_bootstrap(
         strict_providers=frozenset(strict_providers),
     )
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(
+        env_file,
+        allow_current_compose_env_without_asset_root=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1785,7 +1822,10 @@ def service_logs(
     from awf.service.logs import ServiceLogsError, run_service_logs
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_env_files(env_file)
+    env_file, compose_env_file = _resolve_service_env_files(
+        env_file,
+        allow_current_compose_env_without_asset_root=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     try:
         result = run_service_logs(
