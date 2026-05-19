@@ -583,6 +583,64 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "job_field",
+    [
+        "permissions:\n      contents: read",
+        "needs: tests",
+        "if: ${{ always() }}",
+        "environment: production",
+    ],
+)
+def test_added_informational_job_with_privileged_fields_is_blocked(job_field: str) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  notify:
+    name: Notify reviewers
+    runs-on: ubuntu-latest
+    {job_field}
+    steps:
+      - name: Notify reviewers
+        run: echo "heads up"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.notify"
+    assert violation.line == 9
+    assert "added workflow jobs must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_workflow_removed_job_is_blocked() -> None:
     old_text = """
 name: CI

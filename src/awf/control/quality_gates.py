@@ -43,6 +43,7 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "summary",
     "report",
 )
+_INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
 _VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_-])"
     r"(?:pytest|ruff|mypy|coverage|cov|lint|build|deploy|publish|release)"
@@ -1207,6 +1208,8 @@ def _is_comment_or_notify_step(step: Mapping[str, Any]) -> bool:
 
 
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
+    if any(key not in _INFORMATIONAL_JOB_ALLOWED_KEYS for key in job):
+        return False
     if _string_value(job.get("uses")) is not None:
         return False
     label_parts = [job_id]
