@@ -1008,6 +1008,7 @@ def _run_init_service_bootstrap(
     fmt: OutputFormat,
 ) -> None:
     """Run local-service bootstrap with environment seeding and status output."""
+    from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
@@ -1027,10 +1028,14 @@ def _run_init_service_bootstrap(
         raise typer.Exit(code=2) from exc
 
     pretty = fmt == OutputFormat.pretty
+    env_file, env_example = _resolve_init_env_paths()
 
     try:
-        settings = resolve_service_settings()
-        service_env = local_service_environ()
+        service_env = local_service_environ(env_file=env_file)
+        settings = resolve_service_settings(
+            Settings(_env_file=env_file),
+            environ=service_env,
+        )
 
         if pretty:
             typer.echo("AWF init: local service bootstrap")
@@ -1098,7 +1103,6 @@ def _run_init_service_bootstrap(
 
     env_action = "skipped"
     env_error: dict[str, str] | None = None
-    env_file, env_example = _resolve_init_env_paths()
     if write_env:
         env_action, env_error = _seed_env_file(env_file, env_example)
         if pretty:
