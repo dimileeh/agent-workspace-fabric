@@ -404,14 +404,12 @@ async def test_monitor_run_fails_cleanly_when_sync_workspace_has_no_remote_push_
         "origin",
         "+refs/heads/development:refs/remotes/origin/development",
     )
-    assert cmd.calls[1].args == [
-        "git",
-        "-C",
-        str(worktree),
+    assert cmd.calls[1].args == _git_worktree_command(
+        worktree,
         "rev-list",
         "--count",
         "HEAD..origin/development",
-    ]
+    )
     assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
 
 
@@ -495,14 +493,12 @@ async def test_monitor_run_transient_status_fetch_preserves_state_operations_and
         "origin",
         "+refs/heads/development:refs/remotes/origin/development",
     )
-    assert cmd.calls[1].args == [
-        "git",
-        "-C",
-        str(worktree),
+    assert cmd.calls[1].args == _git_worktree_command(
+        worktree,
         "rev-list",
         "--count",
         "HEAD..origin/development",
-    ]
+    )
     assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as s:
@@ -1753,11 +1749,11 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     assert sleep_fn.calls == [30, 60]
     assert state.threads_addressed_ids["T_retry"] == "fix_committed"
     assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
-    assert [call.args[:3] for call in cmd.calls] == [
-        ["gh", "api", "graphql"],
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["gh", "api", "graphql"],
-    ]
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -1815,14 +1811,13 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     assert sleep_fn.calls == [30, 60]
     assert "T_resolve" not in state.threads_addressed_ids
     assert state.last_push_sha == "newsha"
-    assert [call.args[:3] for call in cmd.calls] == [
-        ["gh", "api", "graphql"],
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["gh", "api", "graphql"],
-    ]
-    assert cmd.calls[1].args[3] == "push"
-    assert cmd.calls[2].args[3:5] == ["rev-parse", "HEAD"]
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[5:7] == ["rev-parse", "HEAD"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -2147,7 +2142,8 @@ async def test_fix_cycle_zero_passes_still_runs_push(
     )
 
     assert len(cmd.calls) == 1
-    assert cmd.calls[0].args[:2] == ["git", "-C"]
+    assert cmd.calls[0].args[:5] == _git_worktree_command(tmp_path / "worktrees" / "ws_zero_pass")
+    assert cmd.calls[0].args[5] == "push"
 
 
 @pytest.mark.unit
@@ -3501,11 +3497,11 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     assert state.threads_addressed_ids["T_same"] == "fix_committed"
     assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
     assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
-    assert [call.args[:3] for call in cmd.calls] == [
-        ["gh", "api", "graphql"],
-        ["git", "-C", str(tmp_path / "worktrees" / "ws_thread_resolution_reply")],
-        ["gh", "api", "graphql"],
-    ]
+    worktree = tmp_path / "worktrees" / "ws_thread_resolution_reply"
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
 
 
 @pytest.mark.unit
@@ -4056,7 +4052,11 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
     assert push_result.failed is True
     assert "Supply-chain policy blocked" in push_result.stderr
     assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
-    assert [call.args[3] for call in cmd.calls if len(call.args) > 3] == ["status"]
+    assert cmd.calls[0].args == _git_worktree_command(
+        tmp_path / "worktrees" / workspace_id,
+        "status",
+        "--porcelain",
+    )
     assert {finding.reason_code for finding in findings} == {
         "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",
         "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",

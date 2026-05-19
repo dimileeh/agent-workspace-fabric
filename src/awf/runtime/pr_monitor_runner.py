@@ -146,6 +146,16 @@ from awf.service.provider_recovery import (
 _log = get_logger(__name__)
 
 
+def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        *args,
+    ]
+
+
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
 Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
@@ -4242,7 +4252,7 @@ class PullRequestMonitorRunner:
         worktree_path = self._worktrees_root / workspace_id
 
         async def _git(*args: str) -> tuple[int, str, str]:
-            r = await self._deps.runner.run(["git", "-C", str(worktree_path), *args])
+            r = await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
             return r.returncode, r.stdout, r.stderr
 
         # Defense: if a previous SyncBase attempt left the repo in a
@@ -4474,7 +4484,7 @@ class PullRequestMonitorRunner:
         if not worktree_path.exists():
             return False
         status = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+            _git_worktree_command(worktree_path, "status", "--porcelain")
         )
         if not status.ok:
             _log.warning(
@@ -4509,7 +4519,7 @@ class PullRequestMonitorRunner:
                 return False
             status = repaired_status
 
-        add = await self._deps.runner.run(["git", "-C", str(worktree_path), "add", "-A"])
+        add = await self._deps.runner.run(_git_worktree_command(worktree_path, "add", "-A"))
         if not add.ok:
             _log.warning(
                 "monitor.dirty_add_failed",
@@ -4519,13 +4529,13 @@ class PullRequestMonitorRunner:
             return False
 
         cached = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "diff", "--cached", "--quiet"]
+            _git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
         )
         if cached.returncode == 0:
             return False
 
         commit = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "commit", "-m", message]
+            _git_worktree_command(worktree_path, "commit", "-m", message)
         )
         if not commit.ok:
             _log.warning(
@@ -4661,7 +4671,7 @@ class PullRequestMonitorRunner:
             )
             if not committed_dirty_changes:
                 dirty_status = await self._deps.runner.run(
-                    ["git", "-C", str(worktree_path), "status", "--porcelain"]
+                    _git_worktree_command(worktree_path, "status", "--porcelain")
                 )
                 if not dirty_status.ok or dirty_status.stdout.strip():
                     _log.error(
@@ -4792,7 +4802,7 @@ class PullRequestMonitorRunner:
 
         worktree_path = self._worktrees_root / workspace_id
         repaired_status = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+            _git_worktree_command(worktree_path, "status", "--porcelain")
         )
         if not repaired_status.ok:
             return None
@@ -5575,7 +5585,7 @@ class PullRequestMonitorRunner:
             )
             return False
         delete_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "update-ref", "-d", broken_ref]
+            _git_worktree_command(worktree_path, "update-ref", "-d", broken_ref)
         )
         if not delete_result.ok:
             _log.warning(
@@ -5585,7 +5595,7 @@ class PullRequestMonitorRunner:
                 stderr=(delete_result.stderr or "")[:400],
             )
             return False
-        await self._deps.runner.run(["git", "-C", str(worktree_path), "worktree", "prune"])
+        await self._deps.runner.run(_git_worktree_command(worktree_path, "worktree", "prune"))
         await self._append_workspace_events(
             workspace_id=workspace_id,
             events=[
@@ -5610,14 +5620,12 @@ class PullRequestMonitorRunner:
 
     async def _count_base_behind(self, *, worktree_path: Path, base_branch: str) -> int:
         r = await self._deps.runner.run(
-            [
-                "git",
-                "-C",
-                str(worktree_path),
+            _git_worktree_command(
+                worktree_path,
                 "rev-list",
                 "--count",
                 f"HEAD..origin/{base_branch}",
-            ]
+            )
         )
         if not r.ok:
             raise BaseBehindCountError(_git_failure_message("git rev-list base behind", r))
@@ -5629,7 +5637,7 @@ class PullRequestMonitorRunner:
             ) from exc
 
     async def _rev_parse_head(self, worktree_path: Path) -> str:
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+        r = await self._deps.runner.run(_git_worktree_command(worktree_path, "rev-parse", "HEAD"))
         return r.stdout.strip() if r.ok else ""
 
     async def _git_push(
@@ -5700,7 +5708,9 @@ class PullRequestMonitorRunner:
                 returncode=1,
                 stderr=policy_block_message,
             )
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
+        r = await self._deps.runner.run(
+            _git_worktree_command(worktree_path, "push", remote, refspec)
+        )
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()
@@ -5742,19 +5752,17 @@ class PullRequestMonitorRunner:
         )
         if remote_url:
             fetch_result = await self._deps.runner.run(
-                [
-                    "git",
-                    "-C",
-                    str(worktree_path),
+                _git_worktree_command(
+                    worktree_path,
                     "fetch",
                     remote_url,
                     f"refs/heads/{remote_branch}",
-                ]
+                )
             )
             reset_target = "FETCH_HEAD"
         else:
             fetch_result = await self._deps.runner.run(
-                ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
+                _git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
             )
             reset_target = f"origin/{remote_branch}"
         if not fetch_result.ok:
@@ -5777,7 +5785,7 @@ class PullRequestMonitorRunner:
                 stderr=stderr,
             )
         await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "reset", "--hard", reset_target]
+            _git_worktree_command(worktree_path, "reset", "--hard", reset_target)
         )
         return _GitPushResult(
             pushed=False,
