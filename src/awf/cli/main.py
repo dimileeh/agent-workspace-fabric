@@ -909,7 +909,29 @@ def _resolve_existing_service_env_file(env_file: Path, _env_seed_source: Path) -
     root_env = _compose_root_env_file(env_file)
     if root_env is not None and root_env.exists():
         return root_env
+    if env_file == Path(".env"):
+        compose_env = _resolve_existing_local_service_compose_env_file()
+        if compose_env is not None:
+            return compose_env
     return env_file
+
+
+def _resolve_existing_local_service_compose_env_file() -> Path | None:
+    """Return an existing local Compose env file discovered from the current tree."""
+
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE
+
+    if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
+
+    home = Path.home()
+    for root in (Path.cwd(), *Path.cwd().parents):
+        candidate = root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        if candidate.exists():
+            return candidate.resolve()
+        if root == home:
+            break
+    return None
 
 
 def _init_env_error_payload(
