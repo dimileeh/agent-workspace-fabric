@@ -961,18 +961,28 @@ def _seed_env_file(env_file: Path, env_example: Path) -> tuple[str, dict[str, st
     return "wrote_from_example", None
 
 
+def _init_display_path(path: Path | str) -> str:
+    """Return a stable human-readable init path from the launch directory."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return str(candidate)
+    try:
+        return os.path.relpath(candidate, Path.cwd())
+    except ValueError:
+        return str(candidate)
+
+
 def _init_env_warning(env_error: Mapping[str, str]) -> str:
     """Return the pretty warning for an env seeding failure payload."""
 
     operation = env_error["operation"]
     message = env_error["message"]
-    env_file = env_error["env_file"]
-    env_example = env_error["env_example"]
+    env_file = _init_display_path(env_error["env_file"])
+    env_example = _init_display_path(env_error["env_example"])
     if operation == "create_parent_directory":
-        return (
-            "  warning: could not create parent directory "
-            f"{env_error['path']} for {env_file}: {message}"
-        )
+        parent = _init_display_path(env_error["path"])
+        return f"  warning: could not create parent directory {parent} for {env_file}: {message}"
     if operation == "read_example":
         return f"  warning: could not read {env_example} while seeding {env_file}: {message}"
     return f"  warning: could not write {env_file} from {env_example}: {message}"
@@ -1123,18 +1133,21 @@ def _run_init_service_bootstrap(
 
     if write_env and pretty:
         if env_action == "kept_existing":
-            typer.echo(f"  kept existing {env_file}")
+            typer.echo(f"  kept existing {_init_display_path(env_file)}")
         elif env_action == "wrote_from_example":
-            typer.echo(f"  wrote {env_file} from {env_example}")
+            typer.echo(
+                f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
+            )
         elif env_action == "write_failed" and env_error is not None:
-            typer.echo(_init_env_warning(env_error), err=True)
+            typer.echo(_init_env_warning(env_error))
         elif env_action == "no_example":
             search_paths = ", ".join(
-                str(path) for path in _init_env_example_search_paths(env_file, env_example)
+                _init_display_path(path)
+                for path in _init_env_example_search_paths(env_file, env_example)
             )
             typer.echo(
                 "  no .env.example found; skipped "
-                f"{env_file} "
+                f"{_init_display_path(env_file)} "
                 f"creation (looked for {search_paths}; run `awf init` from "
                 "the AWF repository root if you expected one)"
             )

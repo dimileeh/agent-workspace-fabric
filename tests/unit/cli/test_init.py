@@ -590,7 +590,9 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
     assert expected_env_file.exists()
     assert expected_env_file.read_bytes() == workspace_example.read_bytes()
     assert not (compose / ".env").exists()
-    assert f"wrote {expected_env_file} from {workspace_example}" in result.output
+    assert (
+        "wrote ../workspace-root/docker/compose/.env from ../workspace-root/.env.example"
+    ) in result.output
 
 
 @pytest.mark.unit
@@ -672,7 +674,7 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     env_file = compose / ".env"
     assert env_file.exists()
     assert env_file.read_bytes() == example.read_bytes()
-    assert f"wrote {env_file} from {example}" in result.output
+    assert "wrote ../docker/compose/.env from ../.env.example" in result.output
 
 
 @pytest.mark.unit
@@ -869,7 +871,7 @@ def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
     env_file = compose / ".env"
     assert env_file.exists()
     assert env_file.read_bytes() == compose_example.read_bytes()
-    assert f"wrote {env_file} from {compose_example}" in result.output
+    assert ("wrote ../docker/compose/.env from ../docker/compose/.env.example") in result.output
     assert not (workspace_root / ".env").exists()
 
 
@@ -1023,8 +1025,9 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
-    assert "looked for docker/compose/.env.example, .env.example" in result.output
-    assert "skipped docker/compose/.env creation" in result.output
+    assert "looked for docker/compose/.env.example, .env.example" in result.stdout
+    assert "skipped docker/compose/.env creation" in result.stdout
+    assert "no .env.example found" not in result.stderr
 
 
 @pytest.mark.unit
@@ -1049,7 +1052,8 @@ def test_init_without_path_warns_when_compose_env_parent_creation_fails(
     assert (
         "warning: could not create parent directory docker/compose "
         "for docker/compose/.env: permission denied"
-    ) in output
+    ) in result.stdout
+    assert "warning: could not create parent directory" not in result.stderr
     assert "warning: could not write docker/compose/.env" not in output
     assert len(captured["bootstrap_calls"]) == 1
     assert "Traceback" not in output
@@ -1071,7 +1075,8 @@ def test_init_without_path_warns_when_env_write_fails(
 
     assert result.exit_code == 0, output
     assert not (tmp_path / ".env").exists()
-    assert "warning: could not write .env from .env.example: permission denied" in output
+    assert "warning: could not write .env from .env.example: permission denied" in result.stdout
+    assert "warning: could not write .env from .env.example" not in result.stderr
     assert len(captured["bootstrap_calls"]) == 1
     assert "Traceback" not in output
 
