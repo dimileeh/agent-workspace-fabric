@@ -1071,7 +1071,9 @@ def _workflow_existing_step_violations(
                     reason="continue-on-error is only allowed for comment/notify steps",
                 )
             )
-    elif old_continue != new_continue:
+    elif old_continue != new_continue and not (
+        _is_true(old_continue) and not _is_true(new_continue)
+    ):
         violations.append(
             _violation(
                 path=path,
