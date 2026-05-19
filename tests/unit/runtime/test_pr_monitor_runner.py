@@ -3693,6 +3693,63 @@ async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event
 
 
 @pytest.mark.unit
+async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.3-codex",
+    )
+    async with factory() as session:
+        repo = ProviderModelCircuitBreakerRepository(session)
+        breaker = await repo.record_failure(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:openai:gpt-5.3-codex",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=datetime.now(UTC),
+            failure_threshold=1,
+            cooldown_seconds=900,
+        )
+        breaker.cooldown_until = None
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    first_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+    second_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    source_policy, recovery_events, _, _ = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    recovery_state = source_policy["provider_recovery_state"]
+    cooldown_events = [
+        event
+        for event in recovery_events
+        if event["event_type"] == "workspace.provider_recovery_cooldown"
+    ]
+
+    assert first_suppressed is True
+    assert second_suppressed is True
+    assert recovery_state["action"] == "retry"
+    assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert "not_before" not in recovery_state
+    assert len(cooldown_events) == 1
+
+
+@pytest.mark.unit
 async def test_provider_agent_error_still_raises_full_fallback_for_non_monitor_recovery(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

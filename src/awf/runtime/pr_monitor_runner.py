@@ -908,6 +908,18 @@ class PullRequestMonitorRunner:
             if breaker is None:
                 await s.commit()
                 return False
+            recovery_state = ws.task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
+            if (
+                isinstance(recovery_state, Mapping)
+                and recovery_state.get("action") == "retry"
+                and recovery_state.get("decision_reason_code")
+                == PROVIDER_MODEL_CIRCUIT_OPEN_REASON
+                and recovery_state.get("source_provider") == provider
+                and recovery_state.get("source_model") == model
+                and recovery_state.get("target_provider") == provider
+                and recovery_state.get("target_model") == model
+            ):
+                return True
             await repo.add_event(
                 ws,
                 event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
