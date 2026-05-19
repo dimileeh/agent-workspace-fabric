@@ -504,7 +504,7 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
 
     settings = object()
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _bootstrap(received: object, **kwargs: object) -> ServiceBootstrapResult:
         captured["settings"] = received
@@ -531,6 +531,63 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
 
 
 @pytest.mark.unit
+def test_service_bootstrap_cli_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _bootstrap(settings: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    provider_environ = captured["provider_environ"]
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+
+
+@pytest.mark.unit
 def test_service_bootstrap_cli_pretty_output_uses_existing_emitter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -538,7 +595,7 @@ def test_service_bootstrap_cli_pretty_output_uses_existing_emitter(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapResult
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> ServiceBootstrapResult:
         return ServiceBootstrapResult(
@@ -564,7 +621,7 @@ def test_service_bootstrap_cli_passes_strict_provider_options(
     from awf.service.bootstrap import ServiceBootstrapResult
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **kwargs: object) -> ServiceBootstrapResult:
         captured.update(kwargs)
@@ -599,7 +656,7 @@ def test_service_bootstrap_cli_helper_failures_exit_without_traceback(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapError
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> object:
         raise ServiceBootstrapError(

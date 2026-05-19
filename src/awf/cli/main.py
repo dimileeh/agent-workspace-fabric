@@ -1445,12 +1445,13 @@ def service_bootstrap(
         help=_PROVIDER_HELP,
     ),
 ) -> None:
+    from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
         run_service_bootstrap,
     )
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
 
     try:
@@ -1465,11 +1466,18 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
+    env_file, _ = _resolve_init_env_paths()
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     try:
         result = asyncio.run(
             run_service_bootstrap(
-                resolve_service_settings(),
+                settings,
                 options=options,
+                provider_environ=service_env,
             )
         )
     except KeyboardInterrupt:
