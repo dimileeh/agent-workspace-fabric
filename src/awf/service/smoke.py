@@ -264,16 +264,17 @@ def _phase_profile_preview(
     profile_preview: ProfilePreview | None,
 ) -> tuple[Any, dict[str, Any]]:
     """Collect the smoke profile preview phase result and metadata."""
+    has_disk_profile = profile_preview is None and _project_has_awf_profile(project)
     try:
         if profile_preview is not None:
             preview_fn = profile_preview
-        elif _project_has_awf_profile(project):
+        elif has_disk_profile:
             preview_fn = _default_disk_profile_preview
         else:
             preview_fn = _default_profile_preview
         preview = preview_fn(project)
     except Exception as exc:
-        if profile_preview is None and _project_has_awf_profile(project):
+        if has_disk_profile:
             action = (
                 "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, "
                 "awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint "
