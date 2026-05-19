@@ -8,17 +8,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+_COMPOSE_TEMPLATE_RE = re.compile(r"\$\{([^}]*)\}")
 
-def _compose_template_value(value: str, env: dict[str, str]) -> str:
-    if not (value.startswith("${") and value.endswith("}")):
-        return value
-    inner = value[2:-1]
+
+def _compose_template_token_value(template: str, inner: str, env: dict[str, str]) -> str:
     if not inner:
         raise ValueError("Compose template variable name must not be empty")
 
     match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:\?|:\+|-|\?|\+)(.*))?", inner)
     if match is None:
-        raise ValueError(f"Unsupported Compose template: {value}")
+        raise ValueError(f"Unsupported Compose template: {template}")
     key, operator, operand = match.groups(default="")
     resolved = env.get(key)
     if operator == "":
@@ -38,6 +37,13 @@ def _compose_template_value(value: str, env: dict[str, str]) -> str:
     if operator == ":+":
         return operand if resolved not in (None, "") else ""
     return operand if resolved is not None else ""
+
+
+def _compose_template_value(value: str, env: dict[str, str]) -> str:
+    return _COMPOSE_TEMPLATE_RE.sub(
+        lambda match: _compose_template_token_value(match.group(0), match.group(1), env),
+        value,
+    )
 
 
 def _compose_published_host_port(mapping: str) -> str:
@@ -218,6 +224,10 @@ def test_compose_template_value_matches_common_interpolation_forms() -> None:
     assert _compose_template_value("${AWF_DEFAULT-default}", {}) == "default"
     assert _compose_template_value("${AWF_DEFAULT-default}", {"AWF_DEFAULT": ""}) == ""
     assert _compose_template_value("${AWF_DEFAULT:-default}", {"AWF_DEFAULT": ""}) == "default"
+    assert (
+        _compose_template_value("${AWF_BIND_IP:-127.0.0.1}:${AWF_PORT:-5433}", {})
+        == "127.0.0.1:5433"
+    )
     assert (
         _compose_template_value("${AWF_REQUIRED?set-AWF_REQUIRED}", {"AWF_REQUIRED": "ok"}) == "ok"
     )
