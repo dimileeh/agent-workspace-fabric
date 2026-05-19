@@ -599,6 +599,44 @@ def test_service_logs_uses_existing_compose_env_without_source_checkout(
 
 
 @pytest.mark.unit
+def test_service_logs_ignores_ancestor_compose_env_without_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    project_root = tmp_path / "project"
+    _write_non_source_compose_env(project_root, "AWF_API_TOKEN=from-ancestor\n")
+    project_subdir = project_root / "subdir"
+    project_subdir.mkdir()
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            str((project_root / "docker" / "compose" / "local-service.yml").resolve()),
+            "logs",
+            "--tail",
+            "100",
+            "worker",
+        ]
+    ]
+
+
+@pytest.mark.unit
 def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

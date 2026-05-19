@@ -938,20 +938,15 @@ def _is_local_service_compose_env_file(path: Path) -> bool:
 
 
 def _resolve_existing_local_service_compose_env_file() -> Path | None:
-    """Return an existing local Compose env file discovered from the current tree."""
+    """Return the local Compose env file when it exists under the current directory."""
 
     from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE
 
     if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
         return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
 
-    home = Path.home()
-    for root in (Path.cwd(), *Path.cwd().parents):
-        candidate = root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        if candidate.exists():
-            return candidate.resolve()
-        if root == home:
-            break
+    if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
+        return LOCAL_SERVICE_COMPOSE_ENV_FILE.resolve()
     return None
 
 
