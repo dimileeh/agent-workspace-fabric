@@ -181,6 +181,60 @@ def test_service_settings_explicit_database_url_ignores_postgres_host_port_overr
 
 
 @pytest.mark.unit
+def test_service_settings_default_api_base_url_uses_api_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_default_api_base_url_uses_compose_env_api_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_api_base_url_ignores_api_host_port_override() -> None:
+    explicit_url = "http://127.0.0.1:9300"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, api_base_url=explicit_url),
+        environ={"AWF_API_BASE_URL": explicit_url, "AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == explicit_url
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+def test_service_settings_rejects_invalid_api_host_port(host_port: str) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_API_HOST_PORT": host_port},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_API_HOST_PORT" in message
+    assert repr(host_port) in message
+    assert "integer between 1 and 65535" in message
+
+
+@pytest.mark.unit
 def test_production_guardrails_allow_local_defaults() -> None:
     settings = Settings(_env_file=None, env="local", api_token=None, callbacks_enabled=True)
 

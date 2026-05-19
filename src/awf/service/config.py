@@ -22,6 +22,7 @@ from awf.common.config import (
 )
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
+DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
@@ -87,13 +88,14 @@ def resolve_service_settings(
     if not database_url_explicit:
         database_url = _default_local_service_database_url(service_env)
 
+    api_base_url = _resolve_service_api_base_url(settings, env, service_env)
     work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
 
     return ServiceSettings(
         service_name=settings.service_name,
         env=settings.env,
-        api_base_url=settings.api_base_url,
+        api_base_url=api_base_url,
         console_url=settings.console_url,
         database_url=database_url,
         docker_host=settings.docker_host,
@@ -221,17 +223,50 @@ def _default_local_service_database_url(environ: Mapping[str, str]) -> str:
     host_port = _env_value(environ, "AWF_POSTGRES_HOST_PORT")
     if not host_port:
         return DEFAULT_LOCAL_SERVICE_DATABASE_URL
-    invalid_port_message = (
-        f"AWF_POSTGRES_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}"
-    )
+    parsed_port = _parse_host_port("AWF_POSTGRES_HOST_PORT", host_port)
+    url = make_url(DEFAULT_LOCAL_SERVICE_DATABASE_URL).set(port=parsed_port)
+    return url.render_as_string(hide_password=False)
+
+
+def _resolve_service_api_base_url(
+    settings: Settings,
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+) -> str:
+    """Return the host-side API base URL matching Compose port overrides."""
+
+    host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
+    if host_api_base_url is not None:
+        return host_api_base_url
+    if "api_base_url" in settings.model_fields_set:
+        return settings.api_base_url
+    service_api_base_url = _env_value(service_environ, "AWF_API_BASE_URL")
+    if service_api_base_url is not None:
+        return service_api_base_url
+    return _default_local_service_api_base_url(service_environ)
+
+
+def _default_local_service_api_base_url(environ: Mapping[str, str]) -> str:
+    """Return the host-side local API URL matching Compose port overrides."""
+
+    host_port = _env_value(environ, "AWF_API_HOST_PORT")
+    if not host_port:
+        return DEFAULT_LOCAL_SERVICE_API_BASE_URL
+    parsed_port = _parse_host_port("AWF_API_HOST_PORT", host_port)
+    return f"http://localhost:{parsed_port}"
+
+
+def _parse_host_port(env_key: str, value: str) -> int:
+    """Parse a Compose host port override into a TCP port number."""
+
+    invalid_port_message = f"{env_key} must be an integer between 1 and 65535; got {value!r}"
     try:
-        parsed_port = int(host_port)
+        parsed_port = int(value)
     except (ValueError, OverflowError) as exc:
         raise ValueError(invalid_port_message) from exc
     if not 1 <= parsed_port <= 65535:
         raise ValueError(invalid_port_message)
-    url = make_url(DEFAULT_LOCAL_SERVICE_DATABASE_URL).set(port=parsed_port)
-    return url.render_as_string(hide_password=False)
+    return parsed_port
 
 
 def _settings_database_url_is_explicit(
