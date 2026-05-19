@@ -919,6 +919,16 @@ class PullRequestMonitorRunner:
                 and recovery_state.get("target_provider") == provider
                 and recovery_state.get("target_model") == model
             ):
+                if provider_cooldown_not_before(task_policy) != breaker.cooldown_until:
+                    ws.task_policy = _task_policy_with_monitor_circuit_retry_state(
+                        task_policy,
+                        provider=provider,
+                        model=model,
+                        cooldown_until=breaker.cooldown_until,
+                        last_reason_code=breaker.last_reason_code,
+                    )
+                    await repo.advance_workspace_version(ws)
+                    await s.commit()
                 return True
             await repo.add_event(
                 ws,
