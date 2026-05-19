@@ -1080,6 +1080,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
 
     seed_leading_context: dict[str, list[str]] = {}
     seed_trailing_context: dict[str, list[str]] = {}
+    file_header_context: list[str] = []
     overlay_only_lines: list[str] = []
     pending_context: list[str] = []
     last_assignment_key: str | None = None
@@ -1088,6 +1089,9 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         if key is None:
             pending_context.append(line)
             continue
+        if last_assignment_key is None and key in seed_keys and pending_context:
+            file_header_context = pending_context
+            pending_context = []
         if overlay_last_assignment_index.get(key) == index:
             if key in seed_keys:
                 seed_leading_context[key] = pending_context
@@ -1101,7 +1105,7 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     elif pending_context:
         overlay_only_lines.extend(pending_context)
 
-    merged_lines: list[str] = []
+    merged_lines: list[str] = list(file_header_context)
     emitted_seed_leading_context: set[str] = set()
     emitted_seed_trailing_context: set[str] = set()
     for line in seed_lines:

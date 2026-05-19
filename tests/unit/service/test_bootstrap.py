@@ -367,6 +367,58 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
 
 
 @pytest.mark.unit
+def test_bootstrap_mirrors_mixed_case_awf_docker_host_to_docker_cli_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    docker_host = f"unix://{tmp_path / 'compose-docker.sock'}"
+    service_env = {
+        "AwF_DoCkEr_HoSt": docker_host,
+        "DOCKER_HOST": "unix:///stale-docker.sock",
+    }
+    expected_env = {"DOCKER_HOST": docker_host}
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == expected_env
+    assert calls
+    assert all(call["env"] == expected_env for call in calls)
+    assert all(not any(key.upper() == "AWF_DOCKER_HOST" for key in call["env"]) for call in calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

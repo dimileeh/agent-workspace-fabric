@@ -325,6 +325,16 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     }
 
 
+def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:
+    """Look up a case-insensitive environment value and ignore empty strings."""
+
+    wanted = key.upper()
+    for existing, value in environ.items():
+        if existing.upper() == wanted and value:
+            return value
+    return None
+
+
 def _docker_cli_environ(
     environ: Mapping[str, str],
 ) -> dict[str, str]:
@@ -333,9 +343,12 @@ def _docker_cli_environ(
     resolved = dict(environ)
     # Keep Docker CLI host selection scoped to the resolved service environment;
     # falling back to ServiceSettings would reintroduce process-environment drift.
-    if resolved.get("AWF_DOCKER_HOST"):
-        resolved["DOCKER_HOST"] = resolved["AWF_DOCKER_HOST"]
-    resolved.pop("AWF_DOCKER_HOST", None)
+    docker_host = _non_empty_env_value(resolved, "AWF_DOCKER_HOST")
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
+    for key in list(resolved):
+        if key.upper() == "AWF_DOCKER_HOST":
+            del resolved[key]
     return resolved
 
 
