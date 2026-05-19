@@ -25,12 +25,9 @@ _URL_SECRET_MARKER = "***"
 
 def normalize_api_url(base_url: str, path: str) -> str:
     """Build an API URL while avoiding duplicate ``/v1`` path segments."""
-    if not path.startswith("/v1/"):
-        return f"{base_url.rstrip('/')}{path}"
-
     parsed_base = urllib.parse.urlsplit(base_url)
     base_path = (parsed_base.path or "").rstrip("/")
-    if base_path.endswith("/v1"):
+    if path.startswith("/v1/") and base_path.endswith("/v1"):
         base_path = base_path.removesuffix("/v1")
     base_path = base_path.rstrip("/")
     normalized_path = f"{base_path}{path}" if base_path else path
@@ -66,11 +63,9 @@ def sanitize_request_url(url: str) -> str:
     )
 
 
-def _sanitize_query_pairs(query_pairs: Iterable[tuple[str, str | None]]) -> list[tuple[str, str]]:
+def _sanitize_query_pairs(query_pairs: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     sanitized_pairs: list[tuple[str, str]] = []
     for name, value in query_pairs:
-        if value is None:
-            continue
         if name.lower() in _SENSITIVE_QUERY_KEYS:
             sanitized_pairs.append((name, _URL_SECRET_MARKER))
         else:

@@ -46,6 +46,26 @@ def test_normalize_api_url_keeps_non_v1_paths_simple() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("base_url", "path", "expected"),
+    (
+        ("http://host:8000?tenant=one", "/healthz", "http://host:8000/healthz?tenant=one"),
+        (
+            "http://host:8000/awf?tenant=one#api",
+            "/healthz",
+            "http://host:8000/awf/healthz?tenant=one#api",
+        ),
+    ),
+)
+def test_normalize_api_url_preserves_query_and_fragment_for_non_v1_paths(
+    base_url: str,
+    path: str,
+    expected: str,
+) -> None:
+    assert normalize_api_url(base_url, path) == expected
+
+
+@pytest.mark.unit
 def test_sanitize_request_url_redacts_sensitive_query_values() -> None:
     assert (
         sanitize_request_url(
