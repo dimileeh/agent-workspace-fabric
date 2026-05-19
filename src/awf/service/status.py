@@ -20,7 +20,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
-from awf.service.config import ServiceSettings, local_service_environ
+from awf.service.config import ServiceSettings, resolve_local_service_provider_environ
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
@@ -116,8 +116,9 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
-    provider_environ = _resolve_provider_environ(
+    provider_environ = resolve_local_service_provider_environ(
         provider_environ=provider_environ,
+        environ=os.environ,
         compose_file=compose_file,
         compose_env_file=compose_env_file,
     )
@@ -230,25 +231,6 @@ async def collect_service_status(
         "checks": checks,
         "agent_readiness": agent_readiness,
     }
-
-
-def _resolve_provider_environ(
-    *,
-    provider_environ: Mapping[str, str] | None,
-    compose_file: Path | None,
-    compose_env_file: Path | None,
-) -> Mapping[str, str] | None:
-    """Resolve provider readiness environment from explicit or adjacent Compose env files."""
-    if provider_environ is not None:
-        return provider_environ
-    env_file = compose_env_file
-    if env_file is None and compose_file is not None:
-        candidate = compose_file.parent / ".env"
-        if candidate.exists():
-            env_file = candidate
-    if env_file is None:
-        return None
-    return local_service_environ(env_file=env_file)
 
 
 async def collect_egress_audit_status(

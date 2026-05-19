@@ -370,6 +370,58 @@ services:
     assert "AWF_API_TOKEN" not in env
 
 
+@pytest.mark.unit
+def test_service_logs_caches_compose_interpolation_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import logs as logs_mod
+
+    compose_file = _write_compose_file(tmp_path, "services: {}\n")
+    safe_load_calls = 0
+    subprocess_calls: list[dict[str, object]] = []
+
+    def _safe_load(_contents: str) -> object:
+        nonlocal safe_load_calls
+        safe_load_calls += 1
+        return {
+            "services": {
+                "api": {
+                    "environment": {
+                        "AWF_API_TOKEN": "${AWF_API_TOKEN:?set AWF_API_TOKEN}",
+                    }
+                }
+            }
+        }
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        subprocess_calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(logs_mod.yaml, "safe_load", _safe_load)
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+
+    service_environ = {"AWF_API_TOKEN": "service-token"}
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    assert safe_load_calls == 1
+    assert len(subprocess_calls) == 2
+    for kwargs in subprocess_calls:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["AWF_API_TOKEN"] == "service-token"
+
+
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_follow_failure_mentions_terminal_output() -> None:

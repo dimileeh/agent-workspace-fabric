@@ -1017,6 +1017,28 @@ def test_init_without_path_does_not_seed_current_compose_dir_without_asset_root(
 
 
 @pytest.mark.unit
+def test_service_env_resolution_ignores_current_compose_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Do not pass unverified CWD compose env files to service commands."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env").write_text("AWF_API_TOKEN=wrong-project\n", encoding="utf-8")
+
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(Path(".env"))  # noqa: SLF001
+
+    assert active_env_file == Path(".env")
+    assert compose_env_file is None
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_seed_asset_root_without_compose_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
