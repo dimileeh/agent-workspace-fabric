@@ -181,6 +181,18 @@ def test_service_settings_explicit_database_url_ignores_postgres_host_port_overr
 
 
 @pytest.mark.unit
+def test_service_settings_explicit_base_database_url_ignores_custom_environ_host_port() -> None:
+    explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, database_url=explicit_url),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == explicit_url
+
+
+@pytest.mark.unit
 def test_service_settings_default_api_base_url_uses_api_host_port_override() -> None:
     settings = resolve_service_settings(
         Settings(_env_file=None),

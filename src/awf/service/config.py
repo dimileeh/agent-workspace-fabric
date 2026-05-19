@@ -73,7 +73,8 @@ def resolve_service_settings(
     AWF is PostgreSQL-only. Service mode uses the configured database URL, with
     the local Postgres URL as the default unless ``AWF_DATABASE_URL`` is
     explicitly set. When ``environ`` is ``None``, values loaded from ``.env`` by
-    pydantic-settings count as explicit.
+    pydantic-settings count as explicit. When ``environ`` is provided, only the
+    provided environment or direct ``base`` constructor overrides count.
     """
 
     settings = base or Settings()
@@ -82,8 +83,12 @@ def resolve_service_settings(
     database_url = settings.database_url
 
     database_url_explicit = _has_env_key(env, "AWF_DATABASE_URL")
-    if environ is None and not database_url_explicit:
-        database_url_explicit = _settings_database_url_is_explicit(settings, service_env)
+    if not database_url_explicit:
+        database_url_explicit = _settings_database_url_is_explicit(
+            settings,
+            service_env,
+            require_init_field=environ is not None,
+        )
 
     if not database_url_explicit:
         database_url = _default_local_service_database_url(service_env)
@@ -272,15 +277,27 @@ def _parse_host_port(env_key: str, value: str) -> int:
 def _settings_database_url_is_explicit(
     settings: Settings,
     environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
 ) -> bool:
     """Return true when settings carries a non-derivable database URL."""
 
-    if "database_url" not in settings.model_fields_set:
+    explicit_fields: frozenset[str] | set[str] = (
+        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
+    )
+    if "database_url" not in explicit_fields:
         return False
     return not (
         settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
         and _env_value(environ, "AWF_POSTGRES_HOST_PORT")
     )
+
+
+def _settings_init_fields(settings: Settings) -> frozenset[str]:
+    """Return direct constructor-provided settings fields."""
+
+    init_fields: object = getattr(settings, "_awf_init_fields", frozenset())
+    return init_fields if isinstance(init_fields, frozenset) else frozenset()
 
 
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
