@@ -9,7 +9,6 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -269,13 +268,7 @@ def _compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
 def _compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
     """Return Compose interpolation variable names referenced by the YAML file."""
 
-    return _cached_compose_interpolation_keys(compose_file.expanduser().resolve())
-
-
-@lru_cache(maxsize=32)
-def _cached_compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
-    """Return cached Compose interpolation variable names for a resolved YAML path."""
-
+    compose_file = compose_file.expanduser().resolve()
     try:
         payload: object = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):

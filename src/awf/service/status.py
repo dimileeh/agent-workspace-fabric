@@ -105,6 +105,7 @@ async def collect_service_status(
     workspace_id_lookup: WorkspaceIdLookup | None = None,
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
     compose_file: Path | None = None,
     compose_env_file: Path | None = None,
     provider_http_get: ProviderHttpGet | None = None,
@@ -118,7 +119,7 @@ async def collect_service_status(
     resolved_socket_exists = socket_exists or Path.exists
     provider_environ = resolve_local_service_provider_environ(
         provider_environ=provider_environ,
-        environ=os.environ,
+        environ=os.environ if environ is None else environ,
         compose_file=compose_file,
         compose_env_file=compose_env_file,
     )

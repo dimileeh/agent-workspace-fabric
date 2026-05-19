@@ -371,41 +371,45 @@ services:
 
 
 @pytest.mark.unit
-def test_service_logs_caches_compose_interpolation_keys(
+def test_service_logs_reloads_compose_interpolation_keys_when_file_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from awf.service import logs as logs_mod
-
-    compose_file = _write_compose_file(tmp_path, "services: {}\n")
-    safe_load_calls = 0
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      FIRST: "${AWF_FIRST_TOKEN:?set AWF_FIRST_TOKEN}"
+""",
+    )
     subprocess_calls: list[dict[str, object]] = []
-
-    def _safe_load(_contents: str) -> object:
-        nonlocal safe_load_calls
-        safe_load_calls += 1
-        return {
-            "services": {
-                "api": {
-                    "environment": {
-                        "AWF_API_TOKEN": "${AWF_API_TOKEN:?set AWF_API_TOKEN}",
-                    }
-                }
-            }
-        }
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         subprocess_calls.append(kwargs)
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(logs_mod.yaml, "safe_load", _safe_load)
-    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_FIRST_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_SECOND_TOKEN", raising=False)
+    service_environ = {
+        "AWF_FIRST_TOKEN": "first-token",
+        "AWF_SECOND_TOKEN": "second-token",
+    }
 
-    service_environ = {"AWF_API_TOKEN": "service-token"}
     run_service_logs(
         services=[ServiceLogName.api],
         compose_file=compose_file,
         service_environ=service_environ,
         run_subprocess=_run,
+    )
+    compose_file.write_text(
+        """
+services:
+  api:
+    environment:
+      SECOND: "${AWF_SECOND_TOKEN:?set AWF_SECOND_TOKEN}"
+""",
+        encoding="utf-8",
     )
     run_service_logs(
         services=[ServiceLogName.api],
@@ -414,12 +418,14 @@ def test_service_logs_caches_compose_interpolation_keys(
         run_subprocess=_run,
     )
 
-    assert safe_load_calls == 1
-    assert len(subprocess_calls) == 2
-    for kwargs in subprocess_calls:
-        env = kwargs["env"]
-        assert isinstance(env, dict)
-        assert env["AWF_API_TOKEN"] == "service-token"
+    first_env = subprocess_calls[0]["env"]
+    second_env = subprocess_calls[1]["env"]
+    assert isinstance(first_env, dict)
+    assert isinstance(second_env, dict)
+    assert first_env["AWF_FIRST_TOKEN"] == "first-token"
+    assert "AWF_SECOND_TOKEN" not in first_env
+    assert second_env["AWF_SECOND_TOKEN"] == "second-token"
+    assert "AWF_FIRST_TOKEN" not in second_env
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
