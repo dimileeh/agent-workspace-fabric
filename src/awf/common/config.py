@@ -10,6 +10,7 @@ rather than mutating a global object.
 
 from __future__ import annotations
 
+import threading
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -506,22 +507,26 @@ class _SettingsIdentityRef(weakref.ref[Settings]):
 
 
 _SETTINGS_INIT_FIELDS_BY_SETTINGS: dict[_SettingsIdentityRef, frozenset[str]] = {}
+_SETTINGS_INIT_FIELDS_LOCK = threading.Lock()
 
 
 def _discard_settings_constructor_fields(reference: weakref.ReferenceType[Settings]) -> None:
     if isinstance(reference, _SettingsIdentityRef):
-        _SETTINGS_INIT_FIELDS_BY_SETTINGS.pop(reference, None)
+        with _SETTINGS_INIT_FIELDS_LOCK:
+            _SETTINGS_INIT_FIELDS_BY_SETTINGS.pop(reference, None)
 
 
 def _record_settings_constructor_fields(settings: Settings, fields: frozenset[str]) -> None:
     reference = _SettingsIdentityRef(settings, _discard_settings_constructor_fields)
-    _SETTINGS_INIT_FIELDS_BY_SETTINGS[reference] = fields
+    with _SETTINGS_INIT_FIELDS_LOCK:
+        _SETTINGS_INIT_FIELDS_BY_SETTINGS[reference] = fields
 
 
 def settings_constructor_fields(settings: Settings) -> frozenset[str]:
     """Return fields passed directly to ``Settings(...)`` construction."""
 
-    return _SETTINGS_INIT_FIELDS_BY_SETTINGS.get(_SettingsIdentityRef(settings), frozenset())
+    with _SETTINGS_INIT_FIELDS_LOCK:
+        return _SETTINGS_INIT_FIELDS_BY_SETTINGS.get(_SettingsIdentityRef(settings), frozenset())
 
 
 def validate_production_settings(

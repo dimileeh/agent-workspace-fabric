@@ -189,6 +189,40 @@ def test_settings_constructor_fields_are_tracked_per_equal_settings_instance() -
 
 
 @pytest.mark.unit
+def test_settings_constructor_field_tracking_uses_lock_for_all_dict_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.entries = 0
+
+        def __enter__(self) -> RecordingLock:
+            self.entries += 1
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    lock = RecordingLock()
+    monkeypatch.setattr(common_config, "_SETTINGS_INIT_FIELDS_LOCK", lock, raising=False)
+
+    settings = Settings(_env_file=None, api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    after_record = lock.entries
+    assert after_record >= 1
+
+    assert service_config._settings_init_fields(settings) == frozenset({"api_base_url"})  # noqa: SLF001
+    after_lookup = lock.entries
+    assert after_lookup > after_record
+
+    settings_ref = common_config._SettingsIdentityRef(settings)  # noqa: SLF001
+    del settings
+    gc.collect()
+
+    assert settings_ref() is None
+    assert lock.entries > after_lookup
+
+
+@pytest.mark.unit
 def test_dead_settings_identity_refs_do_not_compare_equal() -> None:
     default_settings = Settings(_env_file=None)
     explicit_default_settings = Settings(

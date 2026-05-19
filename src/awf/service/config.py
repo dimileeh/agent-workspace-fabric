@@ -338,7 +338,12 @@ def _settings_api_base_url_is_explicit(
 
 
 def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> bool:
-    """Return true when the API base URL should not be derived from Compose ports."""
+    """Return true when the API base URL should not be derived from Compose ports.
+
+    A default-valued ``AWF_API_BASE_URL`` is treated as non-explicit when
+    ``AWF_API_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged.
+    """
 
     return not (
         api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
@@ -352,7 +357,12 @@ def _settings_database_url_is_explicit(
     *,
     require_init_field: bool = False,
 ) -> bool:
-    """Return true when settings carries a non-derivable database URL."""
+    """Return true when settings carries a non-derivable database URL.
+
+    A default-valued database URL is treated as derivable when
+    ``AWF_POSTGRES_HOST_PORT`` is present, unless the value came directly from a
+    ``Settings(...)`` constructor override.
+    """
 
     if "database_url" in _settings_init_fields(settings):
         return True
@@ -365,7 +375,12 @@ def _settings_database_url_is_explicit(
 
 
 def _database_url_env_is_explicit(environ: Mapping[str, str]) -> bool:
-    """Return true when the host environment carries a non-derivable database URL."""
+    """Return true when the host environment carries a non-derivable database URL.
+
+    A default-valued ``AWF_DATABASE_URL`` is treated as non-explicit when
+    ``AWF_POSTGRES_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged.
+    """
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
     if database_url is None:
