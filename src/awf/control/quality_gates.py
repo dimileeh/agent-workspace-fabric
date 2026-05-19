@@ -1111,7 +1111,7 @@ def _workflow_existing_step_violations(
                     protected_pattern=protected_pattern,
                     section=f"{section_prefix}.run",
                     line=_line_for_workflow_step_key(new_text, new_step, key="run"),
-                    reason="workflow validation command changed; test-command narrowing is blocked",
+                    reason="workflow validation command introduced; introducing validation command is blocked",
                 )
             )
         elif not _is_comment_or_notify_step(new_step):

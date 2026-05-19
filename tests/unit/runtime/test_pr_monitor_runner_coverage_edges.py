@@ -3719,7 +3719,8 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     assert any(
         args[:1] == ["git"]
         and "diff" in args
-        and "--name-only" in args
+        and "--name-status" in args
+        and "-z" in args
         and "merged-base-sha..HEAD" in args
         for args in call_args
     )
@@ -3857,7 +3858,8 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     assert any(
         args[:1] == ["git"]
         and "diff" in args
-        and "--name-only" in args
+        and "--name-status" in args
+        and "-z" in args
         and "merged-base-sha..HEAD" in args
         for args in call_args
     )
@@ -3935,7 +3937,8 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
         _git_worktree_command(
             worktree,
             "diff",
-            "--name-only",
+            "--name-status",
+            "-z",
             "origin/development..HEAD",
             "--",
         )
@@ -3945,7 +3948,8 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
         _git_worktree_command(
             worktree,
             "diff",
-            "--name-only",
+            "--name-status",
+            "-z",
             "merged-base-sha..HEAD",
             "--",
         )
@@ -4213,7 +4217,8 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     assert any(
         args[:1] == ["git"]
         and "diff" in args
-        and "--name-only" in args
+        and "--name-status" in args
+        and "-z" in args
         and "merge-base-sha..HEAD" in args
         for args in call_args
     )
@@ -4228,6 +4233,55 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_unpushed_commit_protected_scope_detects_rename_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
+    )
+    cmd.queue_result(returncode=0, stdout=workflow_text)
+    cmd.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    cmd.queue_result(returncode=0, stdout="diff --git a/.github/workflows/ci.yml b/docs/ci.yml\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    violations = await runner._protected_scope_violations_for_unpushed_commits(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert len(violations) == 1
+    assert violations[0].path == ".github/workflows/ci.yml"
+    assert "could not read old and new workflow content" in violations[0].reason
+    assert _git_worktree_command(
+        worktree,
+        "show",
+        "merge-base-sha:.github/workflows/ci.yml",
+    ) in [call.args for call in cmd.calls]
 
 
 @pytest.mark.unit
@@ -5089,7 +5143,8 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     assert cmd.calls[2].args == _git_worktree_command(
         worktree,
         "diff",
-        "--name-only",
+        "--name-status",
+        "-z",
         "merge-base-sha..HEAD",
         "--",
     )
@@ -5285,7 +5340,8 @@ async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
         _git_worktree_command(
             worktree,
             "diff",
-            "--name-only",
+            "--name-status",
+            "-z",
             "merge-base-sha..HEAD",
             "--",
         ),
@@ -5304,7 +5360,8 @@ async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
         _git_worktree_command(
             worktree,
             "diff",
-            "--name-only",
+            "--name-status",
+            "-z",
             "merged-base-sha..HEAD",
             "--",
         ),

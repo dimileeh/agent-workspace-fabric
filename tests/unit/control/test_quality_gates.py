@@ -405,7 +405,7 @@ jobs:
 
     assert len(violations) == 1
     assert violations[0].section == "jobs.tests.steps.Post coverage comment.run"
-    assert "test-command narrowing is blocked" in violations[0].reason
+    assert "introducing validation command is blocked" in violations[0].reason
 
 
 @pytest.mark.unit

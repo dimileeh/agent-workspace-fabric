@@ -306,6 +306,49 @@ async def test_git_helpers_mark_worktree_safe_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_changed_paths_between_ref_and_head_includes_rename_sources(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=(
+            "M\0src/fix.py\0"
+            "R100\0.github/workflows/ci.yml\0docs/ci.yml\0"
+            "D\0pyproject.toml\0"
+            "M\0src/fix.py\0"
+        ),
+    )
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+
+    paths = await runner._changed_paths_between_ref_and_head(
+        worktree_path=worktree,
+        ref="merge-base-sha",
+        error_context="against the remote PR branch",
+    )
+
+    assert paths == (
+        "src/fix.py",
+        ".github/workflows/ci.yml",
+        "docs/ci.yml",
+        "pyproject.toml",
+    )
+    assert cmd.calls[0].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "diff",
+        "--name-status",
+        "-z",
+        "merge-base-sha..HEAD",
+        "--",
+    ]
+
+
+@pytest.mark.unit
 async def test_protected_status_diff_for_deleted_file_keeps_head_text(
     tmp_path: Path,
 ) -> None:

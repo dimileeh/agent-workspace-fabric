@@ -5211,7 +5211,8 @@ class PullRequestMonitorRunner:
                 "-C",
                 str(worktree_path),
                 "diff",
-                "--name-only",
+                "--name-status",
+                "-z",
                 diff_spec,
                 "--",
             ]
@@ -5224,7 +5225,7 @@ class PullRequestMonitorRunner:
                 f"stdout={diff_result.stdout.strip() or '<empty>'} "
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
-        return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
+        return _changed_paths_from_name_status_z(diff_result.stdout)
 
     async def _protected_file_diffs_for_status_paths(
         self,
@@ -7642,6 +7643,46 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
             paths.extend([old_path, new_path])
         else:
             paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
+    """Extract changed paths from ``git diff --name-status -z`` output."""
+    if "\0" not in diff_stdout:
+        return tuple(_changed_paths_from_name_status_lines(diff_stdout))
+
+    fields = [field for field in diff_stdout.split("\0") if field]
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        for _ in range(path_count):
+            if index >= len(fields):
+                break
+            path = fields[index].strip()
+            index += 1
+            if path:
+                paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
+def _changed_paths_from_name_status_lines(diff_stdout: str) -> list[str]:
+    paths: list[str] = []
+    for line in diff_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) == 1:
+            paths.append(parts[0].strip())
+            continue
+        status = parts[0]
+        if status.startswith(("R", "C")):
+            paths.extend(part.strip() for part in parts[1:3] if part.strip())
+        elif len(parts) >= 2 and parts[1].strip():
+            paths.append(parts[1].strip())
     return list(dict.fromkeys(paths))
 
 
