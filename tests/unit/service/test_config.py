@@ -148,6 +148,20 @@ def test_service_settings_default_env_file_database_url_uses_postgres_host_port_
 
 
 @pytest.mark.unit
+def test_service_settings_exported_default_database_url_uses_postgres_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.setenv("AWF_POSTGRES_HOST_PORT", "15433")
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
     explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
 

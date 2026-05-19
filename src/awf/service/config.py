@@ -82,7 +82,7 @@ def resolve_service_settings(
     service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
 
-    database_url_explicit = _has_env_key(env, "AWF_DATABASE_URL")
+    database_url_explicit = _database_url_env_is_explicit(env, service_env)
     if not database_url_explicit:
         database_url_explicit = _settings_database_url_is_explicit(
             settings,
@@ -293,17 +293,26 @@ def _settings_database_url_is_explicit(
     )
 
 
+def _database_url_env_is_explicit(
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+) -> bool:
+    """Return true when the host environment carries a non-derivable database URL."""
+
+    database_url = _env_value(environ, "AWF_DATABASE_URL")
+    if database_url is None:
+        return False
+    return not (
+        database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+        and _env_value(service_environ, "AWF_POSTGRES_HOST_PORT")
+    )
+
+
 def _settings_init_fields(settings: Settings) -> frozenset[str]:
     """Return direct constructor-provided settings fields."""
 
     init_fields: object = getattr(settings, "_awf_init_fields", frozenset())
     return init_fields if isinstance(init_fields, frozenset) else frozenset()
-
-
-def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
-    """Return true when ``environ`` contains ``key`` using case-insensitive matching."""
-    wanted = key.upper()
-    return any(existing.upper() == wanted for existing in environ)
 
 
 def _env_value(environ: Mapping[str, str], key: str) -> str | None:
