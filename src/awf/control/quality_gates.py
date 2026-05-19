@@ -1089,7 +1089,7 @@ def _workflow_existing_step_violations(
     old_run = _string_value(old_step.get("run"))
     new_run = _string_value(new_step.get("run"))
     if old_run != new_run:
-        if _is_validation_command(old_run) or _is_validation_command(new_run):
+        if not _is_validation_command(old_run) and _is_validation_command(new_run):
             violations.append(
                 _violation(
                     path=path,
