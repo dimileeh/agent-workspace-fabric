@@ -508,8 +508,8 @@ root-cause history.
   bypasses, test-command narrowing, and job/step removals; include file,
   section/path, approximate line, and reason in block messages; document the
   policy in `docs/PROTECTED_FILES.md`; and pass the seven unit cases plus
-  executor/PR-monitor regressions. Scheduled for Codex `gpt-5.5` / `xhigh`
-  once active workspace capacity drops below five.
+  executor/PR-monitor regressions. Active in workspace
+  `ws_285b5bf215fd4b329eb1af65` on Codex `gpt-5.5` / `xhigh`.
 - [x] Repair deterministic post-agent pre-commit hook rewrites before failing
   otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
   failed `ws_06ee567d44eb479bb0f68478`,
