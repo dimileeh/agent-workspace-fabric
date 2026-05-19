@@ -25,7 +25,7 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import click
@@ -35,6 +35,7 @@ import typer.rich_utils as typer_rich_utils
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
@@ -113,6 +114,16 @@ class OutputFormat(StrEnum):
 
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
+
+
+def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
+    try:
+        request_obj = cast(object, response.request)
+    except RuntimeError:
+        return None, None
+    if not isinstance(request_obj, httpx.Request):
+        return None, None
+    return request_obj.method, sanitize_request_url(str(request_obj.url))
 
 
 def _base_url(override: str | None) -> str:
@@ -554,11 +565,14 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
-    url = f"{base_url.rstrip('/')}{path}"
+    url = normalize_api_url(base_url, path)
     try:
         return httpx.request(method, url, timeout=30.0, **kwargs)
     except httpx.RequestError as exc:
-        typer.echo(f"error: could not reach AWF API at {url}: {exc}", err=True)
+        typer.echo(
+            f"error: could not reach AWF API at {sanitize_request_url(url)}: {exc}",
+            err=True,
+        )
         raise typer.Exit(code=2) from exc
 
 
@@ -568,7 +582,14 @@ def _handle_response(
     *,
     pretty_items: bool = False,
 ) -> None:
+    method, request_url = _request_context(response)
     if response.status_code >= 400:
+        if request_url is not None:
+            method = method or "HTTP"
+            typer.echo(
+                f"error: {method} {request_url} -> HTTP {response.status_code}",
+                err=True,
+            )
         try:
             typer.echo(json.dumps(response.json(), indent=2), err=True)
         except ValueError:
