@@ -1056,6 +1056,13 @@ def _run_init_service_bootstrap(
     if write_env:
         env_action, env_error = _seed_env_file(env_file, env_example)
 
+    env_warning_emitted = False
+    if pretty:
+        typer.echo("AWF init: local service bootstrap")
+        if env_action == "write_failed" and env_error is not None:
+            typer.echo(_init_env_warning(env_error))
+            env_warning_emitted = True
+
     try:
         service_env = local_service_environ(env_file=env_file)
         preflight_env = _init_preflight_environ(
@@ -1066,9 +1073,6 @@ def _run_init_service_bootstrap(
             Settings(_env_file=env_file, github_token=None),
             environ=preflight_env,
         )
-
-        if pretty:
-            typer.echo("AWF init: local service bootstrap")
 
         docker_report = asyncio.run(
             collect_doctor_report(
@@ -1097,15 +1101,15 @@ def _run_init_service_bootstrap(
                 typer.echo("")
                 typer.echo("Docker is not available; cannot bootstrap local service.")
             else:
-                _emit(
-                    {
-                        "status": "failed",
-                        "reason_code": reason,
-                        "message": message,
-                        "action": action,
-                    },
-                    fmt,
-                )
+                docker_payload: dict[str, object] = {
+                    "status": "failed",
+                    "reason_code": reason,
+                    "message": message,
+                    "action": action,
+                }
+                if env_error is not None:
+                    docker_payload["env_error"] = env_error
+                _emit(docker_payload, fmt)
             raise typer.Exit(code=1)
 
         state_dir = _resolve_state_directory(service_env)
@@ -1117,14 +1121,14 @@ def _run_init_service_bootstrap(
         if pretty:
             typer.echo(f"error: could not collect local checks: {exc}", err=True)
         else:
-            _emit(
-                {
-                    "status": "failed",
-                    "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
-                    "message": str(exc),
-                },
-                fmt,
-            )
+            local_checks_payload: dict[str, object] = {
+                "status": "failed",
+                "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
+                "message": str(exc),
+            }
+            if env_error is not None:
+                local_checks_payload["env_error"] = env_error
+            _emit(local_checks_payload, fmt)
         raise typer.Exit(code=1) from exc
 
     if pretty:
@@ -1138,7 +1142,7 @@ def _run_init_service_bootstrap(
             typer.echo(
                 f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
             )
-        elif env_action == "write_failed" and env_error is not None:
+        elif env_action == "write_failed" and env_error is not None and not env_warning_emitted:
             typer.echo(_init_env_warning(env_error))
         elif env_action == "no_example":
             search_paths = ", ".join(

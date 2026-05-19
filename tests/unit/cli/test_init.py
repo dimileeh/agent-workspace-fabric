@@ -1173,6 +1173,57 @@ def test_init_without_path_runs_docker_availability_check_first(
 
 
 @pytest.mark.unit
+def test_init_without_path_json_includes_env_error_when_docker_preflight_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose env write failures even when Docker preflight exits early."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
+    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    assert captured["bootstrap_calls"] == []
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "DOCKER_DAEMON_UNREACHABLE"
+    assert payload["env_error"] == {
+        "operation": "write_env",
+        "path": ".env",
+        "env_file": ".env",
+        "env_example": ".env.example",
+        "message": "permission denied",
+    }
+    assert not (tmp_path / "state").exists()
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_warns_when_env_write_and_docker_preflight_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Warn about env write failures before reporting Docker preflight failure."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
+    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1, result.output
+    assert captured["bootstrap_calls"] == []
+    warning = "warning: could not write .env from .env.example: permission denied"
+    docker_failure = "Docker is not available; cannot bootstrap local service."
+    assert result.stdout.count(warning) == 1
+    assert result.stdout.index(warning) < result.stdout.index(docker_failure)
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_fails_when_docker_diagnostic_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
