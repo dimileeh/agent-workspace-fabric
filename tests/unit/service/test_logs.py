@@ -281,6 +281,44 @@ services:
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_removes_mixed_case_awf_docker_host_after_compose_interpolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      AWF_DOCKER_HOST: "${AWF_DOCKER_HOST:?set AWF_DOCKER_HOST}"
+""",
+    )
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {"AwF_DoCkEr_HoSt": docker_host}
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("awf_docker_host", "unix:///stale-awf-docker.sock")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///stale-docker.sock")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert not any(key.upper() == "AWF_DOCKER_HOST" for key in env)
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

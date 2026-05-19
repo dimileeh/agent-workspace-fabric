@@ -231,7 +231,9 @@ def _docker_cli_environ(
         resolved["DOCKER_HOST"] = docker_host
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
-    resolved.pop("AWF_DOCKER_HOST", None)
+    for key in list(resolved):
+        if key.upper() == "AWF_DOCKER_HOST":
+            del resolved[key]
     return resolved
 
 

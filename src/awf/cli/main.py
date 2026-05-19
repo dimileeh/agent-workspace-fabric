@@ -1057,6 +1057,9 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     except UnicodeDecodeError:
         return seed_contents
 
+    # This merge is deliberately line-oriented to preserve comments and ordering.
+    # Multi-line dotenv values are unsupported in seed and overlay files; keep
+    # template entries single-line unless this is replaced with a dotenv parser.
     seed_lines = seed_text.splitlines(keepends=True)
     overlay_lines = overlay_text.splitlines(keepends=True)
 
