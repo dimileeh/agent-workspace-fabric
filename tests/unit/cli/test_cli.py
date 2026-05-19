@@ -1228,6 +1228,7 @@ class TestWorkspaceAdoptPr:
 
         assert result.exit_code == 0
         assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
+        assert cli_main._CALL_CONTEXT == {}
 
     @pytest.mark.unit
     def test_posts_adoption_request_to_normalized_v1_endpoint_from_env(
@@ -1252,6 +1253,7 @@ class TestWorkspaceAdoptPr:
 
             assert result.exit_code == 0
             assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
+            assert cli_main._CALL_CONTEXT == {}
 
     @pytest.mark.unit
     def test_posts_model_and_effort_when_requested(self) -> None:
