@@ -402,8 +402,6 @@ def _compose_command(
 
 def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | None:
     """Return ``environ`` as a dict, or ``None`` when it adds nothing beyond current env."""
-    if not environ:
-        return None
     env_dict = dict(environ)
     if env_dict == dict(os.environ):
         return None
