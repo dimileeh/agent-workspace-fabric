@@ -29,7 +29,6 @@ def normalize_api_url(base_url: str, path: str) -> str:
     base_path = (parsed_base.path or "").rstrip("/")
     if path.startswith("/v1/") and base_path.endswith("/v1"):
         base_path = base_path.removesuffix("/v1")
-    base_path = base_path.rstrip("/")
     normalized_path = f"{base_path}{path}" if base_path else path
     return urllib.parse.urlunsplit(
         (

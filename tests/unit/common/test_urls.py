@@ -11,6 +11,8 @@ from awf.common.urls import normalize_api_url, sanitize_request_url
     (
         ("http://host:8000", "/v1/workspaces", "http://host:8000/v1/workspaces"),
         ("http://host:8000/", "/v1/workspaces", "http://host:8000/v1/workspaces"),
+        ("http://host:8000/v1", "/v1/workspaces", "http://host:8000/v1/workspaces"),
+        ("http://host:8000/v1/", "/v1/workspaces", "http://host:8000/v1/workspaces"),
         ("http://host:8000/awf", "/v1/workspaces", "http://host:8000/awf/v1/workspaces"),
         (
             "http://host:8000/awf/v1",
