@@ -454,8 +454,8 @@ def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
     ]
     env = kwargs["env"]
     assert isinstance(env, dict)
-    assert env["AWF_DOCKER_HOST"] == docker_host
     assert env["DOCKER_HOST"] == docker_host
+    assert "AWF_DOCKER_HOST" not in env
 
 
 @pytest.mark.unit

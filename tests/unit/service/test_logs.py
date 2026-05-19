@@ -100,18 +100,23 @@ def test_service_logs_returns_captured_output_for_non_follow_success() -> None:
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
-def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(tmp_path: Path) -> None:
+def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
     service_environ = {
         "AWF_DOCKER_HOST": docker_host,
         "DOCKER_HOST": "unix:///stale-docker.sock",
-        "PATH": "/usr/bin",
+        "PATH": "/service/bin",
     }
     calls: list[dict[str, object]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(kwargs)
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.setenv("PATH", "/caller/bin")
 
     run_service_logs(
         services=[ServiceLogName.api],
@@ -121,9 +126,45 @@ def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(tmp_path: Path
 
     env = calls[0]["env"]
     assert isinstance(env, dict)
-    assert env["AWF_DOCKER_HOST"] == docker_host
     assert env["DOCKER_HOST"] == docker_host
-    assert env["PATH"] == "/usr/bin"
+    assert env["PATH"] == "/caller/bin"
+    assert "AWF_DOCKER_HOST" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {
+        "AWF_DOCKER_HOST": docker_host,
+        "AWF_API_TOKEN": "service-token",
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:secret@db:5432/awf",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in ("AWF_DOCKER_HOST", "AWF_API_TOKEN", "AWF_DATABASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWF_CALLER_ENV_MARKER", "present")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert env["AWF_CALLER_ENV_MARKER"] == "present"
+    assert "AWF_DOCKER_HOST" not in env
+    assert "AWF_API_TOKEN" not in env
+    assert "AWF_DATABASE_URL" not in env
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

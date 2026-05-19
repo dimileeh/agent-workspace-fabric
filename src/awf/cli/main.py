@@ -901,7 +901,7 @@ def _resolve_service_env_paths() -> tuple[Path, Path]:
     return env_file, env_example
 
 
-def _resolve_existing_service_env_file(env_file: Path, env_seed_source: Path) -> Path:
+def _resolve_existing_service_env_file(env_file: Path, _env_seed_source: Path) -> Path:
     """Return the existing env file service commands should read."""
 
     if env_file.exists():
@@ -909,8 +909,6 @@ def _resolve_existing_service_env_file(env_file: Path, env_seed_source: Path) ->
     root_env = _compose_root_env_file(env_file)
     if root_env is not None and root_env.exists():
         return root_env
-    if env_seed_source.name == ".env" and env_seed_source.exists():
-        return env_seed_source
     return env_file
 
 

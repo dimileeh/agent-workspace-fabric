@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -186,14 +187,14 @@ def _run_subprocess(
 
 
 def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
-    if environ is None:
-        return None
-    docker_host = environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")
+    docker_host = (
+        (environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")) if environ else None
+    )
     if not docker_host:
         # Compose reads service values through --env-file; only pass an explicit
         # subprocess environment when we need to select a Docker daemon.
         return None
-    resolved = dict(environ)
+    resolved = dict(os.environ)
     resolved["DOCKER_HOST"] = docker_host
     return resolved
 
