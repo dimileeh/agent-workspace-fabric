@@ -28,7 +28,6 @@ DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
-_PROJECT_ROOT_MARKER = ".git"
 _AWF_SOURCE_ROOT_MARKERS = (
     "pyproject.toml",
     "src/awf/__init__.py",
@@ -195,16 +194,11 @@ def resolve_local_service_compose_env_file(
 
     candidates: list[Path] = []
     if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
-        cwd = Path.cwd().resolve()
-        candidates.extend(root / expanded for root in _bounded_env_search_roots(cwd))
-        module_file = Path(__file__).resolve()
         candidates.extend(
-            root / expanded
-            for root in _bounded_env_search_roots(
-                module_file.parent,
-                require_awf_source_root=True,
-            )
+            root / expanded for root in _awf_source_search_roots(Path.cwd().resolve())
         )
+        module_file = Path(__file__).resolve()
+        candidates.extend(root / expanded for root in _awf_source_search_roots(module_file.parent))
     else:
         candidates.append(expanded.resolve())
 
@@ -219,23 +213,14 @@ def resolve_local_service_compose_env_file(
     return None
 
 
-def _bounded_env_search_roots(
-    start: Path,
-    *,
-    require_awf_source_root: bool = False,
-) -> tuple[Path, ...]:
-    """Return ancestor roots bounded by the first recognizable project root."""
+def _awf_source_search_roots(start: Path) -> tuple[Path, ...]:
+    """Return the nearest AWF source root for default env discovery."""
 
     roots = (start, *start.parents)
-    predicate = _is_awf_source_root if require_awf_source_root else _is_project_root
-    for index, root in enumerate(roots):
-        if predicate(root):
-            return roots[: index + 1]
-    return (start,)
-
-
-def _is_project_root(candidate: Path) -> bool:
-    return (candidate / _PROJECT_ROOT_MARKER).exists()
+    for root in roots:
+        if _is_awf_source_root(root):
+            return (root,)
+    return ()
 
 
 def _is_awf_source_root(candidate: Path) -> bool:
@@ -447,7 +432,7 @@ def _project_dotenv_candidates() -> tuple[Path, ...]:
     resolved_env_file = resolve_local_service_compose_env_file()
     if resolved_env_file is not None:
         return (_project_dotenv_from_compose_env_file(resolved_env_file),)
-    return tuple(root / ".env" for root in _bounded_env_search_roots(Path.cwd().resolve()))
+    return tuple(root / ".env" for root in _awf_source_search_roots(Path.cwd().resolve()))
 
 
 def _project_dotenv_from_compose_env_file(env_file: Path) -> Path:

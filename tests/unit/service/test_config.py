@@ -38,17 +38,21 @@ _NON_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:prod-pass@db.internal:5432
 _STRONG_PRODUCTION_API_TOKEN = "prod-token-for-awf-operator-apis-32"
 
 
-def _write_awf_source_checkout(tmp_path: Path) -> tuple[Path, Path]:
-    checkout = tmp_path / "checkout"
+def _write_awf_source_root(checkout: Path) -> Path:
     fake_module = checkout / "src" / "awf" / "service" / "config.py"
-    fake_module.parent.mkdir(parents=True)
+    fake_module.parent.mkdir(parents=True, exist_ok=True)
     fake_module.write_text("# source module placeholder\n", encoding="utf-8")
     (checkout / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
     (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     compose_file = checkout / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
+    compose_file.parent.mkdir(parents=True, exist_ok=True)
     compose_file.write_text("services: {}\n", encoding="utf-8")
-    return checkout, fake_module
+    return fake_module
+
+
+def _write_awf_source_checkout(tmp_path: Path) -> tuple[Path, Path]:
+    checkout = tmp_path / "checkout"
+    return checkout, _write_awf_source_root(checkout)
 
 
 def _diagnostic_codes(error: ProductionSettingsError) -> set[str]:
@@ -117,10 +121,10 @@ def test_service_settings_default_database_url_uses_compose_env_host_port_overri
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
     monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
 
@@ -134,13 +138,10 @@ def test_service_settings_uses_checkout_root_compose_env_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    checkout = tmp_path / "checkout"
+    checkout, _ = _write_awf_source_checkout(tmp_path)
     nested = checkout / "src" / "awf"
-    nested.mkdir(parents=True)
     (checkout / ".git").mkdir()
-    (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     compose_env_file = checkout / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
     compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
     monkeypatch.chdir(nested)
     monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
@@ -359,6 +360,27 @@ def test_default_compose_env_lookup_accepts_awf_project_root_from_module_path(
 
 
 @pytest.mark.unit
+def test_default_compose_env_lookup_ignores_unrelated_git_root_before_module_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    unrelated_repo = tmp_path / "unrelated"
+    nested_cwd = unrelated_repo / "src" / "app"
+    nested_cwd.mkdir(parents=True)
+    (unrelated_repo / ".git").mkdir()
+    unrelated_env_file = unrelated_repo / "docker" / "compose" / ".env"
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_env_file.write_text("AWF_POSTGRES_HOST_PORT=25433\n", encoding="utf-8")
+    monkeypatch.chdir(nested_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
+
+
+@pytest.mark.unit
 def test_module_path_sourced_default_database_url_uses_compose_postgres_host_port(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -417,10 +439,10 @@ def test_service_settings_host_default_database_url_ignores_compose_env_postgres
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
     monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
 
@@ -434,12 +456,12 @@ def test_service_settings_sourced_env_default_database_url_uses_compose_env_post
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    env_file = tmp_path / ".env"
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
     env_file.write_text(f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n")
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
     monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
 
@@ -453,7 +475,7 @@ def test_project_dotenv_value_continues_past_env_without_requested_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    checkout = tmp_path / "checkout"
+    checkout, _ = _write_awf_source_checkout(tmp_path)
     nested = checkout / "src" / "module"
     nested.mkdir(parents=True)
     (checkout / ".git").mkdir()
@@ -521,10 +543,10 @@ def test_service_settings_default_api_base_url_uses_compose_env_api_host_port_ov
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
     monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
 
@@ -538,12 +560,12 @@ def test_service_settings_default_env_file_api_base_url_uses_compose_env_api_hos
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    env_file = tmp_path / ".env"
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
     env_file.write_text("AWF_API_BASE_URL=http://localhost:8000\n", encoding="utf-8")
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
     monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
 
@@ -557,12 +579,12 @@ def test_service_settings_sourced_env_default_api_base_url_uses_compose_env_api_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    env_file = tmp_path / ".env"
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
     env_file.write_text(f"AWF_API_BASE_URL={DEFAULT_LOCAL_SERVICE_API_BASE_URL}\n")
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
     monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
 
@@ -600,10 +622,10 @@ def test_service_settings_host_default_api_base_url_ignores_compose_env_api_host
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
     monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
 
@@ -1046,10 +1068,10 @@ def test_local_service_work_dir_resolves_from_compose_env_file(
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("AWF_WORK_DIR", raising=False)
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
@@ -1065,10 +1087,10 @@ def test_project_default_awf_work_dir_does_not_hide_compose_host_work_dir(
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AWF_WORK_DIR", ".awf")
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
