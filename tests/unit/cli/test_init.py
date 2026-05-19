@@ -1268,6 +1268,43 @@ def test_init_without_path_handles_bootstrap_failure_without_traceback(
 
 
 @pytest.mark.unit
+def test_init_without_path_json_includes_env_error_when_bootstrap_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service.bootstrap import ServiceBootstrapError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
+    error = ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_FAILED",
+        message="docker compose failed",
+        stage="compose_up",
+        command=("docker", "compose", "up", "-d"),
+        returncode=1,
+        stderr="AWF_API_TOKEN is required",
+    )
+    _stub_bootstrap_mode(monkeypatch, bootstrap_error=error)
+    _fail_path_write_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "SERVICE_BOOTSTRAP_FAILED"
+    assert payload["stage"] == "compose_up"
+    assert payload["env_error"] == {
+        "operation": "write_env",
+        "path": ".env",
+        "env_file": ".env",
+        "env_example": ".env.example",
+        "message": "permission denied",
+    }
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_rejects_unknown_provider_without_traceback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

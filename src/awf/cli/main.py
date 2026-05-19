@@ -1169,7 +1169,10 @@ def _run_init_service_bootstrap(
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceBootstrapError as exc:
-        _emit(exc.to_dict(), fmt)
+        payload = exc.to_dict()
+        if env_error is not None:
+            payload["env_error"] = env_error
+        _emit(payload, fmt)
         raise typer.Exit(code=1) from None
 
     if pretty:
