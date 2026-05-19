@@ -297,7 +297,7 @@ def preview_workspace_profile(
         path=project,
         detected_template=resolution.profile.name,
         confidence=resolution.profile.confidence,
-        signals=tuple(resolution.candidates_considered),
+        signals=existing.signals,
         package_manager=existing.package_manager,
         package_scripts=existing.package_scripts,
         package_dependencies=existing.package_dependencies,
