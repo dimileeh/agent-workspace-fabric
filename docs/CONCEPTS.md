@@ -376,7 +376,7 @@ The lower-level Compose workflow remains supported:
 
 ```bash
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-docker compose -f docker/compose/local-service.yml up --build
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up --build
 ```
 
 On Linux, host Ollama is often bound only to `127.0.0.1:11434`, which Docker
