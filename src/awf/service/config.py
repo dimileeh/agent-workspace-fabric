@@ -279,9 +279,9 @@ def _resolve_service_api_base_url(
     """Return the host-side API base URL matching Compose port overrides."""
 
     host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
-    if host_api_base_url is not None and _api_base_url_is_explicit(
-        host_api_base_url,
+    if host_api_base_url is not None and _api_base_url_env_is_explicit(
         environ,
+        service_environ,
     ):
         return host_api_base_url
     if _settings_api_base_url_is_explicit(
@@ -348,6 +348,32 @@ def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> 
     return not (
         api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
         and _env_value(environ, "AWF_API_HOST_PORT")
+    )
+
+
+def _api_base_url_env_is_explicit(
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+) -> bool:
+    """Return true when the host environment carries a non-derivable API URL.
+
+    A default-valued ``AWF_API_BASE_URL`` is treated as non-explicit when
+    ``AWF_API_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged. If a project ``.env`` was
+    sourced into the host shell, a matching default URL is also non-explicit
+    when the merged Compose environment carries the API host-port override.
+    """
+
+    api_base_url = _env_value(environ, "AWF_API_BASE_URL")
+    if api_base_url is None:
+        return False
+    if api_base_url != DEFAULT_LOCAL_SERVICE_API_BASE_URL:
+        return True
+    if _env_value(environ, "AWF_API_HOST_PORT"):
+        return False
+    return not (
+        _env_value(service_environ, "AWF_API_HOST_PORT")
+        and _project_dotenv_value("AWF_API_BASE_URL") == api_base_url
     )
 
 
