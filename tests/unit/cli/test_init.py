@@ -1850,10 +1850,16 @@ def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
 def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> None:
     """Regression: avoid duplicate token keys in docker/compose/.env examples."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
+    snippet_start = readme.index("env_example=docker/compose/.env.example")
+    snippet_end = readme.index("uv run --python 3.12 --extra dev awf service bootstrap")
+    snippet = readme[snippet_start:snippet_end]
 
     assert "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)='" in readme
     assert "} > docker/compose/.env" in readme
     assert ">> docker/compose/.env" not in readme
+    assert 'echo "Missing env template: docker/compose/.env.example or .env.example" >&2' in snippet
+    assert "exit 1" in snippet
+    assert snippet.index("exit 1") < snippet.index("{")
 
 
 @pytest.mark.unit

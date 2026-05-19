@@ -122,6 +122,10 @@ env_example=docker/compose/.env.example
 if [ ! -f "$env_example" ]; then
   env_example=.env.example
 fi
+if [ ! -f "$env_example" ]; then
+  echo "Missing env template: docker/compose/.env.example or .env.example" >&2
+  exit 1
+fi
 {
   grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' "$env_example"
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"

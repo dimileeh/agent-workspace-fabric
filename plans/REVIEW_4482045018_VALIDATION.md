@@ -4,50 +4,54 @@ Plan reference: `plans/REVIEW_4482045018_PLAN.md`
 
 ## Requirement Status
 
-- Complete: First-run `docker/compose/.env` seeding now uses
-  `docker/compose/.env.example` as the base when present and overlays matching
-  or root-only assignments from an existing root `.env`.
-  Evidence: `src/awf/cli/main.py`.
-- Complete: Existing env-file non-clobbering behavior is preserved.
-  Evidence: `_seed_env_file()` still returns `kept_existing` before reading any
-  seed or overlay source, and existing tests continue to pass.
-- Complete: `awf init` and `awf service bootstrap` now pass the already
-  resolved `service_env` as `service_environ` to `run_service_bootstrap`.
-  Evidence: `src/awf/cli/main.py`.
-- Complete: `run_service_bootstrap` still supports provider-only overlays for
-  non-CLI callers.
+- Complete: Added regression coverage for a missing explicit `env_file` path.
   Evidence:
-  `tests/unit/service/test_bootstrap.py::test_bootstrap_partial_provider_environment_preserves_local_service_environment`.
-- Complete: `_init_env_example_search_paths` now uses an explicit `seen` set
-  over the full candidate list.
-  Evidence: `src/awf/cli/main.py`.
-- Complete: Focused regression coverage was added or updated for merged compose
-  seeding, preflight environment reuse, and env-example path deduplication.
-  Evidence: tests listed below.
+  `tests/unit/service/test_bootstrap.py::test_bootstrap_falls_back_to_resolved_env_when_explicit_env_file_is_missing`.
+- Complete: Confirmed the new regressions failed before implementation.
+  Evidence: the focused two-test command failed with the bootstrap profile not
+  loading and the docs snippet missing a template guard.
+- Complete: Implemented the smallest bootstrap fallback change.
+  Evidence: `src/awf/service/bootstrap.py` now only passes the caller-supplied
+  `env_file` to `local_service_environ` when that path exists; otherwise it
+  uses `_bootstrap_environment_file(assets)`.
+- Complete: Updated the getting-started shell snippet to guard the missing
+  template case before redirecting output.
+  Evidence: `docs/GETTING_STARTED.md`.
+- Complete: Focused bootstrap and docs validation passed.
+  Evidence: commands below.
+- Complete: Narrow lint and type validation passed.
+  Evidence: commands below.
+- Complete: Full unit validation was attempted and completed, with failures
+  outside the touched behavior documented below.
 
 ## Verification Evidence
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py::test_init_without_path_merges_existing_root_env_into_source_compose_env tests/unit/cli/test_init.py::test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness tests/unit/cli/test_init.py::test_init_without_path_uses_asset_root_compose_env_for_preflight tests/unit/cli/test_service_cli.py::test_service_bootstrap_cli_resolves_settings_from_compose_env tests/unit/service/test_bootstrap.py::test_bootstrap_uses_explicit_service_environment_without_reloading_env_file -q
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_bootstrap.py::test_bootstrap_falls_back_to_resolved_env_when_explicit_env_file_is_missing tests/unit/cli/test_init.py::test_getting_started_compose_env_snippet_replaces_token_placeholders -q
 ```
 
-Result before implementation: failed as expected across the new/updated
-regression tests.
+Result before implementation: failed as expected, `2 failed in 1.37s`.
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py::test_init_without_path_merges_existing_root_env_into_source_compose_env tests/unit/cli/test_init.py::test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness tests/unit/cli/test_init.py::test_init_without_path_uses_asset_root_compose_env_for_preflight tests/unit/cli/test_service_cli.py::test_service_bootstrap_cli_resolves_settings_from_compose_env tests/unit/service/test_bootstrap.py::test_bootstrap_uses_explicit_service_environment_without_reloading_env_file -q
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_bootstrap.py::test_bootstrap_falls_back_to_resolved_env_when_explicit_env_file_is_missing tests/unit/cli/test_init.py::test_getting_started_compose_env_snippet_replaces_token_placeholders -q
 ```
 
-Result after implementation: passed, `5 passed in 4.16s`.
+Result after implementation: passed, `2 passed in 0.95s`.
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py tests/unit/cli/test_service_cli.py tests/unit/service/test_bootstrap.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_bootstrap.py -q
 ```
 
-Result: passed, `158 passed in 17.67s`.
+Result: passed, `31 passed in 1.62s`.
 
 ```bash
-uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py src/awf/service/bootstrap.py tests/unit/cli/test_init.py tests/unit/cli/test_service_cli.py tests/unit/service/test_bootstrap.py
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py -q
+```
+
+Result: passed, `68 passed in 2.93s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf tests
 ```
 
 Result: passed, `All checks passed!`.
@@ -58,6 +62,23 @@ uv run --python 3.12 --extra dev mypy src/awf
 
 Result: passed, `Success: no issues found in 155 source files`.
 
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit -q
+```
+
+Result: failed after completing the suite, `3 failed, 6542 passed in
+1931.33s`. The failures were outside this change:
+
+- `tests/unit/cli/test_cli.py::TestServiceStatusOrphanReporting::test_pretty_output_surfaces_orphan_summary`
+  failed because an existing monkeypatched `resolve_service_settings` lambda
+  did not accept the `environ` keyword.
+- `tests/unit/cli/test_cli.py::TestServiceDoctorBundle::test_cli_service_doctor_fail_path_points_to_bundle_and_issue_template`
+  failed for the same existing monkeypatch signature pattern.
+- `tests/unit/docs/test_public_docs_status.py::test_generated_plan_artifacts_are_not_tracked_public_docs`
+  failed because this branch already has multiple tracked files under
+  `plans/` beyond `plans/PLAN_EXECUTION_PROTOCOL.md`.
+
 ## Gaps
 
-None.
+None for the scoped review feedback. The full unit suite has unrelated
+pre-existing failures as documented above.

@@ -198,10 +198,15 @@ async def run_service_bootstrap(
     )
     if env_file is not None:
         assets = replace(assets, compose_env_file=env_file if env_file.exists() else None)
+    resolved_env_file = (
+        env_file
+        if env_file is not None and env_file.exists()
+        else _bootstrap_environment_file(assets)
+    )
     service_env = (
         dict(service_environ)
         if service_environ is not None
-        else local_service_environ(env_file=env_file or _bootstrap_environment_file(assets))
+        else local_service_environ(env_file=resolved_env_file)
     )
     if provider_environ is not None:
         service_env.update(provider_environ)
