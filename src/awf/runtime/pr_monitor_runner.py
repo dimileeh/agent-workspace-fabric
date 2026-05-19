@@ -887,6 +887,13 @@ class PullRequestMonitorRunner:
             return tuple(command for command in raw_test_commands if isinstance(command, str))
 
     async def _provider_recovery_suppresses_cli(self, workspace_id: str) -> bool:
+        """Return whether provider recovery cooldown suppresses immediate CLI monitor actions.
+
+        If an open breaker is detected for the workspace's current provider/model,
+        this updates monitor task policy so the suppression can survive restarts and
+        returns ``True`` to short-circuit CLI execution. ``False`` is returned only
+        when the workspace cannot be resolved or no cooldown applies.
+        """
         now = datetime.now(UTC)
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)

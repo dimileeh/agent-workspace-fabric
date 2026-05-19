@@ -3757,6 +3757,7 @@ async def test_provider_recovery_suppresses_cli_refreshes_stale_task_policy_from
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Validate stale monitor cooldown state is refreshed from updated breaker state."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _configure_provider_monitor_workspace(
         factory,
