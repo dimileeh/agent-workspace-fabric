@@ -786,8 +786,10 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     assert result.exit_code == 0, result.output
     assert captured["preflight_settings"].docker_host == docker_host
     doctor_kwargs = captured["doctor_kwargs"]
+    assert doctor_kwargs["compose_file"] == compose / "local-service.yml"
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert captured["bootstrap_kwargs"]["compose_file"] == compose / "local-service.yml"
     assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
 

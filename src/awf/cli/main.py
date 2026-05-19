@@ -1061,7 +1061,7 @@ def _run_init_service_bootstrap(
         raise typer.Exit(code=2) from exc
 
     pretty = fmt == OutputFormat.pretty
-    env_file, env_example = _resolve_service_env_paths()
+    compose_file, env_file, env_example = _resolve_service_compose_paths()
     env_action = "skipped"
     env_error: dict[str, str] | None = None
     if write_env:
@@ -1091,6 +1091,7 @@ def _run_init_service_bootstrap(
                 strict_providers=frozenset(),
                 provider_environ=preflight_env,
                 environ=preflight_env,
+                compose_file=compose_file,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -1178,6 +1179,7 @@ def _run_init_service_bootstrap(
             run_service_bootstrap(
                 settings,
                 options=options,
+                compose_file=compose_file,
                 env_file=env_file,
                 provider_environ=service_env,
             ),
@@ -1492,7 +1494,7 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    env_file, _ = _resolve_service_env_paths()
+    compose_file, env_file, _ = _resolve_service_compose_paths()
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1503,6 +1505,7 @@ def service_bootstrap(
             run_service_bootstrap(
                 settings,
                 options=options,
+                compose_file=compose_file,
                 env_file=env_file,
                 provider_environ=service_env,
             )
