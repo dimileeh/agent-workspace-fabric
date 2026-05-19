@@ -638,8 +638,8 @@ def _handle_response(
     *,
     pretty_items: bool = False,
 ) -> None:
+    method, request_url = _request_context(response)
     if response.status_code >= 400:
-        method, request_url = _request_context(response)
         if request_url is not None:
             method = method or "HTTP"
             typer.echo(

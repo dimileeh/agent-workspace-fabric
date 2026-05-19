@@ -18,6 +18,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from awf.cli import main as cli_main
 from awf.cli.main import app
 
 _runner = CliRunner()
@@ -46,6 +47,18 @@ def _assert_control_headers(
 ) -> None:
     assert headers["Idempotency-Key"] == idempotency_key
     assert headers["If-Match"] == if_match
+
+
+@pytest.mark.unit
+def test_handle_response_pops_request_context_for_success() -> None:
+    response = _mock_response(status_code=200, payload={"ok": True})
+    cli_main._CALL_CONTEXT[id(response)] = ("GET", "http://localhost:8000/v1/workspaces")
+
+    try:
+        cli_main._handle_response(response, cli_main.OutputFormat.json)
+        assert id(response) not in cli_main._CALL_CONTEXT
+    finally:
+        cli_main._CALL_CONTEXT.pop(id(response), None)
 
 
 class TestWorkspaceCreate:
