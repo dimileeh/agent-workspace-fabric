@@ -610,10 +610,10 @@ def init(
         True,
         "--write-env/--no-write-env",
         help=(
-            "When bootstrapping the local service, copy `.env.example` to "
-            "the Compose env target if it is missing. Target path: "
-            "docker/compose/.env. Uses `.env` when Compose assets are "
-            "unavailable. Has no effect in project-onboarding mode."
+            "When bootstrapping the local service, seed the Compose env target "
+            "if it is missing. Target path: docker/compose/.env. Uses existing "
+            "`.env` values before example templates, and uses `.env` when "
+            "Compose assets are unavailable. Has no effect in project-onboarding mode."
         ),
     ),
     timeout_seconds: float = typer.Option(
@@ -859,10 +859,10 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
 
 
 def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
-    """Return the compose, env, and example files used by service commands.
+    """Return the compose, env, and env seed source files used by service commands.
 
     If the verified source checkout contains local Compose assets, return those
-    assets as absolute paths and use a sibling `.env.example` if present.
+    assets as absolute paths and prefer an existing root `.env` before examples.
     """
 
     from awf.service import bootstrap as bootstrap_mod
@@ -879,17 +879,19 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
             return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
         compose_file = compose_local_service
         compose_env = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        fallback_example = resolved_asset_root / ".env.example"
+        root_env = resolved_asset_root / ".env"
         compose_example = compose_env.with_name(".env.example")
-        if compose_example.exists():
-            return compose_file, compose_env, compose_example
+        fallback_example = resolved_asset_root / ".env.example"
+        for seed_source in (root_env, compose_example, fallback_example):
+            if seed_source.exists():
+                return compose_file, compose_env, seed_source
         return compose_file, compose_env, fallback_example
 
     return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
 
 
 def _resolve_service_env_paths() -> tuple[Path, Path]:
-    """Return the target env file and example file used by service commands."""
+    """Return the target env file and seed source used by service commands."""
 
     _, env_file, env_example = _resolve_service_compose_paths()
     return env_file, env_example

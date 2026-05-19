@@ -587,6 +587,44 @@ def test_init_without_path_prefers_compose_env_example_over_root(
 
 
 @pytest.mark.unit
+def test_init_without_path_migrates_existing_root_env_to_source_compose_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Prefer a working root `.env` before source-checkout example templates."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_example = compose / ".env.example"
+    compose_example.write_text(
+        "AWF_API_TOKEN=compose-example\nAWF_POSTGRES_PASSWORD=compose-example\n",
+        encoding="utf-8",
+    )
+    root_example = tmp_path / ".env.example"
+    root_example.write_text(
+        "AWF_API_TOKEN=root-example\nAWF_POSTGRES_PASSWORD=root-example\n",
+        encoding="utf-8",
+    )
+    root_env = tmp_path / ".env"
+    root_env.write_text(
+        "AWF_API_TOKEN=migrated-token\nAWF_POSTGRES_PASSWORD=migrated-password\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    env_file = compose / ".env"
+    assert env_file.exists()
+    assert env_file.read_bytes() == root_env.read_bytes()
+    assert "wrote docker/compose/.env from .env" in result.output
+    assert "migrated-token" not in result.output
+    assert "migrated-password" not in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_seed_non_root_compose_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
