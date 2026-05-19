@@ -1028,6 +1028,7 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     assert captured["preflight_settings"].docker_host == docker_host
     doctor_kwargs = captured["doctor_kwargs"]
     assert doctor_kwargs["compose_file"] == compose / "local-service.yml"
+    assert doctor_kwargs["compose_env_file"] == compose / ".env"
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["compose_file"] == compose / "local-service.yml"
@@ -1085,6 +1086,7 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     assert (compose / ".env").read_bytes() == compose_example.read_bytes()
     assert captured["preflight_settings"].docker_host == docker_host
     doctor_kwargs = captured["doctor_kwargs"]
+    assert doctor_kwargs["compose_env_file"] == compose / ".env"
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert "provider_environ" not in captured["bootstrap_kwargs"]
