@@ -122,7 +122,7 @@ def test_bootstrap_stage_runner_does_not_block_event_loop(tmp_path: Path) -> Non
 def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     source_root = _source_checkout_root()
-    expected_env = dict(os.environ)
+    expected_env = None
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -254,7 +254,7 @@ def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
 
     assert result.service_status["status"] == "ok"
     assert calls
-    expected_env = dict(os.environ)
+    expected_env = None
     assert [call.get("env") for call in calls] == [expected_env] * len(calls)
 
 

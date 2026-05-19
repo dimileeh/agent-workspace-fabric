@@ -399,7 +399,10 @@ def _compose_command(
     return tuple(args)
 
 
-def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str]:
+def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Build subprocess environment overrides, or return ``None`` when unchanged."""
+    if not environ:
+        return None
     return {**os.environ, **dict(environ)}
 
 

@@ -168,6 +168,7 @@ def _task_policy_with_monitor_circuit_retry_state(
     cooldown_until: datetime | None,
     last_reason_code: str | None,
 ) -> dict[str, Any]:
+    """Return workspace task policy with monitor retry metadata for provider recovery."""
     policy = dict(task_policy or {})
     raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
     recovery_state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
