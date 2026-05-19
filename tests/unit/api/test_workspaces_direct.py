@@ -81,11 +81,22 @@ def _payload(
 
 
 def _route_settings() -> Settings:
-    return Settings(_env_file=None)
+    # Direct route tests are not disk-pressure tests; keep them independent of
+    # host runner free space while exercising workspace route behavior.
+    return Settings(_env_file=None, min_free_disk_bytes=0)
 
 
 def _closed_connection_error() -> InterfaceError:
     return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+
+
+@pytest.mark.unit
+def test_route_settings_do_not_inherit_host_disk_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_MIN_FREE_DISK_BYTES", "999999999999999")
+
+    assert _route_settings().min_free_disk_bytes == 0
 
 
 class TestCreateDirect:
@@ -361,18 +372,20 @@ class TestGetDirect:
 class TestListDirect:
     @pytest.mark.unit
     async def test_returns_rows(self, session: AsyncSession) -> None:
-        await create_workspace(
+        first = await create_workspace(
             payload=_payload(provider_readiness_override=True, task_title="a"),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
         )
-        await create_workspace(
+        second = await create_workspace(
             payload=_payload(provider_readiness_override=True, task_title="b"),
             idempotency_key=None,
             settings=_route_settings(),
             session=session,
         )
+        assert isinstance(first, WorkspaceAcceptedResponse)
+        assert isinstance(second, WorkspaceAcceptedResponse)
         # Flush so the query sees the inserts in the same session.
         await session.flush()
         results = await _list_workspace_responses(session, limit=10)

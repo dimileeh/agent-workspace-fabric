@@ -72,6 +72,24 @@ Retry with the same raw grace override used by the first adoption request. An
 omitted/null value means "use the profile policy" and is stored separately from
 an explicit `900`, even when the resolved profile default is also 900 seconds.
 
+## Troubleshooting `Not Found` from `adopt-pr`
+
+If `awf workspace adopt-pr` returns `Not Found` before any workspace appears:
+
+- Verify the CLI is targeting the same API root as your REST calls.
+- For plain API roots, `AWF_CLI_BASE_URL` can be `http://host:8000`, `http://host:8000/`,
+  `http://host:8000/v1`, or `http://host:8000/v1/`.
+- For reverse-proxy setups, set `AWF_CLI_BASE_URL` to the proxy mount
+  (for example, `http://host:8000/awf` or `http://host:8000/awf/v1`).
+- If your base URL already ends in `/v1`, the CLI no longer doubles the prefix.
+  In other words, `.../v1` + `POST /v1/workspaces/adopt-pr` now resolves to
+  `.../v1/workspaces/adopt-pr`, not `.../v1/v1/workspaces/adopt-pr`.
+- If a direct REST request succeeds with the same command payload, compare the
+  two URLs in logs; the CLI now emits lines like
+  `error: POST <normalized_url> -> HTTP 404` before response output to help
+  spot route-level mismatches quickly. URL debug context redacts token-like query
+  values to avoid secret leakage.
+
 ## Adopt Through REST
 
 REST adoption requires `Authorization: Bearer $AWF_API_TOKEN` but does not
