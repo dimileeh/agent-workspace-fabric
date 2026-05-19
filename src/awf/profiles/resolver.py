@@ -19,7 +19,6 @@ from awf.profiles.models import (
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
 
 __all__ = (
-    "PROFILE_MARKER_PATHS",
     "ProfileResolution",
     "ProfileResolutionError",
     "ProfileResolver",
