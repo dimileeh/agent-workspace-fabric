@@ -12,6 +12,12 @@ _SENSITIVE_QUERY_KEYS = frozenset(
         "access_token",
         "secret",
         "authorization",
+        "api_key",
+        "apikey",
+        "key",
+        "password",
+        "passwd",
+        "auth",
     }
 )
 _URL_SECRET_MARKER = "***"

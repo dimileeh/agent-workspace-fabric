@@ -56,10 +56,35 @@ def test_sanitize_request_url_redacts_sensitive_query_values() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "query_key",
+    ("api_key", "apikey", "key", "password", "passwd", "auth"),
+)
+def test_sanitize_request_url_redacts_common_sensitive_query_aliases(
+    query_key: str,
+) -> None:
+    sanitized_url = sanitize_request_url(
+        f"http://host:8000/v1/workspaces?tenant=one&{query_key}=top-secret"
+    )
+
+    assert f"{query_key}=top-secret" not in sanitized_url
+    assert f"{query_key}=%2A%2A%2A" in sanitized_url
+    assert "tenant=one" in sanitized_url
+
+
+@pytest.mark.unit
 def test_sanitize_request_url_preserves_ipv6_authority() -> None:
     assert (
         sanitize_request_url("http://[::1]:8000/v1/workspaces?token=top-secret")
         == "http://[::1]:8000/v1/workspaces?token=%2A%2A%2A"
+    )
+
+
+@pytest.mark.unit
+def test_sanitize_request_url_preserves_ipv6_authority_when_userinfo_is_redacted() -> None:
+    assert (
+        sanitize_request_url("http://operator:secret@[::1]:8000/v1/workspaces?token=top-secret")
+        == "http://***@[::1]:8000/v1/workspaces?token=%2A%2A%2A"
     )
 
 
