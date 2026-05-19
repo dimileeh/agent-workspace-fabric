@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
@@ -14,16 +15,11 @@ ProfilePreview = Callable[..., Any]
 ConfigResolver = Callable[[ServiceSettings], dict[str, Any]]
 ConsoleChecker = Callable[[str], Awaitable[bool]]
 DEFAULT_LOCAL_CONSOLE_URL = "http://localhost:3000"
-
-_PROFILE_MARKER_PATHS = (
-    ".awf/workspace.yml",
-    ".awf/workspace.yaml",
-    "awf.workspace.yml",
-    "awf.workspace.yaml",
-)
+_PROFILE_MARKER_PATHS: tuple[str, ...] = PROFILE_MARKER_PATHS
 
 
 def _project_has_awf_profile(path: Path) -> bool:
+    """Check whether the project root contains a workspace profile marker file."""
     return any((path / rel).is_file() for rel in _PROFILE_MARKER_PATHS)
 
 
@@ -39,6 +35,23 @@ async def collect_smoke_report(
     config_resolver: ConfigResolver | None = None,
     console_checker: ConsoleChecker | None = None,
 ) -> dict[str, Any]:
+    """Run smoke checks for a project and return a phase-by-phase status report.
+
+    Args:
+        project: Path to the project root under inspection.
+        settings: Service settings for resolving service/API/console URLs.
+        mocked_local: If true, marks expected-live failures as warnings where safe.
+        demo_path: Optional fallback project root used when ``project`` is missing.
+        service_collector: Optional override for service health checks.
+        auth_collector: Optional override for provider readiness checks.
+        profile_preview: Optional override for profile inspection behavior.
+        config_resolver: Optional override for API/console configuration.
+        console_checker: Optional override for console URL reachability checks.
+
+    Returns:
+        Structured smoke report including phase statuses, evidence, and next actions.
+
+    """
     mode = "mocked_local" if mocked_local else "live"
     phases: list[dict[str, Any]] = []
     overall: list[str] = []
@@ -143,6 +156,7 @@ async def _phase_service_readiness(
     mocked_local: bool,
     service_collector: ServiceCollector | None,
 ) -> dict[str, Any]:
+    """Probe AWF service health for smoke readiness."""
     try:
         collector = service_collector or _default_service_collector
         result = await collector(settings)
@@ -181,6 +195,7 @@ def _phase_auth_readiness(
     mocked_local: bool,
     auth_collector: AuthCollector | None,
 ) -> dict[str, Any]:
+    """Evaluate provider readiness and derive auth phase status."""
     try:
         collector = auth_collector or _default_auth_collector
         result = collector(settings)
@@ -248,17 +263,32 @@ def _phase_profile_preview(
     mocked_local: bool,
     profile_preview: ProfilePreview | None,
 ) -> tuple[Any, dict[str, Any]]:
+    """Collect the smoke profile preview phase result and metadata."""
+    has_disk_profile = profile_preview is None and _project_has_awf_profile(project)
     try:
-        preview_fn = profile_preview or _default_profile_preview
+        if profile_preview is not None:
+            preview_fn = profile_preview
+        elif has_disk_profile:
+            preview_fn = _default_disk_profile_preview
+        else:
+            preview_fn = _default_profile_preview
         preview = preview_fn(project)
     except Exception as exc:
+        if has_disk_profile:
+            action = (
+                "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, "
+                "awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint "
+                "checks."
+            )
+        else:
+            action = "Verify the project is a valid AWF workspace project."
         return None, {
             "name": "profile_preview",
             "status": "fail",
             "reason_code": "SMOKE_PROFILE_PREVIEW_FAILED",
             "message": f"Project profile preview failed: {exc}",
             "evidence": {"project": str(project), "error": str(exc)},
-            "action": "Verify the project is a valid AWF workspace project.",
+            "action": action,
         }
 
     detected_template = getattr(getattr(preview, "draft", None), "template", "unknown")
@@ -288,6 +318,7 @@ def _phase_profile_preview(
 
 
 def _extract_validation_commands(preview: Any) -> list[str]:
+    """Extract ordered validate commands from a preview profile payload."""
     try:
         profile_phases = getattr(getattr(preview, "draft", None), "profile", None)
         if profile_phases is None:
@@ -305,6 +336,7 @@ def _extract_validation_commands(preview: Any) -> list[str]:
 
 
 def _phase_validation(validation_commands: list[str]) -> dict[str, Any]:
+    """Build validation phase status from discovered commands."""
     if validation_commands:
         return {
             "name": "validation",
@@ -328,6 +360,7 @@ def _phase_workspace_request(
     preview: Any,
     project: Path,
 ) -> dict[str, Any]:
+    """Build the workspace-request phase from the preview profile."""
     try:
         from awf.profiles.onboarding import _smoke_request
 
@@ -372,6 +405,7 @@ def _phase_pr_monitor(
     mocked_local: bool,
     settings: ServiceSettings,
 ) -> dict[str, Any]:
+    """Report PR monitor readiness for mocked-local versus live mode."""
     if mocked_local:
         return {
             "name": "pr_monitor",
@@ -407,6 +441,7 @@ def _resolve_config(
     settings: ServiceSettings,
     config_resolver: ConfigResolver | None,
 ) -> dict[str, Any]:
+    """Resolve smoke runtime config, with optional override support."""
     resolver = config_resolver or _default_config_resolver
     return resolver(settings)
 
@@ -416,6 +451,7 @@ async def _phase_console_links(
     *,
     console_checker: ConsoleChecker | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
+    """Resolve configured or local console URL and build smoke console-link evidence."""
     api_base = resolved_config.get("api_base_url", "http://localhost:8000")
     console_url = resolved_config.get("console_url")
     links: dict[str, str] = {
@@ -493,6 +529,7 @@ async def _phase_console_links(
 
 
 def _compute_overall_status(phase_statuses: list[str]) -> str:
+    """Collapse per-phase status values into the overall smoke status."""
     has_fail = any(s == "fail" for s in phase_statuses)
     has_warn = any(s == "warn" for s in phase_statuses)
     if has_fail:
@@ -503,6 +540,7 @@ def _compute_overall_status(phase_statuses: list[str]) -> str:
 
 
 def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
+    """Collect non-no-op actionable hints from smoke phases."""
     actions: list[str] = []
     for phase in phases:
         action = phase.get("action", "")
@@ -512,6 +550,7 @@ def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
+    """Check AWF service healthz endpoint and return status map."""
     import httpx
 
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -522,6 +561,7 @@ async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any
 
 
 async def _default_console_checker(url: str) -> bool:
+    """Return whether a URL responds as reachable console endpoint."""
     import httpx
 
     try:
@@ -533,18 +573,33 @@ async def _default_console_checker(url: str) -> bool:
 
 
 def _default_auth_collector(settings: ServiceSettings) -> dict[str, Any]:
+    """Resolve current provider readiness from the auth provider subsystem."""
     from awf.service.provider_readiness import collect_agent_readiness
 
     return collect_agent_readiness(settings)
 
 
 def _default_profile_preview(project: Path) -> Any:
+    """Return an onboarding-generated preview for projects without an on-disk profile."""
     from awf.profiles.onboarding import preview_project_onboarding
 
     return preview_project_onboarding(project)
 
 
+def _default_disk_profile_preview(project: Path) -> Any:
+    """Resolve a workspace profile from disk and return a smoke preview object."""
+    from awf.profiles import resolve_workspace_profile
+    from awf.profiles.onboarding import preview_workspace_profile
+
+    if not _project_has_awf_profile(project):
+        raise FileNotFoundError(f"no on-disk workspace profile marker file found in {project}")
+
+    resolution = resolve_workspace_profile(worktree_path=project)
+    return preview_workspace_profile(project, resolution)
+
+
 def _default_config_resolver(settings: ServiceSettings) -> dict[str, Any]:
+    """Build smoke config values consumed by console-link reporting."""
     result: dict[str, Any] = {
         "api_base_url": settings.api_base_url,
     }

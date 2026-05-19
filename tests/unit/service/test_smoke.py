@@ -11,6 +11,7 @@ import pytest
 from awf.service.smoke import (
     _default_config_resolver,
     _default_console_checker,
+    _default_disk_profile_preview,
     _default_service_collector,
     _extract_validation_commands,
     _phase_service_readiness,
@@ -381,6 +382,169 @@ class TestCollectSmokeReportLiveMode:
         evidence = profile_phase.get("evidence", {})
         assert evidence.get("template") == "node-nextjs"
 
+    async def test_profile_preview_prefers_on_disk_profile(self, tmp_path: Path) -> None:
+        """Ensure on-disk workspace profile path wins over autodetection."""
+        (tmp_path / "apps" / "api").mkdir(parents=True)
+        (tmp_path / "apps" / "worker").mkdir(parents=True)
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yml").write_text(
+            "awf:\n"
+            "  name: multi-service\n"
+            "  confidence: medium\n"
+            "  phases:\n"
+            "    validate:\n"
+            "      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "ok"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_READY"
+        assert profile_phase["evidence"]["template"] == "multi-service"
+
+        validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
+        assert validation_phase["reason_code"] == "SMOKE_VALIDATION_READY"
+        assert validation_phase["evidence"]["commands"] == ["pytest -q"]
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
+
+    async def test_profile_preview_prefers_root_awf_workspace_yaml(self, tmp_path: Path) -> None:
+        """Prefer root workspace profile when a marker exists at repository root."""
+        profile_path = tmp_path / "awf.workspace.yml"
+        profile_path.write_text(
+            "awf:\n  name: root-profile\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "ok"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_READY"
+        assert profile_phase["evidence"]["template"] == "root-profile"
+
+        validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
+        assert validation_phase["reason_code"] == "SMOKE_VALIDATION_READY"
+        assert validation_phase["evidence"]["commands"] == ["pytest -q"]
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
+
+    async def test_profile_preview_prefers_on_disk_profile_yaml_extension(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yaml").write_text(
+            "awf:\n"
+            "  name: multi-service-yaml\n"
+            "  confidence: medium\n"
+            "  phases:\n"
+            "    validate:\n"
+            "      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "ok"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_READY"
+        assert profile_phase["evidence"]["template"] == "multi-service-yaml"
+
+        validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
+        assert validation_phase["reason_code"] == "SMOKE_VALIDATION_READY"
+        assert validation_phase["evidence"]["commands"] == ["pytest -q"]
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
+
+    async def test_profile_preview_prefers_root_awf_workspace_yaml_extension(
+        self, tmp_path: Path
+    ) -> None:
+        """Prefer root `.yaml` workspace profile when provided at repository root."""
+        profile_path = tmp_path / "awf.workspace.yaml"
+        profile_path.write_text(
+            "awf:\n  name: root-profile-yaml\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "ok"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_READY"
+        assert profile_phase["evidence"]["template"] == "root-profile-yaml"
+
+        validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
+        assert validation_phase["reason_code"] == "SMOKE_VALIDATION_READY"
+        assert validation_phase["evidence"]["commands"] == ["pytest -q"]
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_READY"
+
+    async def test_profile_preview_precedence_prefers_awf_directory(self, tmp_path: Path) -> None:
+        """Prefer `.awf/workspace.yml` over `awf.workspace.yml` when both exist."""
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yml").write_text(
+            "awf:\n  name: from-awf-dir\n  confidence: medium\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "awf.workspace.yml").write_text(
+            "awf:\n  name: from-root\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["evidence"]["template"] == "from-awf-dir"
+
 
 @pytest.mark.unit
 class TestCollectSmokeReportMockedMode:
@@ -561,6 +725,74 @@ class TestCollectSmokeReportMockedMode:
         validation_phase = next(p for p in report["phases"] if p["name"] == "validation")
         assert validation_phase["reason_code"] == "SMOKE_VALIDATION_MISSING"
 
+    async def test_invalid_on_disk_profile_fails_with_profile_preview_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Report preview failure when .awf/workspace.yml is invalid."""
+        (tmp_path / ".awf").mkdir()
+        (tmp_path / ".awf" / "workspace.yml").write_text(
+            "name: bad\nservices:\n  - name: db\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "fail"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
+        assert profile_phase.get("evidence", {}).get("error")
+        assert (
+            profile_phase["action"]
+            == "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint checks."
+        )
+        assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_FAILED"
+
+    async def test_invalid_root_awf_workspace_yaml_fails_with_profile_preview_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Report preview failure when awf.workspace.yml is invalid."""
+        (tmp_path / "awf.workspace.yml").write_text(
+            "awf:\n  name: bad\n  services:\n    - name: db\n",
+            encoding="utf-8",
+        )
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "fail"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
+        assert profile_phase.get("evidence", {}).get("error")
+        assert (
+            profile_phase["action"]
+            == "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint checks."
+        )
+        assert profile_phase["reason_code"] != "SMOKE_PROFILE_NOT_DETECTED"
+
+        workspace_request_phase = next(
+            p for p in report["phases"] if p["name"] == "workspace_request"
+        )
+        assert workspace_request_phase["status"] == "fail"
+        assert workspace_request_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_FAILED"
+
     async def test_workspace_request_ready_when_smoke_request_valid(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
 
@@ -710,6 +942,21 @@ class TestCollectSmokeReportMockedMode:
 
 
 @pytest.mark.unit
+class TestDefaultDiskProfilePreview:
+    def test_default_disk_profile_preview_preserves_profile_yaml(self, tmp_path: Path) -> None:
+        """Smoke preview should preserve raw workspace YAML from disk."""
+        (tmp_path / ".awf").mkdir()
+        profile_path = tmp_path / ".awf" / "workspace.yml"
+        profile_yaml = (
+            "awf:\n  name: preserved-profile\n  phases:\n    validate:\n      - pytest -q\n"
+        )
+        profile_path.write_text(profile_yaml, encoding="utf-8")
+
+        preview = _default_disk_profile_preview(tmp_path)
+        assert preview.draft.yaml == profile_yaml
+
+
+@pytest.mark.unit
 class TestCollectSmokeReportExceptionPaths:
     async def test_service_collector_exception_returns_fail_phase(self, tmp_path: Path) -> None:
         async def _failing_service(settings, *, http_client=None):
@@ -846,6 +1093,48 @@ class TestCollectSmokeReportExceptionPaths:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
         assert auth_phase["status"] == "fail"
 
+    async def test_profile_removed_between_checks_returns_preview_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return preview failure when a disk profile disappears before loading."""
+        profile_path = tmp_path / ".awf" / "workspace.yml"
+        profile_path.parent.mkdir()
+        profile_path.write_text(
+            "awf:\n  name: generic\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+
+        state = {"calls": 0}
+
+        def _flaky_has_profile(_path: Path) -> bool:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                profile_path.unlink()
+                return True
+            return False
+
+        monkeypatch.setattr("awf.service.smoke._project_has_awf_profile", _flaky_has_profile)
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=None,
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "fail"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
+        assert profile_phase["action"] == (
+            "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, "
+            "awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint "
+            "checks."
+        )
+
     async def test_profile_preview_exception_returns_fail(self, tmp_path: Path) -> None:
         def _failing_preview(project):
             raise OSError("cannot read directory")
@@ -863,7 +1152,7 @@ class TestCollectSmokeReportExceptionPaths:
         profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
         assert profile_phase["status"] == "fail"
         assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
-        assert "cannot read directory" in profile_phase["message"]
+        assert profile_phase.get("evidence", {}).get("error")
 
     async def test_extract_validation_commands_returns_empty_when_draft_profile_is_none(
         self, tmp_path: Path
@@ -1191,6 +1480,21 @@ class TestCollectSmokeReportExceptionPaths:
 
             result = _default_profile_preview(Path("/tmp"))
         assert result is not None
+
+    def test_default_disk_profile_preview_direct_call(self, tmp_path: Path) -> None:
+        """Call the on-disk profile preview helper and return the parsed preview."""
+        workspace_dir = tmp_path / ".awf"
+        workspace_dir.mkdir()
+        (workspace_dir / "workspace.yml").write_text(
+            "awf:\n  name: generic\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+
+        result = _default_disk_profile_preview(tmp_path)
+        assert result.draft.template == "generic"
+        assert result.draft.yaml
+        assert "awf:" in result.draft.yaml
+        assert result.inspection.detected_template == "generic"
 
     async def test_workspace_request_fails_when_smoke_returns_non_dict(
         self, tmp_path: Path
