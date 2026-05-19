@@ -756,6 +756,33 @@ def test_request_admission_reuses_limiter_without_app_state() -> None:
     assert rejected.metadata["reason_code"] == "STATELESS_REQUEST_RATE_LIMITED"
 
 
+def test_request_admission_ensures_bearer_marker_from_request_token() -> None:
+    request = _request(authorization="Bearer shared-secret")
+
+    request_admission.ensure_bearer_auth_verified_from_header(
+        request,
+        expected_token="shared-secret",
+    )
+    identity = request_admission.extract_request_identity(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert request_admission.request_has_verified_bearer_auth(request)
+    assert identity.identity_type == "bearer_token"
+
+
+def test_request_admission_ensures_bearer_marker_ignores_mismatch() -> None:
+    request = _request(authorization="Bearer wrong-secret")
+
+    request_admission.ensure_bearer_auth_verified_from_header(
+        request,
+        expected_token="shared-secret",
+    )
+
+    assert not request_admission.request_has_verified_bearer_auth(request)
+
+
 @pytest.mark.unit
 def test_request_admission_direct_limiter_tolerates_non_extensible_test_objects() -> None:
     class _Slotless:
