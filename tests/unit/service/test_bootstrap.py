@@ -38,8 +38,31 @@ def _settings(tmp_path: Path) -> ServiceSettings:
     )
 
 
-def _source_checkout_root() -> Path:
-    return Path(bootstrap.__file__).resolve().parents[3]
+def _write_source_checkout(root: Path) -> Path:
+    """Write the minimal source tree required by bootstrap asset discovery."""
+
+    (root / "docker" / "compose").mkdir(parents=True)
+    (root / "docker" / "agent-runtime.Dockerfile").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+    (root / "docker" / "control-plane.Dockerfile").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+    (root / "docker" / "compose" / "local-service.yml").write_text(
+        "services: {}\n",
+        encoding="utf-8",
+    )
+    (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (root / "src" / "awf").mkdir(parents=True)
+    (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def source_checkout_root(tmp_path: Path) -> Path:
+    return _write_source_checkout(tmp_path / "default-source-checkout")
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +73,18 @@ def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         "LOCAL_SERVICE_COMPOSE_ENV_FILE",
         tmp_path / "missing.env",
         raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bootstrap_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    source_checkout_root: Path,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "_bootstrap_asset_root_candidates",
+        lambda: (source_checkout_root,),
     )
 
 
@@ -119,9 +154,12 @@ def test_bootstrap_stage_runner_does_not_block_event_loop(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
+def test_bootstrap_runs_expected_command_sequence(
+    tmp_path: Path,
+    source_checkout_root: Path,
+) -> None:
     calls: list[list[str]] = []
-    source_root = _source_checkout_root()
+    source_root = source_checkout_root
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -772,6 +810,7 @@ def test_bootstrap_falls_back_to_resolved_env_when_explicit_env_file_is_missing(
 def test_bootstrap_passes_compose_env_file_when_available(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    source_checkout_root: Path,
 ) -> None:
     compose_env_file = tmp_path / "docker" / "compose" / ".env"
     compose_env_file.parent.mkdir(parents=True)
@@ -801,7 +840,7 @@ def test_bootstrap_passes_compose_env_file_when_available(
 
     assert result.service_status["status"] == "ok"
     assert "--env-file" not in calls[0]
-    source_root = _source_checkout_root()
+    source_root = source_checkout_root
     for call in calls[1:]:
         assert call[:6] == [
             "docker",
@@ -817,9 +856,10 @@ def test_bootstrap_passes_compose_env_file_when_available(
 def test_bootstrap_resolves_source_assets_when_called_outside_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    source_checkout_root: Path,
 ) -> None:
     calls: list[list[str]] = []
-    source_root = _source_checkout_root()
+    source_root = source_checkout_root
     outside_cwd = tmp_path / "outside"
     outside_cwd.mkdir()
     monkeypatch.chdir(outside_cwd)
@@ -963,9 +1003,10 @@ def test_bootstrap_resolves_asset_root_compose_env_file(
 @pytest.mark.unit
 def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
     tmp_path: Path,
+    source_checkout_root: Path,
 ) -> None:
     calls: list[list[str]] = []
-    source_root = _source_checkout_root()
+    source_root = source_checkout_root
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -1211,7 +1252,10 @@ def test_bootstrap_timeout_reports_last_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_bootstrap_compose_failure_stops_with_stage_context(tmp_path: Path) -> None:
+def test_bootstrap_compose_failure_stops_with_stage_context(
+    tmp_path: Path,
+    source_checkout_root: Path,
+) -> None:
     calls: list[list[str]] = []
     status_calls = 0
 
@@ -1244,7 +1288,7 @@ def test_bootstrap_compose_failure_stops_with_stage_context(tmp_path: Path) -> N
         )
 
     assert [Path(calls[0][-1]), calls[1][-1], calls[2][-1]] == [
-        _source_checkout_root(),
+        source_checkout_root,
         "postgres",
         "migrate",
     ]
@@ -1360,9 +1404,12 @@ def test_run_subprocess_delegates_to_subprocess_run(
 
 
 @pytest.mark.unit
-def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) -> None:
+def test_bootstrap_skip_agent_runtime_build_omits_build_command(
+    tmp_path: Path,
+    source_checkout_root: Path,
+) -> None:
     calls: list[list[str]] = []
-    compose_file = str(_source_checkout_root() / "docker/compose/local-service.yml")
+    compose_file = str(source_checkout_root / "docker/compose/local-service.yml")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
