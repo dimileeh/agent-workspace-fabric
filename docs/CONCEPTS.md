@@ -179,10 +179,11 @@ AWF’s local service compose stack keeps container ports stable (`postgres:5432
 - `AWF_POSTGRES_HOST_PORT` controls the host-facing Postgres port (default `5433`).
 - `AWF_API_HOST_PORT` controls the host-facing API port (default `8000`).
 
-By default, host bind addresses stay loopback (`127.0.0.1`) so the service remains
-local by default. If `AWF_API_HOST_PORT` changes, client calls (including `awf
-service status`, `awf service doctor`, and `/readyz` checks) that target the local
-API host must use `AWF_API_BASE_URL` (for example
+Postgres stays loopback-bound (`127.0.0.1`) by default. The API preserves Docker's
+legacy default host bind behavior for `8000:8000`, so existing local clients that
+reach the host IP continue to work. If `AWF_API_HOST_PORT` changes, client calls
+(including `awf service status`, `awf service doctor`, and `/readyz` checks) that
+target the local API host must use `AWF_API_BASE_URL` (for example
 `http://localhost:${AWF_API_HOST_PORT}`) so operator tooling and manual requests
 remain aligned with the running service.
 Set `AWF_API_BASE_URL` to that host value before running local status or doctor

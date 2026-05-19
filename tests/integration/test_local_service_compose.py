@@ -16,8 +16,11 @@ def _compose_template_value(value: str, env: dict[str, str]) -> str:
     return default if resolved in (None, "") else resolved
 
 
-def _compose_host_port(mapping: str) -> str:
-    return mapping.split(":", 1)[1].rsplit(":", 1)[0]
+def _compose_published_host_port(mapping: str) -> str:
+    published = mapping.rsplit(":", 1)[0]
+    if published.startswith("127.0.0.1:"):
+        return published.split(":", 1)[1]
+    return published
 
 
 @pytest.mark.integration
@@ -134,7 +137,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert postgres["ports"] == ["127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"]
 
     api = services["api"]
-    assert api["ports"] == ["127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"]
+    assert api["ports"] == ["${AWF_API_HOST_PORT:-8000}:8000"]
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
@@ -165,11 +168,11 @@ def test_local_service_compose_port_templates_support_default_and_override_value
 
     postgres_mapping = services["postgres"]["ports"][0]
     api_mapping = services["api"]["ports"][0]
-    postgres_host = _compose_host_port(postgres_mapping)
-    api_host = _compose_host_port(api_mapping)
+    postgres_host = _compose_published_host_port(postgres_mapping)
+    api_host = _compose_published_host_port(api_mapping)
 
     assert postgres_mapping == "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
-    assert api_mapping == "127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"
+    assert api_mapping == "${AWF_API_HOST_PORT:-8000}:8000"
 
     assert _compose_template_value(postgres_host, {}) == "5433"
     assert _compose_template_value(api_host, {}) == "8000"
