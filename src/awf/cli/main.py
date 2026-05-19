@@ -900,7 +900,7 @@ def _resolve_service_env_paths() -> tuple[Path, Path]:
     return env_file, env_example
 
 
-def _resolve_existing_service_env_file(env_file: Path, _env_seed_source: Path) -> Path:
+def _resolve_existing_service_env_file(env_file: Path) -> Path:
     """Return the existing env file service commands should read."""
 
     if env_file.exists():
@@ -996,31 +996,32 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
     except UnicodeDecodeError:
         return seed_contents
 
+    seed_lines = seed_text.splitlines(keepends=True)
+    overlay_lines = overlay_text.splitlines(keepends=True)
+
     overlay_assignments: dict[str, str] = {}
-    for line in overlay_text.splitlines(keepends=True):
+    for line in overlay_lines:
         key = _env_assignment_key(line)
         if key is not None:
             overlay_assignments[key] = line
 
-    merged_lines: list[str] = []
     seed_keys: set[str] = set()
-    for line in seed_text.splitlines(keepends=True):
+    for line in seed_lines:
         key = _env_assignment_key(line)
-        if key is None:
-            merged_lines.append(line)
-            continue
-        seed_keys.add(key)
-        merged_lines.append(overlay_assignments.get(key, line))
+        if key is not None:
+            seed_keys.add(key)
 
     overlay_last_assignment_index: dict[str, int] = {}
-    for index, line in enumerate(overlay_text.splitlines(keepends=True)):
+    for index, line in enumerate(overlay_lines):
         key = _env_assignment_key(line)
         if key is not None and key not in seed_keys:
             overlay_last_assignment_index[key] = index
 
+    seed_trailing_context: dict[str, list[str]] = {}
     overlay_only_lines: list[str] = []
     pending_context: list[str] = []
-    for index, line in enumerate(overlay_text.splitlines(keepends=True)):
+    last_assignment_key: str | None = None
+    for index, line in enumerate(overlay_lines):
         key = _env_assignment_key(line)
         if key is None:
             pending_context.append(line)
@@ -1029,8 +1030,24 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
             overlay_only_lines.extend(pending_context)
             overlay_only_lines.append(line)
         pending_context = []
-    if overlay_only_lines:
+        last_assignment_key = key
+    if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
+        seed_trailing_context[last_assignment_key] = pending_context
+    elif overlay_only_lines:
         overlay_only_lines.extend(pending_context)
+
+    merged_lines: list[str] = []
+    emitted_seed_trailing_context: set[str] = set()
+    for line in seed_lines:
+        key = _env_assignment_key(line)
+        if key is None:
+            merged_lines.append(line)
+            continue
+        merged_lines.append(overlay_assignments.get(key, line))
+        if key in seed_trailing_context and key not in emitted_seed_trailing_context:
+            merged_lines.extend(seed_trailing_context[key])
+            emitted_seed_trailing_context.add(key)
+
     if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
         merged_lines[-1] = f"{merged_lines[-1]}\n"
     merged_lines.extend(overlay_only_lines)
@@ -1223,7 +1240,7 @@ def _run_init_service_bootstrap(
             env_example,
             env_overlay=_init_env_overlay_source(env_file, env_example),
         )
-    active_env_file = _resolve_existing_service_env_file(env_file, env_example)
+    active_env_file = _resolve_existing_service_env_file(env_file)
 
     if pretty:
         typer.echo("AWF init: local service bootstrap")
@@ -1424,8 +1441,8 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1472,8 +1489,8 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1585,8 +1602,8 @@ def service_readiness(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1667,8 +1684,8 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1726,8 +1743,8 @@ def service_logs(
     from awf.service.config import local_service_environ
     from awf.service.logs import ServiceLogsError, run_service_logs
 
-    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
-    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file)
     compose_env_file = env_file if env_file.exists() else None
     service_env = local_service_environ(env_file=env_file)
     try:

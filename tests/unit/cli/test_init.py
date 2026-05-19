@@ -802,6 +802,59 @@ def test_init_without_path_preserves_trailing_root_env_overlay_context(
 
 
 @pytest.mark.unit
+def test_init_without_path_keeps_trailing_shared_overlay_context_with_seed_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep final shared-key overlay comments adjacent to the overlaid seed key."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "# Root-only service setting",
+                "AWF_ROOT_ONLY=root-value",
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# Keep this note with the migrated API token.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# Keep this note with the migrated API token.",
+                "AWF_COMPOSE_ONLY=compose-default",
+                "# Root-only service setting",
+                "AWF_ROOT_ONLY=root-value",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_seed_non_root_compose_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
