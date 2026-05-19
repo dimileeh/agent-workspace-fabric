@@ -410,6 +410,55 @@ def test_service_logs_passes_source_checkout_compose_env_file(
 
 
 @pytest.mark.unit
+def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///stale-docker.sock")
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "api"])
+
+    assert result.exit_code == 0, result.output
+    args, kwargs = calls[0]
+    assert args == [
+        "docker",
+        "compose",
+        "--env-file",
+        str(compose_env),
+        "-f",
+        str(compose_file),
+        "logs",
+        "--tail",
+        "100",
+        "api",
+    ]
+    env = kwargs["env"]
+    assert isinstance(env, dict)
+    assert env["AWF_DOCKER_HOST"] == docker_host
+    assert env["DOCKER_HOST"] == docker_host
+
+
+@pytest.mark.unit
 def test_service_logs_passes_existing_root_env_file_when_compose_env_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

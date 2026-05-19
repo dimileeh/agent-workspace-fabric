@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import signal
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -67,6 +67,7 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
+        env: Mapping[str, str] | None = None,
     ) -> CompletedProcessLike: ...  # pragma: no cover
 
 
@@ -112,6 +113,7 @@ def run_service_logs(
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
     compose_env_file: Path | None = None,
+    service_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ServiceLogsResult:
     """Run ``docker compose logs`` for the local service stack."""
@@ -119,23 +121,34 @@ def run_service_logs(
     runner = run_subprocess or _run_subprocess
     capture_output = not follow
     compose_file = _resolve_local_service_compose_file(compose_file)
+    docker_env = _docker_cli_environ(service_environ)
     if compose_file == LOCAL_SERVICE_COMPOSE_FILE and not compose_file.exists():
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
+    command = service_logs_command(
+        services=services,
+        tail=tail,
+        follow=follow,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     try:
-        result = runner(
-            service_logs_command(
-                services=services,
-                tail=tail,
-                follow=follow,
-                compose_file=compose_file,
-                compose_env_file=compose_env_file,
-            ),
-            check=False,
-            capture_output=capture_output,
-            text=True,
-        )
+        if docker_env is None:
+            result = runner(
+                command,
+                check=False,
+                capture_output=capture_output,
+                text=True,
+            )
+        else:
+            result = runner(
+                command,
+                check=False,
+                capture_output=capture_output,
+                text=True,
+                env=docker_env,
+            )
     except FileNotFoundError as exc:
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
     except OSError as exc:
@@ -165,8 +178,22 @@ def _run_subprocess(
     check: bool,
     capture_output: bool,
     text: Literal[True],
+    env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
-    return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+    if env is None:
+        return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+    return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
+
+
+def _docker_cli_environ(environ: Mapping[str, str] | None) -> dict[str, str] | None:
+    if environ is None:
+        return None
+    docker_host = environ.get("AWF_DOCKER_HOST") or environ.get("DOCKER_HOST")
+    if not docker_host:
+        return None
+    resolved = dict(environ)
+    resolved["DOCKER_HOST"] = docker_host
+    return resolved
 
 
 def _failure_detail(*, stdout: str, stderr: str, follow: bool = False) -> str:

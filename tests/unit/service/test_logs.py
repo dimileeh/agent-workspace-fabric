@@ -100,6 +100,34 @@ def test_service_logs_returns_captured_output_for_non_follow_success() -> None:
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(tmp_path: Path) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {
+        "AWF_DOCKER_HOST": docker_host,
+        "DOCKER_HOST": "unix:///stale-docker.sock",
+        "PATH": "/usr/bin",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["AWF_DOCKER_HOST"] == docker_host
+    assert env["DOCKER_HOST"] == docker_host
+    assert env["PATH"] == "/usr/bin"
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_failure_mentions_terminal_output() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert kwargs == {"check": False, "capture_output": False, "text": True}
