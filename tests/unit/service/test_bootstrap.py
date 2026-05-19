@@ -623,7 +623,17 @@ def test_bootstrap_uses_explicit_env_file_instead_of_internally_resolved_compose
     intended_env = tmp_path / "resolved" / ".env"
     intended_env.parent.mkdir(parents=True)
     intended_database_url = "postgresql+asyncpg://awf:intended@resolved:5432/awf"
-    intended_env.write_text(f"AWF_DATABASE_URL={intended_database_url}\n", encoding="utf-8")
+    intended_postgres_password = "explicit-env-file-only"
+    intended_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={intended_database_url}",
+                f"AWF_POSTGRES_PASSWORD={intended_postgres_password}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: (asset_root,))
@@ -655,7 +665,6 @@ def test_bootstrap_uses_explicit_env_file_instead_of_internally_resolved_compose
             status_collector=_ok_status_collector,
             sleep=_no_sleep,
             monotonic=lambda: 0.0,
-            provider_environ={"AWF_DATABASE_URL": intended_database_url},
             env_file=intended_env,
         )
     )
@@ -669,6 +678,7 @@ def test_bootstrap_uses_explicit_env_file_instead_of_internally_resolved_compose
         assert isinstance(args, list)
         assert isinstance(environ, dict)
         assert environ["AWF_DATABASE_URL"] == intended_database_url
+        assert environ["AWF_POSTGRES_PASSWORD"] == intended_postgres_password
         assert "COMPOSE_PROFILES" not in environ
         assert str(stale_env) not in args
         assert str(intended_env) in args
