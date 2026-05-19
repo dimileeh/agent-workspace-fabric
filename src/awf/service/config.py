@@ -186,25 +186,40 @@ def resolve_local_service_provider_environ(
 def _can_use_adjacent_provider_env_file(candidate: Path, compose_file: Path) -> bool:
     """Return true when adjacent provider env fallback is trusted for compose_file."""
 
-    if compose_file != LOCAL_SERVICE_COMPOSE_FILE:
+    if not _is_local_service_compose_file_path(compose_file):
         return True
     return _is_local_service_compose_env_path(candidate)
+
+
+def _is_local_service_compose_file_path(path: Path) -> bool:
+    """Return true for the default local-service compose file path."""
+
+    if path == LOCAL_SERVICE_COMPOSE_FILE:
+        return True
+    expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_FILE)
+    if expected is None:
+        expected = Path.cwd() / LOCAL_SERVICE_COMPOSE_FILE
+    return path.resolve() == expected.resolve()
 
 
 def _is_local_service_compose_env_path(path: Path) -> bool:
     """Return true for the compose env file under the verified AWF asset root."""
 
+    expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+    if expected is None:
+        return False
+    return path.resolve() == expected.resolve()
+
+
+def _local_service_asset_path(path: Path) -> Path | None:
+    """Return path resolved under the verified AWF asset root, when available."""
+
     from awf.service import bootstrap as bootstrap_mod
 
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is None:
-        return False
-    expected = (
-        LOCAL_SERVICE_COMPOSE_ENV_FILE
-        if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute()
-        else asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-    )
-    return path.resolve() == expected.resolve()
+        return None
+    return path if path.is_absolute() else asset_root / path
 
 
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:

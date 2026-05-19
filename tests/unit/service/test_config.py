@@ -664,6 +664,29 @@ def test_provider_environ_ignores_cwd_compose_env_without_asset_root(
 
 
 @pytest.mark.unit
+def test_provider_environ_ignores_absolute_default_compose_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env = compose_file.parent / ".env"
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-unrelated-project\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: None)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=compose_file,
+        compose_env_file=None,
+    )
+
+    assert environ == {"PATH": "/usr/bin"}
+
+
+@pytest.mark.unit
 def test_provider_environ_loads_default_compose_env_from_asset_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -679,6 +702,31 @@ def test_provider_environ_loads_default_compose_env_from_asset_root(
         provider_environ=None,
         environ={"PATH": "/usr/bin"},
         compose_file=LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=None,
+    )
+
+    assert environ["AWF_GITHUB_TOKEN"] == "from-asset-root"
+    assert environ["PATH"] == "/usr/bin"
+
+
+@pytest.mark.unit
+def test_provider_environ_loads_absolute_default_compose_env_from_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "awf"
+    compose_file = asset_root / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env = compose_file.parent / ".env"
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-asset-root\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=compose_file,
         compose_env_file=None,
     )
 
