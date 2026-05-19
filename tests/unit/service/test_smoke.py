@@ -943,9 +943,7 @@ class TestCollectSmokeReportMockedMode:
 
 @pytest.mark.unit
 class TestDefaultDiskProfilePreview:
-    async def test_default_disk_profile_preview_preserves_profile_yaml(
-        self, tmp_path: Path
-    ) -> None:
+    def test_default_disk_profile_preview_preserves_profile_yaml(self, tmp_path: Path) -> None:
         """Smoke preview should preserve raw workspace YAML from disk."""
         (tmp_path / ".awf").mkdir()
         profile_path = tmp_path / ".awf" / "workspace.yml"
