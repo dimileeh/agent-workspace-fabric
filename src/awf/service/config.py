@@ -25,6 +25,7 @@ DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
+LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
 
 

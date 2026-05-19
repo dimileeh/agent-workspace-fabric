@@ -12,10 +12,10 @@ from typing import Literal, NotRequired, Protocol, TypedDict
 
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    LOCAL_SERVICE_COMPOSE_FILE,
     ServiceSettings,
     local_service_environ,
 )
-from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
 
 DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0

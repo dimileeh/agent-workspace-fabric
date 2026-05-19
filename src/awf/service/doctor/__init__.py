@@ -18,6 +18,7 @@ from sqlalchemy.engine import make_url
 from awf.service import provider_readiness
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    LOCAL_SERVICE_COMPOSE_FILE,
     ServiceSettings,
     local_service_environ,
 )
@@ -34,7 +35,6 @@ from awf.service.doctor.models import (
     StatusCollector,
     SubprocessRun,
 )
-from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
 
 _REASON_TEXT = _reasons._REASON_TEXT

@@ -11,7 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
-LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
+from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}

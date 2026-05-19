@@ -870,8 +870,7 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     """
 
     from awf.service import bootstrap as bootstrap_mod
-    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE
-    from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
 
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is not None:
@@ -1222,10 +1221,10 @@ def _run_init_service_bootstrap(
 
     if pretty:
         typer.echo("AWF init: local service bootstrap")
-        if env_action == "write_failed" and env_error is not None:
-            typer.echo(_init_env_warning(env_error))
         if write_env:
-            if env_action == "kept_existing":
+            if env_action == "write_failed" and env_error is not None:
+                typer.echo(_init_env_warning(env_error))
+            elif env_action == "kept_existing":
                 typer.echo(f"  kept existing {_init_display_path(env_file)}")
             elif env_action == "wrote_from_example":
                 typer.echo(

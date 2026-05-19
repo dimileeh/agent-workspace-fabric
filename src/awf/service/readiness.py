@@ -12,10 +12,9 @@ from typing import Any, Literal, Protocol, cast
 
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.onboarding import preview_project_onboarding
-from awf.service.config import ServiceSettings
+from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE, ServiceSettings
 from awf.service.doctor import collect_doctor_report
 from awf.service.doctor.models import DoctorReport
-from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
     UNKNOWN_FAILURE_REASON,
