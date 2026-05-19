@@ -4862,6 +4862,7 @@ class PullRequestMonitorRunner:
         fetch_result = await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",
@@ -4890,6 +4891,7 @@ class PullRequestMonitorRunner:
                 remote_blob_result = await self._deps.runner.run(
                     [
                         "git",
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
                         str(worktree_path),
                         "rev-parse",
@@ -4903,6 +4905,7 @@ class PullRequestMonitorRunner:
                 worktree_blob_result = await self._deps.runner.run(
                     [
                         "git",
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
                         str(worktree_path),
                         "hash-object",
@@ -4935,6 +4938,7 @@ class PullRequestMonitorRunner:
             diff_result = await self._deps.runner.run(
                 [
                     "git",
+                    *git_safe_directory_config_args(worktree_path),
                     "-C",
                     str(worktree_path),
                     "diff",
@@ -5056,6 +5060,7 @@ class PullRequestMonitorRunner:
         fetch_result = await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",
@@ -5091,7 +5096,15 @@ class PullRequestMonitorRunner:
         error_context: str,
     ) -> str:
         merge_base_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "merge-base", ref, "HEAD"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "merge-base",
+                ref,
+                "HEAD",
+            ]
         )
         merge_base = merge_base_result.stdout.strip()
         if not merge_base_result.ok or not merge_base:
@@ -5113,7 +5126,16 @@ class PullRequestMonitorRunner:
     ) -> tuple[str, ...]:
         diff_spec = f"{ref}..HEAD"
         diff_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "diff", "--name-only", diff_spec, "--"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "diff",
+                "--name-only",
+                diff_spec,
+                "--",
+            ]
         )
         if not diff_result.ok:
             raise ProtectedScopeDiffError(
@@ -5523,6 +5545,7 @@ class PullRequestMonitorRunner:
         return await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",

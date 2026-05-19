@@ -251,22 +251,28 @@ def _assert_committed_diff_phase_ran(
     remote: str = "origin",
 ) -> None:
     call_args = [call.args for call in cmd.calls]
-    assert [
-        "git",
-        "-C",
-        str(worktree_path),
-        "fetch",
-        remote,
-        f"refs/heads/{remote_branch}",
-    ] in call_args
-    assert [
-        "git",
-        "-C",
-        str(worktree_path),
-        "merge-base",
-        "FETCH_HEAD",
-        "HEAD",
-    ] in call_args
+    assert (
+        _git_worktree_command(
+            worktree_path,
+            "fetch",
+            remote,
+            f"refs/heads/{remote_branch}",
+        )
+        in call_args
+    )
+    assert (
+        _git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "FETCH_HEAD",
+            "HEAD",
+        )
+        in call_args
+    )
+
+
+def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
+    return ["git", "-c", f"safe.directory={worktree_path}", "-C", str(worktree_path), *args]
 
 
 async def _mark_refactor_task(
@@ -391,11 +397,22 @@ async def test_monitor_run_fails_cleanly_when_sync_workspace_has_no_remote_push_
         assert ws.status == WorkspaceStatus.failed.value
         assert "no remote_push_branch" in (ws.failure_message or "")
         assert "sync_feature_pr" in (ws.failure_message or "")
-    assert [call.args[0:3] for call in cmd.calls] == [
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["gh", "api", "graphql"],
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert cmd.calls[0].args == _git_worktree_command(
+        worktree,
+        "fetch",
+        "origin",
+        "+refs/heads/development:refs/remotes/origin/development",
+    )
+    assert cmd.calls[1].args == [
+        "git",
+        "-C",
+        str(worktree),
+        "rev-list",
+        "--count",
+        "HEAD..origin/development",
     ]
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
 
 
 @pytest.mark.unit
@@ -471,11 +488,22 @@ async def test_monitor_run_transient_status_fetch_preserves_state_operations_and
         )
 
     assert sleep_fn.calls == [60]
-    assert [call.args[:3] for call in cmd.calls] == [
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
-        ["gh", "api", "graphql"],
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert cmd.calls[0].args == _git_worktree_command(
+        worktree,
+        "fetch",
+        "origin",
+        "+refs/heads/development:refs/remotes/origin/development",
+    )
+    assert cmd.calls[1].args == [
+        "git",
+        "-C",
+        str(worktree),
+        "rev-list",
+        "--count",
+        "HEAD..origin/development",
     ]
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -3906,24 +3934,27 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
 
     assert violations == []
     call_args = [call.args for call in cmd.calls]
-    assert [
-        "git",
-        "-C",
-        str(tmp_path / "worktree"),
-        "diff",
-        "--name-only",
-        "origin/development..HEAD",
-        "--",
-    ] not in call_args
-    assert [
-        "git",
-        "-C",
-        str(tmp_path / "worktree"),
-        "diff",
-        "--name-only",
-        "merged-base-sha..HEAD",
-        "--",
-    ] in call_args
+    worktree = tmp_path / "worktree"
+    assert (
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--name-only",
+            "origin/development..HEAD",
+            "--",
+        )
+        not in call_args
+    )
+    assert (
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--name-only",
+            "merged-base-sha..HEAD",
+            "--",
+        )
+        in call_args
+    )
 
 
 @pytest.mark.unit
@@ -4610,24 +4641,20 @@ async def test_protected_scope_revert_verifies_tracked_restore_against_fetch_hea
 
     assert remaining == []
     assert [call.args for call in cmd.calls] == [
-        [
-            "git",
-            "-C",
-            str(worktree),
+        _git_worktree_command(
+            worktree,
             "fetch",
             "origin",
             f"refs/heads/awf/{workspace_id}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "diff",
             "--quiet",
             "FETCH_HEAD",
             "--",
             ".github/workflows/ci.yml",
-        ],
+        ),
     ]
 
 
@@ -4665,32 +4692,26 @@ async def test_protected_scope_revert_verifies_untracked_restore_against_fetch_h
 
     assert remaining == []
     assert [call.args for call in cmd.calls] == [
-        [
-            "git",
-            "-C",
-            str(worktree),
+        _git_worktree_command(
+            worktree,
             "fetch",
             "origin",
             f"refs/heads/awf/{workspace_id}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "rev-parse",
             "--verify",
             "FETCH_HEAD:.github/workflows/ci.yml^{blob}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "hash-object",
             "--path",
             ".github/workflows/ci.yml",
             "--",
             ".github/workflows/ci.yml",
-        ],
+        ),
     ]
 
 
@@ -4727,32 +4748,26 @@ async def test_protected_scope_revert_keeps_untracked_restore_with_mismatched_bl
 
     assert remaining == [violation]
     assert [call.args for call in cmd.calls] == [
-        [
-            "git",
-            "-C",
-            str(worktree),
+        _git_worktree_command(
+            worktree,
             "fetch",
             "origin",
             f"refs/heads/awf/{workspace_id}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "rev-parse",
             "--verify",
             "FETCH_HEAD:.github/workflows/ci.yml^{blob}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "hash-object",
             "--path",
             ".github/workflows/ci.yml",
             "--",
             ".github/workflows/ci.yml",
-        ],
+        ),
     ]
 
 
@@ -4817,16 +4832,17 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
     assert push_result.failed is False
     assert len(adapter.calls) == 2
     call_args = [call.args for call in cmd.calls]
-    assert [
-        "git",
-        "-C",
-        str(worktree),
-        "diff",
-        "--quiet",
-        "FETCH_HEAD",
-        "--",
-        ".github/workflows/ci.yml",
-    ] in call_args
+    assert (
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--quiet",
+            "FETCH_HEAD",
+            "--",
+            ".github/workflows/ci.yml",
+        )
+        in call_args
+    )
     assert any(args[:1] == ["git"] and "commit" in args for args in call_args)
     assert any(args[:1] == ["git"] and "push" in args for args in call_args)
 
@@ -5057,23 +5073,26 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     )
 
     assert paths == ("src/fix.py", "tests/test_fix.py")
-    assert cmd.calls[0].args == [
-        "git",
-        "-C",
-        str(tmp_path / "worktree"),
+    worktree = tmp_path / "worktree"
+    assert cmd.calls[0].args == _git_worktree_command(
+        worktree,
         "fetch",
         "https://github.com/org/fork.git",
         "refs/heads/awf/ws_remote_missing",
-    ]
-    assert cmd.calls[1].args == [
-        "git",
-        "-C",
-        str(tmp_path / "worktree"),
+    )
+    assert cmd.calls[1].args == _git_worktree_command(
+        worktree,
         "merge-base",
         "FETCH_HEAD",
         "HEAD",
-    ]
-    assert cmd.calls[2].args[3:6] == ["diff", "--name-only", "merge-base-sha..HEAD"]
+    )
+    assert cmd.calls[2].args == _git_worktree_command(
+        worktree,
+        "diff",
+        "--name-only",
+        "merge-base-sha..HEAD",
+        "--",
+    )
 
 
 @pytest.mark.integration
@@ -5251,48 +5270,44 @@ async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
     )
 
     assert [call.args for call in cmd.calls] == [
-        [
-            "git",
-            "-C",
-            str(worktree),
+        _git_worktree_command(
+            worktree,
             "fetch",
             "origin",
             f"refs/heads/awf/{workspace_id}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "merge-base",
             "FETCH_HEAD",
             "HEAD",
-        ],
-        ["git", "-C", str(worktree), "diff", "--name-only", "merge-base-sha..HEAD", "--"],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--name-only",
+            "merge-base-sha..HEAD",
+            "--",
+        ),
+        _git_worktree_command(
+            worktree,
             "fetch",
             "origin",
             "+refs/heads/development:refs/remotes/origin/development",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "merge-base",
             "origin/development",
             "HEAD",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
+        ),
+        _git_worktree_command(
+            worktree,
             "diff",
             "--name-only",
             "merged-base-sha..HEAD",
             "--",
-        ],
+        ),
     ]
 
 
