@@ -893,13 +893,6 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
 
 
-def _resolve_service_env_paths() -> tuple[Path, Path]:
-    """Return the target env file and seed source used by service commands."""
-
-    _, env_file, env_example = _resolve_service_compose_paths()
-    return env_file, env_example
-
-
 def _resolve_existing_service_env_file(env_file: Path) -> Path:
     """Return the existing env file service commands should read."""
 
