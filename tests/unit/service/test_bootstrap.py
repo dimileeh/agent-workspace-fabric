@@ -527,6 +527,60 @@ def test_bootstrap_overrides_stale_docker_host_with_runtime_awf_docker_host(
 
 
 @pytest.mark.unit
+def test_bootstrap_removes_stale_caller_docker_host_variants_when_awf_host_is_forced(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_docker_host = f"unix://{tmp_path / 'runtime-docker.sock'}"
+    service_env = {"AWF_DOCKER_HOST": runtime_docker_host}
+    expected_provider_env = {"DOCKER_HOST": runtime_docker_host}
+    monkeypatch.setenv("DoCkEr_HoSt", "unix:///caller-stale-docker.sock")
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            replace(_settings(tmp_path), docker_host=runtime_docker_host),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == expected_provider_env
+    assert calls
+    for call in calls:
+        env = call["env"]
+        assert isinstance(env, dict)
+        assert env["DOCKER_HOST"] == runtime_docker_host
+        assert [key for key in env if key.upper() == "DOCKER_HOST"] == ["DOCKER_HOST"]
+        assert not any(key.upper() == "AWF_DOCKER_HOST" for key in env)
+
+
+@pytest.mark.unit
 def test_bootstrap_clears_docker_context_when_awf_docker_host_is_forced(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

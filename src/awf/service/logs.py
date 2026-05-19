@@ -274,11 +274,13 @@ def _compose_interpolation_environ(
         # stay out of this override map because _docker_cli_environ starts from
         # dict(os.environ) and the docker compose command also receives
         # compose_env_file via --env-file.
-        if (
-            (caller_found and caller_value != value)
-            or (env_file_found and env_file_value != value)
-            or (not caller_found and not env_file_found)
-        ):
+        # A stale caller value must be overridden because it wins over --env-file.
+        caller_override_needed = caller_found and caller_value != value
+        # A stale --env-file value must be overridden by the resolved service value.
+        env_file_override_needed = env_file_found and env_file_value != value
+        # Service-env-only values need an explicit subprocess env entry for interpolation.
+        service_env_only = not caller_found and not env_file_found
+        if caller_override_needed or env_file_override_needed or service_env_only:
             resolved[key] = value
     return resolved
 
