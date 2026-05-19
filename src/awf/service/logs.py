@@ -256,6 +256,8 @@ def _compose_interpolation_environ(
 
 
 def _compose_env_file_values(compose_env_file: Path | None) -> dict[str, str]:
+    """Return parsed Compose env-file values, omitting unset entries."""
+
     if compose_env_file is None or not compose_env_file.exists():
         return {}
     return {
@@ -277,6 +279,8 @@ def _compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
 
 
 def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
+    """Collect Compose interpolation variable names from nested YAML values."""
+
     if isinstance(value, str):
         for match in _COMPOSE_INTERPOLATION_PATTERN.finditer(value):
             key = match.group("braced") or match.group("plain")
