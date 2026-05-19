@@ -34,7 +34,7 @@ import typer.rich_utils as typer_rich_utils
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.urls import normalize_api_url
+from awf.common.urls import normalize_api_url, sanitize_request_url
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
@@ -111,32 +111,6 @@ _DEFAULT_BASE_URL = "http://localhost:8000"
 _CALL_CONTEXT: dict[int, tuple[str, str]] = {}
 
 
-def _sanitize_request_url(url: str) -> str:
-    parsed_url = urllib.parse.urlsplit(url)
-    if not parsed_url.scheme or not parsed_url.netloc:
-        return url
-    host = parsed_url.hostname or ""
-    if parsed_url.port is not None:
-        host = f"{host}:{parsed_url.port}"
-    query_pairs = urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
-    sanitized_pairs = []
-    for name, value in query_pairs:
-        if name.lower() in {
-            "token",
-            "api_token",
-            "access_token",
-            "secret",
-            "authorization",
-        }:
-            sanitized_pairs.append((name, "***"))
-        else:
-            sanitized_pairs.append((name, value))
-    query = urllib.parse.urlencode(sanitized_pairs, doseq=True)
-    return urllib.parse.urlunsplit(
-        (parsed_url.scheme, host, parsed_url.path, query, parsed_url.fragment)
-    )
-
-
 def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
     context = _CALL_CONTEXT.pop(id(response), None)
     if context is not None:
@@ -147,7 +121,7 @@ def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
         )
         return (
             context_method_text,
-            _sanitize_request_url(context_request_url_text) if context_request_url_text else None,
+            sanitize_request_url(context_request_url_text) if context_request_url_text else None,
         )
 
     request = getattr(response, "request", None)
@@ -157,7 +131,7 @@ def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
     request_url_value = getattr(request, "url", None)
     method_text = method_value if isinstance(method_value, str) else None
     request_url_text = str(request_url_value) if request_url_value is not None else None
-    return method_text, _sanitize_request_url(request_url_text) if request_url_text else None
+    return method_text, sanitize_request_url(request_url_text) if request_url_text else None
 
 
 def _base_url(override: str | None) -> str:
@@ -606,7 +580,7 @@ def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Resp
         return response
     except httpx.RequestError as exc:
         typer.echo(
-            f"error: could not reach AWF API at {_sanitize_request_url(url)}: {exc}",
+            f"error: could not reach AWF API at {sanitize_request_url(url)}: {exc}",
             err=True,
         )
         raise typer.Exit(code=2) from exc

@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Iterable
+
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "token",
+        "api_token",
+        "access_token",
+        "secret",
+        "authorization",
+    }
+)
+_URL_SECRET_MARKER = "***"
 
 
 def normalize_api_url(base_url: str, path: str) -> str:
@@ -25,3 +37,43 @@ def normalize_api_url(base_url: str, path: str) -> str:
             parsed_base.fragment,
         )
     )
+
+
+def sanitize_request_url(url: str) -> str:
+    """Redact secret-bearing request URL parts before operator-facing output."""
+    parsed_url = urllib.parse.urlsplit(url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        return url
+
+    sanitized_pairs = _sanitize_query_pairs(
+        urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+    )
+    query = urllib.parse.urlencode(sanitized_pairs, doseq=True)
+    return urllib.parse.urlunsplit(
+        (
+            parsed_url.scheme,
+            _sanitize_netloc(parsed_url.netloc),
+            parsed_url.path,
+            query,
+            parsed_url.fragment,
+        )
+    )
+
+
+def _sanitize_query_pairs(query_pairs: Iterable[tuple[str, str | None]]) -> list[tuple[str, str]]:
+    sanitized_pairs: list[tuple[str, str]] = []
+    for name, value in query_pairs:
+        if value is None:
+            continue
+        if name.lower() in _SENSITIVE_QUERY_KEYS:
+            sanitized_pairs.append((name, _URL_SECRET_MARKER))
+        else:
+            sanitized_pairs.append((name, value))
+    return sanitized_pairs
+
+
+def _sanitize_netloc(netloc: str) -> str:
+    if "@" not in netloc:
+        return netloc
+    _, host = netloc.rsplit("@", 1)
+    return f"{_URL_SECRET_MARKER}@{host}"
