@@ -227,10 +227,10 @@ def _docker_cli_environ(
         # or Compose project/profile selection.
         return None
     resolved = dict(os.environ)
-    if docker_host:
-        resolved["DOCKER_HOST"] = docker_host
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
     for key in list(resolved):
         if key.upper() == "AWF_DOCKER_HOST":
             del resolved[key]
