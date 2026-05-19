@@ -63,6 +63,7 @@ from awf.service.failure_causality import (
     restore_primary_failure_row_fields,
 )
 from awf.service.provider_recovery import (
+    PROVIDER_RECOVERY_STATE_KEY,
     provider_cooldown_not_before,
     provider_for_agent_model,
 )
@@ -179,6 +180,7 @@ class _ActiveExecutionCandidate:
     workspace_id: str
     status: WorkspaceStatus
     compose_project_name: str | None
+    agent: str | None = None
     repo_url: str | None = None
     compose_file_path: str | None = None
     pr_url: str | None = None
@@ -1360,6 +1362,7 @@ class ControlWorker:
                 Workspace.id,
                 Workspace.status,
                 Workspace.repo_url,
+                Workspace.agent,
                 Workspace.compose_project_name,
                 Workspace.compose_file_path,
                 Workspace.pr_url,
@@ -1406,10 +1409,11 @@ class ControlWorker:
                 workspace_id=row[0],
                 status=WorkspaceStatus(row[1]),
                 repo_url=row[2],
-                compose_project_name=row[3],
-                compose_file_path=row[4],
-                pr_url=row[5],
-                task_policy=row[6],
+                agent=row[3],
+                compose_project_name=row[4],
+                compose_file_path=row[5],
+                pr_url=row[6],
+                task_policy=row[7],
             )
             for row in rows
         ]
@@ -1418,7 +1422,11 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
-        if _monitor_provider_recovery_resume_pending(candidate):
+        monitor_recovery_resume_pending = await _monitor_provider_recovery_resume_pending(
+            self._session_factory,
+            candidate,
+        )
+        if monitor_recovery_resume_pending:
             _log.info(
                 "worker.monitor_provider_recovery_resume_pending",
                 workspace_id=candidate.workspace_id,
@@ -1444,6 +1452,20 @@ class ControlWorker:
             )
 
         finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
+        task_policy: dict[str, Any] = candidate.task_policy or {}
+        monitor_recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
+        is_retry_recovery = (
+            isinstance(monitor_recovery_state, Mapping)
+            and monitor_recovery_state.get("action") == "retry"
+        )
+        if (
+            candidate.status == WorkspaceStatus.monitoring_pr
+            and is_retry_recovery
+            and candidate.compose_project_name
+            and finding is None
+            and snapshot.stack_state == "running"
+        ):
+            return
         if finding is not None and finding.status == "unavailable":
             if has_open_pr_for_remonitor(candidate.status, candidate.pr_url):
                 recoverable_finding = WorkspaceRuntimeFinding(
@@ -2637,14 +2659,42 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
     )
 
 
-def _monitor_provider_recovery_resume_pending(candidate: _ActiveExecutionCandidate) -> bool:
+async def _monitor_provider_recovery_resume_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+    candidate: _ActiveExecutionCandidate,
+) -> bool:
     if candidate.status != WorkspaceStatus.monitoring_pr:
         return False
     task_policy = candidate.task_policy if isinstance(candidate.task_policy, Mapping) else {}
-    raw_state = task_policy.get("provider_recovery_state")
+    raw_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
     if not isinstance(raw_state, Mapping):
         return False
-    return raw_state.get("action") in {"retry", "fallback"}
+    action = raw_state.get("action")
+    if action == "fallback":
+        return True
+    if action != "retry":
+        return False
+
+    not_before = provider_cooldown_not_before(candidate.task_policy)
+    now = datetime.now(UTC)
+    if not_before is not None and not_before > now:
+        return True
+
+    if candidate.agent is None:
+        return False
+
+    model = agent_model_from_task_policy(candidate.task_policy)
+    provider = provider_for_agent_model(candidate.agent, model)
+    if provider is None or model is None:
+        return False
+
+    async with session_factory() as session:
+        breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
+            provider=provider,
+            model=model,
+            now=now,
+        )
+        return breaker is not None
 
 
 def _claim_recheck_conditions(
