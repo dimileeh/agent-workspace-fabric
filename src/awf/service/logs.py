@@ -211,9 +211,8 @@ def _docker_cli_environ(
 
     if environ is None:
         return None
-    docker_host = _non_empty_env_value(environ, "AWF_DOCKER_HOST") or _non_empty_env_value(
-        environ, "DOCKER_HOST"
-    )
+    awf_docker_host = _non_empty_env_value(environ, "AWF_DOCKER_HOST")
+    docker_host = awf_docker_host or _non_empty_env_value(environ, "DOCKER_HOST")
     compose_env = _compose_interpolation_environ(
         environ,
         compose_file=compose_file,
@@ -231,8 +230,11 @@ def _docker_cli_environ(
     resolved.update(compose_cli_env)
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
+    scrubbed_keys = {"AWF_DOCKER_HOST"}
+    if awf_docker_host:
+        scrubbed_keys.add("DOCKER_CONTEXT")
     for key in list(resolved):
-        if key.upper() == "AWF_DOCKER_HOST":
+        if key.upper() in scrubbed_keys:
             del resolved[key]
     return resolved
 

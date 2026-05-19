@@ -140,6 +140,38 @@ def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_clears_docker_context_when_awf_docker_host_is_forced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {
+        "AWF_DOCKER_HOST": docker_host,
+        "DOCKER_CONTEXT": "service-stale-context",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("DOCKER_CONTEXT", "caller-stale-context")
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert "AWF_DOCKER_HOST" not in env
+    assert env.get("DOCKER_CONTEXT") is None
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_awf_docker_host_wins_over_compose_docker_host_interpolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
