@@ -585,10 +585,11 @@ def test_service_bootstrap_cli_resolves_settings_from_compose_env(
     assert settings.api_base_url == api_base_url
     assert captured["compose_file"] == compose / "local-service.yml"
     assert captured["env_file"] == compose / ".env"
-    provider_environ = captured["provider_environ"]
-    assert provider_environ["AWF_DATABASE_URL"] == database_url
-    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
-    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert "provider_environ" not in captured
+    service_environ = captured["service_environ"]
+    assert service_environ["AWF_DATABASE_URL"] == database_url
+    assert service_environ["AWF_DOCKER_HOST"] == docker_host
+    assert service_environ["AWF_API_BASE_URL"] == api_base_url
 
 
 @pytest.mark.unit
@@ -644,10 +645,11 @@ def test_service_bootstrap_cli_resolves_settings_from_existing_root_env(
     assert settings.api_base_url == api_base_url
     assert captured["compose_file"] == compose / "local-service.yml"
     assert captured["env_file"] == root_env
-    provider_environ = captured["provider_environ"]
-    assert provider_environ["AWF_DATABASE_URL"] == database_url
-    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
-    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert "provider_environ" not in captured
+    service_environ = captured["service_environ"]
+    assert service_environ["AWF_DATABASE_URL"] == database_url
+    assert service_environ["AWF_DOCKER_HOST"] == docker_host
+    assert service_environ["AWF_API_BASE_URL"] == api_base_url
 
 
 @pytest.mark.unit

@@ -183,6 +183,7 @@ async def run_service_bootstrap(
     status_collector: StatusCollector | None = None,
     sleep: Sleep = asyncio.sleep,
     monotonic: Monotonic = time.monotonic,
+    service_environ: Mapping[str, str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
 ) -> ServiceBootstrapResult:
     """Start local service dependencies and wait for healthy status."""
@@ -197,7 +198,11 @@ async def run_service_bootstrap(
     )
     if env_file is not None:
         assets = replace(assets, compose_env_file=env_file if env_file.exists() else None)
-    service_env = local_service_environ(env_file=env_file or _bootstrap_environment_file(assets))
+    service_env = (
+        dict(service_environ)
+        if service_environ is not None
+        else local_service_environ(env_file=env_file or _bootstrap_environment_file(assets))
+    )
     if provider_environ is not None:
         service_env.update(provider_environ)
     service_env = _docker_cli_environ(settings, service_env)

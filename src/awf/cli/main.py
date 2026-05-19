@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,7 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "retry after a timeout or dropped response."
 )
 _MIN_RICH_HELP_WIDTH = 80
+_ENV_ASSIGNMENT_RE = re.compile(r"\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
 class _MinRichHelpWidthCommand(typer.core.TyperCommand):
@@ -862,7 +864,9 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     """Return the compose, env, and env seed source files used by service commands.
 
     If the verified source checkout contains local Compose assets, return those
-    assets as absolute paths and prefer an existing root `.env` before examples.
+    assets as absolute paths. Compose-specific examples are the seed base when
+    present; an existing root `.env` is applied as an overlay during seeding and
+    remains the fallback read source until the compose `.env` exists.
     """
 
     from awf.service import bootstrap as bootstrap_mod
@@ -882,7 +886,7 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
         root_env = resolved_asset_root / ".env"
         compose_example = compose_env.with_name(".env.example")
         fallback_example = resolved_asset_root / ".env.example"
-        for seed_source in (root_env, compose_example, fallback_example):
+        for seed_source in (compose_example, root_env, fallback_example):
             if seed_source.exists():
                 return compose_file, compose_env, seed_source
         return compose_file, compose_env, fallback_example
@@ -902,6 +906,9 @@ def _resolve_existing_service_env_file(env_file: Path, env_seed_source: Path) ->
 
     if env_file.exists():
         return env_file
+    root_env = _compose_root_env_file(env_file)
+    if root_env is not None and root_env.exists():
+        return root_env
     if env_seed_source.name == ".env" and env_seed_source.exists():
         return env_seed_source
     return env_file
@@ -926,7 +933,80 @@ def _init_env_error_payload(
     }
 
 
-def _seed_env_file(env_file: Path, env_example: Path) -> tuple[str, dict[str, str] | None]:
+def _compose_root_env_file(env_file: Path) -> Path | None:
+    if (
+        env_file.name == ".env"
+        and env_file.parent.name == "compose"
+        and env_file.parent.parent.name == "docker"
+    ):
+        return env_file.parent.parent.parent / ".env"
+    return None
+
+
+def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
+    """Return the root `.env` overlay used when seeding compose env files."""
+
+    root_env = _compose_root_env_file(env_file)
+    if root_env is None or env_example == root_env or not root_env.exists():
+        return None
+    compose_example = env_file.with_name(".env.example")
+    if env_example != compose_example:
+        return None
+    return root_env
+
+
+def _env_assignment_key(line: str) -> str | None:
+    if line.lstrip().startswith("#"):
+        return None
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:
+        return None
+    return match.group("key")
+
+
+def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
+    """Return compose-template env contents with root env assignments overlaid."""
+
+    try:
+        seed_text = seed_contents.decode("utf-8")
+        overlay_text = overlay_contents.decode("utf-8")
+    except UnicodeDecodeError:
+        return seed_contents
+
+    overlay_assignments: dict[str, str] = {}
+    for line in overlay_text.splitlines(keepends=True):
+        key = _env_assignment_key(line)
+        if key is not None:
+            overlay_assignments[key] = line
+
+    merged_lines: list[str] = []
+    seed_keys: set[str] = set()
+    for line in seed_text.splitlines(keepends=True):
+        key = _env_assignment_key(line)
+        if key is None:
+            merged_lines.append(line)
+            continue
+        seed_keys.add(key)
+        merged_lines.append(overlay_assignments.get(key, line))
+
+    overlay_only_lines = [
+        line
+        for line in overlay_text.splitlines(keepends=True)
+        if (key := _env_assignment_key(line)) is not None and key not in seed_keys
+    ]
+    if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
+        merged_lines[-1] = f"{merged_lines[-1]}\n"
+    merged_lines.extend(overlay_only_lines)
+
+    return "".join(merged_lines).encode("utf-8")
+
+
+def _seed_env_file(
+    env_file: Path,
+    env_example: Path,
+    *,
+    env_overlay: Path | None = None,
+) -> tuple[str, dict[str, str] | None]:
     """Seed an env file from an example and return the action plus any failure payload."""
 
     if env_file.exists():
@@ -962,6 +1042,22 @@ def _seed_env_file(env_file: Path, env_example: Path) -> tuple[str, dict[str, st
                 exc=exc,
             ),
         )
+
+    if env_overlay is not None and env_overlay.exists():
+        try:
+            overlay_contents = env_overlay.read_bytes()
+        except OSError as exc:
+            return (
+                "write_failed",
+                _init_env_error_payload(
+                    operation="read_example",
+                    path=env_overlay,
+                    env_file=env_file,
+                    env_example=env_overlay,
+                    exc=exc,
+                ),
+            )
+        env_contents = _merge_env_seed_contents(env_contents, overlay_contents)
 
     try:
         env_file.write_bytes(env_contents)
@@ -1019,9 +1115,12 @@ def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[P
     ):
         candidates.append(env_file.parent.parent.parent / ".env")
     candidates.extend((env_file.with_name(".env.example"), env_example))
+    seen: set[Path] = set()
     for candidate in candidates:
-        if candidate not in search_paths:
-            search_paths.append(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        search_paths.append(candidate)
     return tuple(search_paths)
 
 
@@ -1081,7 +1180,11 @@ def _run_init_service_bootstrap(
     env_action = "skipped"
     env_error: dict[str, str] | None = None
     if write_env:
-        env_action, env_error = _seed_env_file(env_file, env_example)
+        env_action, env_error = _seed_env_file(
+            env_file,
+            env_example,
+            env_overlay=_init_env_overlay_source(env_file, env_example),
+        )
     active_env_file = _resolve_existing_service_env_file(env_file, env_example)
 
     env_warning_emitted = False
@@ -1199,7 +1302,7 @@ def _run_init_service_bootstrap(
                 options=options,
                 compose_file=compose_file,
                 env_file=active_env_file,
-                provider_environ=service_env,
+                service_environ=service_env,
             ),
         )
     except KeyboardInterrupt:
@@ -1530,7 +1633,7 @@ def service_bootstrap(
                 options=options,
                 compose_file=compose_file,
                 env_file=env_file,
-                provider_environ=service_env,
+                service_environ=service_env,
             )
         )
     except KeyboardInterrupt:

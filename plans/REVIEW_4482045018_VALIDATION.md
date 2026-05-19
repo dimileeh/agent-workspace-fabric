@@ -4,33 +4,50 @@ Plan reference: `plans/REVIEW_4482045018_PLAN.md`
 
 ## Requirement Status
 
-- Complete: `_docker_cli_environ` now mirrors `DOCKER_HOST` from the runtime
-  `AWF_DOCKER_HOST` value instead of `ServiceSettings.docker_host`.
-  Evidence: `src/awf/service/bootstrap.py`.
-- Complete: Added regression coverage for divergent
-  `ServiceSettings.docker_host` and runtime `AWF_DOCKER_HOST`.
+- Complete: First-run `docker/compose/.env` seeding now uses
+  `docker/compose/.env.example` as the base when present and overlays matching
+  or root-only assignments from an existing root `.env`.
+  Evidence: `src/awf/cli/main.py`.
+- Complete: Existing env-file non-clobbering behavior is preserved.
+  Evidence: `_seed_env_file()` still returns `kept_existing` before reading any
+  seed or overlay source, and existing tests continue to pass.
+- Complete: `awf init` and `awf service bootstrap` now pass the already
+  resolved `service_env` as `service_environ` to `run_service_bootstrap`.
+  Evidence: `src/awf/cli/main.py`.
+- Complete: `run_service_bootstrap` still supports provider-only overlays for
+  non-CLI callers.
   Evidence:
-  `tests/unit/service/test_bootstrap.py::test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ`.
-- Complete: Added a transition note for non-source-checkout service commands
-  that now read `.env` unless run from a verified AWF source checkout.
-  Evidence: `docs/GETTING_STARTED.md`.
-- Complete: Refactored `collect_support_bundle` to call `_doctor_collector`
-  once with optional `compose_file` kwargs.
-  Evidence: `src/awf/service/support_bundle.py`.
-- Complete: Ran narrow relevant tests and style checks.
-  Evidence: commands below.
-- Complete: The scoped files are ready for the required local commit.
+  `tests/unit/service/test_bootstrap.py::test_bootstrap_partial_provider_environment_preserves_local_service_environment`.
+- Complete: `_init_env_example_search_paths` now uses an explicit `seen` set
+  over the full candidate list.
+  Evidence: `src/awf/cli/main.py`.
+- Complete: Focused regression coverage was added or updated for merged compose
+  seeding, preflight environment reuse, and env-example path deduplication.
+  Evidence: tests listed below.
 
 ## Verification Evidence
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/service/test_bootstrap.py tests/unit/service/test_support_bundle.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py::test_init_without_path_merges_existing_root_env_into_source_compose_env tests/unit/cli/test_init.py::test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness tests/unit/cli/test_init.py::test_init_without_path_uses_asset_root_compose_env_for_preflight tests/unit/cli/test_service_cli.py::test_service_bootstrap_cli_resolves_settings_from_compose_env tests/unit/service/test_bootstrap.py::test_bootstrap_uses_explicit_service_environment_without_reloading_env_file -q
 ```
 
-Result: passed, `40 passed in 4.32s`.
+Result before implementation: failed as expected across the new/updated
+regression tests.
 
 ```bash
-uv run --python 3.12 --extra dev ruff check src/awf/service/bootstrap.py src/awf/service/support_bundle.py tests/unit/service/test_bootstrap.py
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py::test_init_without_path_merges_existing_root_env_into_source_compose_env tests/unit/cli/test_init.py::test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness tests/unit/cli/test_init.py::test_init_without_path_uses_asset_root_compose_env_for_preflight tests/unit/cli/test_service_cli.py::test_service_bootstrap_cli_resolves_settings_from_compose_env tests/unit/service/test_bootstrap.py::test_bootstrap_uses_explicit_service_environment_without_reloading_env_file -q
+```
+
+Result after implementation: passed, `5 passed in 4.16s`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init.py tests/unit/cli/test_service_cli.py tests/unit/service/test_bootstrap.py -q
+```
+
+Result: passed, `158 passed in 17.67s`.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py src/awf/service/bootstrap.py tests/unit/cli/test_init.py tests/unit/cli/test_service_cli.py tests/unit/service/test_bootstrap.py
 ```
 
 Result: passed, `All checks passed!`.

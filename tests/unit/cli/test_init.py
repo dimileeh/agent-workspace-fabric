@@ -587,10 +587,10 @@ def test_init_without_path_prefers_compose_env_example_over_root(
 
 
 @pytest.mark.unit
-def test_init_without_path_migrates_existing_root_env_to_source_compose_env(
+def test_init_without_path_merges_existing_root_env_into_source_compose_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Prefer a working root `.env` before source-checkout example templates."""
+    """Preserve root `.env` values without dropping compose-only template keys."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -598,7 +598,14 @@ def test_init_without_path_migrates_existing_root_env_to_source_compose_env(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     compose_example = compose / ".env.example"
     compose_example.write_text(
-        "AWF_API_TOKEN=compose-example\nAWF_POSTGRES_PASSWORD=compose-example\n",
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     root_example = tmp_path / ".env.example"
@@ -608,7 +615,14 @@ def test_init_without_path_migrates_existing_root_env_to_source_compose_env(
     )
     root_env = tmp_path / ".env"
     root_env.write_text(
-        "AWF_API_TOKEN=migrated-token\nAWF_POSTGRES_PASSWORD=migrated-password\n",
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_POSTGRES_PASSWORD=migrated-password",
+                "AWF_ROOT_ONLY=root-value",
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
@@ -618,8 +632,18 @@ def test_init_without_path_migrates_existing_root_env_to_source_compose_env(
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
     assert env_file.exists()
-    assert env_file.read_bytes() == root_env.read_bytes()
-    assert "wrote docker/compose/.env from .env" in result.output
+    assert env_file.read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_POSTGRES_PASSWORD=migrated-password",
+                "AWF_COMPOSE_ONLY=compose-default",
+                "AWF_ROOT_ONLY=root-value",
+            ]
+        )
+        + "\n"
+    )
+    assert "wrote docker/compose/.env from docker/compose/.env.example" in result.output
     assert "migrated-token" not in result.output
     assert "migrated-password" not in result.output
 
@@ -796,8 +820,9 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     preflight_environ = captured["doctor_kwargs"]["provider_environ"]
     assert "AWF_GITHUB_TOKEN" not in preflight_environ
     assert secret not in preflight_environ.values()
-    provider_environ = bootstrap_call["provider_environ"]
-    assert provider_environ["AWF_GITHUB_TOKEN"] == secret
+    assert "provider_environ" not in bootstrap_call
+    service_environ = bootstrap_call["service_environ"]
+    assert service_environ["AWF_GITHUB_TOKEN"] == secret
     assert bootstrap_call["env_file"] == workspace_root / "docker" / "compose" / ".env"
     assert secret not in result.output
 
@@ -853,7 +878,8 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["compose_file"] == compose / "local-service.yml"
-    assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert "provider_environ" not in captured["bootstrap_kwargs"]
+    assert captured["bootstrap_kwargs"]["service_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
 
 
@@ -908,7 +934,8 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     doctor_kwargs = captured["doctor_kwargs"]
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
-    assert captured["bootstrap_kwargs"]["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
+    assert "provider_environ" not in captured["bootstrap_kwargs"]
+    assert captured["bootstrap_kwargs"]["service_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
 
 
@@ -1097,6 +1124,22 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
     assert "looked for .env, docker/compose/.env.example, .env.example" in result.stdout
     assert "skipped docker/compose/.env creation" in result.stdout
     assert "no .env.example found" not in result.stderr
+
+
+@pytest.mark.unit
+def test_init_env_example_search_paths_deduplicates_all_candidates(
+    tmp_path: Path,
+) -> None:
+    """Keep the no-example message concise when fallback paths overlap."""
+    from awf.cli import main as cli_main
+
+    env_file = tmp_path / "docker" / "compose" / ".env"
+    root_env = tmp_path / ".env"
+
+    assert cli_main._init_env_example_search_paths(env_file, root_env) == (  # noqa: SLF001
+        root_env,
+        env_file.with_name(".env.example"),
+    )
 
 
 @pytest.mark.unit
