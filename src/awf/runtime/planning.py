@@ -570,8 +570,6 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         has_marker(marker) for marker in validation_subject_markers
     ):
         return False
-    if named_validation_command_handoff:
-        return True
     # Migration implementation gaps stay agent-owned; migration-gate evidence
     # gaps are AWF-owned because the profile gate must produce that evidence.
     migration_validation_evidence_gap = has_marker(
