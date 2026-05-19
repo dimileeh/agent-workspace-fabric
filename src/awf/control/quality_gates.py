@@ -43,19 +43,19 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "summary",
     "report",
 )
-_VALIDATION_COMMAND_MARKERS: Final[tuple[str, ...]] = (
-    "pytest",
-    " test",
-    "tests/",
-    "ruff",
-    "mypy",
-    "coverage",
-    "cov",
-    "lint",
-    "build",
-    "deploy",
-    "publish",
-    "release",
+_VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?:pytest|ruff|mypy|coverage|cov|lint|build|deploy|publish|release)"
+    r"(?![A-Za-z0-9_-])"
+)
+_VALIDATION_TEST_COMMAND_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?:npm|pnpm|yarn|bun|go|cargo|make|mvn|gradle|gradlew|tox|nox|uv|poetry|pipenv)"
+    r"(?:\s+(?:run|exec|--?[A-Za-z0-9_.=:/-]+))*"
+    r"\s+test(?:\s|$)"
+)
+_VALIDATION_UNITTEST_COMMAND_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\s+-m\s+unittest(?:\s|$)"
 )
 _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
@@ -1217,8 +1217,13 @@ def _is_informational_step(step: Mapping[str, Any]) -> bool:
 def _is_validation_command(command: str | None) -> bool:
     if command is None:
         return False
-    normalized = f" {command.lower()} "
-    return any(marker in normalized for marker in _VALIDATION_COMMAND_MARKERS)
+    normalized = command.lower()
+    return (
+        "tests/" in normalized
+        or _VALIDATION_COMMAND_TOKEN_RE.search(normalized) is not None
+        or _VALIDATION_TEST_COMMAND_RE.search(normalized) is not None
+        or _VALIDATION_UNITTEST_COMMAND_RE.search(normalized) is not None
+    )
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
@@ -1228,12 +1233,36 @@ def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
         return False
     old_action, old_ref = old_parts
     new_action, new_ref = new_parts
-    return (
-        old_action == new_action
-        and old_ref != new_ref
-        and _is_pinned_workflow_uses_ref(old_ref)
-        and _is_pinned_workflow_uses_ref(new_ref)
-    )
+    if old_action != new_action or old_ref == new_ref:
+        return False
+    if not _is_pinned_workflow_uses_ref(old_ref) or not _is_pinned_workflow_uses_ref(new_ref):
+        return False
+    old_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(old_ref) is not None
+    new_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(new_ref) is not None
+    if old_is_sha or new_is_sha:
+        return True
+    return _is_workflow_version_ref_non_downgrade(old_ref, new_ref)
+
+
+def _is_workflow_version_ref_non_downgrade(old_ref: str, new_ref: str) -> bool:
+    old_key = _workflow_version_ref_sort_key(old_ref)
+    new_key = _workflow_version_ref_sort_key(new_ref)
+    if old_key is None or new_key is None:
+        return False
+    return new_key >= old_key
+
+
+def _workflow_version_ref_sort_key(ref: str) -> tuple[tuple[int, ...], int, str] | None:
+    if _PINNED_WORKFLOW_USES_VERSION_RE.fullmatch(ref) is None:
+        return None
+    raw_version = ref[1:] if ref.startswith(("v", "V")) else ref
+    version_without_build = raw_version.split("+", 1)[0]
+    core, separator, prerelease = version_without_build.partition("-")
+    numbers = [int(part) for part in core.split(".")]
+    while len(numbers) < 3:
+        numbers.append(0)
+    release_rank = 0 if separator else 1
+    return tuple(numbers[:3]), release_rank, prerelease
 
 
 def _uses_action(value: str) -> str | None:
