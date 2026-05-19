@@ -10,13 +10,14 @@ rather than mutating a global object.
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlsplit
 
-from pydantic import Field, PrivateAttr, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -52,6 +53,7 @@ _WEAK_API_TOKEN_VALUES = frozenset(
         "token",
     }
 )
+_SETTINGS_INIT_FIELDS_BY_ID: dict[int, frozenset[str]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,13 +240,14 @@ class Settings(BaseSettings):
         frozen=True,
         case_sensitive=False,
     )
-    _awf_init_fields: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     def __init__(self, **values: Any) -> None:
         """Initialize settings while remembering direct constructor overrides."""
         init_fields = frozenset(name for name in type(self).model_fields if name in values)
         super().__init__(**values)
-        object.__setattr__(self, "_awf_init_fields", init_fields)
+        instance_id = id(self)
+        _SETTINGS_INIT_FIELDS_BY_ID[instance_id] = init_fields
+        weakref.finalize(self, _SETTINGS_INIT_FIELDS_BY_ID.pop, instance_id, None)
 
     # Identity
     service_name: str = Field(default="awf", description="Service identifier used in logs/metrics.")
@@ -474,6 +477,12 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+
+def settings_constructor_fields(settings: Settings) -> frozenset[str]:
+    """Return fields passed directly to ``Settings(...)`` construction."""
+
+    return _SETTINGS_INIT_FIELDS_BY_ID.get(id(settings), frozenset(settings.model_fields_set))
 
 
 def validate_production_settings(

@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 import awf.common.config as common_config
+import awf.service.config as service_config
 from awf.common.config import (
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
@@ -119,6 +120,7 @@ def test_service_settings_uses_checkout_root_compose_env_from_subdirectory(
     checkout = tmp_path / "checkout"
     nested = checkout / "src" / "awf"
     nested.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.parent.mkdir(parents=True)
     compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
@@ -129,6 +131,74 @@ def test_service_settings_uses_checkout_root_compose_env_from_subdirectory(
     settings = resolve_service_settings(Settings(_env_file=None))
 
     assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_settings_constructor_fields_are_not_pydantic_private_dual_storage() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://awf:pw@db.internal:5432/awf",
+        api_base_url="http://127.0.0.1:9300",
+    )
+
+    assert service_config._settings_init_fields(settings) == frozenset(  # noqa: SLF001
+        {"database_url", "api_base_url"}
+    )
+    assert "_awf_init_fields" not in settings.__dict__
+    assert "_awf_init_fields" not in (getattr(settings, "__pydantic_private__", {}) or {})
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_ignores_unmarked_module_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    fake_module = (
+        install_root
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "awf"
+        / "service"
+        / "config.py"
+    )
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    unrelated_env_file = install_root / "docker" / "compose" / ".env"
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "cwd" / "nested"
+    isolated_cwd.mkdir(parents=True)
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() is None
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_accepts_awf_project_root_from_module_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    fake_module = checkout / "src" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# source module placeholder\n", encoding="utf-8")
+    (checkout / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    compose_file = checkout / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "outside"
+    isolated_cwd.mkdir()
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
 
 
 @pytest.mark.unit

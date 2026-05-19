@@ -18,6 +18,7 @@ from awf.common.config import (
     DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
     DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
     Settings,
+    settings_constructor_fields,
     validate_production_settings,
 )
 
@@ -27,6 +28,12 @@ DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
+_PROJECT_ROOT_MARKERS = ("pyproject.toml", ".git")
+_AWF_SOURCE_ROOT_MARKERS = (
+    "pyproject.toml",
+    "src/awf/__init__.py",
+    "docker/compose/local-service.yml",
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -194,9 +201,15 @@ def resolve_local_service_compose_env_file(
 
     if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
         cwd = Path.cwd().resolve()
-        candidates.extend(root / expanded for root in (cwd, *cwd.parents))
+        candidates.extend(root / expanded for root in _bounded_env_search_roots(cwd))
         module_file = Path(__file__).resolve()
-        candidates.extend(parent / expanded for parent in module_file.parents)
+        candidates.extend(
+            root / expanded
+            for root in _bounded_env_search_roots(
+                module_file.parent,
+                require_awf_source_root=True,
+            )
+        )
     else:
         candidates.append(expanded.resolve())
 
@@ -209,6 +222,29 @@ def resolve_local_service_compose_env_file(
         if resolved.exists():
             return resolved
     return None
+
+
+def _bounded_env_search_roots(
+    start: Path,
+    *,
+    require_awf_source_root: bool = False,
+) -> tuple[Path, ...]:
+    """Return ancestor roots bounded by the first recognizable project root."""
+
+    roots = (start, *start.parents)
+    predicate = _is_awf_source_root if require_awf_source_root else _is_project_root
+    for index, root in enumerate(roots):
+        if predicate(root):
+            return roots[: index + 1]
+    return (start,)
+
+
+def _is_project_root(candidate: Path) -> bool:
+    return any((candidate / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
+
+
+def _is_awf_source_root(candidate: Path) -> bool:
+    return all((candidate / marker).exists() for marker in _AWF_SOURCE_ROOT_MARKERS)
 
 
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
@@ -321,8 +357,7 @@ def _database_url_env_is_explicit(
 def _settings_init_fields(settings: Settings) -> frozenset[str]:
     """Return direct constructor-provided settings fields."""
 
-    init_fields: object = getattr(settings, "_awf_init_fields", frozenset())
-    return init_fields if isinstance(init_fields, frozenset) else frozenset()
+    return settings_constructor_fields(settings)
 
 
 def _env_value(environ: Mapping[str, str], key: str) -> str | None:
