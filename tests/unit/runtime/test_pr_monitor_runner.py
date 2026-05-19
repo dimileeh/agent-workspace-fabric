@@ -3728,6 +3728,10 @@ async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_
     )
 
     first_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+    first_policy, _, _, _ = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
     second_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
     source_policy, _, _, _ = await _provider_recovery_snapshot(
@@ -3746,6 +3750,10 @@ async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_
 
     assert first_suppressed is True
     assert second_suppressed is True
+    assert (
+        first_policy["provider_recovery_state"]["not_before"]
+        == source_policy["provider_recovery_state"]["not_before"]
+    )
     assert recovery_state["action"] == "retry"
     assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     assert isinstance(recovery_state["not_before"], str)

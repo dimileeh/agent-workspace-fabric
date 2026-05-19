@@ -926,7 +926,10 @@ class PullRequestMonitorRunner:
                 and recovery_state.get("target_provider") == provider
                 and recovery_state.get("target_model") == model
             ):
-                if provider_cooldown_not_before(task_policy) != breaker.cooldown_until:
+                if (
+                    breaker.cooldown_until is not None
+                    and provider_cooldown_not_before(task_policy) != breaker.cooldown_until
+                ):
                     ws.task_policy = _task_policy_with_monitor_circuit_retry_state(
                         task_policy,
                         provider=provider,
