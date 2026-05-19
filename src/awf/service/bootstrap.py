@@ -365,7 +365,11 @@ def _resolve_bootstrap_assets(
     """Resolve compose, runtime Dockerfile, and env-file assets for bootstrap."""
 
     asset_root = _resolve_bootstrap_asset_root()
-    default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE
+    default_compose = compose_file == LOCAL_SERVICE_COMPOSE_FILE or (
+        compose_file.is_absolute()
+        and asset_root is not None
+        and compose_file.resolve() == (asset_root / LOCAL_SERVICE_COMPOSE_FILE).resolve()
+    )
 
     if default_compose:
         if asset_root is None:

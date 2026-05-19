@@ -1104,6 +1104,27 @@ def test_bootstrap_fails_clearly_when_source_assets_are_unavailable(
 
 
 @pytest.mark.unit
+def test_bootstrap_treats_absolute_asset_root_compose_path_as_default(
+    monkeypatch: pytest.MonkeyPatch,
+    source_checkout_root: Path,
+) -> None:
+    compose_file = source_checkout_root / bootstrap.LOCAL_SERVICE_COMPOSE_FILE
+
+    def _fail_user_path_resolution(_path: Path) -> Path:
+        pytest.fail("absolute local-service compose path should use default asset resolution")
+
+    monkeypatch.setattr(bootstrap, "_resolve_user_path", _fail_user_path_resolution)
+
+    assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+        compose_file,
+        require_agent_runtime=False,
+    )
+
+    assert assets.root == source_checkout_root
+    assert assets.compose_file == compose_file
+
+
+@pytest.mark.unit
 def test_bootstrap_resolves_custom_compose_paths_without_asset_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -140,6 +140,34 @@ def test_service_logs_mirrors_awf_docker_host_into_subprocess_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_removes_stale_caller_docker_host_variants_when_awf_host_is_forced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {"AWF_DOCKER_HOST": docker_host}
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setenv("DoCkEr_HoSt", "unix:///caller-stale-docker.sock")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert [key for key in env if key.upper() == "DOCKER_HOST"] == ["DOCKER_HOST"]
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_clears_docker_context_when_awf_docker_host_is_forced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -198,6 +226,34 @@ def test_service_logs_clears_docker_context_when_docker_host_is_resolved(
     assert env["DOCKER_HOST"] == docker_host
     assert "AWF_DOCKER_HOST" not in env
     assert env.get("DOCKER_CONTEXT") is None
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
+def test_service_logs_removes_stale_caller_docker_host_variants_when_docker_host_is_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    service_environ = {"DOCKER_HOST": docker_host}
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("DoCkEr_HoSt", "unix:///caller-stale-docker.sock")
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert [key for key in env if key.upper() == "DOCKER_HOST"] == ["DOCKER_HOST"]
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")

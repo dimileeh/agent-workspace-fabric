@@ -228,14 +228,14 @@ def _docker_cli_environ(
     resolved = dict(os.environ)
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
-    if docker_host:
-        resolved["DOCKER_HOST"] = docker_host
     scrubbed_keys = {"AWF_DOCKER_HOST"}
     if docker_host:
-        scrubbed_keys.add("DOCKER_CONTEXT")
+        scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
     for key in list(resolved):
         if key.upper() in scrubbed_keys:
             del resolved[key]
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
     return resolved
 
 
