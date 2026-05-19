@@ -897,6 +897,16 @@ def _resolve_service_env_paths() -> tuple[Path, Path]:
     return env_file, env_example
 
 
+def _resolve_existing_service_env_file(env_file: Path, env_seed_source: Path) -> Path:
+    """Return the existing env file service commands should read."""
+
+    if env_file.exists():
+        return env_file
+    if env_seed_source.name == ".env" and env_seed_source.exists():
+        return env_seed_source
+    return env_file
+
+
 def _init_env_error_payload(
     *,
     operation: str,
@@ -1064,6 +1074,7 @@ def _run_init_service_bootstrap(
     env_error: dict[str, str] | None = None
     if write_env:
         env_action, env_error = _seed_env_file(env_file, env_example)
+    active_env_file = _resolve_existing_service_env_file(env_file, env_example)
 
     env_warning_emitted = False
     if pretty:
@@ -1073,13 +1084,13 @@ def _run_init_service_bootstrap(
             env_warning_emitted = True
 
     try:
-        service_env = local_service_environ(env_file=env_file)
+        service_env = local_service_environ(env_file=active_env_file)
         preflight_env = _init_preflight_environ(
             service_env,
             provider_secret_keys=KNOWN_SECRET_ENV_KEYS,
         )
         settings = resolve_service_settings(
-            Settings(_env_file=env_file, github_token=None),
+            Settings(_env_file=active_env_file, github_token=None),
             environ=preflight_env,
         )
 
@@ -1178,7 +1189,7 @@ def _run_init_service_bootstrap(
                 settings,
                 options=options,
                 compose_file=compose_file,
-                env_file=env_file,
+                env_file=active_env_file,
                 provider_environ=service_env,
             ),
         )
@@ -1266,7 +1277,8 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    env_file, _ = _resolve_service_env_paths()
+    env_file, env_seed_source = _resolve_service_env_paths()
+    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1311,7 +1323,8 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    compose_file, env_file, _ = _resolve_service_compose_paths()
+    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1492,7 +1505,8 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    compose_file, env_file, _ = _resolve_service_compose_paths()
+    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
