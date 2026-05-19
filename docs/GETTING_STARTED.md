@@ -107,14 +107,14 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 `GITHUB_TOKEN` are accepted fallbacks.
 
 ```bash
-cp .env.example docker/compose/.env
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 # Persist Compose-interpolated values into docker/compose/.env.
 {
+  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
-} >> docker/compose/.env
+} > docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 

@@ -1202,6 +1202,16 @@ def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
 
 
 @pytest.mark.unit
+def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> None:
+    """Regression: avoid duplicate token keys in docker/compose/.env examples."""
+    readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
+
+    assert "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)='" in readme
+    assert "} > docker/compose/.env" in readme
+    assert ">> docker/compose/.env" not in readme
+
+
+@pytest.mark.unit
 def test_project_onboarding_doc_distinguishes_init_modes() -> None:
     doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
