@@ -43,7 +43,7 @@ def _source_checkout_root() -> Path:
 
 @pytest.fixture(autouse=True)
 def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: {})
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: {})
     monkeypatch.setattr(
         bootstrap,
         "LOCAL_SERVICE_COMPOSE_ENV_FILE",
@@ -197,7 +197,7 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
         "AWF_DATABASE_URL": "postgresql+asyncpg://awf:compose-secret@localhost:5433/awf",
         "AWF_POSTGRES_PASSWORD": "compose-secret",
     }
-    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(service_env))
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
     calls: list[dict[str, object]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -266,7 +266,7 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
     }
     provider_env = {"COMPOSE_PROFILES": "metrics,ollama-bridge"}
     expected_env = {**local_env, **provider_env}
-    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: dict(local_env))
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(local_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
 
@@ -306,6 +306,92 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
     assert calls
     assert all(call["env"] == expected_env for call in calls)
     assert any(call["args"][-1] == "ollama-bridge" for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_does_not_overlay_provider_environment_on_cwd_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service.config import local_service_environ
+
+    asset_root = tmp_path / "checkout"
+    (asset_root / "docker" / "compose").mkdir(parents=True)
+    (asset_root / "docker" / "agent-runtime.Dockerfile").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+    (asset_root / "docker" / "control-plane.Dockerfile").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+    (asset_root / "docker" / "compose" / "local-service.yml").write_text(
+        "services: {}\n",
+        encoding="utf-8",
+    )
+    (asset_root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    (asset_root / "src" / "awf").mkdir(parents=True)
+    (asset_root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+
+    intended_database_url = "postgresql+asyncpg://awf:intended@asset:5432/awf"
+    (asset_root / "docker" / "compose" / ".env").write_text(
+        f"AWF_DATABASE_URL={intended_database_url}\n",
+        encoding="utf-8",
+    )
+
+    unrelated_cwd = tmp_path / "unrelated-project"
+    (unrelated_cwd / "docker" / "compose").mkdir(parents=True)
+    (unrelated_cwd / "docker" / "compose" / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_DATABASE_URL=postgresql+asyncpg://awf:stale@cwd:5432/awf",
+                "COMPOSE_PROFILES=ollama-bridge",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(unrelated_cwd)
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: (asset_root,))
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        Path("docker/compose/.env"),
+        raising=False,
+    )
+    monkeypatch.setattr(bootstrap, "local_service_environ", local_service_environ)
+    for key in ("AWF_DATABASE_URL", "AWF_POSTGRES_PASSWORD", "COMPOSE_PROFILES"):
+        monkeypatch.delenv(key, raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+            provider_environ={"AWF_DATABASE_URL": intended_database_url},
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls
+    assert not any(call["args"][-1] == "ollama-bridge" for call in calls)
+    for call in calls:
+        environ = call["env"]
+        assert isinstance(environ, dict)
+        assert environ["AWF_DATABASE_URL"] == intended_database_url
+        assert "COMPOSE_PROFILES" not in environ
 
 
 @pytest.mark.unit

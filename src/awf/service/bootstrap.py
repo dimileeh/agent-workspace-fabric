@@ -190,7 +190,11 @@ async def run_service_bootstrap(
     runner = run_subprocess or _run_subprocess
     collector = status_collector or collect_service_status
     completed: list[ServiceBootstrapStageResult] = []
-    service_env = local_service_environ()
+    assets = _resolve_bootstrap_assets(
+        compose_file,
+        require_agent_runtime=not resolved_options.skip_agent_runtime_build,
+    )
+    service_env = local_service_environ(env_file=_bootstrap_environment_file(assets))
     if provider_environ is not None:
         service_env.update(provider_environ)
 
@@ -198,6 +202,7 @@ async def run_service_bootstrap(
         settings,
         options=resolved_options,
         compose_file=compose_file,
+        assets=assets,
         environ=service_env,
     ):
         completed.append(
@@ -228,15 +233,18 @@ def _bootstrap_stages(
     *,
     options: ServiceBootstrapOptions,
     compose_file: Path,
+    assets: _BootstrapAssets | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[_BootstrapStage, ...]:
-    assets = _resolve_bootstrap_assets(
+    resolved_assets = assets or _resolve_bootstrap_assets(
         compose_file,
         require_agent_runtime=not options.skip_agent_runtime_build,
     )
     stages: list[_BootstrapStage] = []
     if not options.skip_agent_runtime_build:
-        if assets.root is None or assets.agent_runtime_dockerfile is None:  # pragma: no cover
+        if (
+            resolved_assets.root is None or resolved_assets.agent_runtime_dockerfile is None
+        ):  # pragma: no cover
             raise _bootstrap_assets_not_found_error(compose_file)
         stages.append(
             _BootstrapStage(
@@ -247,13 +255,16 @@ def _bootstrap_stages(
                     "-t",
                     settings.agent_runtime_image,
                     "-f",
-                    str(assets.agent_runtime_dockerfile),
-                    str(assets.root),
+                    str(resolved_assets.agent_runtime_dockerfile),
+                    str(resolved_assets.root),
                 ),
             )
         )
 
-    compose = _compose_command(assets.compose_file, compose_env_file=assets.compose_env_file)
+    compose = _compose_command(
+        resolved_assets.compose_file,
+        compose_env_file=resolved_assets.compose_env_file,
+    )
     stages.extend(
         [
             _BootstrapStage(
@@ -319,6 +330,16 @@ def _resolve_bootstrap_assets(
     )
 
 
+def _bootstrap_environment_file(assets: _BootstrapAssets) -> Path:
+    """Return the env file path bootstrap should use as its base environment."""
+
+    if assets.compose_env_file is not None:
+        return assets.compose_env_file
+    if assets.root is not None:
+        return assets.root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    return LOCAL_SERVICE_COMPOSE_ENV_FILE
+
+
 def get_bootstrap_asset_root() -> Path | None:
     """Return the verified source root that contains local bootstrap assets."""
 
@@ -374,6 +395,7 @@ def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
         candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
         if candidate.exists():
             return candidate
+        return None
     if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
         return LOCAL_SERVICE_COMPOSE_ENV_FILE.resolve()
     return None
