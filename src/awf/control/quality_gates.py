@@ -57,6 +57,10 @@ _VALIDATION_COMMAND_MARKERS: Final[tuple[str, ...]] = (
     "publish",
     "release",
 )
+_PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
+_PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
+    r"^[vV]?(?:\d+|\d+\.\d+|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
+)
 _PYPROJECT_POLICY_SECTIONS: Final[tuple[tuple[str, ...], ...]] = (
     ("build-system",),
     ("tool", "hatch"),
@@ -1227,18 +1231,40 @@ def _is_validation_command(command: str | None) -> bool:
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
-    old_action = _uses_action(old_uses)
-    new_action = _uses_action(new_uses)
-    if old_action is None or new_action is None:
+    old_parts = _uses_action_and_ref(old_uses)
+    new_parts = _uses_action_and_ref(new_uses)
+    if old_parts is None or new_parts is None:
         return False
-    return old_action == new_action and old_uses != new_uses
+    old_action, old_ref = old_parts
+    new_action, new_ref = new_parts
+    return (
+        old_action == new_action
+        and old_ref != new_ref
+        and _is_pinned_workflow_uses_ref(old_ref)
+        and _is_pinned_workflow_uses_ref(new_ref)
+    )
 
 
 def _uses_action(value: str) -> str | None:
-    action, separator, ref = value.partition("@")
+    parts = _uses_action_and_ref(value)
+    if parts is None:
+        return None
+    action, _ref = parts
+    return action
+
+
+def _uses_action_and_ref(value: str) -> tuple[str, str] | None:
+    action, separator, ref = value.strip().partition("@")
     if not separator or not action or not ref:
         return None
-    return action
+    return action, ref
+
+
+def _is_pinned_workflow_uses_ref(ref: str) -> bool:
+    return (
+        _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(ref) is not None
+        or _PINNED_WORKFLOW_USES_VERSION_RE.fullmatch(ref) is not None
+    )
 
 
 def _step_remainder(
