@@ -58,6 +58,12 @@ _VALIDATION_TEST_COMMAND_RE: Final = re.compile(
 _VALIDATION_UNITTEST_COMMAND_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\s+-m\s+unittest(?:\s|$)"
 )
+_VALIDATION_TEST_PATH_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?:(?:uv|poetry|pipenv)\s+run\s+)?python(?:3(?:\.\d+)?)?"
+    r"(?:\s+--?[A-Za-z0-9_.=:/-]+)*"
+    r"\s+tests/[^\s;&|]*"
+)
 _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
     r"^[vV]?(?:\d+|\d+\.\d+|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
@@ -96,7 +102,6 @@ class ProtectedFileDiff:
     path: str
     old_text: str | None
     new_text: str | None
-    unified_diff: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1243,9 +1248,10 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
 
 
 def _is_informational_step(step: Mapping[str, Any]) -> bool:
-    if _string_value(step.get("uses")) is not None:
+    uses = _string_value(step.get("uses"))
+    if uses is not None and not _is_comment_or_notify_uses(uses):
         return False
-    if not _is_comment_or_notify_step(step):
+    if uses is None and not _is_comment_or_notify_step(step):
         label = _step_label(step).lower()
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
             return False
@@ -1258,11 +1264,17 @@ def _is_validation_command(command: str | None) -> bool:
         return False
     normalized = command.lower()
     return (
-        "tests/" in normalized
+        _VALIDATION_TEST_PATH_RE.search(normalized) is not None
         or _VALIDATION_COMMAND_TOKEN_RE.search(normalized) is not None
         or _VALIDATION_TEST_COMMAND_RE.search(normalized) is not None
         or _VALIDATION_UNITTEST_COMMAND_RE.search(normalized) is not None
     )
+
+
+def _is_comment_or_notify_uses(uses: str) -> bool:
+    action = _uses_action(uses) or uses
+    label = action.lower()
+    return any(marker in label for marker in _COMMENT_STEP_MARKERS)
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
@@ -1417,8 +1429,32 @@ def _line_for_workflow_step_key(
     step_line = _line_for_workflow_step(text, step)
     lines = text.splitlines()
     if step_line is not None:
+        key_pattern = re.compile(rf"^\s*(?:-\s*)?{re.escape(key)}\s*:")
+        step_index = step_line - 1
+        step_indent = None
+        anchor_indent = len(lines[step_index]) - len(lines[step_index].lstrip())
+        for candidate in range(step_index, -1, -1):
+            marker = re.match(r"^(\s*)-\s+", lines[candidate])
+            if marker is None:
+                continue
+            marker_indent = len(marker.group(1))
+            if candidate == step_index or marker_indent < anchor_indent:
+                step_index = candidate
+                step_indent = marker_indent
+                break
+        if step_indent is not None:
+            end_index = len(lines)
+            for candidate in range(step_index + 1, len(lines)):
+                marker = re.match(r"^(\s*)-\s+", lines[candidate])
+                if marker is not None and len(marker.group(1)) <= step_indent:
+                    end_index = candidate
+                    break
+            for candidate in range(step_index, end_index):
+                if key_pattern.match(lines[candidate]):
+                    return candidate + 1
+            return None
         for index in range(step_line, min(len(lines), step_line + 12) + 1):
-            if re.match(rf"^\s*{re.escape(key)}\s*:", lines[index - 1]):
+            if key_pattern.match(lines[index - 1]):
                 return index
     return _line_matching(text, rf"^\s*{re.escape(key)}\s*:")
 

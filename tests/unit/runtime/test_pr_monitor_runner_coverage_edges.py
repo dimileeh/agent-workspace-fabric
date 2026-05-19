@@ -5458,10 +5458,6 @@ async def test_sync_base_protected_scope_diffs_use_remote_branch_base(
     )  # diff against merged base
     cmd.queue_result(returncode=0, stdout=workflow_text)
     cmd.queue_result(returncode=0, stdout=workflow_text)
-    cmd.queue_result(
-        returncode=0,
-        stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n",
-    )
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -5491,7 +5487,7 @@ async def test_sync_base_protected_scope_diffs_use_remote_branch_base(
         "remote-branch-base-sha..HEAD",
         "--",
         ".github/workflows/ci.yml",
-    ) in [call.args for call in cmd.calls]
+    ) not in [call.args for call in cmd.calls]
 
 
 @pytest.mark.unit

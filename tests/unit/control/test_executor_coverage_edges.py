@@ -4013,7 +4013,6 @@ async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="base workflow\n")
     runner.queue_result(returncode=0, stdout="staged workflow\n")
-    runner.queue_result(returncode=0, stdout="@@ -1 +1 @@\n")
     executor = _executor_with_runner(runner, tmp_path)
 
     diffs = await executor._protected_file_diffs_for_staged_paths(
@@ -4029,14 +4028,7 @@ async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
         "base-sha:.github/workflows/ci.yml",
     ]
     assert runner.calls[1].args[-2:] == ["show", ":.github/workflows/ci.yml"]
-    assert runner.calls[2].args[-6:] == [
-        "diff",
-        "--cached",
-        "--unified=0",
-        "base-sha",
-        "--",
-        ".github/workflows/ci.yml",
-    ]
+    assert len(runner.calls) == 2
 
 
 @pytest.mark.unit

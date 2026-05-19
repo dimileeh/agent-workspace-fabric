@@ -531,12 +531,66 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_step_key_line_lookup_scans_long_step_block() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post coverage comment
+        env:
+          KEY_01: value
+          KEY_02: value
+          KEY_03: value
+          KEY_04: value
+          KEY_05: value
+          KEY_06: value
+          KEY_07: value
+          KEY_08: value
+          KEY_09: value
+          KEY_10: value
+          KEY_11: value
+          KEY_12: value
+          KEY_13: value
+          KEY_14: value
+          KEY_15: value
+        run: echo pending
+""".strip()
+    new_text = old_text.replace("run: echo pending", "run: uv run coverage xml")
+    expected_line = new_text.splitlines().index("        run: uv run coverage xml") + 1
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post coverage comment.run"
+    assert violation.line == expected_line
+    assert "introducing validation command is blocked" in violation.reason
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [
         "bash scripts/recovery.sh",
         "bash scripts/discover.sh",
         "test -f config.yaml && echo ok",
+        "cp tests/fixtures/golden.json /tmp/",
+        "ls tests/",
     ],
 )
 def test_added_informational_job_ignores_non_validation_command_words(command: str) -> None:
@@ -1063,6 +1117,49 @@ jobs:
     assert violation.section == "jobs.tests.steps.Notify reviewers"
     assert violation.line == 9
     assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+def test_added_informational_job_with_comment_action_uses_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  notify-comment:
+    name: Notify reviewers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/create-or-update-comment@v4
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
 
 
 @pytest.mark.unit

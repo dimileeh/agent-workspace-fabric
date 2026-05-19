@@ -5250,7 +5250,6 @@ class PullRequestMonitorRunner:
                 path=path,
                 old_text=old_text,
                 new_text=new_text,
-                unified_diff=None,
             )
         return diffs
 
@@ -5270,15 +5269,10 @@ class PullRequestMonitorRunner:
             new_text = await self._git_show_text(
                 worktree_path=worktree_path, refspec=f"HEAD:{path}"
             )
-            unified_diff = await self._git_diff_text(
-                worktree_path=worktree_path,
-                args=["diff", "--unified=0", f"{base_ref}..HEAD", "--", path],
-            )
             diffs[path] = ProtectedFileDiff(
                 path=path,
                 old_text=old_text,
                 new_text=new_text,
-                unified_diff=unified_diff,
             )
         return diffs
 
