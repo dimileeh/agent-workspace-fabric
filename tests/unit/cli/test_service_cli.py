@@ -119,10 +119,13 @@ def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
     compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
     compose_file.parent.mkdir(parents=True)
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
 
 
 @pytest.mark.unit
@@ -357,6 +360,95 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
             ],
             {"check": False, "capture_output": True, "text": True},
         )
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_passes_source_checkout_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(compose_env),
+            "-f",
+            str(compose_file),
+            "logs",
+            "--tail",
+            "100",
+            "api",
+            "worker",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_passes_existing_root_env_file_when_compose_env_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    root_env = workspace_root / ".env"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    root_env.write_text("AWF_API_TOKEN=from-root-env\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(root_env),
+            "-f",
+            str(compose_file),
+            "logs",
+            "--tail",
+            "100",
+            "worker",
+        ]
     ]
 
 

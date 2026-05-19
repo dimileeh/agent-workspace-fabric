@@ -1677,8 +1677,17 @@ def service_logs(
     """Tail local AWF service Compose logs."""
     from awf.service.logs import ServiceLogsError, run_service_logs
 
+    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
+    env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
+    compose_env_file = env_file if env_file.exists() else None
     try:
-        result = run_service_logs(services=service, tail=tail, follow=follow)
+        result = run_service_logs(
+            services=service,
+            tail=tail,
+            follow=follow,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+        )
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceLogsError as exc:

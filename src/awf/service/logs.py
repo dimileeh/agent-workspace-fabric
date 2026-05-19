@@ -89,17 +89,16 @@ def service_logs_command(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
 ) -> list[str]:
     selected_services = [service.value for service in services] or list(DEFAULT_LOG_SERVICES)
     args = [
         "docker",
         "compose",
-        "-f",
-        str(compose_file),
-        "logs",
-        "--tail",
-        str(tail),
     ]
+    if compose_env_file is not None:
+        args.extend(["--env-file", str(compose_env_file)])
+    args.extend(["-f", str(compose_file), "logs", "--tail", str(tail)])
     if follow:
         args.append("--follow")
     args.extend(selected_services)
@@ -112,6 +111,7 @@ def run_service_logs(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ServiceLogsResult:
     """Run ``docker compose logs`` for the local service stack."""
@@ -130,6 +130,7 @@ def run_service_logs(
                 tail=tail,
                 follow=follow,
                 compose_file=compose_file,
+                compose_env_file=compose_env_file,
             ),
             check=False,
             capture_output=capture_output,

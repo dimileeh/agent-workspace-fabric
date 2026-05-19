@@ -41,6 +41,12 @@ def test_service_logs_command_defaults_and_follow_flag() -> None:
         follow=True,
         compose_file=Path("compose.yml"),
     )
+    env_file_command = service_logs_command(
+        services=[ServiceLogName.worker],
+        tail=10,
+        compose_file=Path("docker/compose/local-service.yml"),
+        compose_env_file=Path("docker/compose/.env"),
+    )
 
     assert command == [
         "docker",
@@ -63,6 +69,18 @@ def test_service_logs_command_defaults_and_follow_flag() -> None:
         "50",
         "--follow",
         "postgres",
+    ]
+    assert env_file_command == [
+        "docker",
+        "compose",
+        "--env-file",
+        "docker/compose/.env",
+        "-f",
+        "docker/compose/local-service.yml",
+        "logs",
+        "--tail",
+        "10",
+        "worker",
     ]
 
 
