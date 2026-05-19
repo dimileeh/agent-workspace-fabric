@@ -1000,6 +1000,8 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
             overlay_only_lines.extend(pending_context)
             overlay_only_lines.append(line)
         pending_context = []
+    if overlay_only_lines:
+        overlay_only_lines.extend(pending_context)
     if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
         merged_lines[-1] = f"{merged_lines[-1]}\n"
     merged_lines.extend(overlay_only_lines)

@@ -67,12 +67,22 @@ def _stub_bootstrap_mode(
 ) -> dict[str, Any]:
     """Stub doctor + service bootstrap for ``awf init`` (no-path) tests."""
 
+    from awf.common import config as common_config
     from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    captured: dict[str, Any] = {"bootstrap_calls": []}
+    captured: dict[str, Any] = {"bootstrap_calls": [], "settings_instances": []}
     settings = object()
+
+    class StubSettings:
+        """Minimal Settings double for helper-backed bootstrap tests."""
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            captured["settings_instances"].append(self)
+
+    monkeypatch.setattr(common_config, "Settings", StubSettings)
 
     def _resolve_service_settings(*_args: object, **_kwargs: object) -> object:
         return settings
@@ -538,6 +548,32 @@ def test_init_without_path_runs_service_bootstrap(
 
 
 @pytest.mark.unit
+def test_stub_bootstrap_mode_replaces_settings_constructor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Helper-backed bootstrap tests should not depend on real Settings fields."""
+    from awf.common import config as common_config
+
+    class ExplodingSettings:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("real Settings constructor should be stubbed")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(common_config, "Settings", ExplodingSettings)
+    captured = _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert len(captured["settings_instances"]) == 1
+    assert captured["settings_instances"][0].kwargs == {
+        "_env_file": Path(".env"),
+        "github_token": None,
+    }
+
+
+@pytest.mark.unit
 def test_init_without_path_seeds_source_compose_env_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -652,6 +688,63 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
     assert "wrote docker/compose/.env from docker/compose/.env.example" in result.output
     assert "migrated-token" not in result.output
     assert "migrated-password" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_preserves_trailing_root_env_overlay_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep comments that trail the final root-only assignment during merge."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=compose-example",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "# Root-only service setting",
+                "AWF_ROOT_ONLY=root-value",
+                "",
+                "# Keep this note with the migrated root-only setting",
+                "# It documents why AWF_ROOT_ONLY exists.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (compose / ".env").read_text(encoding="utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+                "",
+                "# Root-only service setting",
+                "AWF_ROOT_ONLY=root-value",
+                "",
+                "# Keep this note with the migrated root-only setting",
+                "# It documents why AWF_ROOT_ONLY exists.",
+            ]
+        )
+        + "\n"
+    )
 
 
 @pytest.mark.unit
