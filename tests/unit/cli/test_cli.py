@@ -50,15 +50,13 @@ def _assert_control_headers(
 
 
 @pytest.mark.unit
-def test_handle_response_pops_request_context_for_success() -> None:
+def test_handle_response_uses_response_request_without_global_context() -> None:
     response = _mock_response(status_code=200, payload={"ok": True})
-    cli_main._CALL_CONTEXT[id(response)] = ("GET", "http://localhost:8000/v1/workspaces")
+    response.request = httpx.Request("GET", "http://localhost:8000/v1/workspaces")
 
-    try:
-        cli_main._handle_response(response, cli_main.OutputFormat.json)
-        assert id(response) not in cli_main._CALL_CONTEXT
-    finally:
-        cli_main._CALL_CONTEXT.pop(id(response), None)
+    assert not hasattr(cli_main, "_CALL_CONTEXT")
+    cli_main._handle_response(response, cli_main.OutputFormat.json)
+    assert not hasattr(cli_main, "_CALL_CONTEXT")
 
 
 class TestWorkspaceCreate:
@@ -1228,7 +1226,7 @@ class TestWorkspaceAdoptPr:
 
         assert result.exit_code == 0
         assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
-        assert cli_main._CALL_CONTEXT == {}
+        assert not hasattr(cli_main, "_CALL_CONTEXT")
 
     @pytest.mark.unit
     def test_posts_adoption_request_to_normalized_v1_endpoint_from_env(
@@ -1253,7 +1251,7 @@ class TestWorkspaceAdoptPr:
 
             assert result.exit_code == 0
             assert mock.call_args[0] == ("POST", "http://host:8000/v1/workspaces/adopt-pr")
-            assert cli_main._CALL_CONTEXT == {}
+            assert not hasattr(cli_main, "_CALL_CONTEXT")
 
     @pytest.mark.unit
     def test_posts_model_and_effort_when_requested(self) -> None:
@@ -1373,6 +1371,10 @@ class TestWorkspaceAdoptPr:
     ) -> None:
         monkeypatch.setenv("AWF_API_TOKEN", "api-token-secret")
         response = _mock_response(status_code=404, payload={"message": "Not Found"})
+        response.request = httpx.Request(
+            "POST",
+            "http://localhost:8000/v1/workspaces/adopt-pr",
+        )
         with patch("awf.cli.main.httpx.request", return_value=response):
             result = _runner.invoke(
                 app,
@@ -1390,6 +1392,10 @@ class TestWorkspaceAdoptPr:
     def test_not_found_sanitizes_url_secret_query_params(self) -> None:
         response = _mock_response(status_code=404, payload={"message": "Not Found"})
         base_url = "http://host:8000/v1?access_token=top-secret-token"
+        response.request = httpx.Request(
+            "POST",
+            "http://host:8000/v1/workspaces/adopt-pr?access_token=top-secret-token",
+        )
         with patch("awf.cli.main.httpx.request", return_value=response):
             result = _runner.invoke(
                 app,
@@ -1418,6 +1424,10 @@ class TestWorkspaceAdoptPr:
     ) -> None:
         monkeypatch.setenv("AWF_API_TOKEN", "api-token-secret")
         response = _mock_response(status_code=404, payload={"message": "Not Found"})
+        response.request = httpx.Request(
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_show",
+        )
         with patch("awf.cli.main.httpx.request", return_value=response):
             result = _runner.invoke(app, ["workspace", "show", "ws_show"])
 

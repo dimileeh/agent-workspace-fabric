@@ -24,7 +24,7 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import click
@@ -108,30 +108,16 @@ class OutputFormat(StrEnum):
 
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
-_CALL_CONTEXT: dict[int, tuple[str, str]] = {}
 
 
 def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
-    context = _CALL_CONTEXT.pop(id(response), None)
-    if context is not None:
-        context_method, context_request_url = context
-        context_method_text = context_method if isinstance(context_method, str) else None
-        context_request_url_text = (
-            context_request_url if isinstance(context_request_url, str) else None
-        )
-        return (
-            context_method_text,
-            sanitize_request_url(context_request_url_text) if context_request_url_text else None,
-        )
-
-    request = getattr(response, "request", None)
-    if request is None:
+    try:
+        request_obj = cast(object, response.request)
+    except RuntimeError:
         return None, None
-    method_value = getattr(request, "method", None)
-    request_url_value = getattr(request, "url", None)
-    method_text = method_value if isinstance(method_value, str) else None
-    request_url_text = str(request_url_value) if request_url_value is not None else None
-    return method_text, sanitize_request_url(request_url_text) if request_url_text else None
+    if not isinstance(request_obj, httpx.Request):
+        return None, None
+    return request_obj.method, sanitize_request_url(str(request_obj.url))
 
 
 def _base_url(override: str | None) -> str:
@@ -575,9 +561,7 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
     url = normalize_api_url(base_url, path)
     try:
-        response = httpx.request(method, url, timeout=30.0, **kwargs)
-        _CALL_CONTEXT[id(response)] = (method, url)
-        return response
+        return httpx.request(method, url, timeout=30.0, **kwargs)
     except httpx.RequestError as exc:
         typer.echo(
             f"error: could not reach AWF API at {sanitize_request_url(url)}: {exc}",
