@@ -2660,7 +2660,7 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
 
 
 async def _monitor_provider_recovery_resume_pending(
-    _session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession],
     candidate: _ActiveExecutionCandidate,
 ) -> bool:
     if candidate.status != WorkspaceStatus.monitoring_pr:
@@ -2688,7 +2688,7 @@ async def _monitor_provider_recovery_resume_pending(
     if provider is None or model is None:
         return False
 
-    async with _session_factory() as session:
+    async with session_factory() as session:
         breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
             provider=provider,
             model=model,
