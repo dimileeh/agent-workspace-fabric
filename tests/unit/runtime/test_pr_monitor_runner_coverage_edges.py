@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
     _as_utc,
     _candidate_stale_required_action,
+    _changed_paths_from_name_status_z,
     _changed_paths_from_porcelain,
     _collect_defer_items,
     _GitPushResult,
@@ -273,6 +274,10 @@ def _assert_committed_diff_phase_ran(
 
 def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
     return ["git", "-c", f"safe.directory={worktree_path}", "-C", str(worktree_path), *args]
+
+
+def _name_status_z(*paths: str) -> str:
+    return "".join(f"M\0{path}\0" for path in paths)
 
 
 async def _mark_refactor_task(
@@ -3243,10 +3248,10 @@ async def test_execute_sync_base_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     runner = make_runner(
         factory=factory,
@@ -3557,7 +3562,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
-        (0, "src/conflict.py\n", ""),
+        (0, _name_status_z("src/conflict.py"), ""),
         (0, "", ""),  # refresh base branch for sync-base diff
         (0, "merged-base-sha\n", ""),
         (0, "", ""),
@@ -3678,10 +3683,10 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     runner = make_runner(
         factory=factory,
@@ -3774,7 +3779,7 @@ jobs:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
     cmd.queue_result(returncode=0, stdout=old_text)  # git show merge-base:path
     cmd.queue_result(returncode=0, stdout=new_text)  # git show HEAD:path
     cmd.queue_result(
@@ -3822,7 +3827,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # diff against merged base excludes base changes
@@ -3899,7 +3904,11 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
             if args[-2:] == ["FETCH_HEAD", "HEAD"]:
                 return CommandResult(returncode=0, stdout="remote-branch-base-sha\n", stderr="")
             if "remote-branch-base-sha..HEAD" in args:
-                return CommandResult(returncode=0, stdout=".github/workflows/ci.yml\n", stderr="")
+                return CommandResult(
+                    returncode=0,
+                    stdout=_name_status_z(".github/workflows/ci.yml"),
+                    stderr="",
+                )
             if args[-1:] == ["+refs/heads/development:refs/remotes/origin/development"]:
                 return CommandResult(returncode=0, stdout="", stderr="")
             if args[-2:] == ["origin/development", "HEAD"]:
@@ -3909,7 +3918,7 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
             if "origin/development..HEAD" in args:
                 return CommandResult(
                     returncode=0,
-                    stdout=".github/workflows/ci.yml\n",
+                    stdout=_name_status_z(".github/workflows/ci.yml"),
                     stderr="",
                 )
             return CommandResult(returncode=0, stdout="", stderr="")
@@ -3975,7 +3984,11 @@ async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
         (0, "", ""),
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
-        (0, "tests/test_app.py\n", ""),  # committed diff is inside ordinary test files
+        (
+            0,
+            _name_status_z("tests/test_app.py"),
+            "",
+        ),  # committed diff is inside ordinary test files
         (0, "", ""),
     ]:
         cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
@@ -4167,7 +4180,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
@@ -4175,7 +4188,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="")  # no dirty repair edits after no-op commit
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -4300,7 +4313,7 @@ async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
@@ -4310,7 +4323,7 @@ async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
     cmd.queue_result(returncode=0)  # git commit
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py"))
     cmd.queue_result(returncode=0, stderr="pushed")  # git push
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -4841,7 +4854,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
@@ -4857,7 +4870,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
     cmd.queue_result(returncode=0)  # git commit
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py"))
     cmd.queue_result(returncode=0, stderr="pushed")  # git push
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -4917,7 +4930,7 @@ async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="before-repair-sha\n")
     cmd.queue_result(returncode=0, stdout="after-repair-sha\n")
@@ -4929,7 +4942,7 @@ async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
     cmd.queue_result(returncode=128, stderr="network reset")  # protected revert baseline fetch
     cmd.queue_result(returncode=0, stdout="")  # would continue to push without the fix
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py"))
     cmd.queue_result(returncode=0, stderr="pushed")
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -5111,7 +5124,7 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n\n tests/test_fix.py \n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py", "tests/test_fix.py"))
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -5148,6 +5161,53 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
         "merge-base-sha..HEAD",
         "--",
     )
+
+
+@pytest.mark.unit
+def test_changed_paths_from_name_status_z_deduplicates_valid_nul_records() -> None:
+    assert _changed_paths_from_name_status_z(
+        "M\0src/fix.py\0M\0src/fix.py\0R100\0.github/workflows/ci.yml\0docs/ci.yml\0"
+    ) == ("src/fix.py", ".github/workflows/ci.yml", "docs/ci.yml")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("diff_stdout", "message"),
+    [
+        ("M\tsrc/fix.py\n", "expected NUL-delimited output"),
+        ("M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0", "truncated"),
+    ],
+)
+def test_changed_paths_from_name_status_z_rejects_malformed_z_output(
+    diff_stdout: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _changed_paths_from_name_status_z(diff_stdout)
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_fails_closed_for_malformed_z_output(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="Could not parse committed diff"):
+        await runner._changed_paths_since_remote_branch(
+            worktree_path=tmp_path / "worktree",
+            remote_branch="awf/ws_remote_missing",
+        )
 
 
 @pytest.mark.integration
@@ -5304,10 +5364,12 @@ async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against remote PR branch
+    cmd.queue_result(
+        returncode=0, stdout=_name_status_z("src/fix.py")
+    )  # diff against remote PR branch
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against merged base
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py"))  # diff against merged base
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -5380,13 +5442,13 @@ async def test_sync_base_protected_scope_diffs_use_remote_branch_base(
     cmd.queue_result(returncode=0, stdout="remote-branch-base-sha\n")
     cmd.queue_result(
         returncode=0,
-        stdout=".github/workflows/ci.yml\n",
+        stdout=_name_status_z(".github/workflows/ci.yml"),
     )  # diff against remote PR branch
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch
     cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(
         returncode=0,
-        stdout=".github/workflows/ci.yml\n",
+        stdout=_name_status_z(".github/workflows/ci.yml"),
     )  # diff against merged base
     cmd.queue_result(returncode=0, stdout=workflow_text)
     cmd.queue_result(returncode=0, stdout=workflow_text)

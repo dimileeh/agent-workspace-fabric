@@ -5225,7 +5225,13 @@ class PullRequestMonitorRunner:
                 f"stdout={diff_result.stdout.strip() or '<empty>'} "
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
-        return _changed_paths_from_name_status_z(diff_result.stdout)
+        try:
+            return _changed_paths_from_name_status_z(diff_result.stdout)
+        except ValueError as exc:
+            raise ProtectedScopeDiffError(
+                f"Could not parse committed diff {error_context} "
+                f"for protected-scope validation: {exc}"
+            ) from exc
 
     async def _protected_file_diffs_for_status_paths(
         self,
@@ -7648,42 +7654,32 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
     """Extract changed paths from ``git diff --name-status -z`` output."""
+    if not diff_stdout:
+        return ()
     if "\0" not in diff_stdout:
-        return tuple(_changed_paths_from_name_status_lines(diff_stdout))
+        raise ValueError("expected NUL-delimited output from `git diff --name-status -z`")
 
-    fields = [field for field in diff_stdout.split("\0") if field]
+    fields = diff_stdout.split("\0")
+    if fields[-1] != "":
+        raise ValueError("truncated `--name-status -z` output: missing terminating NUL")
+    fields = fields[:-1]
     paths: list[str] = []
     index = 0
     while index < len(fields):
         status = fields[index]
+        if not status:
+            raise ValueError("malformed `--name-status -z` output: empty status field")
         index += 1
         path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            raise ValueError(f"truncated `--name-status -z` record for status {status!r}")
         for _ in range(path_count):
-            if index >= len(fields):
-                break
-            path = fields[index].strip()
+            path = fields[index]
             index += 1
-            if path:
-                paths.append(path)
+            if not path:
+                raise ValueError(f"malformed `--name-status -z` record for status {status!r}")
+            paths.append(path)
     return tuple(dict.fromkeys(paths))
-
-
-def _changed_paths_from_name_status_lines(diff_stdout: str) -> list[str]:
-    paths: list[str] = []
-    for line in diff_stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) == 1:
-            paths.append(parts[0].strip())
-            continue
-        status = parts[0]
-        if status.startswith(("R", "C")):
-            paths.extend(part.strip() for part in parts[1:3] if part.strip())
-        elif len(parts) >= 2 and parts[1].strip():
-            paths.append(parts[1].strip())
-    return list(dict.fromkeys(paths))
 
 
 def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
