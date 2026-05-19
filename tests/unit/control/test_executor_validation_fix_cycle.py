@@ -163,13 +163,15 @@ def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
-    """Queue the subprocess results for pr_creator's pre-push
-    diagnostics + push + gh pr create. The three diagnostic queries
+    """Queue the subprocess results for executor's pre-push policy check,
+    then pr_creator's pre-push diagnostics + push + gh pr create. The
+    three diagnostic queries
     (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
     ``git log origin/<base>..HEAD``) were added after the T39
     incident to capture worktree state when ``gh pr create`` rejects
     with "No commits between development and awf/ws_...". Every test
-    that pushes must account for these 3 extra reads."""
+    that pushes must account for these reads."""
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
@@ -665,6 +667,52 @@ dependencies = [
             assert ".awf/workspace.yml" in (ws.failure_message or "")
 
     @pytest.mark.unit
+    async def test_initial_agent_self_committed_protected_change_before_staged_work_is_blocked(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory, owned_paths=["src/**"])
+        fake.queue_result(returncode=0)  # adapter.run (initial)
+        fake.queue_result(returncode=0, stdout="")  # rev-parse --abbrev-ref HEAD
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # only remaining staged work
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="2\n")  # self-commit + AWF commit
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
+        fake.queue_result(returncode=0)  # validation passes
+        fake.queue_result(
+            returncode=0,
+            stdout=".awf/workspace.yml\nsrc/fix.py\n",
+        )  # cumulative base..HEAD diff
+        fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # legacy abbrev-ref HEAD
+        fake.queue_result(returncode=0, stdout="abc1234 work\n")  # legacy log ahead-of-base
+        fake.queue_result(returncode=0)  # legacy git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1")  # legacy gh
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert "protected quality-gate" in (ws.failure_message or "")
+            assert ".awf/workspace.yml" in (ws.failure_message or "")
+        call_args = [call.args for call in fake.calls]
+        assert any(
+            args[:1] == ["git"]
+            and "diff" in args
+            and "--name-only" in args
+            and f"{'a' * 40}..HEAD" in args
+            for args in call_args
+        )
+        assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
+
+    @pytest.mark.unit
     async def test_fix_pass_cannot_commit_unowned_quality_gate_change(
         self,
         fake: FakeCommandRunner,
@@ -678,6 +726,14 @@ dependencies = [
         fake.queue_result(returncode=0)  # adapter.run (fix pass)
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
+        fake.queue_result(returncode=0, stdout="[tool.coverage]\nfail_under = 99\n")
+        fake.queue_result(returncode=0, stdout="[tool.coverage]\nfail_under = 0\n")
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "diff --git a/pyproject.toml b/pyproject.toml\n-fail_under = 99\n+fail_under = 0\n"
+            ),
+        )
 
         await executor.execute(ws_id)
 

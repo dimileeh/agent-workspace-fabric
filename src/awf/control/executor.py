@@ -3431,13 +3431,21 @@ class WorkspaceExecutor:
                 expected_status=WorkspaceStatus.validating,
             ):
                 return
+            if await self._fail_if_protected_quality_gate_committed_output(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                owned_paths=list(ws.owned_paths),
+                expected_status=WorkspaceStatus.validating,
+            ):
+                return
         except Exception as exc:
-            _log.exception("executor.plan_only_output_check_failed", workspace_id=workspace_id)
+            _log.exception("executor.pre_push_policy_check_failed", workspace_id=workspace_id)
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"plan-only output check failed: {exc!r}"[:2000],
+                message=f"pre-push policy check failed: {exc!r}"[:2000],
             )
             return
 
@@ -5535,6 +5543,42 @@ class WorkspaceExecutor:
             changed_paths=changed_paths,
             expected_status=expected_status,
         )
+
+    async def _fail_if_protected_quality_gate_committed_output(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str,
+        owned_paths: list[str],
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        changed_paths = sorted(
+            path.as_posix()
+            for path in await self._committed_paths_since(worktree_path, base_commit)
+        )
+        if not changed_paths:
+            return False
+        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+            worktree_path=worktree_path,
+            base_ref=base_commit,
+            changed_paths=changed_paths,
+        )
+        violations = find_protected_quality_gate_changes(
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
+        )
+        if not violations:
+            return False
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=expected_status,
+            failure_reason=FailureReason.policy_failure,
+            reason_code="QUALITY_GATE_POLICY_CHANGED",
+            message=quality_gate_violation_message(violations)[:2000],
+        )
+        return True
 
     async def _claim_ready(
         self,
