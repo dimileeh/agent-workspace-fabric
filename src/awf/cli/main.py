@@ -989,11 +989,17 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         seed_keys.add(key)
         merged_lines.append(overlay_assignments.get(key, line))
 
-    overlay_only_lines = [
-        line
-        for line in overlay_text.splitlines(keepends=True)
-        if (key := _env_assignment_key(line)) is not None and key not in seed_keys
-    ]
+    overlay_only_lines: list[str] = []
+    pending_context: list[str] = []
+    for line in overlay_text.splitlines(keepends=True):
+        key = _env_assignment_key(line)
+        if key is None:
+            pending_context.append(line)
+            continue
+        if key not in seed_keys:
+            overlay_only_lines.extend(pending_context)
+            overlay_only_lines.append(line)
+        pending_context = []
     if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
         merged_lines[-1] = f"{merged_lines[-1]}\n"
     merged_lines.extend(overlay_only_lines)
@@ -1289,7 +1295,7 @@ def _run_init_service_bootstrap(
                 for path in _init_env_example_search_paths(env_file, env_example)
             )
             typer.echo(
-                "  no .env.example found; skipped "
+                "  no env template found; skipped "
                 f"{_init_display_path(env_file)} "
                 f"creation (looked for {search_paths}; run `awf init` from "
                 "the AWF repository root if you expected one)"

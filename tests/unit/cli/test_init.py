@@ -619,6 +619,9 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
             [
                 "AWF_API_TOKEN=migrated-token",
                 "AWF_POSTGRES_PASSWORD=migrated-password",
+                "",
+                "# Custom docker socket for local service bootstrap",
+                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
                 "AWF_ROOT_ONLY=root-value",
             ]
         )
@@ -638,6 +641,9 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
                 "AWF_API_TOKEN=migrated-token",
                 "AWF_POSTGRES_PASSWORD=migrated-password",
                 "AWF_COMPOSE_ONLY=compose-default",
+                "",
+                "# Custom docker socket for local service bootstrap",
+                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
                 "AWF_ROOT_ONLY=root-value",
             ]
         )
@@ -1100,13 +1106,13 @@ def test_init_without_path_warns_when_env_example_missing(
 
     assert result.exit_code == 0, result.output
     assert not (tmp_path / ".env").exists()
-    assert "no .env.example found" in result.output
+    assert "no env template found" in result.output
     assert "current directory" not in result.output
     assert "AWF repository root" in result.output
 
 
 @pytest.mark.unit
-def test_init_without_path_warns_when_compose_env_examples_missing(
+def test_init_without_path_warns_when_compose_env_templates_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Report every compose env seed path checked before skipping seeding."""
@@ -1121,9 +1127,10 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
+    assert "no env template found" in result.stdout
     assert "looked for .env, docker/compose/.env.example, .env.example" in result.stdout
     assert "skipped docker/compose/.env creation" in result.stdout
-    assert "no .env.example found" not in result.stderr
+    assert "no env template found" not in result.stderr
 
 
 @pytest.mark.unit
