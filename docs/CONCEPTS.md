@@ -483,6 +483,14 @@ docker image inspect "awf-control-plane:${AWF_LOCAL_VERSION}"
 docker image inspect "awf-agent-runtime:${AWF_LOCAL_VERSION}"
 ```
 
+The explicit `--env-file docker/compose/.env` form is preferred for repeatable
+local operations. If the needed Compose variables are already exported in your
+shell, the equivalent control-plane image rebuild command is:
+
+```bash
+docker compose -f docker/compose/local-service.yml build
+```
+
 The Compose stack still points at `awf-control-plane:local` by default, and
 workspace execution still points at `awf-agent-runtime:latest` unless
 `AWF_AGENT_RUNTIME_IMAGE` is overridden. The extra local tags are operator
@@ -535,6 +543,12 @@ docker compose --env-file docker/compose/.env -f docker/compose/local-service.ym
   pg_dump -U awf -d awf -Fc \
   > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
+
+The explicit env-file form avoids depending on shell state. If the needed
+Compose variables are already exported, the equivalent Postgres exec prefix is
+`docker compose -f docker/compose/local-service.yml exec -T postgres`.
+The equivalent pre-restore stop command is
+`docker compose -f docker/compose/local-service.yml stop api worker`.
 
 Restore only when the API and worker are stopped. This avoids live writes
 during restore and makes the backup the single source of control-plane truth.
@@ -602,6 +616,10 @@ docker compose --env-file docker/compose/.env -f docker/compose/local-service.ym
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
+
+The explicit env-file form is preferred. If the needed Compose variables are
+already exported, the equivalent container/network cleanup command is
+`docker compose -f docker/compose/local-service.yml down --remove-orphans`.
 
 Use `down --volumes` only as a last resort after a verified control-plane
 backup exists. Removing the Compose volume destroys the local AWF
