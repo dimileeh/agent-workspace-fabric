@@ -970,6 +970,7 @@ def test_service_bootstrap_cli_uses_existing_compose_env_without_source_checkout
     assert settings.database_url == database_url
     assert settings.docker_host == docker_host
     assert settings.api_base_url == api_base_url
+    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
     assert captured["env_file"] == compose_env
     service_environ = captured["service_environ"]
     assert service_environ["AWF_DATABASE_URL"] == database_url
@@ -1214,12 +1215,19 @@ def test_readme_documents_service_bootstrap_command() -> None:
 
 
 @pytest.mark.unit
-def test_readme_documents_compose_env_bootstrap_path() -> None:
-    """Verify quickstart docs mention the compose env bootstrap target."""
-    quickstart = Path("docs/QUICKSTART.md").read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    "doc_path",
+    [
+        Path("docs/QUICKSTART.md"),
+        Path("docs/GETTING_STARTED.md"),
+    ],
+)
+def test_readme_documents_compose_env_bootstrap_path(doc_path: Path) -> None:
+    """Verify onboarding docs mention the compose env bootstrap target."""
+    document = doc_path.read_text(encoding="utf-8")
 
-    assert "docker/compose/.env" in quickstart
-    assert "wrote .env" not in quickstart
+    assert "docker/compose/.env" in document
+    assert "wrote .env" not in document
 
 
 @pytest.mark.unit
@@ -1878,7 +1886,7 @@ def test_service_status_resolves_settings_from_compose_env(
 
     async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
         captured["settings"] = settings
-        captured["provider_environ"] = kwargs["provider_environ"]
+        captured.update(kwargs)
         return {"service": "awf", "status": "ok", "checks": {}}
 
     monkeypatch.setattr(status_mod, "collect_service_status", _collect)
@@ -1890,6 +1898,8 @@ def test_service_status_resolves_settings_from_compose_env(
     assert isinstance(settings, ServiceSettings)
     assert settings.database_url == compose_database_url
     assert settings.api_base_url == compose_api_base_url
+    assert captured["compose_file"] == compose_env.parent / "local-service.yml"
+    assert captured["compose_env_file"] == compose_env
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert provider_environ["AWF_DATABASE_URL"] == compose_database_url
@@ -1926,7 +1936,7 @@ def test_service_status_uses_existing_compose_env_without_source_checkout(
 
     async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
         captured["settings"] = settings
-        captured["provider_environ"] = kwargs["provider_environ"]
+        captured.update(kwargs)
         return {"service": "awf", "status": "ok", "checks": {}}
 
     monkeypatch.setattr(status_mod, "collect_service_status", _collect)
@@ -1938,6 +1948,8 @@ def test_service_status_uses_existing_compose_env_without_source_checkout(
     assert isinstance(settings, ServiceSettings)
     assert settings.database_url == compose_database_url
     assert settings.api_base_url == compose_api_base_url
+    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
+    assert captured["compose_env_file"] == tmp_path / "docker" / "compose" / ".env"
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert provider_environ["AWF_DATABASE_URL"] == compose_database_url
@@ -1977,7 +1989,7 @@ def test_service_status_resolves_settings_from_existing_root_env(
 
     async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
         captured["settings"] = settings
-        captured["provider_environ"] = kwargs["provider_environ"]
+        captured.update(kwargs)
         return {"service": "awf", "status": "ok", "checks": {}}
 
     monkeypatch.setattr(status_mod, "collect_service_status", _collect)
@@ -1989,6 +2001,8 @@ def test_service_status_resolves_settings_from_existing_root_env(
     assert isinstance(settings, ServiceSettings)
     assert settings.database_url == root_database_url
     assert settings.api_base_url == root_api_base_url
+    assert captured["compose_file"] == compose / "local-service.yml"
+    assert captured["compose_env_file"] == tmp_path / ".env"
     provider_environ = captured["provider_environ"]
     assert isinstance(provider_environ, dict)
     assert provider_environ["AWF_DATABASE_URL"] == root_database_url

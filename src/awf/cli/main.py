@@ -1424,7 +1424,7 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    env_file, env_seed_source = _resolve_service_env_paths()
+    compose_file, env_file, env_seed_source = _resolve_service_compose_paths()
     env_file = _resolve_existing_service_env_file(env_file, env_seed_source)
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
@@ -1436,6 +1436,8 @@ def service_status(
             settings,
             strict_providers=strict_providers,
             provider_environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=env_file,
         )
     )
     _emit(payload, fmt)
