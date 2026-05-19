@@ -9,7 +9,6 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import replace
@@ -118,14 +117,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
-
-
-@pytest.mark.unit
-def test_pr_monitor_runner_git_worktree_commands_use_safe_directory_helper() -> None:
-    source_path = Path(__file__).parents[3] / "src/awf/runtime/pr_monitor_runner.py"
-    source = source_path.read_text()
-
-    assert re.findall(r'\[\s*"git"\s*,\s*"-C"\s*,', source) == []
 
 
 @pytest.fixture

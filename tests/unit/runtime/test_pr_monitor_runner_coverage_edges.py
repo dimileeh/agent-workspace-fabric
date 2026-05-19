@@ -5172,17 +5172,23 @@ def test_changed_paths_from_name_status_z_deduplicates_valid_nul_records() -> No
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("diff_stdout", "message"),
+    ("diff_stdout", "expected_error", "message"),
     [
-        ("M\tsrc/fix.py\n", "expected NUL-delimited output"),
-        ("M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0", "truncated"),
+        ("M\tsrc/fix.py\n", ValueError, "expected NUL-delimited output"),
+        ("M\0src/fix.py", ProtectedScopeDiffError, "missing terminating NUL"),
+        (
+            "M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",
+            ProtectedScopeDiffError,
+            "truncated",
+        ),
     ],
 )
 def test_changed_paths_from_name_status_z_rejects_malformed_z_output(
     diff_stdout: str,
+    expected_error: type[Exception],
     message: str,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(expected_error, match=message):
         _changed_paths_from_name_status_z(diff_stdout)
 
 
