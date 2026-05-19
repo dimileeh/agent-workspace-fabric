@@ -151,6 +151,9 @@ AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
 AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ```
 
+If you change `AWF_POSTGRES_HOST_PORT`, update the localhost port in
+`AWF_DATABASE_URL` to match.
+
 If you change `AWF_API_HOST_PORT`, update host-side CLI targeting for
 `awf service status` and `awf service doctor`, plus local HTTP checks, to use a
 matching API base URL. For example:
