@@ -858,8 +858,8 @@ def _resolve_state_directory(env: Mapping[str, str]) -> Path:
     return (Path(home) / ".awf" / "service").expanduser().resolve()
 
 
-def _resolve_init_env_paths() -> tuple[Path, Path]:
-    """Return the target env file and example file used for init env seeding.
+def _resolve_service_env_paths() -> tuple[Path, Path]:
+    """Return the target env file and example file used by service commands.
 
     If the verified source checkout contains local Compose assets, prefer the
     `docker/compose/.env` target and use a sibling `.env.example` if present.
@@ -1050,7 +1050,7 @@ def _run_init_service_bootstrap(
         raise typer.Exit(code=2) from exc
 
     pretty = fmt == OutputFormat.pretty
-    env_file, env_example = _resolve_init_env_paths()
+    env_file, env_example = _resolve_service_env_paths()
     env_action = "skipped"
     env_error: dict[str, str] | None = None
     if write_env:
@@ -1254,7 +1254,7 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    env_file, _ = _resolve_init_env_paths()
+    env_file, _ = _resolve_service_env_paths()
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1473,7 +1473,7 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
-    env_file, _ = _resolve_init_env_paths()
+    env_file, _ = _resolve_service_env_paths()
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),

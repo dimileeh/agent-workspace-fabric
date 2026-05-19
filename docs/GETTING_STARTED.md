@@ -60,11 +60,12 @@ uv sync
 Once AWF is installed, the fastest path to a working local control plane is
 `awf init`. With no arguments it bootstraps AWF on this machine: it checks
 Docker, ensures the host state directory under
-`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, copies `.env.example` to
-`docker/compose/.env` when the source checkout includes
-`docker/compose/local-service.yml` and falls back to `.env` otherwise (use
-`--no-write-env` to skip), then starts or validates the local Postgres + migrate + API + worker
-stack via
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, seeds
+`docker/compose/.env` from `docker/compose/.env.example` when present or
+`.env.example` otherwise when the source checkout includes
+`docker/compose/local-service.yml`, and falls back to `.env` otherwise (use
+`--no-write-env` to skip), then starts or validates the local Postgres +
+migrate + API + worker stack via
 `awf service bootstrap`.
 
 ```bash
@@ -110,8 +111,12 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 # Persist Compose-interpolated values into docker/compose/.env.
+env_example=docker/compose/.env.example
+if [ ! -f "$env_example" ]; then
+  env_example=.env.example
+fi
 {
-  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example
+  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' "$env_example"
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
 } > docker/compose/.env
