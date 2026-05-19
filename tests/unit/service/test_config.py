@@ -425,6 +425,28 @@ def test_service_settings_sourced_env_default_database_url_uses_compose_env_post
 
 
 @pytest.mark.unit
+def test_project_dotenv_value_continues_past_env_without_requested_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    nested = checkout / "src" / "module"
+    nested.mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    (checkout / ".env").write_text(
+        f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n",
+        encoding="utf-8",
+    )
+    (nested / ".env").write_text("AWF_API_TOKEN=local-token\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+
+    assert (
+        service_config._project_dotenv_value("AWF_DATABASE_URL")  # noqa: SLF001
+        == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    )
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
     explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
 

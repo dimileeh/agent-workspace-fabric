@@ -437,7 +437,9 @@ def _project_dotenv_value(key: str) -> str | None:
             for env_key, env_value in dotenv_values(env_file).items()
             if env_value is not None
         }
-        return _env_value(values, key)
+        value = _env_value(values, key)
+        if value is not None:
+            return value
     return None
 
 
