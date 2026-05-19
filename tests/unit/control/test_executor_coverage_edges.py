@@ -2866,6 +2866,7 @@ def test_digest_file_if_present_streams_file_bytes(
 
     assert executor_mod._digest_file_if_present(path) == hashlib.sha256(payload).hexdigest()
 
+
 @pytest.mark.unit
 async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) -> None:
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
