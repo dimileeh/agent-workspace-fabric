@@ -1422,10 +1422,11 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
-        if await _monitor_provider_recovery_resume_pending(
+        monitor_recovery_resume_pending = await _monitor_provider_recovery_resume_pending(
             self._session_factory,
             candidate,
-        ):
+        )
+        if monitor_recovery_resume_pending:
             _log.info(
                 "worker.monitor_provider_recovery_resume_pending",
                 workspace_id=candidate.workspace_id,
@@ -1451,6 +1452,18 @@ class ControlWorker:
             )
 
         finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
+        task_policy: dict[str, Any] = candidate.task_policy or {}
+        monitor_recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
+        is_retry_recovery = (
+            isinstance(monitor_recovery_state, Mapping)
+            and monitor_recovery_state.get("action") == "retry"
+        )
+        if (
+            is_retry_recovery
+            and candidate.compose_project_name
+            and snapshot.stack_state == "running"
+        ):
+            return
         if finding is not None and finding.status == "unavailable":
             if has_open_pr_for_remonitor(candidate.status, candidate.pr_url):
                 recoverable_finding = WorkspaceRuntimeFinding(
@@ -2655,12 +2668,31 @@ async def _monitor_provider_recovery_resume_pending(
     if not isinstance(raw_state, Mapping):
         return False
     action = raw_state.get("action")
-    # Retry monitors can be in one of two states:
-    # - cooldown not yet elapsed, or
-    # - cooldown elapsed and ready for resumed provider recovery.
-    # In both cases, avoid stale-runtime terminal cleanup until the monitor path
-    # has a chance to claim and run the workspace.
-    return action in {"fallback", "retry"}
+    if action == "fallback":
+        return True
+    if action != "retry":
+        return False
+
+    not_before = provider_cooldown_not_before(candidate.task_policy)
+    now = datetime.now(UTC)
+    if not_before is not None and not_before > now:
+        return True
+
+    if candidate.agent is None:
+        return False
+
+    model = agent_model_from_task_policy(candidate.task_policy)
+    provider = provider_for_agent_model(candidate.agent, model)
+    if provider is None or model is None:
+        return False
+
+    async with _session_factory() as session:
+        breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
+            provider=provider,
+            model=model,
+            now=now,
+        )
+        return breaker is not None
 
 
 def _claim_recheck_conditions(

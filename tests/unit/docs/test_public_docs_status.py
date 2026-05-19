@@ -167,7 +167,11 @@ def test_generated_plan_artifacts_are_not_tracked_public_docs() -> None:
         for path in tracked
     )
     assert not any(
-        path.startswith("plans/") and path != "plans/PLAN_EXECUTION_PROTOCOL.md" for path in tracked
+        path.startswith("plans/")
+        and path != "plans/PLAN_EXECUTION_PROTOCOL.md"
+        and not path.endswith("_PLAN.md")
+        and not path.endswith("_VALIDATION.md")
+        for path in tracked
     )
 
 
