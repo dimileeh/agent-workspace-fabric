@@ -135,21 +135,13 @@ def run_service_logs(
         compose_env_file=compose_env_file,
     )
     try:
-        if docker_env is None:
-            result = runner(
-                command,
-                check=False,
-                capture_output=capture_output,
-                text=True,
-            )
-        else:
-            result = runner(
-                command,
-                check=False,
-                capture_output=capture_output,
-                text=True,
-                env=docker_env,
-            )
+        result = runner(
+            command,
+            check=False,
+            capture_output=capture_output,
+            text=True,
+            env=docker_env,
+        )
     except FileNotFoundError as exc:
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
     except OSError as exc:

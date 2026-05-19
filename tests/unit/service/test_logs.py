@@ -89,7 +89,7 @@ def test_service_logs_command_defaults_and_follow_flag() -> None:
 def test_service_logs_returns_captured_output_for_non_follow_success() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert args[-1] == "worker"
-        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        assert kwargs == {"check": False, "capture_output": True, "text": True, "env": None}
         return subprocess.CompletedProcess(args, returncode=0, stdout="out", stderr="err")
 
     result = run_service_logs(services=[ServiceLogName.worker], run_subprocess=_run)
@@ -171,7 +171,7 @@ def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
 @pytest.mark.unit
 def test_service_logs_follow_failure_mentions_terminal_output() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert kwargs == {"check": False, "capture_output": False, "text": True}
+        assert kwargs == {"check": False, "capture_output": False, "text": True, "env": None}
         return subprocess.CompletedProcess(args, returncode=17, stdout=None, stderr=None)
 
     with pytest.raises(ServiceLogsError) as exc_info:

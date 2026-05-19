@@ -987,14 +987,20 @@ def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> b
         seed_keys.add(key)
         merged_lines.append(overlay_assignments.get(key, line))
 
+    overlay_last_assignment_index: dict[str, int] = {}
+    for index, line in enumerate(overlay_text.splitlines(keepends=True)):
+        key = _env_assignment_key(line)
+        if key is not None and key not in seed_keys:
+            overlay_last_assignment_index[key] = index
+
     overlay_only_lines: list[str] = []
     pending_context: list[str] = []
-    for line in overlay_text.splitlines(keepends=True):
+    for index, line in enumerate(overlay_text.splitlines(keepends=True)):
         key = _env_assignment_key(line)
         if key is None:
             pending_context.append(line)
             continue
-        if key not in seed_keys:
+        if key not in seed_keys and overlay_last_assignment_index.get(key) == index:
             overlay_only_lines.extend(pending_context)
             overlay_only_lines.append(line)
         pending_context = []
