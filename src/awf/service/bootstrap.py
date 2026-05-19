@@ -310,7 +310,7 @@ def _docker_cli_environ(
     environ: Mapping[str, str],
 ) -> dict[str, str]:
     resolved = dict(environ)
-    if resolved.get("AWF_DOCKER_HOST") and "DOCKER_HOST" not in resolved:
+    if resolved.get("AWF_DOCKER_HOST"):
         resolved["DOCKER_HOST"] = resolved["AWF_DOCKER_HOST"]
     return resolved
 
