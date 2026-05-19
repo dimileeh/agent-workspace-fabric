@@ -1198,12 +1198,10 @@ def _run_init_service_bootstrap(
         )
     active_env_file = _resolve_existing_service_env_file(env_file, env_example)
 
-    env_warning_emitted = False
     if pretty:
         typer.echo("AWF init: local service bootstrap")
         if env_action == "write_failed" and env_error is not None:
             typer.echo(_init_env_warning(env_error))
-            env_warning_emitted = True
 
     try:
         service_env = local_service_environ(env_file=active_env_file)
@@ -1286,8 +1284,6 @@ def _run_init_service_bootstrap(
             typer.echo(
                 f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
             )
-        elif env_action == "write_failed" and env_error is not None and not env_warning_emitted:
-            typer.echo(_init_env_warning(env_error))
         elif env_action == "no_example":
             search_paths = ", ".join(
                 _init_display_path(path)

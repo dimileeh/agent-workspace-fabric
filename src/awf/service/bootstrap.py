@@ -210,7 +210,7 @@ async def run_service_bootstrap(
     )
     if provider_environ is not None:
         service_env.update(provider_environ)
-    service_env = _docker_cli_environ(settings, service_env)
+    service_env = _docker_cli_environ(service_env)
 
     for stage in _bootstrap_stages(
         settings,
@@ -316,7 +316,6 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
 
 
 def _docker_cli_environ(
-    _settings: ServiceSettings,
     environ: Mapping[str, str],
 ) -> dict[str, str]:
     resolved = dict(environ)
