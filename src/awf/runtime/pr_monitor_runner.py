@@ -53,10 +53,10 @@ from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.control.quality_gates import (
     ProtectedFileDiff,
     QualityGateViolation,
+    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
     quality_gate_violation_message,
-    requires_protected_file_diff,
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -5132,7 +5132,7 @@ class PullRequestMonitorRunner:
         changed_paths: Sequence[str],
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
-        for path in _diff_classified_protected_paths(changed_paths):
+        for path in diff_classified_protected_paths(changed_paths):
             worktree_file = worktree_path / path
             if not worktree_file.exists():
                 diffs[path] = ProtectedFileDiff(
@@ -5162,7 +5162,7 @@ class PullRequestMonitorRunner:
         changed_paths: Sequence[str],
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
-        for path in _diff_classified_protected_paths(changed_paths):
+        for path in diff_classified_protected_paths(changed_paths):
             old_text = await self._git_show_text(
                 worktree_path=worktree_path,
                 refspec=f"{base_ref}:{path}",
@@ -7548,17 +7548,6 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
-
-
-def _diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
-    paths: list[str] = []
-    for raw_path in changed_paths:
-        path = raw_path.strip().replace("\\", "/")
-        while path.startswith("./"):
-            path = path[2:]
-        if path and requires_protected_file_diff(path):
-            paths.append(path)
-    return tuple(dict.fromkeys(paths))
 
 
 def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:

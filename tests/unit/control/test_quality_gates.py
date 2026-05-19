@@ -7,6 +7,7 @@ import pytest
 from awf.control.quality_gates import (
     ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
+    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     plan_only_output_message,
     quality_gate_violation_message,
@@ -55,6 +56,21 @@ def test_regular_source_changes_are_not_protected() -> None:
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_diff_classified_protected_paths_normalizes_and_deduplicates() -> None:
+    paths = diff_classified_protected_paths(
+        [
+            " ./pyproject.toml ",
+            ".\\.github\\workflows\\ci.yml",
+            "./.github/workflows/ci.yml",
+            "src/awf/control/executor.py",
+            " ",
+        ]
+    )
+
+    assert paths == ("pyproject.toml", ".github/workflows/ci.yml")
 
 
 @pytest.mark.unit

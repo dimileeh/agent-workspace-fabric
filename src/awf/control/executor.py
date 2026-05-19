@@ -56,10 +56,10 @@ from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
+    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     plan_only_output_message,
     quality_gate_violation_message,
-    requires_protected_file_diff,
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.validation_fix_cycle import (
@@ -5311,7 +5311,7 @@ class WorkspaceExecutor:
         changed_paths: Sequence[str],
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
-        for path in _diff_classified_protected_paths(changed_paths):
+        for path in diff_classified_protected_paths(changed_paths):
             old_text = await self._git_show_text(
                 worktree_path=worktree_path, refspec=f"HEAD:{path}"
             )
@@ -5336,7 +5336,7 @@ class WorkspaceExecutor:
         changed_paths: Sequence[str],
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
-        for path in _diff_classified_protected_paths(changed_paths):
+        for path in diff_classified_protected_paths(changed_paths):
             old_text = await self._git_show_text(
                 worktree_path=worktree_path,
                 refspec=f"{base_ref}:{path}",
@@ -8400,17 +8400,6 @@ def _post_validation_conformance_agent_failure_details(
 
 def _git_name_lines(output: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
-
-
-def _diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
-    paths: list[str] = []
-    for raw_path in changed_paths:
-        path = raw_path.strip().replace("\\", "/")
-        while path.startswith("./"):
-            path = path[2:]
-        if path and requires_protected_file_diff(path):
-            paths.append(path)
-    return tuple(dict.fromkeys(paths))
 
 
 def _format_duration_for_message(value: int | float) -> str:

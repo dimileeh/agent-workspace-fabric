@@ -216,6 +216,15 @@ def requires_protected_file_diff(path: str) -> bool:
     return normalized == "pyproject.toml" or _is_workflow_yaml_path(normalized)
 
 
+def diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for raw_path in changed_paths:
+        path = _normalize_path(raw_path)
+        if path and requires_protected_file_diff(path):
+            paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
 def changed_paths_are_only_internal_plan_artifacts(
     changed_paths: list[str] | tuple[str, ...],
 ) -> bool:
