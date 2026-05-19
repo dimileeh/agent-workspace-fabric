@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.service import conformance_salvage as salvage_mod
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_BASE_UNAVAILABLE,
@@ -45,6 +46,27 @@ def _seed_source_worktree(work_dir: Path, workspace_id: str) -> tuple[Path, str]
     base_commit = _git(["rev-parse", "HEAD"], worktree)
     (worktree / "src/app.py").write_text("VALUE = 'new'\n", encoding="utf-8")
     return worktree, base_commit
+
+
+@pytest.mark.unit
+def test_run_git_marks_salvage_worktree_as_safe_directory(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    salvage_mod._run_git(  # noqa: SLF001
+        tmp_path,
+        ["status", "--short"],
+        run=_run,
+        env={},
+    )
+
+    assert calls
+    assert "-c" in calls[0]
+    assert f"safe.directory={tmp_path}" in calls[0]
+    assert calls[0][-3:] == [str(tmp_path), "status", "--short"]
 
 
 @pytest.mark.unit
