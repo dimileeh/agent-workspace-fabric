@@ -1050,10 +1050,10 @@ def _seed_env_file(
             return (
                 "write_failed",
                 _init_env_error_payload(
-                    operation="read_example",
+                    operation="read_overlay",
                     path=env_overlay,
                     env_file=env_file,
-                    env_example=env_overlay,
+                    env_example=env_example,
                     exc=exc,
                 ),
             )
@@ -1100,6 +1100,12 @@ def _init_env_warning(env_error: Mapping[str, str]) -> str:
         return f"  warning: could not create parent directory {parent} for {env_file}: {message}"
     if operation == "read_example":
         return f"  warning: could not read {env_example} while seeding {env_file}: {message}"
+    if operation == "read_overlay":
+        overlay = env_error["path"]
+        return (
+            f"  warning: could not read {overlay} while seeding {env_file} "
+            f"from {env_example}: {message}"
+        )
     return f"  warning: could not write {env_file} from {env_example}: {message}"
 
 

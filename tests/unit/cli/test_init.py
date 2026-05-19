@@ -1218,6 +1218,31 @@ def test_init_env_warning_uses_display_ready_payload_paths(
 
 
 @pytest.mark.unit
+def test_init_env_warning_describes_overlay_read_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Describe overlay read failures as reads, not env writes."""
+    from awf.cli import main as cli_main
+
+    monkeypatch.chdir(tmp_path)
+
+    warning = cli_main._init_env_warning(  # noqa: SLF001
+        {
+            "operation": "read_overlay",
+            "path": ".env",
+            "env_file": "docker/compose/.env",
+            "env_example": "docker/compose/.env.example",
+            "message": "permission denied",
+        }
+    )
+
+    assert warning == (
+        "  warning: could not read .env while seeding docker/compose/.env "
+        "from docker/compose/.env.example: permission denied"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("failure_mode", "expected_operation", "expected_path"),
     (
@@ -1288,6 +1313,35 @@ def test_init_without_path_json_normalizes_asset_root_env_write_failure(
         "path": "../docker/compose/.env",
         "env_file": "../docker/compose/.env",
         "env_example": "../.env.example",
+        "message": "permission denied",
+    }
+
+
+@pytest.mark.unit
+def test_init_without_path_json_marks_env_overlay_read_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose overlay read failures without confusing the seed source."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+    _fail_path_read_bytes(monkeypatch, failing_path=".env")
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["env_action"] == "write_failed"
+    assert payload["env_error"] == {
+        "operation": "read_overlay",
+        "path": ".env",
+        "env_file": "docker/compose/.env",
+        "env_example": "docker/compose/.env.example",
         "message": "permission denied",
     }
 
