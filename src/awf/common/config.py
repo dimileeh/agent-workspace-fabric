@@ -497,7 +497,12 @@ class _SettingsIdentityRef(weakref.ref[Settings]):
         return self._hash
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, _SettingsIdentityRef) and self() is other()
+        if not isinstance(other, _SettingsIdentityRef):
+            return False
+        if self is other:
+            return True
+        settings = self()
+        return settings is not None and settings is other()
 
 
 _SETTINGS_INIT_FIELDS_BY_SETTINGS: dict[_SettingsIdentityRef, frozenset[str]] = {}

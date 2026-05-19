@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import inspect
 import json
 import os
@@ -22,6 +23,7 @@ from awf.common.config import (
     validate_production_settings,
 )
 from awf.service.config import (
+    DEFAULT_LOCAL_SERVICE_API_BASE_URL,
     DEFAULT_LOCAL_SERVICE_DATABASE_URL,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
     _redact_database_url,
@@ -187,6 +189,31 @@ def test_settings_constructor_fields_are_tracked_per_equal_settings_instance() -
 
 
 @pytest.mark.unit
+def test_dead_settings_identity_refs_do_not_compare_equal() -> None:
+    default_settings = Settings(_env_file=None)
+    explicit_default_settings = Settings(
+        _env_file=None,
+        api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+    )
+    default_ref = common_config._SettingsIdentityRef(default_settings)  # noqa: SLF001
+    explicit_default_ref = common_config._SettingsIdentityRef(  # noqa: SLF001
+        explicit_default_settings
+    )
+
+    assert default_settings == explicit_default_settings
+    assert default_ref == common_config._SettingsIdentityRef(default_settings)  # noqa: SLF001
+
+    del default_settings
+    del explicit_default_settings
+    gc.collect()
+
+    assert default_ref() is None
+    assert explicit_default_ref() is None
+    refs_compare_equal = default_ref == explicit_default_ref
+    assert refs_compare_equal is False
+
+
+@pytest.mark.unit
 def test_default_compose_env_lookup_does_not_expose_asset_root_override() -> None:
     signature = inspect.signature(service_config.resolve_local_service_compose_env_file)
 
@@ -299,6 +326,23 @@ def test_service_settings_exported_default_database_url_uses_postgres_host_port_
 
 
 @pytest.mark.unit
+def test_service_settings_host_default_database_url_ignores_compose_env_postgres_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
     explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
 
@@ -320,6 +364,18 @@ def test_service_settings_explicit_base_database_url_ignores_custom_environ_host
     )
 
     assert settings.database_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_default_database_url_ignores_postgres_host_port_override() -> (
+    None
+):
+    settings = resolve_service_settings(
+        Settings(_env_file=None, database_url=DEFAULT_LOCAL_SERVICE_DATABASE_URL),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
 
 
 @pytest.mark.unit
@@ -369,6 +425,23 @@ def test_service_settings_default_env_file_api_base_url_uses_compose_env_api_hos
 
 
 @pytest.mark.unit
+def test_service_settings_host_default_api_base_url_ignores_compose_env_api_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_api_base_url_ignores_api_host_port_override() -> None:
     explicit_url = "http://127.0.0.1:9300"
 
@@ -378,6 +451,16 @@ def test_service_settings_explicit_api_base_url_ignores_api_host_port_override()
     )
 
     assert settings.api_base_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_default_api_base_url_ignores_api_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None, api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
 
 
 @pytest.mark.unit

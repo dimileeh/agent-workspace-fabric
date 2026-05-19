@@ -89,7 +89,7 @@ def resolve_service_settings(
     service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
 
-    database_url_explicit = _database_url_env_is_explicit(env, service_env)
+    database_url_explicit = _database_url_env_is_explicit(env)
     if not database_url_explicit:
         database_url_explicit = _settings_database_url_is_explicit(
             settings,
@@ -281,7 +281,7 @@ def _resolve_service_api_base_url(
     host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
     if host_api_base_url is not None and _api_base_url_is_explicit(
         host_api_base_url,
-        service_environ,
+        environ,
     ):
         return host_api_base_url
     if _settings_api_base_url_is_explicit(
@@ -330,10 +330,9 @@ def _settings_api_base_url_is_explicit(
 ) -> bool:
     """Return true when settings carries a non-derivable API base URL."""
 
-    explicit_fields: frozenset[str] | set[str] = (
-        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
-    )
-    if "api_base_url" not in explicit_fields:
+    if "api_base_url" in _settings_init_fields(settings):
+        return True
+    if require_init_field or "api_base_url" not in settings.model_fields_set:
         return False
     return _api_base_url_is_explicit(settings.api_base_url, environ)
 
@@ -355,10 +354,9 @@ def _settings_database_url_is_explicit(
 ) -> bool:
     """Return true when settings carries a non-derivable database URL."""
 
-    explicit_fields: frozenset[str] | set[str] = (
-        _settings_init_fields(settings) if require_init_field else settings.model_fields_set
-    )
-    if "database_url" not in explicit_fields:
+    if "database_url" in _settings_init_fields(settings):
+        return True
+    if require_init_field or "database_url" not in settings.model_fields_set:
         return False
     return not (
         settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
@@ -366,10 +364,7 @@ def _settings_database_url_is_explicit(
     )
 
 
-def _database_url_env_is_explicit(
-    environ: Mapping[str, str],
-    service_environ: Mapping[str, str],
-) -> bool:
+def _database_url_env_is_explicit(environ: Mapping[str, str]) -> bool:
     """Return true when the host environment carries a non-derivable database URL."""
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
@@ -377,7 +372,7 @@ def _database_url_env_is_explicit(
         return False
     return not (
         database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
-        and _env_value(service_environ, "AWF_POSTGRES_HOST_PORT")
+        and _env_value(environ, "AWF_POSTGRES_HOST_PORT")
     )
 
 
