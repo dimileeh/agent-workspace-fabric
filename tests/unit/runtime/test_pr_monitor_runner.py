@@ -3730,16 +3730,19 @@ async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_
     first_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
     second_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
-    source_policy, recovery_events, _, _ = await _provider_recovery_snapshot(
+    source_policy, _, _, _ = await _provider_recovery_snapshot(
         factory,
         workspace_id,
     )
     recovery_state = source_policy["provider_recovery_state"]
-    cooldown_events = [
-        event
-        for event in recovery_events
-        if event["event_type"] == "workspace.provider_recovery_cooldown"
-    ]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        cooldown_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
 
     assert first_suppressed is True
     assert second_suppressed is True
