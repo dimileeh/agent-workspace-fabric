@@ -200,6 +200,7 @@ async def run_service_bootstrap(
     service_env = local_service_environ(env_file=env_file or _bootstrap_environment_file(assets))
     if provider_environ is not None:
         service_env.update(provider_environ)
+    service_env = _docker_cli_environ(settings, service_env)
 
     for stage in _bootstrap_stages(
         settings,
@@ -302,6 +303,16 @@ def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     return profile in {
         item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
     }
+
+
+def _docker_cli_environ(
+    settings: ServiceSettings,
+    environ: Mapping[str, str],
+) -> dict[str, str]:
+    resolved = dict(environ)
+    if resolved.get("AWF_DOCKER_HOST") and "DOCKER_HOST" not in resolved:
+        resolved["DOCKER_HOST"] = settings.docker_host
+    return resolved
 
 
 def _resolve_bootstrap_assets(

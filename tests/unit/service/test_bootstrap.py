@@ -7,6 +7,7 @@ import contextlib
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,54 @@ def test_bootstrap_passes_merged_service_environment_to_docker_commands(
     assert result.service_status["status"] == "ok"
     assert calls
     assert all(call["env"] == service_env for call in calls)
+
+
+@pytest.mark.unit
+def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    docker_host = f"unix://{tmp_path / 'compose-docker.sock'}"
+    service_env = {"AWF_DOCKER_HOST": docker_host}
+    expected_env = {**service_env, "DOCKER_HOST": docker_host}
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            replace(_settings(tmp_path), docker_host=docker_host),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == expected_env
+    assert calls
+    assert all(call["env"] == expected_env for call in calls)
 
 
 @pytest.mark.unit
