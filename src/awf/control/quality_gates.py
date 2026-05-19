@@ -1190,6 +1190,8 @@ def _is_comment_or_notify_step(step: Mapping[str, Any]) -> bool:
 
 
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
+    if _string_value(job.get("uses")) is not None:
+        return False
     label_parts = [job_id]
     name = _string_value(job.get("name"))
     if name:
@@ -1200,7 +1202,7 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
     steps = _workflow_steps(job)
     if steps is None:
         return False
-    return all(_is_informational_step(step) for step in steps)
+    return bool(steps) and all(_is_informational_step(step) for step in steps)
 
 
 def _is_informational_step(step: Mapping[str, Any]) -> bool:

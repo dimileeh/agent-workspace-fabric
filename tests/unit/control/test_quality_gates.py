@@ -725,6 +725,51 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_informational_reusable_workflow_job_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  notify-comment:
+    name: Notify reviewers
+    uses: org/reusable-notify/.github/workflows/comment.yml@v1
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.notify-comment"
+    assert violation.line == 9
+    assert "added workflow jobs must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("old_header", "new_header", "section", "line", "reason"),
     [
