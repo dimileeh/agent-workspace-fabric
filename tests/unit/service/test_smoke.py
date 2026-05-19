@@ -1095,6 +1095,48 @@ class TestCollectSmokeReportExceptionPaths:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
         assert auth_phase["status"] == "fail"
 
+    async def test_profile_removed_between_checks_returns_preview_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return preview failure when a disk profile disappears before loading."""
+        profile_path = tmp_path / ".awf" / "workspace.yml"
+        profile_path.parent.mkdir()
+        profile_path.write_text(
+            "awf:\n  name: generic\n  phases:\n    validate:\n      - pytest -q\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+
+        state = {"calls": 0}
+
+        def _flaky_has_profile(_path: Path) -> bool:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                profile_path.unlink()
+                return True
+            return False
+
+        monkeypatch.setattr("awf.service.smoke._project_has_awf_profile", _flaky_has_profile)
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=None,
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] == "fail"
+        assert profile_phase["reason_code"] == "SMOKE_PROFILE_PREVIEW_FAILED"
+        assert profile_phase["action"] == (
+            "Fix the on-disk workspace profile (.awf/workspace.yml, .awf/workspace.yaml, "
+            "awf.workspace.yml, or awf.workspace.yaml) so it passes schema validation and lint "
+            "checks."
+        )
+
     async def test_profile_preview_exception_returns_fail(self, tmp_path: Path) -> None:
         def _failing_preview(project):
             raise OSError("cannot read directory")

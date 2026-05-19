@@ -591,6 +591,9 @@ def _default_disk_profile_preview(project: Path) -> Any:
     from awf.profiles import resolve_workspace_profile
     from awf.profiles.onboarding import preview_workspace_profile
 
+    if not _project_has_awf_profile(project):
+        raise FileNotFoundError(f"no on-disk workspace profile marker file found in {project}")
+
     resolution = resolve_workspace_profile(worktree_path=project)
     return preview_workspace_profile(project, resolution)
 
