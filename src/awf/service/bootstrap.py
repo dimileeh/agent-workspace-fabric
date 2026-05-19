@@ -363,9 +363,12 @@ def _resolve_user_path(path: Path) -> Path:
 
 
 def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
+    if asset_root is not None:
+        candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        return candidate if candidate.exists() else None
+
     return resolve_local_service_compose_env_file(
         LOCAL_SERVICE_COMPOSE_ENV_FILE,
-        asset_root=asset_root,
     )
 
 

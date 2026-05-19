@@ -486,6 +486,9 @@ def test_bootstrap_resolves_asset_root_compose_env_file(
     env_file = asset_root / "docker" / "compose" / ".env"
     env_file.parent.mkdir(parents=True)
     env_file.write_text("AWF_API_TOKEN=from-asset-root\n", encoding="utf-8")
+    fallback_env_file = tmp_path / "docker" / "compose" / ".env"
+    fallback_env_file.parent.mkdir(parents=True)
+    fallback_env_file.write_text("AWF_API_TOKEN=from-fallback\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         bootstrap,
