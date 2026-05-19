@@ -4007,6 +4007,39 @@ async def test_committed_paths_since_raises_when_git_diff_fails(tmp_path: Path) 
 
 
 @pytest.mark.unit
+async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="base workflow\n")
+    runner.queue_result(returncode=0, stdout="staged workflow\n")
+    runner.queue_result(returncode=0, stdout="@@ -1 +1 @@\n")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    diffs = await executor._protected_file_diffs_for_staged_paths(
+        worktree_path=tmp_path / "worktree",
+        base_ref="base-sha",
+        changed_paths=[".github/workflows/ci.yml"],
+    )
+
+    assert diffs[".github/workflows/ci.yml"].old_text == "base workflow\n"
+    assert diffs[".github/workflows/ci.yml"].new_text == "staged workflow\n"
+    assert runner.calls[0].args[-2:] == [
+        "show",
+        "base-sha:.github/workflows/ci.yml",
+    ]
+    assert runner.calls[1].args[-2:] == ["show", ":.github/workflows/ci.yml"]
+    assert runner.calls[2].args[-6:] == [
+        "diff",
+        "--cached",
+        "--unified=0",
+        "base-sha",
+        "--",
+        ".github/workflows/ci.yml",
+    ]
+
+
+@pytest.mark.unit
 def test_digest_dirty_content_distinguishes_content_changes_within_same_paths(
     tmp_path: Path,
 ) -> None:

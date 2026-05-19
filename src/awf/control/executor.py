@@ -2248,6 +2248,7 @@ class WorkspaceExecutor:
                     has_known_non_plan_output = True
                     protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
                         worktree_path=worktree_path,
+                        base_ref=base_commit,
                         changed_paths=staged_paths,
                     )
                     violations = find_protected_quality_gate_changes(
@@ -2295,6 +2296,7 @@ class WorkspaceExecutor:
                             await self._run_post_agent_commit_repair(
                                 workspace_id=workspace_id,
                                 worktree_path=worktree_path,
+                                base_commit=base_commit,
                                 commit_result=commit_result,
                                 classification=classification,
                                 staged_paths=staged_paths,
@@ -3248,6 +3250,7 @@ class WorkspaceExecutor:
                 has_known_non_plan_output = True
                 protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
                     worktree_path=worktree_path,
+                    base_ref=base_commit,
                     changed_paths=fix_staged_paths,
                 )
                 violations = find_protected_quality_gate_changes(
@@ -5316,17 +5319,19 @@ class WorkspaceExecutor:
         self,
         *,
         worktree_path: Path,
+        base_ref: str,
         changed_paths: Sequence[str],
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
         for path in diff_classified_protected_paths(changed_paths):
             old_text = await self._git_show_text(
-                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+                worktree_path=worktree_path,
+                refspec=f"{base_ref}:{path}",
             )
             new_text = await self._git_show_text(worktree_path=worktree_path, refspec=f":{path}")
             unified_diff = await self._git_diff_text(
                 worktree_path=worktree_path,
-                args=["diff", "--cached", "--unified=0", "--", path],
+                args=["diff", "--cached", "--unified=0", base_ref, "--", path],
             )
             diffs[path] = ProtectedFileDiff(
                 path=path,
@@ -5798,6 +5803,7 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         worktree_path: Path,
+        base_commit: str,
         commit_result: CommandResult,
         classification: _PostAgentCommitClassification,
         staged_paths: Sequence[str],
@@ -5841,6 +5847,7 @@ class WorkspaceExecutor:
             await self._run_post_agent_semantic_precommit_repair(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
+                base_commit=base_commit,
                 commit_result=commit_result,
                 classification=classification,
                 staged_paths=staged_paths,
@@ -6163,6 +6170,7 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         worktree_path: Path,
+        base_commit: str,
         commit_result: CommandResult,
         classification: _PostAgentCommitClassification,
         staged_paths: Sequence[str],
@@ -6322,6 +6330,7 @@ class WorkspaceExecutor:
             owned_paths=list(ws.owned_paths),
             protected_file_diffs=await self._protected_file_diffs_for_staged_paths(
                 worktree_path=worktree_path,
+                base_ref=base_commit,
                 changed_paths=repair_staged_paths,
             ),
         )
