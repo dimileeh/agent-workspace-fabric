@@ -2644,7 +2644,11 @@ def _monitor_provider_recovery_resume_pending(candidate: _ActiveExecutionCandida
     raw_state = task_policy.get("provider_recovery_state")
     if not isinstance(raw_state, Mapping):
         return False
-    return raw_state.get("action") in {"retry", "fallback"}
+    action = raw_state.get("action")
+    if action == "retry":
+        not_before = provider_cooldown_not_before(task_policy)
+        return not_before is not None and not_before > datetime.now(UTC)
+    return action == "fallback"
 
 
 def _claim_recheck_conditions(
