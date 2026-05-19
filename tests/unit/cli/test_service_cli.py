@@ -504,6 +504,7 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
 
     settings = object()
     captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _bootstrap(received: object, **kwargs: object) -> ServiceBootstrapResult:
@@ -595,6 +596,7 @@ def test_service_bootstrap_cli_pretty_output_uses_existing_emitter(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapResult
 
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> ServiceBootstrapResult:
@@ -621,6 +623,7 @@ def test_service_bootstrap_cli_passes_strict_provider_options(
     from awf.service.bootstrap import ServiceBootstrapResult
 
     captured: dict[str, object] = {}
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **kwargs: object) -> ServiceBootstrapResult:
@@ -656,6 +659,7 @@ def test_service_bootstrap_cli_helper_failures_exit_without_traceback(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapError
 
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> object:
