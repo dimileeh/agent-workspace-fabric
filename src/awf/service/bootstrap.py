@@ -195,18 +195,19 @@ async def run_service_bootstrap(
     if provider_environ is not None:
         service_env.update(provider_environ)
 
+    subprocess_env = {**os.environ, **service_env}
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,
         compose_file=compose_file,
-        environ=service_env,
+        environ=subprocess_env,
     ):
         completed.append(
             await asyncio.to_thread(
                 _run_stage,
                 stage,
                 run_subprocess=runner,
-                environ=service_env,
+                environ=subprocess_env,
             )
         )
 
@@ -403,7 +404,10 @@ def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | No
     """Build subprocess environment overrides, or return ``None`` when unchanged."""
     if not environ:
         return None
-    return {**os.environ, **dict(environ)}
+    merged = {**os.environ, **dict(environ)}
+    if merged == dict(os.environ):
+        return None
+    return merged
 
 
 def _run_stage(

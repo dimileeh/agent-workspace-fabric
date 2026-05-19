@@ -314,6 +314,51 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
 
 
 @pytest.mark.unit
+def test_bootstrap_uses_ambient_compose_profiles_for_ollama_bridge_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("COMPOSE_PROFILES", "metrics,ollama-bridge")
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: {})
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == {}
+    assert any(call["args"][-1] == "ollama-bridge" for call in calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_passes_compose_env_file_when_available(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
