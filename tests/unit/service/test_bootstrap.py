@@ -126,12 +126,14 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
-        assert kwargs == {
+        expected_kwargs = {
             "check": False,
             "capture_output": True,
             "text": True,
-            "env": expected_env,
         }
+        if expected_env is not None:
+            expected_kwargs["env"] = expected_env
+        assert kwargs == expected_kwargs
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     result = asyncio.run(
