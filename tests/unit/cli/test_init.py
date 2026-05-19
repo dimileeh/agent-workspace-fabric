@@ -1082,7 +1082,7 @@ def test_init_without_path_warns_when_env_example_missing(
 def test_init_without_path_warns_when_compose_env_examples_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Report every compose env example path checked before skipping seeding."""
+    """Report every compose env seed path checked before skipping seeding."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -1094,7 +1094,7 @@ def test_init_without_path_warns_when_compose_env_examples_missing(
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
-    assert "looked for docker/compose/.env.example, .env.example" in result.stdout
+    assert "looked for .env, docker/compose/.env.example, .env.example" in result.stdout
     assert "skipped docker/compose/.env creation" in result.stdout
     assert "no .env.example found" not in result.stderr
 

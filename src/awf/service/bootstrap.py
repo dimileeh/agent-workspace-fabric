@@ -310,6 +310,8 @@ def _docker_cli_environ(
     environ: Mapping[str, str],
 ) -> dict[str, str]:
     resolved = dict(environ)
+    # Keep Docker CLI host selection scoped to the resolved service environment;
+    # falling back to ServiceSettings would reintroduce process-environment drift.
     if resolved.get("AWF_DOCKER_HOST"):
         resolved["DOCKER_HOST"] = resolved["AWF_DOCKER_HOST"]
     return resolved

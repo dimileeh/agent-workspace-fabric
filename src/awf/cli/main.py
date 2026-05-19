@@ -1008,10 +1008,18 @@ def _init_env_warning(env_error: Mapping[str, str]) -> str:
 
 
 def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
-    """Return the env examples that explain what init checked before skipping."""
+    """Return the env seed paths that explain what init checked before skipping."""
 
     search_paths: list[Path] = []
-    for candidate in (env_file.with_name(".env.example"), env_example):
+    candidates: list[Path] = []
+    if (
+        env_file.name == ".env"
+        and env_file.parent.name == "compose"
+        and env_file.parent.parent.name == "docker"
+    ):
+        candidates.append(env_file.parent.parent.parent / ".env")
+    candidates.extend((env_file.with_name(".env.example"), env_example))
+    for candidate in candidates:
         if candidate not in search_paths:
             search_paths.append(candidate)
     return tuple(search_paths)
