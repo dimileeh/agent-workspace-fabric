@@ -21,6 +21,7 @@ DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
+_COMPOSE_CLI_ENV_KEYS = ("COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME")
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)|"
     r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
@@ -217,16 +218,30 @@ def _docker_cli_environ(
         compose_file=compose_file,
         compose_env_file=compose_env_file,
     )
-    if not docker_host and not compose_env:
+    compose_cli_env = _compose_cli_environ(environ)
+    if not docker_host and not compose_env and not compose_cli_env:
         # Compose reads ordinary service values through --env-file; only pass an
         # explicit subprocess environment when a resolved value must override the
-        # caller environment for Docker client selection or Compose interpolation.
+        # caller environment for Docker client selection, Compose interpolation,
+        # or Compose project/profile selection.
         return None
     resolved = dict(os.environ)
     if docker_host:
         resolved["DOCKER_HOST"] = docker_host
     resolved.pop("AWF_DOCKER_HOST", None)
     resolved.update(compose_env)
+    resolved.update(compose_cli_env)
+    return resolved
+
+
+def _compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return resolved Compose CLI controls that affect logs stack selection."""
+
+    resolved: dict[str, str] = {}
+    for key in _COMPOSE_CLI_ENV_KEYS:
+        found, value = _env_lookup(environ, key)
+        if found:
+            resolved[key] = value
     return resolved
 
 

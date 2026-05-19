@@ -277,6 +277,42 @@ def test_service_logs_does_not_copy_service_secrets_to_subprocess_env(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_preserves_compose_cli_vars_from_resolved_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_environ = {
+        "COMPOSE_PROJECT_NAME": "awf-resolved-service",
+        "COMPOSE_PROFILES": "ollama-bridge",
+        "AWF_API_TOKEN": "service-token",
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:secret@db:5432/awf",
+    }
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "stale-project")
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["COMPOSE_PROJECT_NAME"] == "awf-resolved-service"
+    assert env["COMPOSE_PROFILES"] == "ollama-bridge"
+    assert "AWF_API_TOKEN" not in env
+    assert "AWF_DATABASE_URL" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_uses_env_file_instead_of_copying_interpolation_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
