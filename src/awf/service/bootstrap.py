@@ -335,6 +335,7 @@ def _docker_cli_environ(
     # falling back to ServiceSettings would reintroduce process-environment drift.
     if resolved.get("AWF_DOCKER_HOST"):
         resolved["DOCKER_HOST"] = resolved["AWF_DOCKER_HOST"]
+    resolved.pop("AWF_DOCKER_HOST", None)
     return resolved
 
 

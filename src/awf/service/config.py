@@ -176,11 +176,35 @@ def resolve_local_service_provider_environ(
     env_file = compose_env_file
     if env_file is None and compose_file is not None:
         candidate = compose_file.parent / ".env"
-        if candidate.exists():
+        if candidate.exists() and _can_use_adjacent_provider_env_file(candidate, compose_file):
             env_file = candidate
     if env_file is None:
         return environ
     return local_service_environ(environ, env_file=env_file)
+
+
+def _can_use_adjacent_provider_env_file(candidate: Path, compose_file: Path) -> bool:
+    """Return true when adjacent provider env fallback is trusted for compose_file."""
+
+    if compose_file != LOCAL_SERVICE_COMPOSE_FILE:
+        return True
+    return _is_local_service_compose_env_path(candidate)
+
+
+def _is_local_service_compose_env_path(path: Path) -> bool:
+    """Return true for the compose env file under the verified AWF asset root."""
+
+    from awf.service import bootstrap as bootstrap_mod
+
+    asset_root = bootstrap_mod.get_bootstrap_asset_root()
+    if asset_root is None:
+        return False
+    expected = (
+        LOCAL_SERVICE_COMPOSE_ENV_FILE
+        if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute()
+        else asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    )
+    return path.resolve() == expected.resolve()
 
 
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:

@@ -324,7 +324,7 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
 ) -> None:
     docker_host = f"unix://{tmp_path / 'compose-docker.sock'}"
     service_env = {"AWF_DOCKER_HOST": docker_host}
-    expected_env = {**service_env, "DOCKER_HOST": docker_host}
+    expected_env = {"DOCKER_HOST": docker_host}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
@@ -363,6 +363,7 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
     assert collected_provider_environ == expected_env
     assert calls
     assert all(call["env"] == expected_env for call in calls)
+    assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
 @pytest.mark.unit
@@ -373,7 +374,7 @@ def test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ(
     runtime_docker_host = f"unix://{tmp_path / 'runtime-docker.sock'}"
     settings_docker_host = f"unix://{tmp_path / 'settings-docker.sock'}"
     service_env = {"AWF_DOCKER_HOST": runtime_docker_host}
-    expected_env = {**service_env, "DOCKER_HOST": runtime_docker_host}
+    expected_env = {"DOCKER_HOST": runtime_docker_host}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
     calls: list[dict[str, object]] = []
 
@@ -399,6 +400,7 @@ def test_bootstrap_mirrors_runtime_awf_docker_host_when_settings_differ(
     assert result.service_status["status"] == "ok"
     assert calls
     assert all(call["env"] == expected_env for call in calls)
+    assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
 @pytest.mark.unit
@@ -412,7 +414,7 @@ def test_bootstrap_overrides_stale_docker_host_with_runtime_awf_docker_host(
         "AWF_DOCKER_HOST": runtime_docker_host,
         "DOCKER_HOST": stale_docker_host,
     }
-    expected_env = {**service_env, "DOCKER_HOST": runtime_docker_host}
+    expected_env = {"DOCKER_HOST": runtime_docker_host}
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
@@ -451,6 +453,7 @@ def test_bootstrap_overrides_stale_docker_host_with_runtime_awf_docker_host(
     assert collected_provider_environ == expected_env
     assert calls
     assert all(call["env"] == expected_env for call in calls)
+    assert all("AWF_DOCKER_HOST" not in call["env"] for call in calls)
 
 
 @pytest.mark.unit
