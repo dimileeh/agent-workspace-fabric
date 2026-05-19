@@ -65,14 +65,19 @@ async def collect_doctor_report(
     path_exists: PathPredicate | None = None,
     path_is_dir: PathPredicate | None = None,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
 ) -> DoctorReport:
     """Collect read-only local diagnostics for operator troubleshooting."""
 
     env = os.environ if environ is None else environ
-    compose_env_file = _local_service_compose_env_file(compose_file)
+    resolved_compose_env_file = (
+        _local_service_compose_env_file(compose_file)
+        if compose_env_file is None
+        else compose_env_file
+    )
     service_env = local_service_environ(
         env,
-        env_file=compose_env_file or LOCAL_SERVICE_COMPOSE_ENV_FILE,
+        env_file=resolved_compose_env_file or LOCAL_SERVICE_COMPOSE_ENV_FILE,
     )
     provider_env = service_env if provider_environ is None else provider_environ
     secrets = _secret_values(settings, service_env, provider_env)
@@ -81,6 +86,12 @@ async def collect_doctor_report(
     connector = socket_connector or _socket_connect
     exists = path_exists or Path.exists
     is_dir = path_is_dir or Path.is_dir
+    worker_compose_env_file = (
+        resolved_compose_env_file
+        if resolved_compose_env_file is not None
+        and _safe_path_exists(resolved_compose_env_file, path_exists=exists)
+        else None
+    )
 
     try:
         service_status = await collector(
@@ -99,7 +110,7 @@ async def collect_doctor_report(
                 run_subprocess=runner,
                 environ=service_env,
                 compose_file=compose_file,
-                compose_env_file=compose_env_file,
+                compose_env_file=worker_compose_env_file,
                 secrets=secrets,
             ),
             *_port_diagnostics(settings, socket_connector=connector, secrets=secrets),

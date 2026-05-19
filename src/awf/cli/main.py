@@ -1109,6 +1109,7 @@ def _run_init_service_bootstrap(
                 provider_environ=preflight_env,
                 environ=preflight_env,
                 compose_file=compose_file,
+                compose_env_file=active_env_file,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -1347,6 +1348,7 @@ def service_doctor(
                 provider_environ=service_env,
                 environ=service_env,
                 compose_file=compose_file,
+                compose_env_file=env_file,
             )
         )
         path = write_support_bundle(bundle_payload)
@@ -1363,6 +1365,7 @@ def service_doctor(
             provider_environ=service_env,
             environ=service_env,
             compose_file=compose_file,
+            compose_env_file=env_file,
         )
     )
 

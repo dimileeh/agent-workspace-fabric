@@ -205,9 +205,10 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_support_bundle_forwards_compose_file_to_doctor_collector(tmp_path: Path) -> None:
+def test_support_bundle_forwards_compose_paths_to_doctor_collector(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_env_file = tmp_path / ".env"
     captured: dict[str, object] = {}
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
@@ -227,6 +228,7 @@ def test_support_bundle_forwards_compose_file_to_doctor_collector(tmp_path: Path
             provider_environ={},
             environ={},
             compose_file=compose_file,
+            compose_env_file=compose_env_file,
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
             failure_analysis_collector=_failure_collector,
@@ -234,6 +236,7 @@ def test_support_bundle_forwards_compose_file_to_doctor_collector(tmp_path: Path
     )
 
     assert captured["compose_file"] == compose_file
+    assert captured["compose_env_file"] == compose_env_file
 
 
 @pytest.mark.unit

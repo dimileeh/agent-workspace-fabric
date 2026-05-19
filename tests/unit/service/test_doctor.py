@@ -236,6 +236,41 @@ def test_doctor_worker_inspection_loads_local_compose_env_file(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_doctor_worker_inspection_uses_explicit_compose_env_file(tmp_path: Path) -> None:
+    from awf.service.doctor import collect_doctor_report
+
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    unrelated_env = compose_file.parent / ".env"
+    unrelated_env.write_text("AWF_POSTGRES_PASSWORD=unrelated\n", encoding="utf-8")
+    explicit_env_file = tmp_path / ".env"
+    explicit_env_file.write_text("AWF_POSTGRES_PASSWORD=resolved-root-env\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        calls.append((args, dict(kwargs["env"])))  # type: ignore[arg-type]
+        return _completed('[{"Service":"worker","State":"running","Health":"healthy"}]')
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_green_collector,
+            run_subprocess=_run,
+            socket_connector=_connect_ok,
+            environ={},
+            compose_file=compose_file,
+            compose_env_file=explicit_env_file,
+        )
+    )
+
+    args, env = calls[0]
+    assert report.to_dict()["status"] == "ok"
+    assert args[:4] == ["docker", "compose", "--env-file", str(explicit_env_file)]
+    assert env["AWF_POSTGRES_PASSWORD"] == "resolved-root-env"
+
+
+@pytest.mark.unit
 def test_doctor_warns_when_active_open_network_posture_is_visible(
     tmp_path: Path,
 ) -> None:

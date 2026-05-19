@@ -29,6 +29,7 @@ _SAFE_CLUSTER_KEYS = frozenset({"failure_reason", "reason_code", "count", "sampl
 
 class _DoctorCollectorKwargs(TypedDict, total=False):
     compose_file: Path
+    compose_env_file: Path
 
 
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:
@@ -53,6 +54,7 @@ async def collect_support_bundle(
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     compose_file: Path | None = None,
+    compose_env_file: Path | None = None,
     failure_window_hours: int = 24,
     status_collector: Any = None,
     doctor_collector: Any = None,
@@ -71,6 +73,8 @@ async def collect_support_bundle(
     doctor_kwargs: _DoctorCollectorKwargs = {}
     if compose_file is not None:
         doctor_kwargs["compose_file"] = compose_file
+    if compose_env_file is not None:
+        doctor_kwargs["compose_env_file"] = compose_env_file
     doctor_task = _doctor_collector(
         settings,
         strict_providers=strict_providers,
