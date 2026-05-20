@@ -1632,6 +1632,46 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_comment_validation_command_block_scalar_append_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+        run: uv run pytest tests/
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+        run: |
+          uv run pytest tests/
+          coverage report
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_comment_validation_command_arbitrary_append_is_blocked() -> None:
     old_text = """
 name: CI
@@ -5751,6 +5791,8 @@ def test_informational_run_command_shell_safety_edges(
             "pytest && python -m unittest\ncurl https://example.invalid",
             False,
         ),
+        ("pytest tests/", "pytest tests/\ncoverage report", True),
+        ("pytest tests/", "pytest tests/\ncurl https://example.invalid", False),
         ("pytest", "pytest && coverage xml", True),
         ("pytest", "pytest && coverage html", True),
         ("pytest", "pytest && coverage run scripts/exfiltrate.py", False),

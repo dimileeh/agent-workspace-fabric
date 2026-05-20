@@ -2144,34 +2144,54 @@ def _preserves_existing_validation_run(old_run: str | None, new_run: str | None)
 
 
 def _validation_run_append_commands(suffix: str) -> tuple[tuple[str, ...], ...] | None:
-    if "\n" in suffix or "\r" in suffix:
-        return None
-
-    tokens = _shell_tokens(suffix)
-    if tokens is None or not tokens or tokens[0] != "&&":
+    logical_lines = _logical_shell_lines(suffix.replace("\r\n", "\n").replace("\r", "\n"))
+    if logical_lines is None:
         return None
 
     commands: list[tuple[str, ...]] = []
     command_tokens: list[str] = []
+    has_append_boundary = False
     expecting_command = True
-    for index, token in enumerate(tokens):
-        if token == "&&":
-            if expecting_command:
-                if index == 0:
-                    continue
-                return None
-            commands.append(tuple(command_tokens))
-            command_tokens = []
-            expecting_command = True
-            continue
-        if token in _VALIDATION_RUN_APPEND_BLOCKED_OPERATORS:
+    pending_and_separator = False
+    for line_index, line in enumerate(logical_lines):
+        tokens = _shell_tokens(line)
+        if tokens is None:
             return None
-        command_tokens.append(token)
-        expecting_command = False
+        for token in tokens:
+            if token == "&&":
+                if expecting_command:
+                    if has_append_boundary:
+                        return None
+                    has_append_boundary = True
+                    pending_and_separator = True
+                    continue
+                commands.append(tuple(command_tokens))
+                command_tokens = []
+                has_append_boundary = True
+                pending_and_separator = True
+                expecting_command = True
+                continue
+            if token in _VALIDATION_RUN_APPEND_BLOCKED_OPERATORS:
+                return None
+            if expecting_command and not has_append_boundary:
+                return None
+            command_tokens.append(token)
+            pending_and_separator = False
+            expecting_command = False
 
-    if expecting_command:
+        if line_index < len(logical_lines) - 1:
+            if command_tokens:
+                commands.append(tuple(command_tokens))
+                command_tokens = []
+            expecting_command = True
+            has_append_boundary = True
+
+    if pending_and_separator:
         return None
-    commands.append(tuple(command_tokens))
+    if command_tokens:
+        commands.append(tuple(command_tokens))
+    if not commands:
+        return None
     return tuple(commands)
 
 
