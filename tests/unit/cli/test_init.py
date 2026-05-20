@@ -1487,7 +1487,7 @@ def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
 def test_service_env_resolution_ignores_current_compose_env_without_project_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Even explicit service fallback requires an AWF project marker."""
+    """A current-directory compose env is not enough without a verified asset root."""
     from awf.cli import main as cli_main
     from awf.service import bootstrap as bootstrap_mod
 
@@ -1499,20 +1499,17 @@ def test_service_env_resolution_ignores_current_compose_env_without_project_mark
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     (compose / ".env").write_text("AWF_API_TOKEN=wrong-project\n", encoding="utf-8")
 
-    active_env_file, compose_env_file = cli_main._resolve_service_env_files(  # noqa: SLF001
-        Path(".env"),
-        allow_current_compose_env_without_asset_root=True,
-    )
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(Path(".env"))  # noqa: SLF001
 
     assert active_env_file == Path(".env")
     assert compose_env_file is None
 
 
 @pytest.mark.unit
-def test_service_env_resolution_uses_current_compose_env_when_explicitly_allowed(
+def test_service_env_resolution_ignores_current_compose_env_with_project_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Service commands can opt into source-less local-service compose env fallback."""
+    """A project marker does not replace verified AWF source asset discovery."""
     from awf.cli import main as cli_main
     from awf.service import bootstrap as bootstrap_mod
 
@@ -1526,13 +1523,10 @@ def test_service_env_resolution_uses_current_compose_env_when_explicitly_allowed
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     (compose / ".env").write_text("AWF_API_TOKEN=local-service\n", encoding="utf-8")
 
-    active_env_file, compose_env_file = cli_main._resolve_service_env_files(  # noqa: SLF001
-        Path(".env"),
-        allow_current_compose_env_without_asset_root=True,
-    )
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(Path(".env"))  # noqa: SLF001
 
-    assert active_env_file == compose / ".env"
-    assert compose_env_file == compose / ".env"
+    assert active_env_file == Path(".env")
+    assert compose_env_file is None
 
 
 @pytest.mark.unit
