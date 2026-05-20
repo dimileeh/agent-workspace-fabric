@@ -2411,7 +2411,7 @@ class ControlWorker:
     ) -> None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(candidate.workspace_id)
+            ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
             if await self._has_current_salvage_event(

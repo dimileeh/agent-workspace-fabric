@@ -7505,6 +7505,150 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls
 
     @pytest.mark.unit
+    async def test_salvage_not_possible_recording_serializes_concurrent_events(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_project = "awf_salvage_not_possible_race"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "salvage-not-possible-race",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        preserved_at = datetime.now(UTC) - timedelta(minutes=5)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved_event.occurred_at = preserved_at
+            await s.commit()
+
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        both_started = asyncio.Event()
+        first_checked = asyncio.Event()
+        allow_first_recording = asyncio.Event()
+        second_checked = asyncio.Event()
+        count_lock = asyncio.Lock()
+        started_count = 0
+        check_count = 0
+        selected_count = 0
+        original_has_event = ControlWorker._has_current_salvage_event
+
+        async def _racing_has_current_salvage_event(
+            self: ControlWorker,
+            session: AsyncSession,
+            workspace_id: str,
+            *,
+            event_type: str,
+            reason_code: str,
+            event_floor: datetime,
+            workspace_status: WorkspaceStatus,
+        ) -> bool:
+            nonlocal check_count, selected_count
+            async with count_lock:
+                check_count += 1
+                call_number = check_count
+                if call_number == 2:
+                    second_checked.set()
+
+            has_event = await original_has_event(
+                self,
+                session,
+                workspace_id,
+                event_type=event_type,
+                reason_code=reason_code,
+                event_floor=event_floor,
+                workspace_status=workspace_status,
+            )
+            async with count_lock:
+                selected_count += 1
+            if call_number == 1:
+                first_checked.set()
+                assert not has_event
+                await asyncio.wait_for(
+                    allow_first_recording.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                )
+            return has_event
+
+        monkeypatch.setattr(
+            ControlWorker,
+            "_has_current_salvage_event",
+            _racing_has_current_salvage_event,
+        )
+        workers = [
+            ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=_RecordingExecutor(),
+                runtime_inspector=_RecordingRuntimeInspector(
+                    {compose_project: _live_agent_snapshot()}
+                ),
+                runtime_cleaner=_RecordingRuntimeCleaner(),
+                config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+            )
+            for _ in range(2)
+        ]
+
+        async def _record_started(worker: ControlWorker) -> None:
+            nonlocal started_count
+            async with count_lock:
+                started_count += 1
+                if started_count == len(workers):
+                    both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await worker._record_preserved_active_salvage_not_possible(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                reason="orphaned_committed_work",
+            )
+
+        tasks = [asyncio.create_task(_record_started(worker)) for worker in workers]
+        try:
+            await asyncio.wait_for(first_checked.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(second_checked.wait(), timeout=0.2)
+            allow_first_recording.set()
+            await asyncio.gather(*tasks)
+        finally:
+            allow_first_recording.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert started_count == 2
+        assert check_count == 2
+        assert selected_count == 2
+        async with session_factory() as s:
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+
+        assert len(not_possible_events) == 1
+        assert not_possible_events[0].payload is not None
+        assert not_possible_events[0].payload["reason_code"] == (
+            "ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE"
+        )
+
+    @pytest.mark.unit
     async def test_cleanup_failure_path_does_not_target_preserved_live_runtime(
         self,
         session_factory: async_sessionmaker[AsyncSession],
