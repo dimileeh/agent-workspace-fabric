@@ -148,6 +148,9 @@ _ACTIVE_RECOVERY_OPERATION_STATUSES: Final[tuple[str, ...]] = (
     OperationStatus.running.value,
 )
 _VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebase_only")
+# Preserved validating/pushing workspace recovery rewinds to running before the
+# executor is dispatched, so worker-restart execution claims intentionally only
+# match running workspaces.
 _WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.running.value,
 )

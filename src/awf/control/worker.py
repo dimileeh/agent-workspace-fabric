@@ -169,6 +169,11 @@ _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
         TaskKind.sync_feature_pr.value,
     }
 )
+# SALVAGE_BLOCKED and SALVAGE_NOT_POSSIBLE are intentionally absent:
+# _recover_preserved_active_execution returns True while SALVAGE_BLOCKED is
+# active, gating stale-active cleanup without needing an entry here.
+# SALVAGE_NOT_POSSIBLE is written immediately before returning False to open
+# the stale-active path; adding it here would create a livelock.
 _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS: tuple[tuple[str, str], ...] = (
     (
         _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
@@ -1712,6 +1717,7 @@ class ControlWorker:
             has_active_validation_recovery = candidate.status in (
                 WorkspaceStatus.running,
                 WorkspaceStatus.validating,
+                WorkspaceStatus.pushing,
             ) and await self._has_active_preserved_validation_recovery(
                 session,
                 candidate.workspace_id,

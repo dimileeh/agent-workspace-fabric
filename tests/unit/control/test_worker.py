@@ -7472,6 +7472,66 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert len(validate_ops) == 1
 
     @pytest.mark.unit
+    async def test_pushing_candidate_redispatches_active_validation_recovery_without_preservation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushing-redispatches-active-validation",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_pushing_redispatches_active_validation",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "running-preservation-cycle",
+                },
+            )
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_pushing_redispatches_active_validation": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.pushing,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_pushing_redispatches_active_validation",
+            )
+        )
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+
+        assert recovered
+        assert executor.calls == [workspace_id]
+        assert preserved_events == []
+
+    @pytest.mark.unit
     async def test_preserved_active_validation_recovery_lookup_uses_single_active_query(
         self,
         session_factory: async_sessionmaker[AsyncSession],
