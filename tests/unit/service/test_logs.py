@@ -840,6 +840,46 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_compose_interpolation_cache_uses_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import environment as service_environment
+
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.enter_count = 0
+            self.exit_count = 0
+
+        def __enter__(self) -> None:
+            self.enter_count += 1
+
+        def __exit__(self, *_exc: object) -> None:
+            self.exit_count += 1
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHE_TOKEN:?set AWF_CACHE_TOKEN}"
+""",
+    )
+    lock = RecordingLock()
+    monkeypatch.setattr(service_environment, "_COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK", lock)
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+    try:
+        assert service_environment.compose_interpolation_keys(compose_file) == ("AWF_CACHE_TOKEN",)
+        assert service_environment.compose_interpolation_keys(compose_file) == ("AWF_CACHE_TOKEN",)
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+    assert lock.enter_count >= 2
+    assert lock.exit_count == lock.enter_count
+
+
+@pytest.mark.unit
 def test_service_logs_reloads_compose_interpolation_keys_when_file_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

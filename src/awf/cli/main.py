@@ -958,13 +958,11 @@ def _service_compose_env_file(active_env_file: Path) -> Path | None:
 
 
 def _is_local_service_compose_env_file(path: Path) -> bool:
-    """Return true for docker/compose/.env paths discovered from the current tree."""
+    """Return true for the verified local-service Compose env file."""
 
-    return (
-        path.name == ".env"
-        and path.parent.name == "compose"
-        and path.parent.parent.name == "docker"
-    )
+    from awf.service.config import _is_local_service_compose_env_path
+
+    return _is_local_service_compose_env_path(path)
 
 
 def _resolve_existing_local_service_compose_env_file() -> Path | None:
@@ -1252,6 +1250,9 @@ def _merge_env_seed_contents_with_overlay_keys(
     elif pending_context:
         overlay_only_lines.extend(pending_context)
 
+    # Overlay file headers are kept only when the seed starts with assignments.
+    # If the seed has its own leading context, it owns the top of the merged file
+    # and overlay header comments are omitted to avoid duplicate file headers.
     merged_lines: list[str] = [] if seed_has_leading_context else list(file_header_context)
     emitted_seed_leading_context: set[str] = set()
     emitted_seed_trailing_context: set[str] = set()

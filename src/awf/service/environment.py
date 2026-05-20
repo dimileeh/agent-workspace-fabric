@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
@@ -29,6 +30,7 @@ _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
 _COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[tuple[str, str, int], tuple[str, ...]] = (
     OrderedDict()
 )
+_COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK = threading.Lock()
 
 
 def env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
@@ -153,10 +155,11 @@ def _cached_compose_interpolation_keys(
     """Return cached Compose interpolation keys for one file version."""
 
     cache_key = (_compose_file, contents_digest, contents_size)
-    cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
-    if cached is not None:
-        _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
-        return cached
+    with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+        cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
+        if cached is not None:
+            _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
+            return cached
 
     try:
         payload: object = yaml.safe_load(contents)
@@ -167,9 +170,14 @@ def _cached_compose_interpolation_keys(
         _collect_compose_interpolation_keys(payload, collected_keys)
         keys = tuple(sorted(collected_keys))
 
-    _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
-    if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
-        _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
+    with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+        cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
+        if cached is not None:
+            _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
+            return cached
+        _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
+        if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
+            _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
     return keys
 
 

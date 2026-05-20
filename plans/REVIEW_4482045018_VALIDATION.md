@@ -4,33 +4,22 @@ Plan reference: `plans/REVIEW_4482045018_PLAN.md`
 
 ## Requirement Status
 
-- Add regression coverage for explicit Docker CLI key clearing with a stale caller
-  `DOCKER_CONTEXT`: Complete. Added
-  `test_service_logs_scrubs_explicitly_cleared_docker_context_without_docker_host`.
-- Add regression coverage that support bundle status collectors receive
-  `environ`, `compose_file`, and `compose_env_file`: Complete. Updated
-  `test_support_bundle_forwards_compose_context_to_collectors`.
-- Add regression coverage for first-key overlay context where a file header and
-  key-specific comment have no blank separator: Complete. Added two
-  `_merge_env_seed_contents_with_overlay_keys` regressions covering seed files
-  with and without their own header.
-- Implement the smallest code changes that satisfy the regressions while
-  preserving existing env merge and service command behavior: Complete.
-- Run the narrow focused tests for touched areas: Complete.
-- Commit only the scoped changes locally with a conventional commit: Complete.
+- Add regression coverage that proves Compose interpolation cache access goes through a synchronization guard: Complete. Added `test_service_logs_compose_interpolation_cache_uses_lock`.
+- Add regression coverage that a rogue absolute path ending in `docker/compose/.env` is not forwarded as a local service Compose `--env-file` when it is outside the verified AWF asset root: Complete. Added `test_service_compose_env_file_rejects_matching_path_outside_asset_root`.
+- Keep existing env-file seeding and merge behavior unchanged except for a clarifying comment: Complete. Only `_is_local_service_compose_env_file` trust logic and merge-code comments changed in `src/awf/cli/main.py`.
+- Preserve existing root `.env` and Compose `.env` safety semantics: Complete. The touched `test_init.py` and `test_logs.py` unit surfaces pass.
+- Commit the fix locally without switching branches or pushing: Complete. This validation is staged with the local fix commit for this review cycle.
 
 ## Evidence
 
-- Confirmed the four new regressions failed before implementation:
-  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs.py::test_service_logs_scrubs_explicitly_cleared_docker_context_without_docker_host tests/unit/service/test_support_bundle.py::test_support_bundle_forwards_compose_context_to_collectors tests/unit/cli/test_init.py::test_merge_env_seed_keeps_first_key_comment_after_header_without_separator tests/unit/cli/test_init.py::test_merge_env_seed_keeps_first_key_comment_when_seed_has_header -q`
-  failed with the expected missing scrub, missing status kwargs, and env-comment
-  placement assertions.
-- After implementation, the same focused regression command passed with
-  `4 passed`.
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs.py tests/unit/service/test_support_bundle.py tests/unit/cli/test_init.py -q`
-  passed with `152 passed`.
-- `uv run --python 3.12 --extra dev ruff check src/awf tests/unit/service/test_logs.py tests/unit/service/test_support_bundle.py tests/unit/cli/test_init.py`
-  passed.
+- Confirmed the two new regressions failed before implementation:
+  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs.py::test_service_logs_compose_interpolation_cache_uses_lock tests/unit/cli/test_init.py::test_service_compose_env_file_rejects_matching_path_outside_asset_root -q`
+  failed with the expected missing cache lock and out-of-tree Compose env-file trust assertion.
+- After implementation, the same focused regression command passed with `2 passed`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs.py tests/unit/cli/test_init.py -q` passed with `141 passed`.
+- Extra guard: `uv run --python 3.12 --extra dev pytest tests/unit/cli/test_service_cli.py -q` passed with `75 passed`.
+- `uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/cli/main.py tests/unit/service/test_logs.py tests/unit/cli/test_init.py` passed.
+- `git diff --check` passed.
 
 ## Gaps
 

@@ -1530,6 +1530,26 @@ def test_service_env_resolution_ignores_current_compose_env_with_project_marker(
 
 
 @pytest.mark.unit
+def test_service_compose_env_file_rejects_matching_path_outside_asset_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the verified AWF asset-root compose env can become a Compose env-file."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+
+    asset_root = tmp_path / "awf"
+    asset_compose = asset_root / "docker" / "compose"
+    asset_compose.mkdir(parents=True)
+    (asset_compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    rogue_env = tmp_path / "other" / "docker" / "compose" / ".env"
+    rogue_env.parent.mkdir(parents=True)
+    rogue_env.write_text("AWF_API_TOKEN=wrong-project\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
+
+    assert cli_main._service_compose_env_file(rogue_env) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_init_without_path_does_not_seed_asset_root_without_compose_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
