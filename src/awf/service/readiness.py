@@ -366,7 +366,7 @@ def _cached_status_collector(payload: dict[str, object] | None) -> StatusCollect
         provider_environ: Mapping[str, str] | None = None,
         environ: Mapping[str, str] | None = None,
         compose_file: Path | None = None,
-        compose_env_file: Path | None = None,
+        compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     ) -> dict[str, object]:
         del strict_providers, provider_environ, environ, compose_file, compose_env_file
         return payload

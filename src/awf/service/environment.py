@@ -241,6 +241,8 @@ def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
                 keys.add(key)
         return
     if isinstance(value, Mapping):
+        # Compose 2.x interpolates YAML scalar values, not mapping keys such as
+        # service, network, or volume names, so this intentionally walks values only.
         for nested_value in value.values():
             _collect_compose_interpolation_keys(nested_value, keys)
         return
