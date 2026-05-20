@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,8 +28,9 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, func, literal, or_, select, text
-from sqlalchemy.dialects.postgresql import aggregate_order_by
+from sqlalchemy import String, and_, func, literal, or_, select, text
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB, aggregate_order_by
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
@@ -3516,14 +3518,30 @@ async def _requested_capacity_queue_signature(
             await session.execute(stmt)
         ).one()
         digest = hashlib.sha256()
-        ids_stmt = (
-            select(Workspace.id)
+        queue_fields_stmt = (
+            select(
+                Workspace.id,
+                Workspace.created_at,
+                Workspace.task_class,
+                Workspace.agent,
+                Workspace.task_policy,
+            )
             .where(Workspace.status == WorkspaceStatus.requested.value)
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
             .order_by(Workspace.id)
         )
-        for workspace_id in (await session.execute(ids_stmt)).scalars():
-            digest.update(workspace_id.encode("utf-8"))
+        for workspace_id, created_at, task_class, agent, task_policy in await session.execute(
+            queue_fields_stmt
+        ):
+            digest.update(
+                _requested_capacity_queue_digest_payload(
+                    workspace_id=workspace_id,
+                    created_at=created_at,
+                    task_class=task_class,
+                    agent=agent,
+                    task_policy=task_policy,
+                ).encode("utf-8")
+            )
             digest.update(b"\0")
         return (
             int(count or 0),
@@ -3542,7 +3560,18 @@ async def _requested_capacity_queue_signature(
             func.md5(
                 func.coalesce(
                     func.string_agg(
-                        Workspace.id,
+                        func.md5(
+                            sql_cast(
+                                func.jsonb_build_array(
+                                    Workspace.id,
+                                    Workspace.created_at,
+                                    Workspace.task_class,
+                                    Workspace.agent,
+                                    sql_cast(Workspace.task_policy, JSONB),
+                                ),
+                                String(),
+                            )
+                        ),
                         aggregate_order_by(literal(","), Workspace.id),
                     ),
                     literal(""),
@@ -3561,6 +3590,27 @@ async def _requested_capacity_queue_signature(
         _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
         str(max_workspace_id) if max_workspace_id is not None else None,
         str(ids_digest),
+    )
+
+
+def _requested_capacity_queue_digest_payload(
+    *,
+    workspace_id: str,
+    created_at: datetime,
+    task_class: str | None,
+    agent: str | None,
+    task_policy: Mapping[str, Any] | None,
+) -> str:
+    return json.dumps(
+        {
+            "agent": agent,
+            "created_at": _json_datetime(created_at),
+            "id": workspace_id,
+            "task_class": task_class,
+            "task_policy": dict(task_policy or {}),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

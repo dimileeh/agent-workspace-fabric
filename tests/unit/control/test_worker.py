@@ -971,6 +971,74 @@ class TestRunOnce:
         assert before != after
 
     @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_changes_when_scheduler_policy_changes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        queued_at = datetime(2026, 1, 1, tzinfo=UTC)
+        mutable_updated_at = datetime(2026, 1, 2, tzinfo=UTC)
+        anchor_updated_at = datetime(2026, 1, 5, tzinfo=UTC)
+
+        anchor_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-policy-anchor",
+            created_at=queued_at,
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        mutable_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-policy-mutable",
+            created_at=queued_at,
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 5}},
+        )
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == anchor_id)
+                .values(updated_at=anchor_updated_at)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == mutable_id)
+                .values(updated_at=mutable_updated_at)
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            before = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == mutable_id)
+                .values(
+                    task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+                    updated_at=mutable_updated_at,
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            after = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        assert before[0] == after[0] == 2
+        assert before[1] == after[1] == anchor_updated_at
+        assert before[2] == after[2] == queued_at
+        assert before[3] == after[3]
+        assert before != after
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],
