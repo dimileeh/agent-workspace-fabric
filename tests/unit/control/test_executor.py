@@ -30,8 +30,9 @@ from awf.control.executor import (
     WorkspaceExecutor,
     _apply_baseline_coverage_ratchet,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
+    OperationRepository,
     ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
@@ -371,6 +372,33 @@ async def _seed_ready_workspace(
         return ws.id
 
 
+async def _seed_running_worker_restart_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    execution_claimed_by: str | None = None,
+    execution_claim_expires_at: datetime | None = None,
+) -> str:
+    ws_id = await _seed_ready_workspace(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="TEST_RUNNING")
+        ws.execution_claimed_by = execution_claimed_by
+        ws.execution_claim_expires_at = execution_claim_expires_at
+        await OperationRepository(s).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={
+                "source": "worker_restart",
+                "recovery_mode": "validate_only",
+            },
+        )
+        await s.commit()
+    return ws_id
+
+
 class TestHappyPath:
     @pytest.mark.unit
     async def test_claim_ready_persists_execution_claim(
@@ -393,6 +421,107 @@ class TestHappyPath:
             assert persisted is not None
             assert persisted.status == WorkspaceStatus.running.value
             assert persisted.execution_claimed_by == "worker-a"
+            assert persisted.execution_claim_expires_at == lease_expires_at
+
+    @pytest.mark.unit
+    async def test_claim_ready_worker_restart_recovery_rejects_other_live_execution_claim(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        previous_expiry = datetime.now(UTC) + timedelta(minutes=5)
+        ws_id = await _seed_running_worker_restart_recovery(
+            factory,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=previous_expiry,
+        )
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-b",
+            execution_lease_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+
+        assert ws is None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.status == WorkspaceStatus.running.value
+            assert persisted.execution_claimed_by == "worker-a"
+            assert persisted.execution_claim_expires_at == previous_expiry
+
+    @pytest.mark.unit
+    async def test_claim_ready_worker_restart_recovery_refreshes_same_execution_owner(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_running_worker_restart_recovery(
+            factory,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        refreshed_expiry = datetime.now(UTC) + timedelta(minutes=10)
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-a",
+            execution_lease_expires_at=refreshed_expiry,
+        )
+
+        assert ws is not None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.execution_claimed_by == "worker-a"
+            assert persisted.execution_claim_expires_at == refreshed_expiry
+
+    @pytest.mark.unit
+    async def test_claim_ready_worker_restart_recovery_claims_stale_execution_claim(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_running_worker_restart_recovery(
+            factory,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-b",
+            execution_lease_expires_at=lease_expires_at,
+        )
+
+        assert ws is not None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.execution_claimed_by == "worker-b"
+            assert persisted.execution_claim_expires_at == lease_expires_at
+
+    @pytest.mark.unit
+    async def test_claim_ready_worker_restart_recovery_claims_unset_execution_claim(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_running_worker_restart_recovery(factory)
+        lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-b",
+            execution_lease_expires_at=lease_expires_at,
+        )
+
+        assert ws is not None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.execution_claimed_by == "worker-b"
             assert persisted.execution_claim_expires_at == lease_expires_at
 
     @pytest.mark.unit
