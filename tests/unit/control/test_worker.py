@@ -646,6 +646,37 @@ class _RecordingRuntimeCleaner:
         return self.result
 
 
+class _TrackedSessionContext:
+    def __init__(self, factory: _TrackingSessionFactory) -> None:
+        self._factory = factory
+        self._session = factory.base_factory()
+
+    async def __aenter__(self) -> AsyncSession:
+        session = await self._session.__aenter__()
+        self._factory.active_sessions += 1
+        return session
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool | None:
+        try:
+            return await self._session.__aexit__(exc_type, exc, traceback)
+        finally:
+            self._factory.active_sessions -= 1
+
+
+class _TrackingSessionFactory:
+    def __init__(self, base_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.base_factory = base_factory
+        self.active_sessions = 0
+
+    def __call__(self) -> _TrackedSessionContext:
+        return _TrackedSessionContext(self)
+
+
 class _RecordingBranchOpenPRResolver:
     def __init__(
         self,
@@ -6690,6 +6721,68 @@ class TestRunOnceStaleActiveExecutionRecovery:
         finally:
             executor.release.set()
             await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_preserved_active_pr_handoff_closes_recovery_session_before_attach(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pr-handoff-session-scope",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pr_handoff_session_scope",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/274"
+            ws.pr_number = 274
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+
+        tracked_factory = _TrackingSessionFactory(session_factory)
+        worker = ControlWorker(
+            session_factory=tracked_factory,  # type: ignore[arg-type]
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        attach_calls: list[str] = []
+
+        async def _record_attach(
+            candidate: _ActiveExecutionCandidate,
+            **_kwargs: object,
+        ) -> None:
+            assert tracked_factory.active_sessions == 0
+            attach_calls.append(candidate.workspace_id)
+
+        worker._attach_preserved_active_pr_monitor = _record_attach  # type: ignore[method-assign]
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.pushing,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_pr_handoff_session_scope",
+                pr_url="https://github.com/example/repo/pull/274",
+            )
+        )
+
+        assert recovered is True
+        assert attach_calls == [workspace_id]
 
     @pytest.mark.unit
     async def test_preserved_active_pushed_branch_open_pr_attaches_one_monitor_after_restart(

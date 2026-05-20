@@ -1737,24 +1737,47 @@ class ControlWorker:
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
                 return True
 
-            if ws.pr_url:
-                await session.commit()
-                await self._attach_preserved_active_pr_monitor(
-                    candidate,
-                    preserved_event=preserved_event,
-                    attempt_id=attempt_id,
-                    task_id=task_id,
+            attach_existing_pr_monitor = bool(ws.pr_url)
+            branch_recovery_context: (
+                tuple[
+                    str,
+                    str,
+                    str,
+                    str | None,
+                    str | None,
+                    str | None,
+                ]
+                | None
+            ) = None
+            if not attach_existing_pr_monitor:
+                branch_recovery_context = (
+                    ws.repo_url,
+                    ws.branch_base,
+                    ws.id,
+                    ws.branch_name,
+                    ws.remote_push_branch,
+                    ws.base_commit,
                 )
-                return True
-
-            repo_url = ws.repo_url
-            branch_base = ws.branch_base
-            workspace_id = ws.id
-            branch_name = ws.branch_name
-            remote_push_branch = ws.remote_push_branch
-            base_commit = ws.base_commit
             await session.commit()
 
+        if attach_existing_pr_monitor:
+            await self._attach_preserved_active_pr_monitor(
+                candidate,
+                preserved_event=preserved_event,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+            return True
+
+        assert branch_recovery_context is not None
+        (
+            repo_url,
+            branch_base,
+            workspace_id,
+            branch_name,
+            remote_push_branch,
+            base_commit,
+        ) = branch_recovery_context
         branch_lookup = await self._resolve_preserved_active_branch_open_pr(
             repo_url=repo_url,
             branch_name=remote_push_branch or branch_name,
