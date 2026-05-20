@@ -1535,11 +1535,30 @@ async def _capacity_queue_summary(
             0,
             int((_to_utc(now) - _to_utc(oldest_row.created_at)).total_seconds()),
         )
-    allocated_for_gate = await _scheduler_allocated_resources_for_session(
-        session,
-        node_id=node_id,
-        resource_defaults=resource_defaults,
+    has_configured_constraints = any(
+        local_capacity_limit(
+            constraint,
+            cpu_limit=settings.local_capacity_cpu_cores,
+            memory_limit=settings.local_capacity_memory_gb,
+            dind_slots=settings.local_capacity_dind_slots,
+        )
+        is not None
+        for constraint in LOCAL_CAPACITY_CONSTRAINTS
     )
+    if has_configured_constraints:
+        allocated_for_gate = await _scheduler_allocated_resources_for_session(
+            session,
+            node_id=node_id,
+            resource_defaults=resource_defaults,
+        )
+    else:
+        allocated_for_gate = ReservedResources(
+            active_workspace_count=0,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=0.0,
+            peak_memory_gb=0.0,
+        )
     blockers = await _capacity_queue_blocked_reason_counts(
         session,
         settings=settings,

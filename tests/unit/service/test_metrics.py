@@ -883,6 +883,57 @@ async def test_resource_saturation_allocated_capacity_matches_scheduler_null_nod
 
 
 @pytest.mark.unit
+async def test_capacity_queue_summary_skips_scheduler_allocation_when_unconstrained(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=2),
+    )
+
+    async def fail_scheduler_allocation(*args: Any, **kwargs: Any) -> metrics.ReservedResources:
+        raise AssertionError("scheduler allocation should not be loaded without capacity limits")
+
+    monkeypatch.setattr(
+        metrics,
+        "_scheduler_allocated_resources_for_session",
+        fail_scheduler_allocation,
+    )
+
+    async with session_factory() as session:
+        summary = await metrics._capacity_queue_summary(  # noqa: SLF001
+            session,
+            settings=settings,
+            node_id=metrics._local_capacity_node_id(settings),  # noqa: SLF001
+            resource_defaults=metrics.WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=3.0,
+                peak_memory_gb=4.0,
+            ),
+            detected_local_capacity=metrics.LocalCapacityLimits(cpu_cores=1.0, memory_gb=1.0),
+            now=now,
+        )
+
+    assert summary.queued_workspace_count == 1
+    assert summary.oldest_workspace_id == requested_id
+    assert summary.oldest_wait_seconds == 120
+    assert summary.planned_resources.active_workspace_count == 1
+    assert summary.planned_resources.steady_cpu == 1.0
+    assert summary.planned_resources.steady_memory_gb == 2.0
+    assert summary.planned_resources.peak_cpu == 3.0
+    assert summary.planned_resources.peak_memory_gb == 4.0
+    assert summary.blocked_reason_counts == {}
+
+
+@pytest.mark.unit
 async def test_capacity_queue_uses_scheduler_allocation_scope_for_migrating_reservation(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
