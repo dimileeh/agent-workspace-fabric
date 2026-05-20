@@ -255,6 +255,13 @@ class _RequestedCapacityClaimResult:
     resume_after: SchedulerOrderCursor | None = None
     allocated_signature: _AllocatedReservationSignature | None = None
     requested_queue_signature: _RequestedCapacityQueueSignature | None = None
+    provider_suppression_resume_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _SchedulerCandidateFilterResult:
+    workspace_ids: list[str]
+    provider_suppression_resume_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -365,6 +372,7 @@ class ControlWorker:
         self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
             None
         )
+        self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -695,6 +703,46 @@ class ControlWorker:
         )
         return [workspace.id for workspace in ordered_workspaces[:limit]]
 
+    async def _filter_scheduler_candidate_workspaces_with_result(
+        self,
+        session: AsyncSession,
+        candidate_workspaces: list[Workspace],
+        *,
+        limit: int,
+        scoring_at: datetime,
+        provider_recovery_decision_candidate_limit: int | None = None,
+    ) -> _SchedulerCandidateFilterResult:
+        if not candidate_workspaces:
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
+
+        if provider_recovery_decision_candidate_limit is None:
+            filter_result = await self._filter_provider_recovery_suppressed_with_result(
+                session,
+                candidate_workspaces,
+            )
+        else:
+            filter_result = await self._filter_provider_recovery_suppressed_with_result(
+                session,
+                candidate_workspaces,
+                decision_candidate_limit=provider_recovery_decision_candidate_limit,
+            )
+        workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
+        eligible_workspaces_by_id: dict[str, Workspace] = {}
+        for workspace_id in filter_result.workspace_ids:
+            workspace = workspaces_by_id.get(workspace_id)
+            if workspace is not None:
+                eligible_workspaces_by_id.setdefault(workspace_id, workspace)
+        ordered_workspaces = _order_scheduler_workspaces(
+            list(eligible_workspaces_by_id.values()),
+            now=scoring_at,
+        )
+        return _SchedulerCandidateFilterResult(
+            workspace_ids=[workspace.id for workspace in ordered_workspaces[:limit]],
+            provider_suppression_resume_expires_at=(
+                filter_result.provider_suppression_resume_expires_at
+            ),
+        )
+
     async def _filter_provider_recovery_suppressed(
         self,
         session: AsyncSession,
@@ -702,8 +750,22 @@ class ControlWorker:
         *,
         decision_candidate_limit: int | None = None,
     ) -> list[str]:
+        result = await self._filter_provider_recovery_suppressed_with_result(
+            session,
+            workspaces,
+            decision_candidate_limit=decision_candidate_limit,
+        )
+        return result.workspace_ids
+
+    async def _filter_provider_recovery_suppressed_with_result(
+        self,
+        session: AsyncSession,
+        workspaces: list[Workspace] | list[str],
+        *,
+        decision_candidate_limit: int | None = None,
+    ) -> _SchedulerCandidateFilterResult:
         if not workspaces:
-            return []
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
         if _scheduler_items_are_workspace_ids(workspaces):
             workspace_ids = workspaces
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
@@ -715,12 +777,13 @@ class ControlWorker:
             workspace_ids = [workspace.id for workspace in workspace_rows]
             rows = {workspace.id: workspace for workspace in workspace_rows}
         else:
-            return []
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
         circuit_candidates: dict[str, tuple[str, str]] = {}
         circuit_decision_workspace_ids: set[str] = set()
+        provider_suppression_resume_expires_at: datetime | None = None
         for index, workspace_id in enumerate(workspace_ids):
             workspace = rows.get(workspace_id)
             if workspace is None:
@@ -730,6 +793,11 @@ class ControlWorker:
             )
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
+                provider_suppression_resume_expires_at = _earliest_future_datetime(
+                    provider_suppression_resume_expires_at,
+                    not_before,
+                    now=now,
+                )
                 if record_suppression_decision:
                     await _record_scheduler_queue_decision(
                         session,
@@ -774,7 +842,17 @@ class ControlWorker:
                         "cooldown_until": _json_datetime(breaker.cooldown_until),
                     },
                 )
-        return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
+            provider_suppression_resume_expires_at = _earliest_future_datetime(
+                provider_suppression_resume_expires_at,
+                breaker.cooldown_until,
+                now=now,
+            )
+        return _SchedulerCandidateFilterResult(
+            workspace_ids=[
+                workspace_id for workspace_id in workspace_ids if workspace_id in allowed
+            ],
+            provider_suppression_resume_expires_at=provider_suppression_resume_expires_at,
+        )
 
     async def _record_ordered_decisions(
         self,
@@ -2491,6 +2569,9 @@ class ControlWorker:
                 resume_after=self._requested_capacity_resume_after,
                 resume_allocated_signature=self._requested_capacity_resume_signature,
                 resume_requested_queue_signature=(self._requested_capacity_resume_queue_signature),
+                resume_provider_suppression_expires_at=(
+                    self._requested_capacity_resume_provider_suppression_expires_at
+                ),
             )
 
         result = await run_db_operation_with_retry(
@@ -2503,6 +2584,9 @@ class ControlWorker:
         self._requested_capacity_resume_after = result.resume_after
         self._requested_capacity_resume_signature = result.allocated_signature
         self._requested_capacity_resume_queue_signature = result.requested_queue_signature
+        self._requested_capacity_resume_provider_suppression_expires_at = (
+            result.provider_suppression_resume_expires_at
+        )
         return result.workspace_ids
 
     async def _claim_requested_ids_with_capacity(
@@ -2512,6 +2596,7 @@ class ControlWorker:
         resume_after: SchedulerOrderCursor | None,
         resume_allocated_signature: _AllocatedReservationSignature | None,
         resume_requested_queue_signature: _RequestedCapacityQueueSignature | None,
+        resume_provider_suppression_expires_at: datetime | None,
     ) -> _RequestedCapacityClaimResult:
         reservation_repo = ResourceReservationRepository(session)
         allocated = await _allocated_totals_for_capacity_gate(
@@ -2526,23 +2611,27 @@ class ControlWorker:
             session,
             node_id=self._config.node_id or "local",
         )
+        decided_at = datetime.now(UTC)
+        resume_provider_suppression_open = (
+            resume_provider_suppression_expires_at is None
+            or _utc_datetime(resume_provider_suppression_expires_at) > decided_at
+        )
         candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
         candidate_after = (
             resume_after
             if (
                 resume_allocated_signature == allocated_signature
                 and resume_requested_queue_signature == requested_queue_signature
+                and resume_provider_suppression_open
             )
             else None
         )
-        scoring_at = (
-            candidate_after.scoring_at if candidate_after is not None else datetime.now(UTC)
-        )
-        decided_at = datetime.now(UTC)
+        scoring_at = candidate_after.scoring_at if candidate_after is not None else decided_at
         capacity_refill_pages_remaining: int | None = None
         next_resume_after: SchedulerOrderCursor | None = None
         next_resume_signature: _AllocatedReservationSignature | None = None
         next_resume_queue_signature: _RequestedCapacityQueueSignature | None = None
+        next_resume_provider_suppression_expires_at: datetime | None = None
 
         while len(claimed) < self._config.max_concurrent_provisions:
             workspaces = await repo.list_schedulable_workspaces(
@@ -2562,12 +2651,18 @@ class ControlWorker:
 
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
             claim_slots = self._config.max_concurrent_provisions - len(claimed)
-            page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
+            page_filter_result = await self._filter_scheduler_candidate_workspaces_with_result(
                 session,
                 workspaces,
                 limit=len(workspaces),
                 scoring_at=scoring_at,
                 provider_recovery_decision_candidate_limit=claim_slots,
+            )
+            page_dispatchable_ids = page_filter_result.workspace_ids
+            next_resume_provider_suppression_expires_at = _earliest_future_datetime(
+                next_resume_provider_suppression_expires_at,
+                page_filter_result.provider_suppression_resume_expires_at,
+                now=decided_at,
             )
             page_candidates = [
                 workspaces_by_id[workspace_id]
@@ -2609,6 +2704,11 @@ class ControlWorker:
             resume_after=next_resume_after,
             allocated_signature=next_resume_signature,
             requested_queue_signature=next_resume_queue_signature,
+            provider_suppression_resume_expires_at=(
+                next_resume_provider_suppression_expires_at
+                if next_resume_after is not None
+                else None
+            ),
         )
 
     async def _claim_requested_capacity_candidates(
@@ -3916,6 +4016,22 @@ def _utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _earliest_future_datetime(
+    current: datetime | None,
+    candidate: datetime | None,
+    *,
+    now: datetime,
+) -> datetime | None:
+    if candidate is None:
+        return current
+    candidate = _utc_datetime(candidate)
+    if candidate <= now:
+        return current
+    if current is None or candidate < current:
+        return candidate
+    return current
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:

@@ -160,6 +160,7 @@ async def _create_requested(
     task_policy: dict[str, object] | None = None,
     task_class: str | None = None,
     created_at: datetime | None = None,
+    agent: str = "codex",
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -168,7 +169,7 @@ async def _create_requested(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=[],
             task_policy=task_policy,
             task_class=task_class,
@@ -2326,6 +2327,190 @@ class TestRunOnce:
         assert urgent.status == WorkspaceStatus.ready.value
         assert all(workspace is not None for workspace in blocked)
         assert all(workspace.status == WorkspaceStatus.requested.value for workspace in blocked)
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_resets_resume_cursor_when_provider_suppression_elapses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        frozen_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+
+        class FrozenDatetime(datetime):
+            current = frozen_now
+
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                if tz is None:
+                    return cls.current.replace(tzinfo=None)
+                return cls.current.astimezone(tz)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        not_before = frozen_now + timedelta(minutes=5)
+        candidate_window = _scheduler_candidate_fetch_limit(1)
+        scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+        suppressed_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "resume-reset-provider-suppressed-request",
+            create_task_attempt=True,
+            created_at=frozen_now,
+            task_policy={
+                "scheduler": {"base_priority": 100},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+        )
+        await _reserve_workspace(
+            session_factory,
+            suppressed_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        for index in range((candidate_window * scanned_page_limit) - 1):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"resume-reset-provider-blocked-{index}",
+                create_task_attempt=True,
+                created_at=frozen_now + timedelta(seconds=index + 1),
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert provisioner.calls == []
+
+        FrozenDatetime.current = not_before + timedelta(seconds=1)
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            suppressed = await WorkspaceRepository(s).get(suppressed_id)
+
+        assert provisioner.calls == [suppressed_id]
+        assert suppressed is not None
+        assert suppressed.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_resets_resume_cursor_when_provider_circuit_elapses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        frozen_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
+
+        class FrozenDatetime(datetime):
+            current = frozen_now
+
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                if tz is None:
+                    return cls.current.replace(tzinfo=None)
+                return cls.current.astimezone(tz)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        circuit_cooldown_seconds = 300
+        circuit_until = frozen_now + timedelta(seconds=circuit_cooldown_seconds)
+        candidate_window = _scheduler_candidate_fetch_limit(1)
+        scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+        suppressed_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "resume-reset-provider-circuit-request",
+            create_task_attempt=True,
+            created_at=frozen_now,
+            agent="gemini",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "scheduler": {"base_priority": 100},
+            },
+        )
+        await _reserve_workspace(
+            session_factory,
+            suppressed_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        for index in range((candidate_window * scanned_page_limit) - 1):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"resume-reset-provider-circuit-blocked-{index}",
+                create_task_attempt=True,
+                created_at=frozen_now + timedelta(seconds=index + 1),
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+        async with session_factory() as session:
+            await ProviderModelCircuitBreakerRepository(session).record_failure(
+                provider="google",
+                model="gemini-2.5-pro",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:fingerprint",
+                workspace_id=suppressed_id,
+                attempt_id=None,
+                now=frozen_now,
+                failure_threshold=1,
+                cooldown_seconds=circuit_cooldown_seconds,
+            )
+            await session.commit()
+
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert provisioner.calls == []
+
+        FrozenDatetime.current = circuit_until + timedelta(seconds=1)
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            suppressed = await WorkspaceRepository(s).get(suppressed_id)
+
+        assert provisioner.calls == [suppressed_id]
+        assert suppressed is not None
+        assert suppressed.status == WorkspaceStatus.ready.value
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_preserves_scheduler_priority_before_fifo(
