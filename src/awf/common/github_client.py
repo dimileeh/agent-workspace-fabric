@@ -85,6 +85,7 @@ class _FetchedReview:
     fetch_index: int
     viewer_did_author: bool
     has_body: bool
+    counts_for_required_review: bool
 
 
 # GraphQL: fetch PR state + review threads + review comments in one query.
@@ -173,6 +174,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           commit { oid }
           url
           author { login }
+          authorCanPushToRepository
           viewerDidAuthor
         }
         pageInfo { hasNextPage endCursor }
@@ -279,6 +281,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           commit { oid }
           url
           author { login }
+          authorCanPushToRepository
           viewerDidAuthor
         }
         pageInfo { hasNextPage endCursor }
@@ -1249,6 +1252,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         fetch_index=fetch_index,
         viewer_did_author=comment.viewer_did_author,
         has_body=bool(body.strip()),
+        counts_for_required_review=_review_counts_for_required_review(node),
     )
 
 
@@ -1262,12 +1266,20 @@ def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> 
     return f"review-fetch-index:{fetch_index}"
 
 
+def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
+    # Real GraphQL payloads include this Boolean. Older/fake payloads are treated
+    # as counting to preserve conservative merge-gate behavior.
+    return node.get("authorCanPushToRepository") is not False
+
+
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
     merge_gating_states = {"APPROVED", "CHANGES_REQUESTED"}
     latest_by_reviewer: dict[str, _FetchedReview] = {}
     for fetched in fetched_reviews:
+        if not fetched.counts_for_required_review:
+            continue
         if fetched.comment.state not in merge_gating_states:
             continue
         current = latest_by_reviewer.get(fetched.reviewer_key)

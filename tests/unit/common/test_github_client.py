@@ -592,6 +592,41 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
+    async def test_non_counting_changes_requested_review_is_advisory_not_blocking(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9251,
+                        "body": "External contributor advisory change request.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "external-reviewer"},
+                        "authorCanPushToRepository": False,
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "authorCanPushToRepository" in query_arg
+        assert len(status.unresolved_review_comments) == 1
+        review = status.unresolved_review_comments[0]
+        assert review.comment_id == "9251"
+        assert review.state == "CHANGES_REQUESTED"
+        assert review.blocks_merge is False
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
     async def test_later_approval_from_same_reviewer_clears_blocking_review(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
