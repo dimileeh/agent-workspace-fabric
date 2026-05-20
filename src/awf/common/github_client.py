@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
@@ -567,7 +568,14 @@ class BranchOpenPullRequestResolver:
     ) -> list[BranchOpenPullRequest]:
         try:
             repo = RepoRef.from_url(repo_url)
-        except ValueError:
+        except ValueError as exc:
+            _log.warning(
+                "github.open_pr_lookup_skipped_invalid_repo_url",
+                repo_url=redact_audit_text(repo_url),
+                branch_name=branch_name,
+                base_branch=base_branch,
+                error=redact_audit_text(str(exc)),
+            )
             return []
         return await list_open_pull_requests_for_branch(
             runner=self._runner,

@@ -19,6 +19,7 @@ import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
+    BranchOpenPullRequestResolver,
     GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
@@ -391,6 +392,38 @@ class TestListOpenPullRequestsForBranch:
 
         assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
         assert "url" in excinfo.value.message
+
+
+class TestBranchOpenPullRequestResolver:
+    @pytest.mark.unit
+    async def test_invalid_repo_url_returns_empty_list_and_warns(self) -> None:
+        fake = FakeCommandRunner()
+        resolver = BranchOpenPullRequestResolver(fake)
+        repo_url = "https://x-access-token:secret-token@github.com/dimileeh"
+
+        with structlog.testing.capture_logs() as captured:
+            resolved = await resolver.resolve(
+                repo_url=repo_url,
+                branch_name="feature/head",
+                base_branch="main",
+            )
+
+        assert resolved == []
+        assert fake.calls == []
+        event = next(
+            (
+                item
+                for item in captured
+                if item.get("event") == "github.open_pr_lookup_skipped_invalid_repo_url"
+            ),
+            None,
+        )
+        assert event is not None
+        assert event.get("log_level") == "warning"
+        assert event.get("repo_url") == "https://[redacted]@github.com/dimileeh"
+        assert event.get("branch_name") == "feature/head"
+        assert "github.com/dimileeh" in str(event.get("error"))
+        assert "secret-token" not in str(event)
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────

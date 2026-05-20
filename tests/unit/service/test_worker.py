@@ -613,6 +613,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
@@ -643,6 +644,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
 
     assert created["provisioner_config"].node_id == "local"
     assert created["worker_config"].node_id == "local"
+    assert isinstance(created["worker_open_pr_resolver"], _AnyInit)
 
 
 @pytest.mark.unit
