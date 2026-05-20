@@ -34,6 +34,11 @@ _COMMENT_STEP_MARKERS: Final[tuple[str, ...]] = (
     "notify",
     "notification",
 )
+_COMMENT_NOTIFY_ACTION_USES: Final[frozenset[str]] = frozenset(
+    {
+        "peter-evans/create-or-update-comment",
+    }
+)
 _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "comment",
     "pr comment",
@@ -1478,9 +1483,11 @@ def _script_stem(command: str) -> str:
 
 
 def _is_comment_or_notify_uses(uses: str) -> bool:
-    action = _uses_action(uses) or uses
-    label = action.lower()
-    return any(marker in label for marker in _COMMENT_STEP_MARKERS)
+    parts = _uses_action_and_ref(uses)
+    if parts is None:
+        return False
+    action, ref = parts
+    return action.lower() in _COMMENT_NOTIFY_ACTION_USES and _is_pinned_workflow_uses_ref(ref)
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
