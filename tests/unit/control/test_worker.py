@@ -7212,6 +7212,266 @@ class TestRunOnceStaleActiveExecutionRecovery:
             worker._execution_tasks.pop("other-workspace", None)  # noqa: SLF001
 
     @pytest.mark.unit
+    async def test_validating_candidate_reuses_running_validation_salvage_event(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-validating-reuses-running-validation-event",
+            WorkspaceStatus.validating,
+            compose_project_name="awf_validating_reuses_running_validation_event",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.validating.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.active_execution_salvage_validation_requested",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "running-preservation-cycle",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.validating.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            old_operation = await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "running-preservation-cycle",
+                },
+            )
+            await s.commit()
+            attempt_id = attempt.id
+            task_id = attempt.task_id
+            old_operation_id = old_operation.id
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_validating_reuses_running_validation_event": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.validating,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_validating_reuses_running_validation_event",
+        )
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="committed",
+            reason="clean_branch_ahead",
+            branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+            head_sha="b" * 40,
+            commit_count=1,
+        )
+
+        async with session_factory() as s:
+            assert await worker._has_current_salvage_event(  # noqa: SLF001
+                s,
+                workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                event_floor=preserved_event.occurred_at,
+                workspace_status=WorkspaceStatus.validating,
+            )
+
+        assert not await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
+
+        await worker._request_preserved_active_validation(  # noqa: SLF001
+            candidate,
+            preserved_event=preserved_event,
+            classification=classification,
+            attempt_id=attempt_id,
+            task_id=task_id,
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            old_operation = await OperationRepository(s).get(old_operation_id)
+            assert old_operation is not None
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+
+        validate_ops = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.validate.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+        ]
+        assert ws.status == WorkspaceStatus.validating.value
+        assert len(salvage_events) == 1
+        assert len(validate_ops) == 1
+        assert old_operation.status == OperationStatus.pending.value
+
+    @pytest.mark.unit
+    async def test_validating_candidate_redispatches_active_running_validation_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-validating-redispatches-running-validation",
+            WorkspaceStatus.running,
+            compose_project_name="awf_validating_redispatches_running_validation",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+            attempt_id = attempt.id
+            task_id = attempt.task_id
+
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="committed",
+            reason="clean_branch_ahead",
+            branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+            head_sha="b" * 40,
+            commit_count=1,
+        )
+        first_worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_validating_redispatches_running_validation": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        await first_worker._request_preserved_active_validation(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_validating_redispatches_running_validation",
+            ),
+            preserved_event=preserved_event,
+            classification=classification,
+            attempt_id=attempt_id,
+            task_id=task_id,
+        )
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.validating.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_validating_redispatches_running_validation": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.validating,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_validating_redispatches_running_validation",
+        )
+
+        assert not await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
+        assert await worker._recover_preserved_active_execution(candidate)  # noqa: SLF001
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            validation_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        validate_ops = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.validate.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+        ]
+        assert executor.calls == [workspace_id]
+        assert len(validation_events) == 1
+        assert len(validate_ops) == 1
+
+    @pytest.mark.unit
     async def test_preserved_active_validation_recovery_lookup_uses_single_active_query(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -232,15 +232,11 @@ def _salvage_workspace_status_values(
     reason_code: str,
 ) -> tuple[str, ...]:
     if (
-        workspace_status == WorkspaceStatus.running
+        workspace_status in _ACTIVE_EXECUTION_STATUSES
         and event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE
         and reason_code == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
     ):
-        return (
-            WorkspaceStatus.running.value,
-            WorkspaceStatus.validating.value,
-            WorkspaceStatus.pushing.value,
-        )
+        return tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
     return (workspace_status.value,)
 
 
@@ -1711,16 +1707,18 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
-            has_active_validation_recovery = False
-            if candidate.status == WorkspaceStatus.running:
-                has_active_validation_recovery = await (
-                    self._has_active_preserved_validation_recovery(
-                        session,
-                        candidate.workspace_id,
-                    )
-                )
+            has_active_validation_recovery = candidate.status in (
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+            ) and await self._has_active_preserved_validation_recovery(
+                session,
+                candidate.workspace_id,
+            )
             if has_active_validation_recovery:
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                can_continue_validation = self._preserved_active_validation_can_continue(
+                    candidate.workspace_id
+                )
                 _log.info(
                     "worker.preserved_active_validation_redispatch",
                     workspace_id=candidate.workspace_id,
@@ -1728,7 +1726,7 @@ class ControlWorker:
                     reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
                     dispatched=dispatched,
                 )
-                if dispatched or candidate.workspace_id in self._execution_tasks:
+                if dispatched or can_continue_validation:
                     return True
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
@@ -3499,6 +3497,15 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
+            if (
+                candidate.status in (WorkspaceStatus.running, WorkspaceStatus.validating)
+                and await self._has_active_preserved_validation_recovery(
+                    session,
+                    candidate.workspace_id,
+                )
+                and self._preserved_active_validation_can_continue(candidate.workspace_id)
+            ):
+                return False
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
@@ -3516,9 +3523,8 @@ class ControlWorker:
                     reason_code,
                 ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
                     if event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE:
-                        can_dispatch_validation = self._executor is not None and (
-                            candidate.workspace_id in self._execution_tasks
-                            or self._can_dispatch_execution_when_slot_available()
+                        can_dispatch_validation = self._preserved_active_validation_can_continue(
+                            candidate.workspace_id
                         )
                         if not can_dispatch_validation:
                             continue
@@ -3816,6 +3822,12 @@ class ControlWorker:
 
     def _can_dispatch_execution_when_slot_available(self) -> bool:
         return self._executor is not None and self._config.max_concurrent_executions > 0
+
+    def _preserved_active_validation_can_continue(self, workspace_id: str) -> bool:
+        return self._executor is not None and (
+            workspace_id in self._execution_tasks
+            or self._can_dispatch_execution_when_slot_available()
+        )
 
     def _dispatchable_execution_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
         dispatchable: list[str] = []
