@@ -85,6 +85,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         def __init__(self, runner: object) -> None:
             created["github_runner"] = runner
 
+    class _BranchOpenPullRequestResolver:
+        def __init__(self, runner: object) -> None:
+            created["open_pr_resolver_runner"] = runner
+
     class _GitManager:
         def __init__(
             self,
@@ -175,12 +179,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            open_pr_resolver: object,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_config"] = config
 
     engine = _Engine()
@@ -193,6 +199,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "ValidationRunner", _ValidationRunner)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _PullRequestCreator)
     monkeypatch.setattr(worker_mod, "GitHubClient", _GitHubClient)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _BranchOpenPullRequestResolver)
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
     monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
     monkeypatch.setattr(worker_mod, "LocalSecretLeaseMountResolver", _LocalSecretLeaseMountResolver)
@@ -233,6 +240,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["validation_runner"] is created["executor_runner"]
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
+    assert created["open_pr_resolver_runner"] is created["executor_runner"]
+    assert created["worker_open_pr_resolver"].__class__ is _BranchOpenPullRequestResolver
     git_env = created["git_env"]
     assert git_env["HOME"] == str(Path(settings.host_home).resolve())
     assert git_env["GIT_CONFIG_COUNT"] == "1"
@@ -587,10 +596,12 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            open_pr_resolver: object,
             config: object,
         ) -> None:
             created["worker_config"] = config
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_open_pr_resolver"] = open_pr_resolver
 
     engine = _Engine()
     session_factory = object()

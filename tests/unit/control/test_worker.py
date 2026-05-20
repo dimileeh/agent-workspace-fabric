@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import event, select, update
@@ -639,6 +640,51 @@ class _RecordingRuntimeCleaner:
             }
         )
         return self.result
+
+
+class _RecordingBranchOpenPRResolver:
+    def __init__(
+        self,
+        results_by_branch: dict[str, list[SimpleNamespace] | Exception],
+    ) -> None:
+        self._results_by_branch = results_by_branch
+        self.calls: list[dict[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[SimpleNamespace]:
+        self.calls.append(
+            {
+                "repo_url": repo_url,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        result = self._results_by_branch[branch_name]
+        if isinstance(result, Exception):
+            raise result
+        return list(result)
+
+
+def _rewrite_branch_placeholder(value: Any, branch_name: str) -> Any:
+    if isinstance(value, str):
+        return branch_name if value == "BRANCH" else value
+    if isinstance(value, list):
+        return [_rewrite_branch_placeholder(item, branch_name) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_branch_placeholder(item, branch_name) for key, item in value.items()}
+    if isinstance(value, SimpleNamespace):
+        return SimpleNamespace(
+            **{
+                key: _rewrite_branch_placeholder(item, branch_name)
+                for key, item in vars(value).items()
+            }
+        )
+    return value
 
 
 def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
@@ -6387,6 +6433,333 @@ class TestRunOnceStaleActiveExecutionRecovery:
         finally:
             executor.release.set()
             await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_open_pr_attaches_one_monitor_after_restart(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushed-branch-pr",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pushed_branch_pr",
+            create_task_attempt=True,
+        )
+        branch_name = f"awf/{workspace_id}"
+        resolved_head_sha = "e" * 40
+        resolver = _RecordingBranchOpenPRResolver(
+            {
+                branch_name: [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/270",
+                        number=270,
+                        head_ref=branch_name,
+                        head_sha=resolved_head_sha,
+                    )
+                ]
+            }
+        )
+        executor = _BlockingMonitorExecutor()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_pushed_branch_pr": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        try:
+            await worker.run_once()
+            await asyncio.wait_for(executor.started.wait(), timeout=5.0)
+            await worker.run_once()
+
+            async with session_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+                assert attempt is not None
+                salvage_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_monitor_attached",
+                )
+                operator_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_operator_required",
+                )
+                stale_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.stale_active_execution_detected",
+                )
+                monitor_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.monitor_recovery_started",
+                )
+                remonitor_ops = [
+                    operation
+                    for operation in await OperationRepository(s).list_for_workspace(workspace_id)
+                    if operation.type == OperationType.remonitor.value
+                ]
+
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.pr_url == "https://github.com/example/repo/pull/270"
+            assert ws.pr_number == 270
+            assert ws.remote_push_branch == branch_name
+            assert ws.monitor_last_commit_sha == resolved_head_sha
+            assert len(salvage_events) == 1
+            payload = salvage_events[0].payload
+            assert payload is not None
+            assert payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+            assert payload["decision"] == "attach_pr_monitor"
+            assert payload["pr_url"] == "https://github.com/example/repo/pull/270"
+            assert payload["pr_number"] == 270
+            assert payload["remote_push_branch"] == branch_name
+            assert payload["monitor_last_commit_sha"] == resolved_head_sha
+            assert payload["branch_pr_lookup"] == {
+                "branch_name": branch_name,
+                "match_count": 1,
+                "source": "open_pr_resolver",
+            }
+            assert payload["attempt_id"] == attempt.id
+            assert payload["task_id"] == attempt.task_id
+            assert len(monitor_events) == 1
+            assert len(remonitor_ops) == 1
+            assert operator_events == []
+            assert stale_events == []
+            assert executor.resume_calls == [workspace_id]
+            assert resolver.calls == [
+                {
+                    "repo_url": str(origin_repo),
+                    "branch_name": branch_name,
+                    "base_branch": "development",
+                }
+            ]
+            assert cleaner.calls == []
+        finally:
+            executor.release.set()
+            await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_lookup_falls_back_to_branch_name(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushed-branch-name-pr",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pushed_branch_name_pr",
+            create_task_attempt=True,
+        )
+        branch_name = f"awf/{workspace_id}"
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.remote_push_branch = None
+            await s.commit()
+
+        resolver = _RecordingBranchOpenPRResolver(
+            {
+                branch_name: [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/271",
+                        number=271,
+                        head_ref=branch_name,
+                        head_sha="d" * 40,
+                    )
+                ]
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_pushed_branch_name_pr": _live_agent_snapshot()}
+            ),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.pr_url == "https://github.com/example/repo/pull/271"
+        assert ws.pr_number == 271
+        assert ws.remote_push_branch == branch_name
+        assert len(salvage_events) == 1
+        assert resolver.calls == [
+            {
+                "repo_url": str(origin_repo),
+                "branch_name": branch_name,
+                "base_branch": "development",
+            }
+        ]
+        assert executor.resume_calls == [workspace_id]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("lookup_result", "ambiguity_reason", "lookup_payload"),
+        [
+            (
+                RuntimeError("gh pr list failed"),
+                "open_pr_lookup_failed",
+                {
+                    "branch_name": "BRANCH",
+                    "error": "gh pr list failed",
+                    "source": "open_pr_resolver",
+                },
+            ),
+            (
+                [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/272",
+                        number=272,
+                        head_ref="BRANCH",
+                        head_sha="c" * 40,
+                    ),
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/273",
+                        number=273,
+                        head_ref="BRANCH",
+                        head_sha="b" * 40,
+                    ),
+                ],
+                "multiple_open_prs_for_branch",
+                {
+                    "branch_name": "BRANCH",
+                    "match_count": 2,
+                    "matches": [
+                        {
+                            "pr_url": "https://github.com/example/repo/pull/272",
+                            "pr_number": 272,
+                            "head_ref": "BRANCH",
+                            "head_sha": "c" * 40,
+                        },
+                        {
+                            "pr_url": "https://github.com/example/repo/pull/273",
+                            "pr_number": 273,
+                            "head_ref": "BRANCH",
+                            "head_sha": "b" * 40,
+                        },
+                    ],
+                    "source": "open_pr_resolver",
+                },
+            ),
+        ],
+    )
+    async def test_preserved_active_pushed_branch_pr_lookup_ambiguity_is_operator_recoverable(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        lookup_result: list[SimpleNamespace] | Exception,
+        ambiguity_reason: str,
+        lookup_payload: dict[str, object],
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            f"preserved-pushed-branch-{ambiguity_reason}",
+            WorkspaceStatus.pushing,
+            compose_project_name=f"awf_preserved_{ambiguity_reason}",
+            create_task_attempt=True,
+        )
+        branch_name = f"awf/{workspace_id}"
+        resolver_payload = _rewrite_branch_placeholder(lookup_result, branch_name)
+        expected_lookup_payload = _rewrite_branch_placeholder(lookup_payload, branch_name)
+        resolver = _RecordingBranchOpenPRResolver({branch_name: resolver_payload})
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {f"awf_preserved_{ambiguity_reason}": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws.status == WorkspaceStatus.pushing.value
+        assert ws.subphase == "runtime_preserved_operator_recovery_required"
+        assert ws.pr_url is None
+        assert ws.pr_number is None
+        assert len(operator_events) == 1
+        payload = operator_events[0].payload
+        assert payload is not None
+        assert payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED"
+        assert payload["ambiguity_reason"] == ambiguity_reason
+        assert payload["branch_pr_lookup"] == expected_lookup_payload
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in stale_events)
+        assert (
+            len(
+                [
+                    operation
+                    for operation in operations
+                    if operation.type == OperationType.refresh.value
+                    and operation.payload is not None
+                    and operation.payload.get("ambiguity_reason") == ambiguity_reason
+                ]
+            )
+            == 1
+        )
+        assert resolver.calls == [
+            {
+                "repo_url": str(origin_repo),
+                "branch_name": branch_name,
+                "base_branch": "development",
+            }
+        ]
+        assert cleaner.calls == []
 
     @pytest.mark.unit
     async def test_preserved_active_without_usable_work_creates_one_replacement_with_lineage(

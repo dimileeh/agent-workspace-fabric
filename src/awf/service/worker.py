@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
-from awf.common.github_client import GitHubClient
+from awf.common.github_client import BranchOpenPullRequestResolver, GitHubClient
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
@@ -85,6 +85,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     )
     pr_creator = PullRequestCreator(runner)
     gh = GitHubClient(runner)
+    open_pr_resolver = BranchOpenPullRequestResolver(runner)
     target_branch_reconciler = TargetBranchReconcileMonitor(
         runner=runner,
         work_dir=work_dir,
@@ -205,6 +206,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         provisioner=provisioner,
         executor=executor,
         runtime_cleaner=runtime_cleaner,
+        open_pr_resolver=open_pr_resolver,
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,

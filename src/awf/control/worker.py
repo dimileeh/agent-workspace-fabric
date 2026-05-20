@@ -19,7 +19,7 @@ import asyncio
 import contextlib
 import subprocess
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.github_client import BranchOpenPullRequest
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -278,6 +279,31 @@ class _PreservedWorktreeClassification:
         }
 
 
+@dataclass(frozen=True)
+class _OpenPullRequestSummary:
+    pr_url: str
+    pr_number: int
+    head_ref: str | None
+    head_sha: str | None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "pr_url": self.pr_url,
+            "pr_number": self.pr_number,
+            "head_ref": self.head_ref,
+            "head_sha": self.head_sha,
+        }
+
+
+@dataclass(frozen=True)
+class _BranchOpenPRLookup:
+    branch_name: str
+    state: str
+    payload: dict[str, Any]
+    match: _OpenPullRequestSummary | None = None
+    ambiguity_reason: str | None = None
+
+
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(  # pragma: no cover - Protocol method declaration only.
         self,
@@ -291,6 +317,16 @@ class WorkspaceExecutorProtocol(Protocol):
         self,
         workspace_id: str,
     ) -> None: ...
+
+
+class BranchOpenPullRequestResolverProtocol(Protocol):
+    async def resolve(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> Sequence[BranchOpenPullRequest]: ...
 
 
 class RuntimeInspectorProtocol(Protocol):
@@ -325,6 +361,7 @@ class ControlWorker:
         executor: WorkspaceExecutorProtocol | None = None,
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
+        open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -332,6 +369,7 @@ class ControlWorker:
         self._executor = executor
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._runtime_cleaner = runtime_cleaner
+        self._open_pr_resolver = open_pr_resolver
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1654,46 +1692,63 @@ class ControlWorker:
                 return True
 
             if ws.pr_url:
-                if candidate.status in {WorkspaceStatus.validating, WorkspaceStatus.pushing}:
-                    await session.commit()
-                    await self._attach_preserved_active_pr_monitor(
-                        candidate,
-                        preserved_event=preserved_event,
-                        attempt_id=attempt_id,
-                        task_id=task_id,
-                    )
-                    return True
                 await session.commit()
-                await self._record_preserved_active_operator_required(
+                await self._attach_preserved_active_pr_monitor(
                     candidate,
                     preserved_event=preserved_event,
-                    classification=None,
-                    ambiguity_reason="pr_metadata_on_unexpected_active_status",
                     attempt_id=attempt_id,
                     task_id=task_id,
                 )
                 return True
 
-            if attempt_id is None or task_id is None:
-                if preservation_expired:
-                    await session.commit()
-                    await self._record_preserved_active_salvage_not_possible(
-                        candidate,
-                        preserved_event=preserved_event,
-                        reason=(
-                            "missing_task_attempt_lineage"
-                            if attempt_id is None
-                            else "missing_task_lineage"
-                        ),
-                    )
-                    return False
-                return True
-
+            repo_url = ws.repo_url
+            branch_base = ws.branch_base
             workspace_id = ws.id
             branch_name = ws.branch_name
             remote_push_branch = ws.remote_push_branch
             base_commit = ws.base_commit
             await session.commit()
+
+        branch_lookup = await self._resolve_preserved_active_branch_open_pr(
+            repo_url=repo_url,
+            branch_name=remote_push_branch or branch_name,
+            base_branch=branch_base,
+        )
+        if branch_lookup is not None and branch_lookup.state == "matched":
+            await self._attach_preserved_active_pr_monitor(
+                candidate,
+                preserved_event=preserved_event,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                open_pr=branch_lookup.match,
+                branch_pr_lookup=branch_lookup.payload,
+            )
+            return True
+        if branch_lookup is not None and branch_lookup.state == "ambiguous":
+            await self._record_preserved_active_operator_required(
+                candidate,
+                preserved_event=preserved_event,
+                classification=None,
+                ambiguity_reason=branch_lookup.ambiguity_reason or "open_pr_lookup_ambiguous",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=branch_lookup.payload,
+            )
+            return True
+
+        if attempt_id is None or task_id is None:
+            if preservation_expired:
+                await self._record_preserved_active_salvage_not_possible(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=(
+                        "missing_task_attempt_lineage"
+                        if attempt_id is None
+                        else "missing_task_lineage"
+                    ),
+                )
+                return False
+            return True
 
         classification = await self._classify_preserved_active_worktree(
             workspace_id=workspace_id,
@@ -1891,14 +1946,22 @@ class ControlWorker:
         preserved_event: WorkspaceEvent,
         attempt_id: str | None,
         task_id: str | None,
+        open_pr: _OpenPullRequestSummary | None = None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
     ) -> None:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(candidate.workspace_id)
-            if ws is None or ws.status != candidate.status.value or not ws.pr_url:
+            if ws is None or ws.status != candidate.status.value:
                 return
-            if candidate.status not in {WorkspaceStatus.validating, WorkspaceStatus.pushing}:
+            if open_pr is not None and not ws.pr_url:
+                ws.pr_url = open_pr.pr_url
+                ws.pr_number = open_pr.pr_number
+                ws.remote_push_branch = open_pr.head_ref or ws.remote_push_branch or ws.branch_name
+                if open_pr.head_sha:
+                    ws.monitor_last_commit_sha = open_pr.head_sha
+            if not ws.pr_url:
                 return
             if await self._has_current_salvage_event(
                 session,
@@ -1917,6 +1980,14 @@ class ControlWorker:
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
             ws.subphase = None
+            extra: dict[str, Any] = {
+                "pr_url": ws.pr_url,
+                "pr_number": ws.pr_number,
+                "remote_push_branch": ws.remote_push_branch,
+                "monitor_last_commit_sha": ws.monitor_last_commit_sha,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
@@ -1927,11 +1998,7 @@ class ControlWorker:
                 task_id=task_id,
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
-                extra={
-                    "pr_url": ws.pr_url,
-                    "pr_number": ws.pr_number,
-                    "monitor_last_commit_sha": ws.monitor_last_commit_sha,
-                },
+                extra=extra,
             )
             await repo.transition(
                 ws,
@@ -2201,6 +2268,7 @@ class ControlWorker:
         ambiguity_reason: str,
         attempt_id: str | None,
         task_id: str | None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
     ) -> None:
         idempotency_key = _active_execution_salvage_idempotency_key(
             "operator",
@@ -2230,6 +2298,12 @@ class ControlWorker:
                 ws.execution_claim_expires_at = None
             ws.subphase = _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE
             await repo.advance_workspace_version(ws)
+            extra: dict[str, Any] = {
+                "ambiguity_reason": ambiguity_reason,
+                "source_workspace_id": ws.id,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
@@ -2241,10 +2315,7 @@ class ControlWorker:
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
                 classification=classification,
-                extra={
-                    "ambiguity_reason": ambiguity_reason,
-                    "source_workspace_id": ws.id,
-                },
+                extra=extra,
             )
             operation, _created = await OperationRepository(session).create_idempotent(
                 workspace_id=ws.id,
@@ -2566,6 +2637,88 @@ class ControlWorker:
                 floors.append(_utc_datetime(refresh_requested_at))
 
         return max(floors) if floors else None
+
+    async def _resolve_preserved_active_branch_open_pr(
+        self,
+        *,
+        repo_url: str | None,
+        branch_name: str | None,
+        base_branch: str | None,
+    ) -> _BranchOpenPRLookup | None:
+        if self._open_pr_resolver is None:
+            return None
+        if repo_url is None or not repo_url.strip():
+            return None
+        if branch_name is None or not branch_name.strip():
+            return None
+
+        lookup_branch = branch_name.strip()
+        try:
+            matches = await self._open_pr_resolver.resolve(
+                repo_url=repo_url,
+                branch_name=lookup_branch,
+                base_branch=base_branch,
+            )
+        except Exception as exc:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="ambiguous",
+                ambiguity_reason="open_pr_lookup_failed",
+                payload={
+                    "branch_name": lookup_branch,
+                    "error": str(exc),
+                    "source": "open_pr_resolver",
+                },
+            )
+
+        try:
+            summaries = [
+                _open_pull_request_summary(match, branch_name=lookup_branch) for match in matches
+            ]
+        except ValueError as exc:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="ambiguous",
+                ambiguity_reason="open_pr_lookup_invalid",
+                payload={
+                    "branch_name": lookup_branch,
+                    "error": str(exc),
+                    "source": "open_pr_resolver",
+                },
+            )
+
+        if not summaries:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="none",
+                payload={
+                    "branch_name": lookup_branch,
+                    "match_count": 0,
+                    "source": "open_pr_resolver",
+                },
+            )
+        if len(summaries) == 1:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="matched",
+                match=summaries[0],
+                payload={
+                    "branch_name": lookup_branch,
+                    "match_count": 1,
+                    "source": "open_pr_resolver",
+                },
+            )
+        return _BranchOpenPRLookup(
+            branch_name=lookup_branch,
+            state="ambiguous",
+            ambiguity_reason="multiple_open_prs_for_branch",
+            payload={
+                "branch_name": lookup_branch,
+                "match_count": len(summaries),
+                "matches": [summary.to_payload() for summary in summaries],
+                "source": "open_pr_resolver",
+            },
+        )
 
     async def _classify_preserved_active_worktree(
         self,
@@ -4103,6 +4256,50 @@ def _active_execution_preservation_payload(
         "claim_cleanup": claim_cleanup,
         "runtime": _runtime_snapshot_payload(snapshot),
     }
+
+
+def _open_pull_request_summary(
+    metadata: object,
+    *,
+    branch_name: str,
+) -> _OpenPullRequestSummary:
+    pr_url = _metadata_nonempty_str(metadata, "pr_url", "url")
+    if pr_url is None:
+        raise ValueError("open PR lookup result is missing pr_url")
+    pr_number_value = _metadata_value(metadata, "pr_number", "number")
+    try:
+        if isinstance(pr_number_value, int) and not isinstance(pr_number_value, bool):
+            pr_number = pr_number_value
+        elif isinstance(pr_number_value, str):
+            pr_number = int(pr_number_value)
+        else:
+            raise TypeError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("open PR lookup result is missing pr_number") from exc
+    if pr_number <= 0:
+        raise ValueError("open PR lookup result has invalid pr_number")
+    head_ref = _metadata_nonempty_str(metadata, "head_ref", "headRefName") or branch_name
+    head_sha = _metadata_nonempty_str(metadata, "head_sha", "headRefOid")
+    return _OpenPullRequestSummary(
+        pr_url=pr_url,
+        pr_number=pr_number,
+        head_ref=head_ref,
+        head_sha=head_sha,
+    )
+
+
+def _metadata_value(metadata: object, *names: str) -> object:
+    for name in names:
+        if isinstance(metadata, Mapping) and name in metadata:
+            return metadata[name]
+        if hasattr(metadata, name):
+            return getattr(metadata, name)
+    return None
+
+
+def _metadata_nonempty_str(metadata: object, *names: str) -> str | None:
+    value = _metadata_value(metadata, *names)
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _active_execution_salvage_idempotency_key(

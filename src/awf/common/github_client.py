@@ -402,10 +402,21 @@ class PullRequestAdoptionMetadata:
     title: str
 
 
+@dataclass(frozen=True)
+class BranchOpenPullRequest:
+    """Open PR metadata resolved from a head branch."""
+
+    url: str
+    number: int
+    head_ref: str
+    head_sha: str | None = None
+
+
 _PR_ADOPTION_VIEW_JSON_FIELDS = (
     "number,headRefName,headRepository,isCrossRepository,baseRefName,"
     "headRefOid,baseRefOid,state,isDraft,author,url,title"
 )
+_BRANCH_OPEN_PR_LIST_JSON_FIELDS = "number,url,headRefName,headRefOid"
 
 
 def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
@@ -472,6 +483,98 @@ async def fetch_pull_request_adoption_metadata(
         ) from exc
 
     return _parse_pull_request_adoption_metadata(payload, repo=repo, pr_number=pr_number)
+
+
+async def list_open_pull_requests_for_branch(
+    *,
+    runner: AsyncCommandRunner,
+    repo: RepoRef,
+    branch_name: str,
+    base_branch: str | None = None,
+) -> list[BranchOpenPullRequest]:
+    """List open GitHub PRs whose head branch matches ``branch_name``."""
+
+    stripped_branch = branch_name.strip()
+    if not stripped_branch:
+        return []
+    command = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        repo.slug(),
+        "--head",
+        stripped_branch,
+        "--state",
+        "open",
+    ]
+    if base_branch is not None and base_branch.strip():
+        command.extend(["--base", base_branch.strip()])
+    command.extend(["--json", _BRANCH_OPEN_PR_LIST_JSON_FIELDS])
+    result = await runner.run(command)
+    if result.returncode != 0:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_FAILED",
+            message=(result.stderr or f"gh pr list exited {result.returncode}").strip(),
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+                "returncode": result.returncode,
+            },
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"failed to parse gh pr list JSON: {exc}",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+            },
+        ) from exc
+    if not isinstance(payload, list):
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message="gh pr list returned non-list JSON.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+            },
+        )
+    return [
+        _parse_branch_open_pull_request(item, repo=repo, branch_name=stripped_branch)
+        for item in payload
+    ]
+
+
+class BranchOpenPullRequestResolver:
+    """Resolve open PRs for a branch using the GitHub CLI."""
+
+    def __init__(self, runner: AsyncCommandRunner) -> None:
+        self._runner = runner
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[BranchOpenPullRequest]:
+        try:
+            repo = RepoRef.from_url(repo_url)
+        except ValueError:
+            return []
+        return await list_open_pull_requests_for_branch(
+            runner=self._runner,
+            repo=repo,
+            branch_name=branch_name,
+            base_branch=base_branch,
+        )
 
 
 def _parse_pull_request_adoption_metadata(
@@ -555,6 +658,44 @@ def _parse_pull_request_adoption_metadata(
     )
 
 
+def _parse_branch_open_pull_request(
+    payload: object,
+    *,
+    repo: RepoRef,
+    branch_name: str,
+) -> BranchOpenPullRequest:
+    if not isinstance(payload, dict):
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message="gh pr list item is not an object.",
+            detail={"repo_slug": repo.slug(), "branch_name": branch_name},
+        )
+    try:
+        number = int(payload["number"])
+        url = str(payload["url"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"gh pr list payload missing required field: {exc}",
+            detail={"repo_slug": repo.slug(), "branch_name": branch_name},
+        ) from exc
+    if number <= 0 or not url.strip():
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message="gh pr list payload has invalid number or URL.",
+            detail={"repo_slug": repo.slug(), "branch_name": branch_name},
+        )
+
+    head_ref = _optional_nonempty_str(payload.get("headRefName")) or branch_name
+    head_sha = _optional_nonempty_str(payload.get("headRefOid"))
+    return BranchOpenPullRequest(
+        url=url,
+        number=number,
+        head_ref=head_ref,
+        head_sha=head_sha,
+    )
+
+
 def _head_repo_slug_from_adoption_payload(
     payload: dict[str, Any],
     *,
@@ -610,6 +751,10 @@ def _required_nonempty_str(
             detail={"repo_slug": repo.slug(), "pr_number": pr_number, "field": field_name},
         )
     return stripped
+
+
+def _optional_nonempty_str(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _looks_like_missing_pr_error(stderr: str) -> bool:
