@@ -5346,9 +5346,6 @@ class WorkspaceExecutor:
             )
         return diffs
 
-    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
-        return await git_show_text(self._runner, worktree_path=worktree_path, refspec=refspec)
-
     async def _verify_recovered_post_agent_commit(
         self,
         *,

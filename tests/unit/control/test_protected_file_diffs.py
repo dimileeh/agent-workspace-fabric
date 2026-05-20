@@ -38,18 +38,29 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-async def test_git_show_text_returns_none_for_missing_path(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: path '.github/workflows/ci.yml' does not exist in 'HEAD'",
+        "fatal: Path '.github/workflows/ci.yml' exists on disk, but not in 'HEAD'",
+        (
+            "fatal: path '.github/workflows/ci.yml' does not exist "
+            "(neither on disk nor in the index)"
+        ),
+    ],
+)
+async def test_git_show_text_returns_none_for_missing_path(
+    tmp_path,
+    stderr: str,
+) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(
-        returncode=128,
-        stderr="fatal: path 'pyproject.toml' does not exist in 'HEAD'",
-    )
+    runner.queue_result(returncode=128, stderr=stderr)
 
     assert (
         await git_show_text(
             runner,
             worktree_path=tmp_path,
-            refspec="HEAD:pyproject.toml",
+            refspec="HEAD:.github/workflows/ci.yml",
         )
         is None
     )
@@ -59,11 +70,17 @@ async def test_git_show_text_returns_none_for_missing_path(tmp_path) -> None:
 @pytest.mark.unit
 async def test_git_show_text_raises_for_unexpected_git_error(tmp_path) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr="fatal: bad object HEAD")
+    runner.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
 
-    with pytest.raises(RuntimeError, match="git show failed"):
+    with pytest.raises(RuntimeError) as excinfo:
         await git_show_text(
             runner,
             worktree_path=tmp_path,
-            refspec="HEAD:pyproject.toml",
+            refspec="bad-ref:pyproject.toml",
         )
+
+    message = str(excinfo.value)
+    assert "git show failed" in message
+    assert "bad-ref:pyproject.toml" in message
+    assert str(tmp_path) in message
+    assert "bad revision" in message

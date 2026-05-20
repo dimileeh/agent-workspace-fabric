@@ -4065,56 +4065,6 @@ async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "stderr",
-    [
-        "fatal: path '.github/workflows/ci.yml' does not exist in 'HEAD'",
-        "fatal: Path '.github/workflows/ci.yml' exists on disk, but not in 'HEAD'",
-        (
-            "fatal: path '.github/workflows/ci.yml' does not exist "
-            "(neither on disk nor in the index)"
-        ),
-    ],
-)
-async def test_git_show_text_returns_none_when_path_missing_from_ref(
-    tmp_path: Path,
-    stderr: str,
-) -> None:
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr=stderr)
-    executor = _executor_with_runner(runner, tmp_path)
-
-    text = await executor._git_show_text(
-        worktree_path=tmp_path / "worktree",
-        refspec="HEAD:.github/workflows/ci.yml",
-    )
-
-    assert text is None
-
-
-@pytest.mark.unit
-async def test_git_show_text_raises_when_git_show_fails_for_non_missing_path(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
-    executor = _executor_with_runner(runner, tmp_path)
-    worktree = tmp_path / "worktree"
-
-    with pytest.raises(RuntimeError) as excinfo:
-        await executor._git_show_text(
-            worktree_path=worktree,
-            refspec="bad-ref:pyproject.toml",
-        )
-
-    message = str(excinfo.value)
-    assert "git show failed" in message
-    assert "bad-ref:pyproject.toml" in message
-    assert str(worktree) in message
-    assert "bad revision" in message
-
-
-@pytest.mark.unit
 def test_digest_dirty_content_distinguishes_content_changes_within_same_paths(
     tmp_path: Path,
 ) -> None:
