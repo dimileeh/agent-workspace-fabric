@@ -2180,6 +2180,77 @@ class TestRunOnce:
         assert younger_high.status == WorkspaceStatus.ready.value
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_bounds_provider_suppression_decisions_to_claim_slots(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        not_before = now + timedelta(minutes=10)
+        front_suppressed_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "front-cooling-capacity-request",
+            create_task_attempt=True,
+            task_policy={
+                "scheduler": {"base_priority": 100},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+            created_at=now,
+        )
+        allowed_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "allowed-capacity-request-before-tail-cooling",
+            create_task_attempt=True,
+            task_policy={"scheduler": {"base_priority": 50}},
+            created_at=now + timedelta(seconds=1),
+        )
+        tail_suppressed_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "tail-cooling-capacity-request",
+            create_task_attempt=True,
+            task_policy={
+                "scheduler": {"base_priority": 10},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+            created_at=now + timedelta(seconds=2),
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=8.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as session:
+            front_decisions = await QueueDecisionRepository(session).list_for_workspace(
+                front_suppressed_id
+            )
+            tail_decisions = await QueueDecisionRepository(session).list_for_workspace(
+                tail_suppressed_id
+            )
+
+        assert provisioner.calls == [allowed_id]
+        assert any(
+            decision.reason_code == "PROVIDER_RECOVERY_NOT_BEFORE" for decision in front_decisions
+        )
+        assert tail_decisions == []
+
+    @pytest.mark.unit
     async def test_concurrent_capacity_claims_do_not_oversubscribe_requested_workspaces(
         self,
         session_factory: async_sessionmaker[AsyncSession],

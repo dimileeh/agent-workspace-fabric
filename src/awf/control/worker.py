@@ -665,14 +665,22 @@ class ControlWorker:
         *,
         limit: int,
         scoring_at: datetime,
+        provider_recovery_decision_candidate_limit: int | None = None,
     ) -> list[str]:
         if not candidate_workspaces:
             return []
 
-        eligible = await self._filter_provider_recovery_suppressed(
-            session,
-            candidate_workspaces,
-        )
+        if provider_recovery_decision_candidate_limit is None:
+            eligible = await self._filter_provider_recovery_suppressed(
+                session,
+                candidate_workspaces,
+            )
+        else:
+            eligible = await self._filter_provider_recovery_suppressed(
+                session,
+                candidate_workspaces,
+                decision_candidate_limit=provider_recovery_decision_candidate_limit,
+            )
         workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
         eligible_workspaces_by_id: dict[str, Workspace] = {}
         for workspace_id in eligible:
@@ -689,6 +697,8 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspaces: list[Workspace] | list[str],
+        *,
+        decision_candidate_limit: int | None = None,
     ) -> list[str]:
         if not workspaces:
             return []
@@ -708,20 +718,25 @@ class ControlWorker:
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
         circuit_candidates: dict[str, tuple[str, str]] = {}
-        for workspace_id in workspace_ids:
+        circuit_decision_workspace_ids: set[str] = set()
+        for index, workspace_id in enumerate(workspace_ids):
             workspace = rows.get(workspace_id)
             if workspace is None:
                 continue
+            record_suppression_decision = (
+                decision_candidate_limit is None or index < decision_candidate_limit
+            )
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
-                await _record_scheduler_queue_decision(
-                    session,
-                    workspace,
-                    decision=QUEUE_DECISION_DEFERRED,
-                    reason_code=PROVIDER_RECOVERY_NOT_BEFORE_REASON,
-                    decided_at=now,
-                    suppression_detail={"not_before": not_before.isoformat()},
-                )
+                if record_suppression_decision:
+                    await _record_scheduler_queue_decision(
+                        session,
+                        workspace,
+                        decision=QUEUE_DECISION_DEFERRED,
+                        reason_code=PROVIDER_RECOVERY_NOT_BEFORE_REASON,
+                        decided_at=now,
+                        suppression_detail={"not_before": not_before.isoformat()},
+                    )
                 continue
             model = agent_model_from_task_policy(workspace.task_policy)
             provider = provider_for_agent_model(workspace.agent, model)
@@ -729,6 +744,8 @@ class ControlWorker:
                 allowed.add(workspace_id)
                 continue
             circuit_candidates[workspace_id] = (provider, model)
+            if record_suppression_decision:
+                circuit_decision_workspace_ids.add(workspace_id)
 
         open_breakers = await breaker_repo.open_breakers_for_pairs(
             pairs=circuit_candidates.values(),
@@ -742,18 +759,19 @@ class ControlWorker:
             if workspace is None:
                 continue
             breaker = open_breakers[pair]
-            await _record_scheduler_queue_decision(
-                session,
-                workspace,
-                decision=QUEUE_DECISION_DEFERRED,
-                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
-                decided_at=now,
-                suppression_detail={
-                    "provider": breaker.provider,
-                    "model": breaker.model,
-                    "cooldown_until": _json_datetime(breaker.cooldown_until),
-                },
-            )
+            if workspace_id in circuit_decision_workspace_ids:
+                await _record_scheduler_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_DEFERRED,
+                    reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+                    decided_at=now,
+                    suppression_detail={
+                        "provider": breaker.provider,
+                        "model": breaker.model,
+                        "cooldown_until": _json_datetime(breaker.cooldown_until),
+                    },
+                )
         return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
 
     async def _record_ordered_decisions(
@@ -2541,11 +2559,13 @@ class ControlWorker:
             )
 
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+            claim_slots = self._config.max_concurrent_provisions - len(claimed)
             page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
                 session,
                 workspaces,
                 limit=len(workspaces),
                 scoring_at=scoring_at,
+                provider_recovery_decision_candidate_limit=claim_slots,
             )
             page_candidates = [
                 workspaces_by_id[workspace_id]
@@ -2558,7 +2578,7 @@ class ControlWorker:
                 reservation_repo=reservation_repo,
                 candidates=page_candidates,
                 allocated=allocated,
-                claim_slots=self._config.max_concurrent_provisions - len(claimed),
+                claim_slots=claim_slots,
                 decided_at=decided_at,
             )
             claimed.extend(page_claimed)
