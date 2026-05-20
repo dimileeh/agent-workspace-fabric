@@ -135,9 +135,10 @@ _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(
     r")"
 )
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
-    r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
+    r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PAT|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
     re.IGNORECASE,
 )
+_SAFE_INFORMATIONAL_RUN_ENV_NAMES: Final[frozenset[str]] = frozenset({"PATH"})
 _PACKAGE_MANAGER_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
     {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-c", "-w"}
 )
@@ -1640,11 +1641,12 @@ def _is_informational_step(step: Mapping[str, Any]) -> bool:
 def _is_informational_run_command(command: str | None) -> bool:
     if command is None:
         return True
+    safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
     for line in command.splitlines():
         tokens = _shell_tokens(line)
         if tokens is None:
             return False
-        if not _informational_shell_tokens_are_safe(tokens):
+        if not _informational_shell_tokens_are_safe(tokens, safe_env_names):
             return False
     return True
 
@@ -1658,7 +1660,11 @@ def _shell_tokens(command: str) -> tuple[str, ...] | None:
         return None
 
 
-def _informational_shell_tokens_are_safe(tokens: Sequence[str]) -> bool:
+def _informational_shell_tokens_are_safe(
+    tokens: Sequence[str], safe_env_names: set[str] | None = None
+) -> bool:
+    if safe_env_names is None:
+        safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
     if not tokens:
         return True
     command_tokens: list[str] = []
@@ -1666,21 +1672,33 @@ def _informational_shell_tokens_are_safe(tokens: Sequence[str]) -> bool:
         if token in _INFORMATIONAL_RUN_BLOCKED_OPERATORS:
             return False
         if token in _INFORMATIONAL_RUN_SEPARATORS:
-            if not command_tokens or not _informational_shell_command_is_safe(command_tokens):
+            if not command_tokens or not _informational_shell_command_is_safe(
+                command_tokens, safe_env_names
+            ):
                 return False
+            _remember_safe_informational_assignments(command_tokens, safe_env_names)
             command_tokens = []
             continue
         command_tokens.append(token)
-    return bool(command_tokens) and _informational_shell_command_is_safe(command_tokens)
+    if not command_tokens or not _informational_shell_command_is_safe(
+        command_tokens, safe_env_names
+    ):
+        return False
+    _remember_safe_informational_assignments(command_tokens, safe_env_names)
+    return True
 
 
-def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
+def _informational_shell_command_is_safe(
+    tokens: Sequence[str], safe_env_names: set[str] | None = None
+) -> bool:
+    if safe_env_names is None:
+        safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
     remaining = tuple(tokens)
     if not remaining:
         return True
     if any("$(" in token or "`" in token for token in remaining):
         return False
-    if _has_unsafe_informational_parameter_expansion(remaining):
+    if _has_unsafe_informational_parameter_expansion(remaining, safe_env_names):
         return False
     while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]) is not None:
         remaining = remaining[1:]
@@ -1689,14 +1707,32 @@ def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
     return _command_basename(remaining[0]) in _INFORMATIONAL_RUN_COMMAND_NAMES
 
 
-def _has_unsafe_informational_parameter_expansion(tokens: Sequence[str]) -> bool:
+def _remember_safe_informational_assignments(
+    tokens: Sequence[str], safe_env_names: set[str]
+) -> None:
+    if not tokens or any(_ENV_ASSIGNMENT_RE.match(token) is None for token in tokens):
+        return
+    for token in tokens:
+        name = token.split("=", 1)[0]
+        if _SENSITIVE_ENV_NAME_RE.search(name) is None:
+            safe_env_names.add(name)
+
+
+def _has_unsafe_informational_parameter_expansion(
+    tokens: Sequence[str], safe_env_names: set[str] | None = None
+) -> bool:
+    if safe_env_names is None:
+        safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
     if _has_unsafe_github_actions_expression(tokens):
         return True
     for token in tokens:
         if _BRACED_SHELL_PARAMETER_RE.search(token) is not None:
             return True
         for match in _UNBRACED_SHELL_PARAMETER_RE.finditer(token):
-            if _SENSITIVE_ENV_NAME_RE.search(match.group(1)) is not None:
+            name = match.group(1)
+            if _SENSITIVE_ENV_NAME_RE.search(name) is not None:
+                return True
+            if name not in safe_env_names:
                 return True
     return False
 

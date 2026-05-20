@@ -2168,6 +2168,8 @@ jobs:
     [
         'echo "${VAR}"',
         'echo "${VAR:0:4}"',
+        'echo "$PAT"',
+        'printf "%s\\n" "$GH_PAT"',
         'printf "%s\\n" "$AWF_API_TOKEN"',
         'echo "token=$GH_TOKEN"',
         'echo "${{ secrets.GITHUB_TOKEN }}"',
@@ -4785,6 +4787,8 @@ jobs:
         ("echo ok; ; printf done", False),
         ("echo ok && curl https://example.test", False),
         ("echo ${TOKEN}", False),
+        ("printf %s $PAT", False),
+        ('printf "%s\\n" "$GH_PAT"', False),
         ("printf %s $PASSWORD", False),
         ("printf %s $PATH", True),
         ('echo "${{ github.sha }}"', True),
