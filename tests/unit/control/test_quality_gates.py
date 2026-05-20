@@ -1641,6 +1641,57 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "step_body",
+    [
+        "name: Summary report",
+        "name: Notify reviewers\n        uses: actions/github-script@v7.0.0\n        run: echo ok",
+    ],
+)
+def test_added_informational_step_requires_exactly_one_executable_key(
+    step_body: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - {step_body}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section.startswith("jobs.tests.steps.")
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_added_informational_step_with_custom_shell_is_blocked() -> None:
     old_text = """
 name: CI

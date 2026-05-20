@@ -1534,7 +1534,10 @@ def _informational_job_permissions_are_safe(permissions: object) -> bool:
 def _is_informational_step(step: Mapping[str, Any]) -> bool:
     if any(key not in _INFORMATIONAL_STEP_ALLOWED_KEYS for key in step):
         return False
+    run = _string_value(step.get("run"))
     uses = _string_value(step.get("uses"))
+    if (run is None) == (uses is None):
+        return False
     if uses is not None:
         if not _is_comment_or_notify_step(step):
             return False
@@ -1544,7 +1547,6 @@ def _is_informational_step(step: Mapping[str, Any]) -> bool:
         label = _step_label(step).lower()
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
             return False
-    run = _string_value(step.get("run"))
     return _is_informational_run_command(run) and not _is_validation_command(run)
 
 
