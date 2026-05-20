@@ -2614,6 +2614,9 @@ class ControlWorker:
             node_id=self._config.node_id or "local",
         )
         decided_at = datetime.now(UTC)
+        # A provider circuit can open between polls without changing the queue
+        # or allocation signatures. That may reuse the cursor for one cycle; a
+        # scan that observes suppression stores its expiry and later resets here.
         resume_provider_suppression_open = (
             resume_provider_suppression_expires_at is None
             or _utc_datetime(resume_provider_suppression_expires_at) > decided_at
@@ -3430,6 +3433,9 @@ async def _allocated_totals_for_capacity_gate(
 
 
 def _active_reservation_workspace_ids_subquery() -> Any:
+    # Deliberately node-agnostic: scheduler totals already count stale-node
+    # reservations for local workspaces, and any active reservation keeps a
+    # null-node legacy workspace from being default-counted on multiple nodes.
     return (
         select(ResourceReservation.workspace_id.label("workspace_id"))
         .where(ResourceReservation.released_at.is_(None))

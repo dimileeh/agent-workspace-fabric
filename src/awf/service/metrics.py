@@ -1568,6 +1568,9 @@ async def _capacity_queue_blocked_reason_counts(
     )
     allocated = _CapacityQueueAllocated.from_reserved(allocated_resources)
     counts: dict[str, int] = {}
+    # These counts are FIFO saturation frontiers, not every workspace waiting
+    # behind a frontier. Unsatisfiable requests are counted individually because
+    # they are independent of current allocated capacity.
     deferred_frontiers: set[str] = set()
     for candidate in ordered_candidates:
         blockers = []
