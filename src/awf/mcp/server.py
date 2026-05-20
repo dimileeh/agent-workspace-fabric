@@ -222,7 +222,15 @@ def build_mcp_server(
         ),
         model: str | None = Field(
             default=None,
+            min_length=1,
+            max_length=128,
             description="Optional model override for the selected agent runtime.",
+        ),
+        effort: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=64,
+            description="Optional reasoning effort override for the selected agent runtime.",
         ),
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
@@ -366,6 +374,7 @@ def build_mcp_server(
                     "kind": task_kind,
                     "agent": agent,
                     "model": model,
+                    "effort": effort,
                     "external_id": task_external_id,
                     "task_class": task_class,
                     "priority": priority,

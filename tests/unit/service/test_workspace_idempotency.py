@@ -566,6 +566,37 @@ async def test_create_auto_profile_replay_conflicts_when_requested_tier_changes(
 
 
 @pytest.mark.unit
+async def test_create_replay_conflicts_when_agent_effort_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Verify effort mismatch invalidates workspace create idempotency replay."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-agent-effort"
+    request_payload = _v2_request().model_dump(mode="python")
+    request_payload["task"]["effort"] = "high"
+    request_with_high_effort = WorkspaceCreateRequest.model_validate(request_payload)
+
+    created = await service.create(
+        request_with_high_effort,
+        idempotency_key=idempotency_key,
+    )
+    assert created.id.startswith("ws_")
+    replayed = await service.create(
+        request_with_high_effort,
+        idempotency_key=idempotency_key,
+    )
+    assert replayed.id == created.id
+
+    request_payload["task"]["effort"] = "xhigh"
+    request_with_xhigh_effort = WorkspaceCreateRequest.model_validate(request_payload)
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(
+            request_with_xhigh_effort,
+            idempotency_key=idempotency_key,
+        )
+
+
+@pytest.mark.unit
 async def test_create_auto_profile_legacy_replay_allows_missing_requested_tier(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
