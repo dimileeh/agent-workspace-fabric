@@ -319,6 +319,8 @@ def _resolve_service_api_base_url(
         require_init_field=require_init_field,
     ):
         return settings.api_base_url
+    # This adds new information only for AWF_API_BASE_URL supplied by the
+    # Compose .env while absent from the host env; host values were checked above.
     service_api_base_url = _env_value(service_environ, "AWF_API_BASE_URL")
     if service_api_base_url is not None and _api_base_url_is_explicit(
         service_api_base_url,
@@ -397,7 +399,7 @@ def _api_base_url_env_is_explicit(
 
     api_base_url = _env_value(environ, "AWF_API_BASE_URL")
     if api_base_url is None:
-        return True
+        return False
     if api_base_url != DEFAULT_LOCAL_SERVICE_API_BASE_URL:
         return True
     if _env_value(environ, "AWF_API_HOST_PORT"):
@@ -448,7 +450,7 @@ def _database_url_env_is_explicit(
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
     if database_url is None:
-        return True
+        return False
     if database_url != DEFAULT_LOCAL_SERVICE_DATABASE_URL:
         return True
     if _env_value(environ, "AWF_POSTGRES_HOST_PORT"):

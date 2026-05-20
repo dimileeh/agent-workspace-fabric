@@ -582,13 +582,13 @@ def test_resolve_service_settings_reuses_project_dotenv_candidates_for_default_u
 
 
 @pytest.mark.unit
-def test_database_url_env_explicit_treats_missing_host_value_as_explicit() -> None:
-    assert service_config._database_url_env_is_explicit({}, {}) is True  # noqa: SLF001
+def test_database_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
+    assert service_config._database_url_env_is_explicit({}, {}) is False  # noqa: SLF001
 
 
 @pytest.mark.unit
-def test_api_base_url_env_explicit_treats_missing_host_value_as_explicit() -> None:
-    assert service_config._api_base_url_env_is_explicit({}, {}) is True  # noqa: SLF001
+def test_api_base_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
+    assert service_config._api_base_url_env_is_explicit({}, {}) is False  # noqa: SLF001
 
 
 @pytest.mark.unit
