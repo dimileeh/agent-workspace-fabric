@@ -1155,6 +1155,102 @@ async def test_resource_saturation_includes_runtime_health_counts(
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_aggregates_requested_demands_in_sql(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    reserved_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=20.0,
+        peak_memory_gb=40.0,
+        dind_slots=0,
+        reserved_at=now - timedelta(minutes=5),
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=4.0,
+        peak_cpu=7.0,
+        peak_memory_gb=25.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await _capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(
+                    _env_file=None,
+                    local_capacity_cpu_cores=8.0,
+                    local_capacity_memory_gb=24.0,
+                    local_capacity_dind_slots=1,
+                ),
+                allocated_resources=ReservedResources(
+                    active_workspace_count=1,
+                    steady_cpu=2.0,
+                    steady_memory_gb=4.0,
+                    peak_cpu=4.0,
+                    peak_memory_gb=8.0,
+                    disk_mb=0,
+                    dind_slots=1,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=3.0,
+                    steady_memory_gb=8.0,
+                    peak_cpu=6.0,
+                    peak_memory_gb=16.0,
+                ),
+                detected_local_capacity=None,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert counts == {
+        "DIND_CAPACITY_SATURATED": 1,
+        "PEAK_CPU_CAPACITY_SATURATED": 2,
+        "PEAK_MEMORY_CAPACITY_SATURATED": 1,
+    }
+    assert len(statements) == 1
+    assert "sum(case" in statements[0]
+    assert "row_number() over" in statements[0]
+    assert "left outer join" in statements[0]
+    assert "select workspaces.id, workspaces.repo_url" not in statements[0]
+
+
+@pytest.mark.unit
 async def test_resource_saturation_prefers_active_reservations_and_falls_back_for_old_rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

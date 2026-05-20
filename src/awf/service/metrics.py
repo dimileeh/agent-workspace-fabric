@@ -17,7 +17,7 @@ from sqlalchemy.sql import expression
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
+from awf.db.models import Operation, ResourceReservation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     ProviderModelCircuitBreakerRepository,
@@ -1322,18 +1322,6 @@ async def _capacity_queue_blocked_reason_counts(
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
 ) -> dict[str, int]:
-    workspaces = list(
-        (
-            await session.execute(
-                select(Workspace).where(Workspace.status == WorkspaceStatus.requested.value)
-            )
-        ).scalars()
-    )
-    if not workspaces:
-        return {}
-    reservations = await ResourceReservationRepository(session).active_latest_by_workspace_ids(
-        workspace.id for workspace in workspaces
-    )
     cpu_limit = settings.local_capacity_cpu_cores
     memory_limit = settings.local_capacity_memory_gb
     if detected_local_capacity is not None:
@@ -1341,95 +1329,118 @@ async def _capacity_queue_blocked_reason_counts(
         memory_limit = (
             memory_limit if memory_limit is not None else detected_local_capacity.memory_gb
         )
-    reason_counts: dict[str, int] = {}
-    for workspace in workspaces:
-        reservation = reservations.get(workspace.id)
-        if reservation is None:
-            demand = {
-                "steady_cpu": resource_defaults.steady_cpu,
-                "peak_cpu": resource_defaults.peak_cpu,
-                "steady_memory_gb": resource_defaults.steady_memory_gb,
-                "peak_memory_gb": resource_defaults.peak_memory_gb,
-                "dind_slots": 0,
-            }
-        else:
-            demand = {
-                "steady_cpu": reservation.steady_cpu,
-                "peak_cpu": reservation.peak_cpu,
-                "steady_memory_gb": reservation.steady_memory_gb,
-                "peak_memory_gb": reservation.peak_memory_gb,
-                "dind_slots": int(reservation.dind_slots or 0),
-            }
-        for reason in _queue_blocking_reasons(
-            allocated_resources=allocated_resources,
-            demand=demand,
-            cpu_limit=cpu_limit,
-            memory_limit=memory_limit,
-            dind_limit=settings.local_capacity_dind_slots,
-        ):
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-    return dict(sorted(reason_counts.items()))
 
+    latest_active_reservations = (
+        select(
+            ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.steady_cpu.label("steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            ResourceReservation.dind_slots.label("dind_slots"),
+            func.row_number()
+            .over(
+                partition_by=ResourceReservation.workspace_id,
+                order_by=(
+                    ResourceReservation.reserved_at.desc(),
+                    ResourceReservation.id.desc(),
+                ),
+            )
+            .label("reservation_rank"),
+        )
+        .where(ResourceReservation.released_at.is_(None))
+        .subquery()
+    )
+    demand = {
+        "steady_cpu": func.coalesce(
+            latest_active_reservations.c.steady_cpu,
+            resource_defaults.steady_cpu,
+        ),
+        "peak_cpu": func.coalesce(
+            latest_active_reservations.c.peak_cpu,
+            resource_defaults.peak_cpu,
+        ),
+        "steady_memory_gb": func.coalesce(
+            latest_active_reservations.c.steady_memory_gb,
+            resource_defaults.steady_memory_gb,
+        ),
+        "peak_memory_gb": func.coalesce(
+            latest_active_reservations.c.peak_memory_gb,
+            resource_defaults.peak_memory_gb,
+        ),
+        "dind_slots": func.coalesce(latest_active_reservations.c.dind_slots, 0),
+    }
+    reason_expressions: list[tuple[str, Any]] = []
 
-def _queue_blocking_reasons(
-    *,
-    allocated_resources: ReservedResources,
-    demand: dict[str, float | int],
-    cpu_limit: float | None,
-    memory_limit: float | None,
-    dind_limit: int | None,
-) -> list[str]:
-    reasons: list[str] = []
-    _append_queue_blocking_reason(
-        reasons,
+    def add_reason(
+        *,
+        reason_code: str,
+        limit: float | int | None,
+        allocated: float | int,
+        requested: Any,
+    ) -> None:
+        if limit is None:
+            return
+        blocked = (requested > limit) | (allocated + requested > limit)
+        reason_expressions.append(
+            (
+                reason_code,
+                func.coalesce(func.sum(case((blocked, 1), else_=0)), 0).label(reason_code),
+            )
+        )
+
+    add_reason(
         reason_code="STEADY_CPU_CAPACITY_SATURATED",
         limit=cpu_limit,
         allocated=allocated_resources.steady_cpu,
-        requested=float(demand["steady_cpu"]),
+        requested=demand["steady_cpu"],
     )
-    _append_queue_blocking_reason(
-        reasons,
+    add_reason(
         reason_code="PEAK_CPU_CAPACITY_SATURATED",
         limit=cpu_limit,
         allocated=allocated_resources.peak_cpu,
-        requested=float(demand["peak_cpu"]),
+        requested=demand["peak_cpu"],
     )
-    _append_queue_blocking_reason(
-        reasons,
+    add_reason(
         reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
         limit=memory_limit,
         allocated=allocated_resources.steady_memory_gb,
-        requested=float(demand["steady_memory_gb"]),
+        requested=demand["steady_memory_gb"],
     )
-    _append_queue_blocking_reason(
-        reasons,
+    add_reason(
         reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
         limit=memory_limit,
         allocated=allocated_resources.peak_memory_gb,
-        requested=float(demand["peak_memory_gb"]),
+        requested=demand["peak_memory_gb"],
     )
-    _append_queue_blocking_reason(
-        reasons,
+    add_reason(
         reason_code="DIND_CAPACITY_SATURATED",
-        limit=dind_limit,
+        limit=settings.local_capacity_dind_slots,
         allocated=allocated_resources.dind_slots,
-        requested=int(demand["dind_slots"]),
+        requested=demand["dind_slots"],
     )
-    return reasons
+    if not reason_expressions:
+        return {}
 
-
-def _append_queue_blocking_reason(
-    reasons: list[str],
-    *,
-    reason_code: str,
-    limit: float | int | None,
-    allocated: float | int,
-    requested: float | int,
-) -> None:
-    if limit is None:
-        return
-    if requested > limit or allocated + requested > limit:
-        reasons.append(reason_code)
+    stmt = (
+        select(*(expression for _reason, expression in reason_expressions))
+        .select_from(Workspace)
+        .outerjoin(
+            latest_active_reservations,
+            and_(
+                latest_active_reservations.c.workspace_id == Workspace.id,
+                latest_active_reservations.c.reservation_rank == 1,
+            ),
+        )
+        .where(Workspace.status == WorkspaceStatus.requested.value)
+    )
+    row = (await session.execute(stmt)).one()
+    counts = {
+        reason: int(row._mapping[reason] or 0)
+        for reason, _expression in reason_expressions
+        if int(row._mapping[reason] or 0) > 0
+    }
+    return dict(sorted(counts.items()))
 
 
 def _resource_concurrency(
