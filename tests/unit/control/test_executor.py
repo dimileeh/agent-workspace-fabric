@@ -516,7 +516,7 @@ class TestHappyPath:
         "workspace_status",
         [WorkspaceStatus.validating, WorkspaceStatus.pushing],
     )
-    async def test_claim_ready_worker_restart_recovery_claims_available_inflight_claim(
+    async def test_claim_ready_worker_restart_recovery_rejects_non_running_inflight_claim(
         self,
         executor: WorkspaceExecutor,
         factory: async_sessionmaker[AsyncSession],
@@ -534,13 +534,13 @@ class TestHappyPath:
             execution_lease_expires_at=lease_expires_at,
         )
 
-        assert ws is not None
+        assert ws is None
         async with factory() as s:
             persisted = await WorkspaceRepository(s).get(ws_id)
             assert persisted is not None
             assert persisted.status == workspace_status.value
-            assert persisted.execution_claimed_by == "worker-b"
-            assert persisted.execution_claim_expires_at == lease_expires_at
+            assert persisted.execution_claimed_by is None
+            assert persisted.execution_claim_expires_at is None
 
     @pytest.mark.unit
     async def test_claim_ready_worker_restart_recovery_claims_unset_execution_claim(

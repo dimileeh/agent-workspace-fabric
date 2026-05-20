@@ -150,8 +150,6 @@ _ACTIVE_RECOVERY_OPERATION_STATUSES: Final[tuple[str, ...]] = (
 _VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebase_only")
 _WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.running.value,
-    WorkspaceStatus.validating.value,
-    WorkspaceStatus.pushing.value,
 )
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
