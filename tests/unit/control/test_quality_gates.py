@@ -626,6 +626,40 @@ lint = [
 
 
 @pytest.mark.unit
+def test_pyproject_first_dependency_groups_section_is_allowed() -> None:
+    old_text = """
+[project]
+name = "demo"
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+lint = [
+    "ruff>=0.9.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_pyproject_unchanged_pep735_include_group_is_not_revalidated() -> None:
     old_text = """
 [project]
@@ -975,6 +1009,46 @@ jobs:
     steps:
       - uses: peter-evans/create-or-update-comment@v4
         continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_workflow_step_name_change_is_allowed_when_step_id_matches() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - id: unit-tests
+        name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - id: unit-tests
+        name: Run unit tests
+        run: uv run pytest
 """.strip()
 
     violations = find_protected_quality_gate_changes(
@@ -5262,6 +5336,8 @@ def test_informational_run_command_shell_safety_edges(
         ("pytest", "pytest &&", False),
         ("pytest", "pytest && && ruff check", False),
         ("pytest", "pytest && ruff check | tee log", False),
+        ("pytest", "pytest&& ruff check", False),
+        ("uv run pytest", "uv run pytest-cov report", False),
         ("pytest", "pytest-randomly -p no:randomly && coverage", False),
         ("pytest", "pytest && bad`cmd`", False),
         (

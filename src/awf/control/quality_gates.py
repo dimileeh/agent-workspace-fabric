@@ -671,16 +671,17 @@ def _pyproject_dependency_violations(
             allow_new_groups=True,
         )
     )
+    old_dep_groups = _nested_value(old_doc, ("dependency-groups",))
     violations.extend(
         _dependency_group_violations(
             path=path,
             protected_pattern=protected_pattern,
             section_prefix="dependency-groups",
-            old_value=_nested_value(old_doc, ("dependency-groups",)),
+            old_value=old_dep_groups,
             new_value=_nested_value(new_doc, ("dependency-groups",)),
             old_text=old_text,
             new_text=new_text,
-            allow_new_groups=False,
+            allow_new_groups=old_dep_groups is None,
         )
     )
     return violations
@@ -1999,6 +2000,8 @@ def _preserves_existing_validation_run(old_run: str | None, new_run: str | None)
     if not new_command.startswith(old_command):
         return False
     suffix = new_command[len(old_command) :]
+    if suffix and suffix[0] not in (" ", "\t", "\n", "\r"):
+        return False
     appended_commands = _validation_run_append_commands(suffix)
     return appended_commands is not None and all(
         _validation_run_append_command_is_safe(command) for command in appended_commands

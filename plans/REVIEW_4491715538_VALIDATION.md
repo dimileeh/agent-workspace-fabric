@@ -4,31 +4,26 @@ Plan reference: `plans/REVIEW_4491715538_PLAN.md`
 
 ## Requirement Status
 
-- Confirm whether explicit restricted informational job permissions are already
-  accepted and covered by regression tests: Complete.
-  `tests/unit/control/test_quality_gates.py` already includes
-  `test_added_informational_job_with_restricted_permissions_is_allowed`, which
-  covers `permissions: {}` and `permissions: contents: read`; the targeted test
-  run passed.
-- Add a failing regression for case-insensitive pinned action name comparison:
-  Complete. Added
-  `test_workflow_pinned_uses_bump_allows_action_case_change`; it failed before
-  implementation because the classifier reported removed/added steps for the
-  same differently-cased action.
-- Implement the smallest code change that allows same-action pinned ref bumps
-  when only action casing differs: Complete. `_step_identity` now normalizes
-  parsed action names to lowercase for matching, and `_is_pinned_uses_bump`
-  compares action names case-insensitively.
-- Preserve existing coverage policy diagnostics unless a regression test proves
-  the review comment identifies a real bug without conflicting with current
-  policy tests: Complete. Existing
-  `test_pyproject_fail_under_change_reports_other_coverage_policy_changes`
-  remains unchanged and passing, preserving the policy that a `fail_under`
-  change plus another coverage policy edit reports both blocked changes.
-- Run relevant tests and lint: Complete.
-- Commit the resulting changes locally on the current AWF-managed branch:
-  Complete. The final local commit records the review fix on AWF's current
-  branch.
+- Confirm `_step_remainder` continues to ignore `id` and `name` so cosmetic
+  renames on matched steps do not produce remainder violations: Complete.
+  `_step_remainder` already ignored those fields in the current checkout, and
+  `test_workflow_step_name_change_is_allowed_when_step_id_matches` now locks
+  that behavior.
+- Add a regression for validation command prefix boundaries such as
+  `uv run pytest` versus `uv run pytest-cov report`: Complete. The parameterized
+  validation preservation test now covers both `pytest&& ruff check` and
+  `uv run pytest-cov report`; the former failed before implementation and
+  passes after the boundary guard.
+- Add a regression proving first-time `[dependency-groups]` additions are
+  allowed when the new group entries are supported string lists: Complete.
+  `test_pyproject_first_dependency_groups_section_is_allowed` failed before
+  implementation and passes after allowing new groups only when the old section
+  is absent.
+- Preserve the existing policy that adding a new dependency group to an
+  existing `[dependency-groups]` section is blocked: Complete.
+  `test_pyproject_new_dependency_group_is_blocked` still passes.
+- Keep changes scoped to the classifier, focused tests, and required plan and
+  validation artifacts: Complete.
 
 ## Evidence
 
@@ -41,17 +36,18 @@ Files changed:
 
 Commands run:
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py -q -k 'pinned_uses_bump_allows_action_case_change or restricted_permissions or fail_under_change_reports_other_coverage_policy_changes'`
-  - First run failed on the new action-casing regression before implementation.
-  - Final run passed: 4 passed, 215 deselected.
+- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py::test_pyproject_first_dependency_groups_section_is_allowed tests/unit/control/test_quality_gates.py::test_validation_run_preservation_allows_only_safe_validation_appends -q`
+  - Failed before implementation on the first-time dependency group addition and
+    the `pytest&& ruff check` prefix-boundary case.
+- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py::test_workflow_step_name_change_is_allowed_when_step_id_matches tests/unit/control/test_quality_gates.py::test_pyproject_first_dependency_groups_section_is_allowed tests/unit/control/test_quality_gates.py::test_pyproject_new_dependency_group_is_blocked tests/unit/control/test_quality_gates.py::test_validation_run_preservation_allows_only_safe_validation_appends -q`
+  - Passed: 28 passed.
 - `uv run --python 3.12 --extra dev pytest tests/unit/control/test_quality_gates.py -q`
-  - Passed: 219 passed.
+  - Passed: 316 passed.
 - `uv run --python 3.12 --extra dev ruff check src/awf/control/quality_gates.py tests/unit/control/test_quality_gates.py`
   - Passed: All checks passed.
 
 ## Gaps
 
-No remaining gaps for the actionable code change. The permissions concern is
-stale in this checkout, and the coverage duplicate concern conflicts with an
-existing regression that intentionally reports both a `fail_under` change and a
-separate coverage policy edit.
+No remaining gaps. The `_step_remainder` item was already fixed in this
+checkout; this iteration added a regression test for it and fixed the two
+remaining actionable classifier issues.
