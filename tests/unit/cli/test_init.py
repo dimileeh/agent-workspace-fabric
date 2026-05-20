@@ -2502,6 +2502,8 @@ def test_merge_env_seed_appends_trailing_shared_overlay_context_after_seed_lines
     (
         ('AWF_API_TOKEN="template\ncontinued"\n', "AWF_API_TOKEN=root\n"),
         ("AWF_API_TOKEN=template\n", 'AWF_API_TOKEN="root\ncontinued"\n'),
+        ("AWF_API_TOKEN=template\\\ncontinued\n", "AWF_API_TOKEN=root\n"),
+        ("AWF_API_TOKEN=template\n", "AWF_API_TOKEN=root\\\ncontinued\n"),
     ),
 )
 def test_merge_env_seed_contents_rejects_multiline_dotenv_values(

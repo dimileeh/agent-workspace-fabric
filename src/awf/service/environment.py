@@ -91,6 +91,9 @@ def compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
             if caller_found and caller_value:
                 resolved[key] = ""
             continue
+        # Compose CLI selectors are intentionally inherited from the caller
+        # when the service env is silent; explicit service values override them,
+        # and explicit blank service values above clear stale caller settings.
         caller_found, caller_value = env_lookup(os.environ, key)
         if caller_found and caller_value:
             resolved[key] = caller_value
