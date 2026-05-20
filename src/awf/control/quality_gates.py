@@ -98,6 +98,7 @@ _BROAD_VALIDATION_SCRIPT_STEMS: Final[frozenset[str]] = frozenset(
     {"build", "lint", "deploy", "publish", "release"}
 )
 _SHELL_SEGMENT_SPLIT_RE: Final = re.compile(r"(?:&&|\|\||;|\n)")
+_SHELL_COMMAND_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&", "||", "|", "|&", "&"})
 _COMMAND_PREFIX_WORDS: Final[frozenset[str]] = frozenset({"command", "sudo", "time"})
 _ENV_ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _BRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$\{(?!\{)")
@@ -1567,7 +1568,7 @@ def _is_informational_run_command(command: str | None) -> bool:
 def _shell_tokens(command: str) -> tuple[str, ...] | None:
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
+        lexer.wordchars += "$%{}()"
         return tuple(token for token in lexer if token)
     except ValueError:
         return None
@@ -1617,13 +1618,112 @@ def _has_unsafe_informational_parameter_expansion(tokens: Sequence[str]) -> bool
 def _is_validation_command(command: str | None) -> bool:
     if command is None:
         return False
-    normalized = command.lower()
+    for line in command.splitlines():
+        tokens = _shell_tokens(line)
+        if tokens is None:
+            if _raw_validation_command_match(line.lower()):
+                return True
+            continue
+        if _shell_tokens_include_validation_command(tokens):
+            return True
+    return _has_broad_validation_command_invocation(command.lower())
+
+
+def _raw_validation_command_match(normalized: str) -> bool:
     return (
         _VALIDATION_TEST_PATH_RE.search(normalized) is not None
         or _VALIDATION_COMMAND_TOKEN_RE.search(normalized) is not None
         or _VALIDATION_TEST_COMMAND_RE.search(normalized) is not None
         or _VALIDATION_UNITTEST_COMMAND_RE.search(normalized) is not None
-        or _has_broad_validation_command_invocation(normalized)
+    )
+
+
+def _shell_tokens_include_validation_command(tokens: Sequence[str]) -> bool:
+    command_tokens: list[str] = []
+    for token in tokens:
+        if token in _SHELL_COMMAND_SEPARATORS:
+            if _shell_command_tokens_are_validation(command_tokens):
+                return True
+            command_tokens = []
+            continue
+        command_tokens.append(token)
+    return _shell_command_tokens_are_validation(command_tokens)
+
+
+def _shell_command_tokens_are_validation(tokens: Sequence[str]) -> bool:
+    words = _strip_validation_command_prefixes(tuple(token.lower() for token in tokens))
+    if not words:
+        return False
+    command_name = _command_basename(words[0])
+    if command_name in {"pipenv", "poetry", "uv"} and len(words) > 1 and words[1] == "run":
+        return _run_wrapper_runs_validation_command(words[2:])
+    return _command_words_start_validation_command(words)
+
+
+def _strip_validation_command_prefixes(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining:
+        command = _command_basename(remaining[0])
+        if remaining[0] in _COMMAND_PREFIX_WORDS or _ENV_ASSIGNMENT_RE.match(remaining[0]):
+            remaining = remaining[1:]
+            continue
+        if command == "env":
+            remaining = _strip_env_prefix(remaining[1:])
+            continue
+        return remaining
+    return ()
+
+
+def _run_wrapper_runs_validation_command(words: Sequence[str]) -> bool:
+    remaining = _strip_run_wrapper_options(words)
+    if not remaining:
+        return False
+    command_name = _command_basename(remaining[0])
+    return _is_validation_run_target(command_name) or _command_words_start_validation_command(
+        remaining
+    )
+
+
+def _command_words_start_validation_command(words: Sequence[str]) -> bool:
+    if not words:
+        return False
+    command_name = _command_basename(words[0])
+    if command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES or command_name == "coverage":
+        return True
+    if command_name.startswith("python"):
+        return _python_runs_validation_command(words[1:])
+    if command_name in {"npm", "pnpm", "yarn", "bun"}:
+        return _package_manager_runs_any_validation_command(words[1:])
+    if command_name in _VALIDATION_RUN_TEST_COMMAND_NAMES:
+        return _command_args_include_validation_target(words[1:])
+    return False
+
+
+def _python_runs_validation_command(words: Sequence[str]) -> bool:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-") and remaining[0] != "-m":
+        remaining = remaining[1:]
+    if len(remaining) >= 2 and remaining[0] == "-m":
+        return remaining[1] in _VALIDATION_RUN_MODULE_NAMES
+    return any(
+        word == "tests" or word.startswith("tests/")
+        for word in remaining
+        if not word.startswith("-")
+    )
+
+
+def _package_manager_runs_any_validation_command(words: Sequence[str]) -> bool:
+    remaining = tuple(word for word in words if word != "--")
+    remaining = _strip_package_manager_options(remaining)
+    if not remaining:
+        return False
+    if remaining[0] in {"exec", "run"}:
+        remaining = _strip_package_manager_options(remaining[1:])
+        if not remaining:
+            return False
+    command_name = _command_basename(remaining[0])
+    return _is_validation_run_target(command_name) or _command_words_start_validation_command(
+        remaining
     )
 
 
