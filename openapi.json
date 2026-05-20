@@ -10468,6 +10468,19 @@
             "title": "Auto Merge",
             "type": "boolean"
           },
+          "effort": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
           "external_id": {
             "anyOf": [
               {
