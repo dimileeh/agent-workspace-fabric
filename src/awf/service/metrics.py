@@ -1325,13 +1325,11 @@ async def _capacity_queue_blocked_reason_counts(
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
 ) -> dict[str, int]:
+    # Queue blockers must mirror scheduler enforcement, which only gates on
+    # explicitly configured local capacity limits.
+    del detected_local_capacity
     cpu_limit = settings.local_capacity_cpu_cores
     memory_limit = settings.local_capacity_memory_gb
-    if detected_local_capacity is not None:
-        cpu_limit = cpu_limit if cpu_limit is not None else detected_local_capacity.cpu_cores
-        memory_limit = (
-            memory_limit if memory_limit is not None else detected_local_capacity.memory_gb
-        )
 
     latest_active_reservations = (
         select(

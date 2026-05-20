@@ -1251,6 +1251,64 @@ async def test_capacity_queue_blocked_reason_counts_aggregates_requested_demands
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_memory_limits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import (
+        LocalCapacityLimits,
+        ReservedResources,
+        WorkspaceResourceDefaults,
+    )
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=3.0,
+        peak_memory_gb=5.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=None,
+                local_capacity_memory_gb=None,
+                local_capacity_dind_slots=1,
+            ),
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=2.0,
+                steady_memory_gb=4.0,
+                peak_cpu=3.0,
+                peak_memory_gb=5.0,
+            ),
+            detected_local_capacity=LocalCapacityLimits(cpu_cores=1.0, memory_gb=1.0),
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_prefers_active_reservations_and_falls_back_for_old_rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
