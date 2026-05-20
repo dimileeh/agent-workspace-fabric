@@ -1562,9 +1562,7 @@ def _validation_run_append_command_is_safe(tokens: Sequence[str]) -> bool:
     if command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES:
         return True
     if command_name.startswith("python"):
-        return _python_runs_validation_module(
-            command_words[1:]
-        ) or _python_runs_validation_test_path(command_words[1:])
+        return _python_runs_validation_module(command_words[1:])
     if command_name in {"npm", "pnpm", "yarn", "bun"}:
         return _package_manager_runs_validation_command(command_words[1:])
     if command_name in _VALIDATION_RUN_TEST_COMMAND_NAMES:
@@ -1581,10 +1579,6 @@ def _python_runs_validation_module(words: Sequence[str]) -> bool:
         and remaining[0] == "-m"
         and remaining[1] in _VALIDATION_RUN_MODULE_NAMES
     )
-
-
-def _python_runs_validation_test_path(words: Sequence[str]) -> bool:
-    return any(word == "tests" or word.startswith("tests/") for word in words)
 
 
 def _package_manager_runs_validation_command(words: Sequence[str]) -> bool:
