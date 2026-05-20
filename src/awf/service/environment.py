@@ -23,7 +23,7 @@ _DOCKER_CLI_CLIENT_ENV_KEYS = (
     "DOCKER_TLS_VERIFY",
 )
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
-    r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])(?=[^}]*\})|"
+    r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
     r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
 )
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32

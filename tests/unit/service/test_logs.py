@@ -849,6 +849,28 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_ignores_plain_variables_inside_braced_defaults(tmp_path: Path) -> None:
+    """Compose does not recursively interpolate dollar values inside defaults."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      DEFAULTED: "${AWF_DEFAULTED_INTERPOLATION:-$AWF_LITERAL_FALLBACK}"
+      PLAIN: "$AWF_PLAIN_INTERPOLATION"
+""",
+    )
+
+    assert service_environment.compose_interpolation_keys(compose_file) == (
+        "AWF_DEFAULTED_INTERPOLATION",
+        "AWF_PLAIN_INTERPOLATION",
+    )
+
+
+@pytest.mark.unit
 def test_service_logs_ignores_compose_mapping_key_interpolation(tmp_path: Path) -> None:
     """Compose interpolation inputs should be collected from YAML values only."""
     from awf.service import environment as service_environment
