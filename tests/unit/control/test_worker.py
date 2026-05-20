@@ -748,6 +748,46 @@ class TestRunOnce:
             assert count == 5
 
     @pytest.mark.unit
+    def test_allocated_reservation_signature_normalizes_float_drift(self) -> None:
+        aggregate_total = worker_module._AllocatedReservationTotals(  # noqa: SLF001
+            workspace_count=2,
+            steady_cpu=0.3,
+            steady_memory_gb=0.6,
+            peak_cpu=0.9,
+            peak_memory_gb=1.2,
+            disk_mb=2048,
+            dind_slots=1,
+        )
+        accumulated_total = worker_module._AllocatedReservationTotals()  # noqa: SLF001
+        accumulated_total.add(  # noqa: SLF001
+            worker_module._ReservationDemand(  # noqa: SLF001
+                workspace_id="float-drift-a",
+                steady_cpu=0.1,
+                steady_memory_gb=0.2,
+                peak_cpu=0.3,
+                peak_memory_gb=0.4,
+                disk_mb=1024,
+                dind_slots=0,
+            )
+        )
+        accumulated_total.add(  # noqa: SLF001
+            worker_module._ReservationDemand(  # noqa: SLF001
+                workspace_id="float-drift-b",
+                steady_cpu=0.2,
+                steady_memory_gb=0.4,
+                peak_cpu=0.6,
+                peak_memory_gb=0.8,
+                disk_mb=1024,
+                dind_slots=1,
+            )
+        )
+
+        assert accumulated_total.steady_cpu != aggregate_total.steady_cpu
+        assert worker_module._allocated_reservation_signature(  # noqa: SLF001
+            accumulated_total
+        ) == worker_module._allocated_reservation_signature(aggregate_total)  # noqa: SLF001
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],

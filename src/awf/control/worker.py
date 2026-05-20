@@ -236,7 +236,9 @@ class _AllocatedReservationTotals:
         self.dind_slots += demand.dind_slots
 
 
-type _AllocatedReservationSignature = tuple[int, float, float, float, float, int, int]
+_ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
+
+type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -3378,13 +3380,17 @@ def _allocated_reservation_signature(
 ) -> _AllocatedReservationSignature:
     return (
         allocated.workspace_count,
-        allocated.steady_cpu,
-        allocated.steady_memory_gb,
-        allocated.peak_cpu,
-        allocated.peak_memory_gb,
+        _capacity_signature_units(allocated.steady_cpu),
+        _capacity_signature_units(allocated.steady_memory_gb),
+        _capacity_signature_units(allocated.peak_cpu),
+        _capacity_signature_units(allocated.peak_memory_gb),
         allocated.disk_mb,
         allocated.dind_slots,
     )
+
+
+def _capacity_signature_units(value: float) -> int:
+    return round(value * _ALLOCATED_RESERVATION_SIGNATURE_SCALE)
 
 
 def _reservation_demand_for_workspace(
