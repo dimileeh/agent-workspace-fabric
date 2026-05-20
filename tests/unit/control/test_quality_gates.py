@@ -464,6 +464,55 @@ lint = [
 
 
 @pytest.mark.unit
+def test_pyproject_unchanged_pep735_include_group_is_not_revalidated() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=8.0.0",
+]
+dev = [
+    { include-group = "test" },
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=8.0.0",
+]
+dev = [
+    { include-group = "test" },
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_comment_continue_on_error_is_allowed() -> None:
     old_text = """
 name: CI

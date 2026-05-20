@@ -591,6 +591,8 @@ def _dependency_group_violations(
                 )
             )
             continue
+        if old_groups[group] == new_groups[group]:
+            continue
         violations.extend(
             _dependency_list_violations(
                 path=path,
