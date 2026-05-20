@@ -248,6 +248,73 @@ dependencies = [
 
 
 @pytest.mark.unit
+def test_pyproject_marker_dependency_changes_are_deduplicated_by_name() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "requests>=2.0.0; python_version >= '3.11'",
+    "requests>=1.26.0; python_version < '3.11'",
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "requests>=2.1.0; python_version >= '3.11'",
+    "requests>=1.27.0; python_version < '3.11'",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.reason for violation in violations] == ["dependency changed: requests"]
+
+
+@pytest.mark.unit
+def test_pyproject_marker_dependency_removals_are_deduplicated_by_name() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "requests>=2.0.0; python_version >= '3.11'",
+    "requests>=1.26.0; python_version < '3.11'",
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "requests>=2.1.0; python_version >= '3.11'",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.reason for violation in violations] == ["dependency removed: requests"]
+
+
+@pytest.mark.unit
 def test_pyproject_new_dependency_group_is_blocked() -> None:
     old_text = """
 [dependency-groups]

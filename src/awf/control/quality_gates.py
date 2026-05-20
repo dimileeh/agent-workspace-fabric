@@ -633,7 +633,7 @@ def _dependency_list_violations(
                         reason=f"dependency removed: {name}",
                     )
                 )
-                continue
+                break
             violations.append(
                 _violation(
                     path=path,
@@ -650,6 +650,7 @@ def _dependency_list_violations(
                     reason=f"dependency changed: {name}",
                 )
             )
+            break
     return violations
 
 
