@@ -38,6 +38,12 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
 
 
+def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
+    visible_help = click.unstyle(stdout)
+    assert "--model" in visible_help
+    assert "--effort" in visible_help
+
+
 def _assert_control_headers(
     headers: dict[str, str],
     *,
@@ -153,6 +159,8 @@ class TestWorkspaceCreate:
                     "Add docstrings everywhere.",
                     "--model",
                     "gemini-test",
+                    "--effort",
+                    "xhigh",
                     "--task-class",
                     "docs_task",
                     "--priority",
@@ -173,6 +181,7 @@ class TestWorkspaceCreate:
         assert result.exit_code == 0
         kwargs = mock.call_args.kwargs
         assert kwargs["json"]["task"]["model"] == "gemini-test"
+        assert kwargs["json"]["task"]["effort"] == "xhigh"
         assert kwargs["json"]["task"]["task_class"] == "docs_task"
         assert kwargs["json"]["task"]["priority"] == 10
         assert kwargs["json"]["task"]["human_boost"] == 2
@@ -180,6 +189,13 @@ class TestWorkspaceCreate:
         assert kwargs["json"]["task"]["external_id"] == "ext_123"
         assert kwargs["json"]["resources"]["cpu"] == 2.5
         assert kwargs["json"]["resources"]["memory"] == "4GB"
+
+    @pytest.mark.unit
+    def test_create_help_exposes_model_and_effort_flags(self) -> None:
+        result = _runner.invoke(app, ["workspace", "create", "--help"])
+
+        assert result.exit_code == 0
+        _assert_workspace_create_help_exposes_model_and_effort(result.stdout)
 
     @pytest.mark.unit
     def test_emits_json_policy_flags_to_post(self) -> None:

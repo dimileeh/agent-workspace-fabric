@@ -202,6 +202,7 @@ def _v2_body(
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
     model: str | None = None,
+    effort: str | None = None,
 ) -> dict[str, object]:
     task = {
         **_V2_MINIMAL_BODY["task"],
@@ -213,6 +214,8 @@ def _v2_body(
         task["owned_paths"] = owned_paths
     if model is not None:
         task["model"] = model
+    if effort is not None:
+        task["effort"] = effort
     return {
         **_V2_MINIMAL_BODY,
         "repo": {
@@ -2863,11 +2866,11 @@ class TestCreateWorkspacePolicyMetadata:
         }
 
     @pytest.mark.unit
-    async def test_persists_agent_model_override_in_task_policy(
+    async def test_persists_agent_model_and_effort_override_in_task_policy(
         self,
         client: AsyncClient,
     ) -> None:
-        payload = _v2_body(model="ollama/glm-5.1:cloud")
+        payload = _v2_body(model="ollama/glm-5.1:cloud", effort="high")
 
         create = await client.post("/v1/workspaces", json=payload)
         assert create.status_code == 202
@@ -2879,24 +2882,31 @@ class TestCreateWorkspacePolicyMetadata:
 
         assert response.status_code == 200
         assert response.json()["task_policy"]["agent_model"] == "ollama/glm-5.1:cloud"
+        assert response.json()["task_policy"]["agent_effort"] == "high"
         _assert_effective_identity(
             response.json(),
             model="ollama/glm-5.1:cloud",
+            effort="high",
             model_source="task_policy",
+            effort_source="task_policy",
         )
         _assert_usage_unavailable(response.json())
         assert overview.status_code == 200
         _assert_effective_identity(
             overview.json()["items"][0],
             model="ollama/glm-5.1:cloud",
+            effort="high",
             model_source="task_policy",
+            effort_source="task_policy",
         )
         _assert_usage_unavailable(overview.json()["items"][0])
         assert tasks.status_code == 200
         _assert_effective_identity(
             tasks.json()["items"][0],
             model="ollama/glm-5.1:cloud",
+            effort="high",
             model_source="task_policy",
+            effort_source="task_policy",
         )
         _assert_usage_unavailable(tasks.json()["items"][0])
 

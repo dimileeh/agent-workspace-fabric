@@ -2945,6 +2945,8 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
         )
     if payload.task.model is not None:
         policy["agent_model"] = payload.task.model
+    if payload.task.effort is not None:
+        policy["agent_effort"] = payload.task.effort
     if payload.task.out_of_scope_changes is not None:
         policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
     if payload.task.provider_recovery is not None:
