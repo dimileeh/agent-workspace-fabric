@@ -135,9 +135,7 @@ _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
     r"^[vV]?(?:\d+|\d+\.\d+|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
 )
-_WORKFLOW_PRERELEASE_IDENTIFIER_CHUNK_RE: Final = re.compile(r"\d+|\D+")
-type _WorkflowPrereleaseChunk = tuple[int, int | str]
-type _WorkflowPrereleaseIdentifierKey = tuple[int, int | tuple[_WorkflowPrereleaseChunk, ...]]
+type _WorkflowPrereleaseIdentifierKey = tuple[int, int | str]
 type _WorkflowVersionRefSortKey = tuple[
     tuple[int, ...], int, tuple[_WorkflowPrereleaseIdentifierKey, ...]
 ]
@@ -1914,7 +1912,9 @@ def _is_workflow_version_ref_non_downgrade(old_ref: str, new_ref: str) -> bool:
     new_key = _workflow_version_ref_sort_key(new_ref)
     if old_key is None or new_key is None:
         return False
-    return new_key >= old_key
+    if new_key < old_key:
+        return False
+    return not _has_same_core_mixed_prerelease_label_change(old_ref, new_ref, old_key, new_key)
 
 
 def _is_full_workflow_version_ref(ref: str) -> bool:
@@ -1953,14 +1953,38 @@ def _workflow_prerelease_identifier_sort_key(
 ) -> _WorkflowPrereleaseIdentifierKey:
     if identifier.isdigit():
         return 0, int(identifier)
+    return 1, identifier
 
-    chunks: list[_WorkflowPrereleaseChunk] = []
-    for chunk in _WORKFLOW_PRERELEASE_IDENTIFIER_CHUNK_RE.findall(identifier):
-        if chunk.isdigit():
-            chunks.append((1, int(chunk)))
-        else:
-            chunks.append((0, chunk))
-    return 1, tuple(chunks)
+
+def _has_same_core_mixed_prerelease_label_change(
+    old_ref: str,
+    new_ref: str,
+    old_key: _WorkflowVersionRefSortKey,
+    new_key: _WorkflowVersionRefSortKey,
+) -> bool:
+    if old_key[0] != new_key[0]:
+        return False
+    old_prerelease = _workflow_version_ref_prerelease(old_ref)
+    new_prerelease = _workflow_version_ref_prerelease(new_ref)
+    if not old_prerelease or not new_prerelease or old_prerelease == new_prerelease:
+        return False
+    return _has_mixed_prerelease_identifier(old_prerelease) or _has_mixed_prerelease_identifier(
+        new_prerelease
+    )
+
+
+def _workflow_version_ref_prerelease(ref: str) -> str:
+    raw_version = ref[1:] if ref.startswith(("v", "V")) else ref
+    version_without_build = raw_version.split("+", 1)[0]
+    _core, separator, prerelease = version_without_build.partition("-")
+    return prerelease if separator else ""
+
+
+def _has_mixed_prerelease_identifier(prerelease: str) -> bool:
+    return any(
+        not identifier.isdigit() and any(character.isdigit() for character in identifier)
+        for identifier in prerelease.split(".")
+    )
 
 
 def _uses_action(value: str) -> str | None:
