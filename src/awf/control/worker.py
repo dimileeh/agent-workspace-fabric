@@ -37,7 +37,7 @@ from awf.common.github_client import BranchOpenPullRequest
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskKind, WorkspaceStatus
-from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import Operation, QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     OperationRepository,
@@ -2192,6 +2192,18 @@ class ControlWorker:
                 idempotency_key=idempotency_key,
             )
             payload_with_operation = {**payload, "operation_id": operation.id}
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=operation.id,
+                    )
+                )
+                if cancelled_active_operations:
+                    payload_with_operation["cancelled_active_operations"] = (
+                        cancelled_active_operations
+                    )
             if operation.payload != payload_with_operation:
                 operation.payload = payload_with_operation
             ws.execution_claimed_by = None
@@ -2213,6 +2225,59 @@ class ControlWorker:
                 payload=payload_with_operation,
             )
             await session.commit()
+
+    async def _cancel_superseded_active_execution_operations(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        replacement_operation_id: str,
+    ) -> list[dict[str, object]]:
+        operation_repo = OperationRepository(session)
+        active_operations: list[Operation] = []
+        for status in (OperationStatus.pending, OperationStatus.running):
+            active_operations.extend(
+                await operation_repo.list_for_workspace(
+                    workspace_id,
+                    status=status,
+                    limit=100,
+                )
+            )
+
+        cancelled: list[dict[str, object]] = []
+        for operation in active_operations:
+            if operation.id == replacement_operation_id:
+                continue
+            if operation.type not in {
+                OperationType.validate.value,
+                OperationType.push.value,
+            }:
+                continue
+            payload = operation.payload if isinstance(operation.payload, Mapping) else {}
+            if payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE:
+                continue
+
+            detail: dict[str, object] = {
+                "operation_id": operation.id,
+                "operation_type": operation.type,
+                "previous_status": operation.status,
+            }
+            cancelled.append(detail)
+            await operation_repo.finish(
+                operation,
+                status=OperationStatus.cancelled,
+                result={
+                    "status": OperationStatus.cancelled.value,
+                    "reason_code": _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    "requested_action": OperationType.validate.value,
+                    "replacement_operation_id": replacement_operation_id,
+                },
+                error_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                error_message=(
+                    "Cancelled superseded active operation before worker-restart validation recovery."
+                ),
+            )
+        return cancelled
 
     async def _create_preserved_active_replacement(
         self,

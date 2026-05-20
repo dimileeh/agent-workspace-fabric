@@ -6387,8 +6387,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "status",
-        [WorkspaceStatus.validating, WorkspaceStatus.pushing],
+        ("status", "original_operation_type"),
+        [
+            (WorkspaceStatus.validating, OperationType.validate),
+            (WorkspaceStatus.pushing, OperationType.push),
+        ],
     )
     async def test_preserved_active_clean_committed_non_running_work_rewinds_for_validation_salvage(
         self,
@@ -6396,6 +6399,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         origin_repo: Path,
         tmp_path: Path,
         status: WorkspaceStatus,
+        original_operation_type: OperationType,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -6420,6 +6424,16 @@ class TestRunOnceStaleActiveExecutionRecovery:
             ws.base_commit = base_commit
             ws.branch_name = branch_name
             ws.remote_push_branch = branch_name
+            original_operation = await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=original_operation_type,
+                status=OperationStatus.running,
+                payload={
+                    "source": "workspace_executor",
+                    "workspace_status": status.value,
+                },
+            )
+            original_operation_id = original_operation.id
             await s.commit()
 
         executor = _BlockingExecutor()
@@ -6470,10 +6484,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
                     event_type="workspace.active_execution_salvage_validation_requested",
                 )
                 operations = await OperationRepository(s).list_for_workspace(workspace_id)
+                original_operation = await OperationRepository(s).get(original_operation_id)
 
             assert ws.status == WorkspaceStatus.running.value
             assert attempt.status == WorkspaceStatus.running.value
             assert stale_events == []
+            assert original_operation is not None
+            assert original_operation.status == OperationStatus.cancelled.value
+            assert original_operation.error_code == "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED"
+            assert original_operation.result is not None
+            assert original_operation.result["reason_code"] == (
+                "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED"
+            )
             assert len(state_events) == 1
             assert state_events[0].old_state == status.value
             assert state_events[0].new_state == WorkspaceStatus.running.value
@@ -6486,6 +6508,13 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert salvage_payload is not None
             assert salvage_payload["workspace_status"] == status.value
             assert salvage_payload["head_sha"] == head_sha
+            assert salvage_payload["cancelled_active_operations"] == [
+                {
+                    "operation_id": original_operation_id,
+                    "operation_type": original_operation_type.value,
+                    "previous_status": OperationStatus.running.value,
+                }
+            ]
             validate_ops = [
                 operation
                 for operation in operations
