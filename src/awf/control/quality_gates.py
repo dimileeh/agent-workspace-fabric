@@ -2367,7 +2367,8 @@ def _workflow_pinned_bump_with_inputs_are_safe(
         return False
     if any(key not in old_map or key not in new_map for key in changed_keys):
         return False
-    return _workflow_with_inputs_have_safe_names_and_values(new_inputs)
+    changed_inputs = {key: new_map[key] for key in changed_keys}
+    return _workflow_with_inputs_have_safe_names_and_values(changed_inputs)
 
 
 def _workflow_pinned_bump_allowed_with_keys(uses: str) -> frozenset[str]:

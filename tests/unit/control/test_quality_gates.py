@@ -3347,6 +3347,52 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_pinned_uses_version_bump_allows_unchanged_sensitive_with_input() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v4.7.0
+        with:
+          python-version: "3.11"
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5.0.0
+        with:
+          python-version: "3.12"
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_pinned_uses_version_bump_blocks_github_script_input_rewrite() -> None:
     old_text = """
 name: CI
