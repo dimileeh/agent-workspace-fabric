@@ -1275,14 +1275,14 @@ def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
-    merge_gating_states = {"APPROVED", "CHANGES_REQUESTED"}
+    effective_review_states = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
     latest_by_reviewer: dict[str, _FetchedReview] = {}
     for fetched in fetched_reviews:
         if fetched.viewer_did_author:
             continue
         if not fetched.counts_for_required_review:
             continue
-        if fetched.comment.state not in merge_gating_states:
+        if fetched.comment.state not in effective_review_states:
             continue
         current = latest_by_reviewer.get(fetched.reviewer_key)
         if current is None or _review_is_later(fetched, current):

@@ -725,7 +725,7 @@ class TestFetchPrStatus:
         assert blocker.blocks_merge is True
 
     @pytest.mark.unit
-    async def test_later_dismissed_review_does_not_clear_blocking_review(self) -> None:
+    async def test_later_dismissed_review_clears_blocking_review(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -755,11 +755,8 @@ class TestFetchPrStatus:
         )
 
         assert [c.comment_id for c in status.unresolved_review_comments] == ["9361", "9362"]
-        assert [c.blocks_merge for c in status.unresolved_review_comments] == [True, False]
-        assert len(status.blocking_reviews) == 1
-        blocker = status.blocking_reviews[0]
-        assert blocker.comment_id == "9361"
-        assert blocker.blocks_merge is True
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
+        assert status.blocking_reviews == ()
 
     @pytest.mark.unit
     async def test_empty_body_changes_requested_review_still_blocks(self) -> None:
