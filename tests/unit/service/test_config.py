@@ -500,13 +500,24 @@ def test_project_dotenv_value_continues_past_env_without_requested_key(
         f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n",
         encoding="utf-8",
     )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
     (nested / ".env").write_text("AWF_API_TOKEN=local-token\n", encoding="utf-8")
     monkeypatch.chdir(nested)
+    read_env_files: list[Path] = []
+    real_dotenv_values = service_config.dotenv_values
+
+    def recording_dotenv_values(env_file: Path) -> dict[str, str | None]:
+        read_env_files.append(env_file)
+        return real_dotenv_values(env_file)
+
+    monkeypatch.setattr(service_config, "dotenv_values", recording_dotenv_values)
 
     assert (
         service_config._project_dotenv_value("AWF_DATABASE_URL")  # noqa: SLF001
         == DEFAULT_LOCAL_SERVICE_DATABASE_URL
     )
+    assert read_env_files == [nested / ".env", checkout / ".env"]
 
 
 @pytest.mark.unit

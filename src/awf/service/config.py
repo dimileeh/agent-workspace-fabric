@@ -430,10 +430,42 @@ def _project_dotenv_value(key: str) -> str | None:
 
 
 def _project_dotenv_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    cwd = Path.cwd().resolve()
+
     resolved_env_file = resolve_local_service_compose_env_file()
     if resolved_env_file is not None:
-        return (_project_dotenv_from_compose_env_file(resolved_env_file),)
-    return tuple(root / ".env" for root in _awf_source_search_roots(Path.cwd().resolve()))
+        project_dotenv = _project_dotenv_from_compose_env_file(resolved_env_file)
+        project_root = project_dotenv.parent.resolve()
+        if cwd == project_root or project_root in cwd.parents:
+            candidates.extend(_project_dotenv_ancestor_candidates(cwd, project_root))
+        candidates.append(project_dotenv)
+    else:
+        for root in _awf_source_search_roots(cwd):
+            candidates.extend(_project_dotenv_ancestor_candidates(cwd, root))
+
+    return _dedupe_paths(candidates)
+
+
+def _project_dotenv_ancestor_candidates(start: Path, root: Path) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for directory in (start, *start.parents):
+        candidates.append(directory / ".env")
+        if directory == root:
+            break
+    return tuple(candidates)
+
+
+def _dedupe_paths(paths: list[Path]) -> tuple[Path, ...]:
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(path)
+    return tuple(deduped)
 
 
 def _project_dotenv_from_compose_env_file(env_file: Path) -> Path:
