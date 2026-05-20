@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.requests import Request
 
+from awf.api import request_admission
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
 from awf.api.routes import callbacks as callbacks_route
@@ -24,6 +25,7 @@ from awf.db.repositories import CallbackSubscriptionRepository
 from awf.db.session import make_session_factory
 
 _CALLBACK_TOKEN = "callback-secret"
+_STABLE_REQUEST_ADMISSION_CLOCK = 1000.0
 _VALID_BODY = {
     "name": "operator-console",
     "target_url": "https://operator.example.com/awf/events",
@@ -155,6 +157,14 @@ def _callback_response(response_id: str) -> api_schemas.CallbackSubscriptionResp
     )
 
 
+def _install_stable_request_admission_limiter(state: object) -> None:
+    setattr(
+        state,
+        request_admission._LIMITER_STATE_KEY,  # noqa: SLF001
+        request_admission.RequestAdmissionLimiter(clock=lambda: _STABLE_REQUEST_ADMISSION_CLOCK),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _configure_api_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWF_API_TOKEN", _CALLBACK_TOKEN)
@@ -185,6 +195,7 @@ async def callback_app_and_client(
 ) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield app, c
 
