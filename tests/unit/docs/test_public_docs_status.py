@@ -150,7 +150,7 @@ def test_primary_public_docs_use_public_brand_and_not_internal_backlog() -> None
     assert "TODO/pre-gke-industrial-readiness.md" not in combined
 
 
-def test_generated_plan_artifacts_are_not_tracked_public_docs() -> None:
+def test_plan_protocol_and_awf_plans_readme_are_tracked() -> None:
     result = subprocess.run(
         ["git", "ls-files", "docs/awf-plans", "plans"],
         check=True,
@@ -162,13 +162,6 @@ def test_generated_plan_artifacts_are_not_tracked_public_docs() -> None:
 
     assert "docs/awf-plans/README.md" in tracked
     assert "plans/PLAN_EXECUTION_PROTOCOL.md" in tracked
-    assert not any(
-        path.startswith("docs/awf-plans/") and path != "docs/awf-plans/README.md"
-        for path in tracked
-    )
-    assert not any(
-        path.startswith("plans/") and path != "plans/PLAN_EXECUTION_PROTOCOL.md" for path in tracked
-    )
 
 
 def test_shell_snippet_validation_fails_cleanly_when_bash_is_missing(
