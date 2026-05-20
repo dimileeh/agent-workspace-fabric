@@ -817,6 +817,138 @@ class TestRunOnce:
         }
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_skips_repeated_unchanged_capacity_deferral(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "stable-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "stable-capacity-deferred",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=2,
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+                local_capacity_dind_slots=1,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        deferred_decisions = [
+            decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
+        ]
+        assert len(deferred_decisions) == 1
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_records_changed_capacity_deferral(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "changing-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=6.0,
+            peak_memory_gb=0.0,
+        )
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "changing-capacity-deferred",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=6.0,
+            peak_memory_gb=0.0,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=2,
+                local_capacity_cpu_cores=6.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        second_active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "new-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            second_active_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        deferred_decisions = [
+            decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
+        ]
+        assert len(deferred_decisions) == 2
+        latest_blockers = deferred_decisions[0].resource_summary["blockers"]
+        previous_blockers = deferred_decisions[1].resource_summary["blockers"]
+        assert latest_blockers[0]["allocated"] == 7.0
+        assert previous_blockers[0]["allocated"] == 6.0
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_ignores_allocated_capacity_on_other_nodes(
         self,
         session_factory: async_sessionmaker[AsyncSession],

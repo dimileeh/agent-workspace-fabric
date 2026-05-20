@@ -156,6 +156,15 @@ PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
 LOCAL_CAPACITY_DEFERRED_REASON = "LOCAL_CAPACITY_DEFERRED"
 LOCAL_CAPACITY_UNSATISFIABLE_REASON = "LOCAL_CAPACITY_UNSATISFIABLE"
 LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON = "LOCAL_CAPACITY_RESERVATION_DEFAULTED"
+_CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
+    "dimension",
+    "reason_code",
+    "limit",
+    "allocated",
+    "requested",
+    "after",
+    "unsatisfiable",
+)
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
 _TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
@@ -3030,6 +3039,15 @@ async def _record_capacity_queue_decision(
 
     queue_repo = QueueDecisionRepository(session)
     latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
+    latest_decision = latest[0] if latest else None
+    if decision == QUEUE_DECISION_DEFERRED and _capacity_deferred_decision_matches(
+        latest_decision,
+        attempt_id=attempt.id,
+        reason_code=reason_code,
+        blockers=blockers,
+    ):
+        return
+
     score = scheduler_score_from_workspace(workspace, now=decided_at)
     score_summary = (
         score_summary_with_suppression(
@@ -3047,8 +3065,8 @@ async def _record_capacity_queue_decision(
         demand=demand,
         blockers=blockers,
     )
-    if latest:
-        resource_summary["previous"] = dict(latest[0].resource_summary)
+    if latest_decision is not None:
+        resource_summary["previous"] = dict(latest_decision.resource_summary)
     await queue_repo.create(
         workspace_id=workspace.id,
         task_id=attempt.task_id,
@@ -3060,10 +3078,61 @@ async def _record_capacity_queue_decision(
         age_boost=score.age_boost,
         retry_bonus=score.retry_bonus,
         resource_summary=resource_summary,
-        overlap_risk_summary=dict(latest[0].overlap_risk_summary) if latest else {},
+        overlap_risk_summary=(
+            dict(latest_decision.overlap_risk_summary) if latest_decision is not None else {}
+        ),
         score_summary=score_summary,
         decided_at=decided_at,
     )
+
+
+def _capacity_deferred_decision_matches(
+    decision: QueueDecision | None,
+    *,
+    attempt_id: str,
+    reason_code: str,
+    blockers: list[LocalCapacityBlocker],
+) -> bool:
+    if decision is None:
+        return False
+    if (
+        decision.attempt_id != attempt_id
+        or decision.decision != QUEUE_DECISION_DEFERRED
+        or decision.reason_code != reason_code
+    ):
+        return False
+    return _capacity_blocker_signatures_from_summary(
+        decision.resource_summary
+    ) == _capacity_blocker_signatures(blockers)
+
+
+def _capacity_blocker_signatures(
+    blockers: list[LocalCapacityBlocker],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        _capacity_blocker_payload_signature(_capacity_blocker_payload(blocker))
+        for blocker in blockers
+    )
+
+
+def _capacity_blocker_signatures_from_summary(
+    resource_summary: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], ...] | None:
+    blockers = resource_summary.get("blockers")
+    if not isinstance(blockers, list):
+        return None
+    signatures: list[tuple[Any, ...]] = []
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping):
+            return None
+        signatures.append(_capacity_blocker_payload_signature(blocker))
+    return tuple(signatures)
+
+
+def _capacity_blocker_payload_signature(
+    payload: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    return tuple(payload.get(field) for field in _CAPACITY_BLOCKER_SIGNATURE_FIELDS)
 
 
 def _allocated_totals_from_repository(
