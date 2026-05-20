@@ -943,10 +943,6 @@ def _resolve_existing_service_env_file(env_file: Path) -> Path:
     root_env = _compose_root_env_file(env_file)
     if root_env is not None and root_env.exists():
         return root_env
-    if env_file == Path(".env"):
-        compose_env = _resolve_existing_local_service_compose_env_file()
-        if compose_env is not None:
-            return compose_env
     return env_file
 
 
@@ -973,32 +969,6 @@ def _is_local_service_compose_env_file(path: Path) -> bool:
     from awf.service.config import _is_local_service_compose_env_path
 
     return _is_local_service_compose_env_path(path)
-
-
-def _resolve_existing_local_service_compose_env_file() -> Path | None:
-    """Return the local Compose env file when it exists in an allowed location."""
-
-    from awf.service import bootstrap as bootstrap_mod
-    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
-
-    asset_root = bootstrap_mod.get_bootstrap_asset_root()
-    if asset_root is not None:
-        resolved_asset_root = asset_root.resolve()
-        compose_file = (
-            LOCAL_SERVICE_COMPOSE_FILE
-            if LOCAL_SERVICE_COMPOSE_FILE.is_absolute()
-            else resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
-        )
-        if not compose_file.is_file():
-            return None
-        compose_env = (
-            LOCAL_SERVICE_COMPOSE_ENV_FILE
-            if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute()
-            else resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        )
-        return compose_env if compose_env.exists() else None
-
-    return None
 
 
 def _init_env_error_payload(
