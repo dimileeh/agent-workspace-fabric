@@ -204,6 +204,33 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_doctor_port_diagnostics_reflect_configured_ports(tmp_path: Path) -> None:
+    from awf.service.doctor import collect_doctor_report
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(
+                tmp_path,
+                api_base_url="http://localhost:9100",
+                database_url="postgresql+asyncpg://awf:pw@localhost:15433/awf",
+            ),
+            status_collector=_green_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+
+    diagnostics = _diagnostics_by_id(report)
+    assert diagnostics["port.api"]["metadata"] == {"host": "localhost", "port": 9100}
+    assert diagnostics["port.api"]["message"] == "localhost:9100 is accepting connections."
+    assert diagnostics["port.db"]["metadata"] == {"host": "localhost", "port": 15433}
+    assert diagnostics["port.db"]["message"] == "localhost:15433 is accepting connections."
+    assert diagnostics["local_config"]["status"] == "ok"
+    assert diagnostics["local_config"]["metadata"]["api_base_url"] == "http://localhost:9100"
+
+
+@pytest.mark.unit
 def test_doctor_worker_inspection_loads_local_compose_env_file(tmp_path: Path) -> None:
     from awf.service.doctor import collect_doctor_report
 
