@@ -75,6 +75,7 @@ _BROAD_VALIDATION_SCRIPT_STEMS: Final[frozenset[str]] = frozenset(
 _SHELL_SEGMENT_SPLIT_RE: Final = re.compile(r"(?:&&|\|\||;|\n)")
 _COMMAND_PREFIX_WORDS: Final[frozenset[str]] = frozenset({"command", "sudo", "time"})
 _ENV_ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_BRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$\{(?!\{)")
 _UNBRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
@@ -1423,7 +1424,7 @@ def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
 
 def _has_unsafe_informational_parameter_expansion(tokens: Sequence[str]) -> bool:
     for token in tokens:
-        if "${" in token:
+        if _BRACED_SHELL_PARAMETER_RE.search(token) is not None:
             return True
         for match in _UNBRACED_SHELL_PARAMETER_RE.finditer(token):
             if _SENSITIVE_ENV_NAME_RE.search(match.group(1)) is not None:
