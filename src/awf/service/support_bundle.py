@@ -38,6 +38,14 @@ class _DoctorCollectorKwargs(TypedDict, total=False):
     compose_env_file: Path
 
 
+class _StatusCollectorKwargs(TypedDict, total=False):
+    """Optional environment and path context forwarded to the status collector."""
+
+    environ: Mapping[str, str]
+    compose_file: Path
+    compose_env_file: Path
+
+
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:
     if isinstance(value, str):
         return _redact_text(value, secrets)
@@ -81,10 +89,13 @@ async def collect_support_bundle(
 
     service_status_result: dict[str, object] | BaseException
     doctor_result: dict[str, object] | BaseException | Any
+    status_kwargs: _StatusCollectorKwargs = {"environ": env}
     doctor_kwargs: _DoctorCollectorKwargs = {}
     if compose_file is not None:
+        status_kwargs["compose_file"] = compose_file
         doctor_kwargs["compose_file"] = compose_file
     if compose_env_file is not None:
+        status_kwargs["compose_env_file"] = compose_env_file
         doctor_kwargs["compose_env_file"] = compose_env_file
     doctor_task = _doctor_collector(
         settings,
@@ -99,6 +110,7 @@ async def collect_support_bundle(
             settings,
             strict_providers=strict_providers,
             provider_environ=provider_env,
+            **status_kwargs,
         ),
         doctor_task,
         return_exceptions=True,

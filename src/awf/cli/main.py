@@ -68,6 +68,8 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
 )
 _MIN_RICH_HELP_WIDTH = 80
 _ENV_ASSIGNMENT_RE = re.compile(r"\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
+_ENV_COMMENT_WORD_RE = re.compile(r"[a-z0-9]+")
+_ENV_COMMENT_KEY_IGNORE_WORDS = frozenset({"awf"})
 
 
 class _EnvSeedMergeError(ValueError):
@@ -1093,6 +1095,56 @@ def _env_context_looks_like_file_header(lines: list[str]) -> bool:
     return comment_count > 1
 
 
+def _env_comment_looks_key_specific(line: str, key: str) -> bool:
+    """Return whether a comment appears to document one dotenv assignment key."""
+
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return False
+    comment = stripped.lstrip("#").strip().lower()
+    if key.lower() in comment:
+        return True
+    key_words = [
+        word
+        for word in _ENV_COMMENT_WORD_RE.findall(key.lower())
+        if word not in _ENV_COMMENT_KEY_IGNORE_WORDS
+    ]
+    if len(key_words) < 2:
+        return False
+    comment_words = set(_ENV_COMMENT_WORD_RE.findall(comment))
+    return all(word in comment_words for word in key_words)
+
+
+def _env_context_has_key_specific_comment(lines: list[str], key: str) -> bool:
+    """Return whether any context comment appears tied to the given key."""
+
+    return any(_env_comment_looks_key_specific(line, key) for line in lines)
+
+
+def _split_env_file_header_context(lines: list[str], key: str) -> tuple[list[str], list[str]]:
+    """Split leading overlay comments into file-header and assignment context."""
+
+    if not _env_context_looks_like_file_header(lines):
+        return [], lines
+    last_blank_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == "":
+            last_blank_index = index
+    if last_blank_index is not None:
+        return lines[: last_blank_index + 1], lines[last_blank_index + 1 :]
+
+    split_at: int | None = None
+    for index in range(len(lines) - 1, -1, -1):
+        stripped = lines[index].strip()
+        if not stripped.startswith("#"):
+            break
+        if _env_comment_looks_key_specific(lines[index], key):
+            split_at = index
+    if split_at is None:
+        return lines, []
+    return lines[:split_at], lines[split_at:]
+
+
 def _env_context_looks_like_section_header(lines: list[str]) -> bool:
     """Return whether non-assignment lines look like reusable section documentation."""
 
@@ -1163,17 +1215,21 @@ def _merge_env_seed_contents_with_overlay_keys(
         if key is None:
             pending_context.append(line)
             continue
-        if (
-            last_assignment_key is None
-            and pending_context
-            and _env_context_looks_like_file_header(pending_context)
-        ):
-            file_header_context = pending_context
-            pending_context = []
+        first_overlay_assignment = last_assignment_key is None
+        if first_overlay_assignment and pending_context:
+            file_header_context, pending_context = _split_env_file_header_context(
+                pending_context,
+                key,
+            )
         context = [*duplicate_context.pop(key, []), *pending_context]
+        context_has_key_specific_comment = _env_context_has_key_specific_comment(context, key)
         if overlay_last_assignment_index.get(key) == index:
             if key in seed_keys:
-                if last_assignment_key is None and seed_has_leading_context:
+                if (
+                    first_overlay_assignment
+                    and seed_has_leading_context
+                    and not context_has_key_specific_comment
+                ):
                     context = []
                 seed_leading_context[key] = context
             else:

@@ -60,8 +60,8 @@ def docker_cli_client_environ(environ: Mapping[str, str]) -> dict[str, str]:
             resolved[key] = value
             continue
         caller_found, caller_value = env_lookup(os.environ, key)
-        # Service env explicitly cleared the key; zero out the caller's value so
-        # it does not bleed into the subprocess env via dict(os.environ).
+        # Service env explicitly cleared the key; return an empty scrub marker so
+        # callers that start from dict(os.environ) can delete the caller value.
         if found and caller_found and caller_value:
             resolved[key] = ""
     return resolved

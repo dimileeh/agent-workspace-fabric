@@ -205,17 +205,20 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_support_bundle_forwards_compose_paths_to_doctor_collector(tmp_path: Path) -> None:
+def test_support_bundle_forwards_compose_context_to_collectors(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
     compose_env_file = tmp_path / ".env"
-    captured: dict[str, object] = {}
+    base_environ = {"PATH": "/usr/bin", "AWF_CUSTOM_SERVICE_VALUE": "from-compose-env"}
+    captured_status: dict[str, object] = {}
+    captured_doctor: dict[str, object] = {}
 
-    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+    async def _status_collector(_: ServiceSettings, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
         return _green_status()
 
     async def _doctor_collector(_: ServiceSettings, **kwargs: object) -> DoctorReportProxy:
-        captured.update(kwargs)
+        captured_doctor.update(kwargs)
         return _green_doctor()
 
     async def _failure_collector(**_: object) -> dict[str, object]:
@@ -226,7 +229,7 @@ def test_support_bundle_forwards_compose_paths_to_doctor_collector(tmp_path: Pat
             settings,
             strict_providers=frozenset(),
             provider_environ={},
-            environ={},
+            environ=base_environ,
             compose_file=compose_file,
             compose_env_file=compose_env_file,
             status_collector=_status_collector,
@@ -235,8 +238,12 @@ def test_support_bundle_forwards_compose_paths_to_doctor_collector(tmp_path: Pat
         )
     )
 
-    assert captured["compose_file"] == compose_file
-    assert captured["compose_env_file"] == compose_env_file
+    assert captured_status["environ"] == base_environ
+    assert captured_status["compose_file"] == compose_file
+    assert captured_status["compose_env_file"] == compose_env_file
+    assert captured_doctor["environ"] == base_environ
+    assert captured_doctor["compose_file"] == compose_file
+    assert captured_doctor["compose_env_file"] == compose_env_file
 
 
 @pytest.mark.unit

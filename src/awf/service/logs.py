@@ -216,7 +216,15 @@ def _docker_cli_environ(
     )
     compose_cli_env = compose_cli_environ(environ)
     docker_cli_env = docker_cli_client_environ(environ)
-    if not docker_host and not compose_env and not compose_cli_env and not docker_cli_env:
+    cleared_docker_cli_keys = {key for key, value in docker_cli_env.items() if not value}
+    docker_cli_env = {key: value for key, value in docker_cli_env.items() if value}
+    if (
+        not docker_host
+        and not compose_env
+        and not compose_cli_env
+        and not docker_cli_env
+        and not cleared_docker_cli_keys
+    ):
         # Compose reads ordinary service values through --env-file; only pass an
         # explicit subprocess environment when a resolved value must override the
         # caller environment for Docker client selection, Compose interpolation,
@@ -226,7 +234,7 @@ def _docker_cli_environ(
     resolved.update(docker_cli_env)
     resolved.update(compose_env)
     resolved.update(compose_cli_env)
-    scrubbed_keys = {"AWF_DOCKER_HOST"}
+    scrubbed_keys = {"AWF_DOCKER_HOST", *cleared_docker_cli_keys}
     if docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
     for key in list(resolved):

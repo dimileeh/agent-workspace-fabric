@@ -268,6 +268,30 @@ def test_service_logs_clears_docker_context_when_docker_host_is_resolved(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_scrubs_explicitly_cleared_docker_context_without_docker_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("DOCKER_CONTEXT", "caller-stale-context")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ={"DOCKER_CONTEXT": ""},
+        run_subprocess=_run,
+    )
+
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert "DOCKER_CONTEXT" not in env
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_removes_stale_caller_docker_host_variants_when_docker_host_is_resolved(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

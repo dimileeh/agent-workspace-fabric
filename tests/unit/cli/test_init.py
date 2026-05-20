@@ -2253,6 +2253,89 @@ def test_init_without_path_json_marks_env_overlay_read_failed(
 
 
 @pytest.mark.unit
+def test_merge_env_seed_keeps_first_key_comment_after_header_without_separator() -> None:
+    """Keep key-specific first-assignment comments adjacent to the merged key."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_POSTGRES_PASSWORD=compose-example",
+                    "AWF_API_TOKEN=compose-example",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Existing root .env migrated by awf init.",
+                    "# Existing API token override",
+                    "AWF_API_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Existing root .env migrated by awf init.",
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "# Existing API token override",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_merge_env_seed_keeps_first_key_comment_when_seed_has_header() -> None:
+    """Do not discard key-specific first-assignment comments under a seed header."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "# Compose service defaults.",
+                    "AWF_POSTGRES_PASSWORD=compose-example",
+                    "AWF_API_TOKEN=compose-example",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Existing root .env migrated by awf init.",
+                    "# Existing API token override",
+                    "AWF_API_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "# Existing API token override",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("seed_text", "overlay_text"),
     (
