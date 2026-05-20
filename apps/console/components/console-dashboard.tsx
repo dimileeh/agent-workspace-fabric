@@ -251,7 +251,6 @@ function fallbackResourceSaturation(
       oldest_workspace_id: saturation.capacity_queue?.oldest_workspace_id ?? null,
       oldest_wait_seconds: saturation.capacity_queue?.oldest_wait_seconds ?? null,
       planned_resources: {
-        active_workspace_count: saturation.capacity_queue?.planned_resources?.active_workspace_count ?? 0,
         steady_cpu: saturation.capacity_queue?.planned_resources?.steady_cpu ?? 0,
         steady_memory_gb: saturation.capacity_queue?.planned_resources?.steady_memory_gb ?? 0,
         peak_cpu: saturation.capacity_queue?.planned_resources?.peak_cpu ?? 0,
