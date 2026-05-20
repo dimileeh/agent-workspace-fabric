@@ -702,6 +702,8 @@ def _dependency_list_violations(
     old_text: str,
     new_text: str,
 ) -> list[QualityGateViolation]:
+    if old_value == new_value:
+        return []
     old_dependencies = _dependency_entries(old_value)
     new_dependencies = _dependency_entries(new_value)
     if old_dependencies is None or new_dependencies is None:

@@ -597,6 +597,40 @@ dev = [
 
 
 @pytest.mark.unit
+def test_pyproject_unchanged_unsupported_project_dependencies_are_not_revalidated() -> None:
+    old_text = """
+[project]
+name = "demo"
+description = "old"
+dependencies = [
+    { name = "fastapi" },
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+description = "new"
+dependencies = [
+    { name = "fastapi" },
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_pyproject_changed_pep735_include_group_reports_evaluation_limit() -> None:
     old_text = """
 [dependency-groups]
