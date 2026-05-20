@@ -355,10 +355,8 @@ def _docker_cli_environ(
         and caller_docker_host_found
         and bool(caller_docker_host_value)
     )
-    if docker_host:
+    if docker_host or clears_docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
-    elif clears_docker_host:
-        scrubbed_keys.add("DOCKER_HOST")
     for key in list(resolved):
         if key.upper() in scrubbed_keys:
             del resolved[key]

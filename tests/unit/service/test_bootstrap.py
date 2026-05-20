@@ -706,6 +706,7 @@ def test_bootstrap_blank_docker_host_clears_stale_caller_env(
 ) -> None:
     service_env = {"DOCKER_HOST": ""}
     monkeypatch.setenv("DOCKER_HOST", "unix:///caller-stale-docker.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "caller-stale-context")
     monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
     calls: list[dict[str, object]] = []
     collected_provider_environ: dict[str, str] | None = None
@@ -745,6 +746,7 @@ def test_bootstrap_blank_docker_host_clears_stale_caller_env(
     assert collected_provider_environ == {}
     assert calls
     assert all("DOCKER_HOST" not in call["env"] for call in calls)
+    assert all("DOCKER_CONTEXT" not in call["env"] for call in calls)
 
 
 @pytest.mark.unit
