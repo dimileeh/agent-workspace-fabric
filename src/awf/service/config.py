@@ -340,7 +340,16 @@ def _local_service_asset_path(path: Path) -> Path | None:
     asset_root = bootstrap_mod.get_bootstrap_asset_root()
     if asset_root is None:
         return None
-    return path if path.is_absolute() else asset_root / path
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        return asset_root / expanded
+    resolved_asset_root = asset_root.expanduser().resolve()
+    resolved_path = expanded.resolve()
+    try:
+        resolved_path.relative_to(resolved_asset_root)
+    except ValueError:
+        return None
+    return resolved_path
 
 
 def resolve_local_service_compose_env_file(

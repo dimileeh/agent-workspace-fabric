@@ -119,9 +119,8 @@ def compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
         # Compose CLI selectors are intentionally inherited from the caller
         # when the service env is silent; explicit service values override them,
         # and explicit blank service values above clear stale caller settings.
-        caller_found, caller_value = env_lookup(os.environ, key)
-        if caller_found and caller_value:
-            resolved[key] = caller_value
+        # Leaving silent keys out keeps subprocess env inheritance implicit and
+        # avoids forcing `env=` for logs calls that need no real override.
     return resolved
 
 
@@ -256,8 +255,8 @@ def _parse_compose_interpolation_keys(contents: str) -> tuple[str, ...]:
 
     try:
         payload: object = yaml.safe_load(contents)
-    except yaml.YAMLError:
-        return ()
+    except yaml.YAMLError as exc:
+        raise yaml.YAMLError(f"could not parse Compose YAML: {exc}") from exc
     collected_keys: set[str] = set()
     _collect_compose_interpolation_keys(payload, collected_keys)
     return tuple(sorted(collected_keys))

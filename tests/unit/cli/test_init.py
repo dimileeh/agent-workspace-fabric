@@ -1546,6 +1546,23 @@ def test_compose_root_env_file_requires_absolute_compose_env_path(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_compose_root_env_file_uses_resolved_path_for_symlinked_env_file(
+    tmp_path: Path,
+) -> None:
+    """A symlinked Compose env file must not be paired by lexical path alone."""
+    from awf.cli import main as cli_main
+
+    compose_dir = tmp_path / "docker" / "compose"
+    compose_dir.mkdir(parents=True)
+    external_env = tmp_path / "external" / ".env"
+    external_env.parent.mkdir()
+    external_env.write_text("GITHUB_TOKEN=operator-secret\n", encoding="utf-8")
+    (compose_dir / ".env").symlink_to(external_env)
+
+    assert cli_main._compose_root_env_file(compose_dir / ".env") is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_trusted_service_compose_env_file_rejects_unrelated_local_service_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -1046,14 +1046,16 @@ def _compose_root_env_file(env_file: Path) -> Path | None:
     to absolute paths resolved from the verified bootstrap asset root.
     """
 
+    env_file = env_file.expanduser()
     if not env_file.is_absolute():
         return None
+    resolved_env_file = env_file.resolve()
     if (
-        env_file.name == ".env"
-        and env_file.parent.name == "compose"
-        and env_file.parent.parent.name == "docker"
+        resolved_env_file.name == ".env"
+        and resolved_env_file.parent.name == "compose"
+        and resolved_env_file.parent.parent.name == "docker"
     ):
-        return env_file.parent.parent.parent / ".env"
+        return resolved_env_file.parent.parent.parent / ".env"
     return None
 
 

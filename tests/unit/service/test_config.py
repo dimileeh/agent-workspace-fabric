@@ -1509,6 +1509,21 @@ def test_provider_environ_loads_absolute_default_compose_env_from_asset_root(
 
 
 @pytest.mark.unit
+def test_local_service_asset_path_rejects_absolute_path_outside_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "awf"
+    asset_root.mkdir()
+    inside = asset_root / LOCAL_SERVICE_COMPOSE_FILE
+    outside = tmp_path / "outside" / LOCAL_SERVICE_COMPOSE_FILE
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
+
+    assert service_config._local_service_asset_path(inside) == inside.resolve()  # noqa: SLF001
+    assert service_config._local_service_asset_path(outside) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_provider_environ_uses_explicit_compose_env_without_asset_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

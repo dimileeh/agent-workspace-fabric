@@ -710,20 +710,41 @@ def test_service_logs_blank_compose_cli_vars_clear_stale_caller_env(
     assert env["COMPOSE_PROFILES"] == ""
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
-def test_compose_cli_environ_passes_through_caller_values_for_absent_service_keys(
+def test_service_logs_inherits_caller_compose_cli_vars_without_subprocess_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Caller Compose values are explicit even when service env omits them."""
+    """Caller Compose selectors should not force an explicit subprocess env."""
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "caller-project")
+    monkeypatch.setenv("COMPOSE_PROFILES", "caller-profile")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        service_environ={},
+        run_subprocess=_run,
+    )
+
+    assert calls[0]["env"] is None
+
+
+@pytest.mark.unit
+def test_compose_cli_environ_omits_caller_values_for_absent_service_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller Compose values are inherited without explicit env overrides."""
     from awf.service import environment as service_environment
 
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "caller-project")
     monkeypatch.setenv("COMPOSE_PROFILES", "caller-profile")
 
-    assert service_environment.compose_cli_environ({}) == {
-        "COMPOSE_PROFILES": "caller-profile",
-        "COMPOSE_PROJECT_NAME": "caller-project",
-    }
+    assert service_environment.compose_cli_environ({}) == {}
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
@@ -922,6 +943,40 @@ services:
         "AWF_PLAIN_INTERPOLATION",
         "AWF_VALID_INTERPOLATION",
     )
+
+
+@pytest.mark.unit
+def test_service_logs_surfaces_malformed_compose_yaml_and_reloads_after_fix(
+    tmp_path: Path,
+) -> None:
+    """Malformed Compose YAML should fail loudly and recover after file changes."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment: [
+""",
+    )
+
+    with pytest.raises(yaml.YAMLError):
+        service_environment.compose_interpolation_keys(compose_file)
+    with pytest.raises(yaml.YAMLError):
+        service_environment.compose_interpolation_keys(compose_file)
+
+    compose_file.write_text(
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_FIXED_TOKEN:?set AWF_FIXED_TOKEN}"
+""",
+        encoding="utf-8",
+    )
+
+    assert service_environment.compose_interpolation_keys(compose_file) == ("AWF_FIXED_TOKEN",)
 
 
 @pytest.mark.unit
