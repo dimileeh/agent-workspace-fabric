@@ -251,12 +251,39 @@ def resolve_local_service_provider_environ(
     discover_adjacent_env_file = isinstance(compose_env_file, _ComposeEnvFileOmitted)
     env_file = None if discover_adjacent_env_file else cast(Path | None, compose_env_file)
     if env_file is None and discover_adjacent_env_file and compose_file is not None:
-        candidate = compose_file.parent / ".env"
-        if candidate.exists() and _can_use_adjacent_provider_env_file(candidate, compose_file):
-            env_file = candidate
+        env_file = _provider_env_file_from_compose_file(
+            compose_file,
+            allow_custom_adjacent=True,
+        )
+    if env_file is None and compose_env_file is None and compose_file is not None:
+        env_file = _provider_env_file_from_compose_file(
+            compose_file,
+            allow_custom_adjacent=False,
+        )
     if env_file is None:
         return environ
     return local_service_environ(environ, env_file=env_file)
+
+
+def _provider_env_file_from_compose_file(
+    compose_file: Path,
+    *,
+    allow_custom_adjacent: bool,
+) -> Path | None:
+    """Return a trusted provider env file adjacent to compose_file, when available."""
+
+    if _is_local_service_compose_file_path(compose_file):
+        asset_env_file = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+        if asset_env_file is not None and asset_env_file.exists():
+            return asset_env_file
+
+    if not allow_custom_adjacent:
+        return None
+
+    candidate = compose_file.parent / ".env"
+    if candidate.exists() and _can_use_adjacent_provider_env_file(candidate, compose_file):
+        return candidate
+    return None
 
 
 def _can_use_adjacent_provider_env_file(candidate: Path, compose_file: Path) -> bool:
