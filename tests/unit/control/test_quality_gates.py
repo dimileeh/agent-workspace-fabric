@@ -3639,7 +3639,7 @@ jobs:
 
 
 @pytest.mark.unit
-def test_added_informational_step_with_github_script_comment_action_is_allowed() -> None:
+def test_added_github_script_comment_step_without_script_is_blocked() -> None:
     old_text = """
 name: CI
 on: [pull_request]
@@ -3675,7 +3675,10 @@ jobs:
         },
     )
 
-    assert violations == []
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post PR comment"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
 
 
 @pytest.mark.unit

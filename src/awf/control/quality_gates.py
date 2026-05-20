@@ -2307,7 +2307,7 @@ def _comment_notify_action_with_inputs_are_safe(action: str, inputs: object) -> 
 
 def _github_script_comment_notify_inputs_are_safe(inputs: object) -> bool:
     if inputs is None:
-        return True
+        return False
     if not isinstance(inputs, Mapping):
         return False
     script: object = None
