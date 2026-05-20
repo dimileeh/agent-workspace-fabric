@@ -968,11 +968,24 @@ def _resolve_service_runtime_env_files(
 
     return _resolve_service_env_files(
         env_file,
-        trusted_compose_env_file=_trusted_service_compose_env_file(
+        trusted_compose_env_file=_trusted_resolved_service_compose_env_file(
             compose_file,
             env_file,
         ),
     )
+
+
+def _trusted_resolved_service_compose_env_file(
+    compose_file: Path,
+    env_file: Path,
+) -> Path | None:
+    """Return the Compose env path when paths came from service compose resolution."""
+
+    if _compose_root_env_file(env_file) is None:
+        return None
+    if compose_file.expanduser().resolve().parent != env_file.expanduser().resolve().parent:
+        return None
+    return env_file
 
 
 def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Path | None:
