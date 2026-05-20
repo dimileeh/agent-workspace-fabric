@@ -25,6 +25,7 @@ from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
+from awf.control.protected_file_diffs import git_show_text
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -74,6 +75,7 @@ from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
     BaseFetchError,
     MonitorRunnerConfig,
+    ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -255,6 +257,181 @@ async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
     runner = _monitor_runner(tmp_path, FakeCommandRunner(), session_factory=_SessionContext)
 
     assert await runner._workspace_test_commands("ws_1") == expected
+
+
+@pytest.mark.unit
+async def test_git_show_text_marks_worktree_safe_directory(tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="old text")
+    worktree = tmp_path / "worktree"
+
+    show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:README.md")
+
+    assert show_text == "old text"
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "cat-file",
+            "-e",
+            "HEAD:README.md",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "show",
+            "HEAD:README.md",
+        ],
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: path 'pyproject.toml' does not exist in 'HEAD'",
+        "fatal: Path '.github/workflows/ci.yml' exists on disk, but not in 'HEAD'",
+    ],
+)
+async def test_git_show_text_returns_none_for_missing_path(
+    tmp_path: Path,
+    stderr: str,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr=stderr)
+    cmd.queue_result(returncode=0)
+    worktree = tmp_path / "worktree"
+
+    show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:pyproject.toml")
+
+    assert show_text is None
+
+
+@pytest.mark.unit
+async def test_git_show_text_raises_for_unexpected_git_failure(tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
+    cmd.queue_result(returncode=1)
+    worktree = tmp_path / "worktree"
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await git_show_text(cmd, worktree_path=worktree, refspec="bad-ref:pyproject.toml")
+
+    message = str(exc_info.value)
+    assert "bad-ref:pyproject.toml" in message
+    assert "bad revision" in message
+
+
+@pytest.mark.unit
+async def test_changed_paths_between_ref_and_head_includes_rename_sources(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=0,
+        stdout=(
+            "M\0src/fix.py\0"
+            "R100\0.github/workflows/ci.yml\0docs/ci.yml\0"
+            "D\0pyproject.toml\0"
+            "M\0src/fix.py\0"
+        ),
+    )
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+
+    paths = await runner._changed_paths_between_ref_and_head(
+        worktree_path=worktree,
+        ref="merge-base-sha",
+        error_context="against the remote PR branch",
+    )
+
+    assert paths == (
+        "src/fix.py",
+        ".github/workflows/ci.yml",
+        "docs/ci.yml",
+        "pyproject.toml",
+    )
+    assert cmd.calls[0].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "diff",
+        "--name-status",
+        "-z",
+        "merge-base-sha..HEAD",
+        "--",
+    ]
+
+
+@pytest.mark.unit
+async def test_protected_status_diff_for_deleted_file_keeps_head_text(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    diffs = await runner._protected_file_diffs_for_status_paths(
+        worktree_path=worktree,
+        changed_paths=["pyproject.toml"],
+    )
+
+    diff = diffs["pyproject.toml"]
+    assert diff.old_text == '[project]\nname = "demo"\n'
+    assert diff.new_text is None
+    assert cmd.calls[0].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "cat-file",
+        "-e",
+        "HEAD:pyproject.toml",
+    ]
+    assert cmd.calls[1].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "show",
+        "HEAD:pyproject.toml",
+    ]
+
+
+@pytest.mark.unit
+async def test_protected_status_diff_for_unreadable_file_fails_closed(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "pyproject.toml").write_bytes(b"\xff")
+
+    with pytest.raises(
+        ProtectedScopeDiffError,
+        match="Could not read protected worktree file 'pyproject.toml' as UTF-8",
+    ):
+        await runner._protected_file_diffs_for_status_paths(
+            worktree_path=worktree,
+            changed_paths=["pyproject.toml"],
+        )
 
 
 @pytest.mark.unit

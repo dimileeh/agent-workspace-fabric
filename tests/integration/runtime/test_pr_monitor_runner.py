@@ -108,6 +108,14 @@ class RecordedSleep:
         self.calls.append(seconds)
 
 
+def _git_calls(cmd: FakeCommandRunner, *tokens: str) -> list:
+    return [
+        call
+        for call in cmd.calls
+        if call.args[:1] == ["git"] and all(token in call.args for token in tokens)
+    ]
+
+
 # ── GraphQL payload helpers — mirror test_github_client.py ─────────────────
 
 
@@ -706,7 +714,7 @@ class TestAddressComments:
             compose_file=tmp_path / "compose.yml",
         )
 
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert len(push_calls) == 1
         assert "git@github.com:contributor/aira-web.git" in push_calls[0].args
         assert "HEAD:refs/heads/fix/fork-review" in push_calls[0].args
@@ -915,7 +923,7 @@ class TestFixCyclePasses:
         # CLI was called twice (T1, T2) — one AddressComments action,
         # two passes inside fix_cycle.
         assert len(adapter.calls) == 2
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         # Exactly ONE push for the whole burst.
         assert len(push_calls) == 1
 
@@ -1019,7 +1027,7 @@ class TestSyncBase:
         merge_call = next(
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" not in c.args
+            if c.args[:1] == ["git"] and "merge" in c.args and "--abort" not in c.args
         )
         assert "origin/development" in merge_call.args
 
@@ -1129,7 +1137,7 @@ class TestPushRejectRecovery:
             compose_file=tmp_path / "compose.yml",
         )
         # Assert push used an explicit refspec — no bare ``HEAD`` arg.
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls, "expected at least one push"
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/test-branch" in pc.args, (
@@ -1142,7 +1150,7 @@ class TestPushRejectRecovery:
         fetch_branch_calls = [
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"]
+            if c.args[:1] == ["git"]
             and "fetch" in c.args
             and any(a == "awf/test-branch" for a in c.args)
         ]
@@ -1150,7 +1158,7 @@ class TestPushRejectRecovery:
         reset_calls = [
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"]
+            if c.args[:1] == ["git"]
             and "reset" in c.args
             and "--hard" in c.args
             and any("origin/awf/test-branch" in a for a in c.args)
@@ -1203,7 +1211,7 @@ class TestPushRejectRecovery:
         reset_calls = [
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"] and "reset" in c.args and "--hard" in c.args
+            if c.args[:1] == ["git"] and "reset" in c.args and "--hard" in c.args
         ]
         assert not reset_calls, (
             f"reset --hard must not fire on non-rejection failures; got {reset_calls}"
@@ -1309,7 +1317,7 @@ class TestDirtyConflictResolution:
         abort_calls = [
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" in c.args
+            if c.args[:1] == ["git"] and "merge" in c.args and "--abort" in c.args
         ]
         assert len(abort_calls) == 1, "git merge --abort must fire exactly once before sync"
 
@@ -1578,7 +1586,7 @@ class TestAgentRunErrorResilience:
             compose_file=tmp_path / "compose.yml",
         )
         # Push was invoked despite CLI crash.
-        assert any(c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls)
+        assert _git_calls(cmd, "push")
 
     @pytest.mark.unit
     async def test_cli_crash_during_ci_fix_still_pushes(
@@ -1620,7 +1628,7 @@ class TestAgentRunErrorResilience:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        assert any(c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls)
+        assert _git_calls(cmd, "push")
 
 
 class TestBaseBehindEdges:
@@ -2547,7 +2555,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls, "fix_cycle must push"
         for pc in push_calls:
             # The bare ``HEAD`` arg would mean the ambiguous form
@@ -2599,7 +2607,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/feature-y" in pc.args
@@ -2656,7 +2664,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/feature-z" in pc.args
@@ -2704,7 +2712,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/development" in pc.args, (
@@ -2779,7 +2787,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        push_calls = _git_calls(cmd, "push")
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/legacy-row" in pc.args
