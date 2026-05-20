@@ -1907,6 +1907,16 @@ class ControlWorker:
                 task_id=task_id,
             )
             return True
+        if classification.state == "failed" and not preservation_expired:
+            await self._record_preserved_active_salvage_blocked(
+                candidate,
+                preserved_event=preserved_event,
+                reason=classification.reason,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                classification=classification,
+            )
+            return True
 
         await self._record_preserved_active_operator_required(
             candidate,
@@ -2605,6 +2615,7 @@ class ControlWorker:
         reason: str,
         attempt_id: str | None,
         task_id: str | None,
+        classification: _PreservedWorktreeClassification | None = None,
         branch_pr_lookup: Mapping[str, Any] | None = None,
         preservation_expired: bool = False,
     ) -> None:
@@ -2652,6 +2663,7 @@ class ControlWorker:
                 task_id=task_id,
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
+                classification=classification,
                 extra=extra,
             )
             await repo.add_event(
@@ -3092,7 +3104,7 @@ class ControlWorker:
         branch = await self._run_preserved_active_git(worktree_path, "branch", "--show-current")
         if not branch[0]:
             return _PreservedWorktreeClassification(
-                state="ambiguous",
+                state="failed",
                 reason="branch_unavailable",
                 worktree_path=str(worktree_path),
                 expected_branch_name=expected_branch_name,
@@ -3130,7 +3142,7 @@ class ControlWorker:
         head = await self._run_preserved_active_git(worktree_path, "rev-parse", "HEAD")
         if not head[0]:
             return _PreservedWorktreeClassification(
-                state="ambiguous",
+                state="failed",
                 reason="head_unavailable",
                 worktree_path=str(worktree_path),
                 branch_name=branch_name,
@@ -3147,7 +3159,7 @@ class ControlWorker:
         )
         if not status[0]:
             return _PreservedWorktreeClassification(
-                state="ambiguous",
+                state="failed",
                 reason="status_unavailable",
                 worktree_path=str(worktree_path),
                 branch_name=branch_name,
@@ -3177,7 +3189,7 @@ class ControlWorker:
         )
         if not count[0]:
             return _PreservedWorktreeClassification(
-                state="ambiguous",
+                state="failed",
                 reason="ahead_count_unavailable",
                 worktree_path=str(worktree_path),
                 branch_name=branch_name,
