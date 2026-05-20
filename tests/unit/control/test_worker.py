@@ -8192,6 +8192,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
         await worker.run_once()
+        await worker.run_once()
+        await worker.run_once()
         await worker.wait_for_execution_tasks()
 
         async with session_factory() as s:
@@ -8390,6 +8392,103 @@ class TestRunOnceStaleActiveExecutionRecovery:
             ],
             "source": "open_pr_resolver",
         }
+
+    @pytest.mark.unit
+    async def test_preserved_active_adopted_sync_feature_pr_fork_head_repo_attaches_monitor(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-adopted-sync-feature-pr-fork-head",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_adopted_sync_feature_pr_fork",
+            create_task_attempt=True,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "head_repo_slug": "contributor/repo",
+                }
+            },
+        )
+        remote_push_branch = "contributors/fix-123"
+        resolved_head_sha = "f" * 40
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.repo_url = "https://github.com/example/repo.git"
+            ws.remote_push_branch = remote_push_branch
+            await s.commit()
+
+        resolver = _RecordingBranchOpenPRResolver(
+            {
+                remote_push_branch: [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/277",
+                        number=277,
+                        head_ref=remote_push_branch,
+                        head_sha=resolved_head_sha,
+                        head_repo_slug="contributor/repo",
+                    )
+                ]
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_adopted_sync_feature_pr_fork": _live_agent_snapshot()}
+            ),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.pr_url == "https://github.com/example/repo/pull/277"
+        assert ws.pr_number == 277
+        assert ws.remote_push_branch == remote_push_branch
+        assert ws.monitor_last_commit_sha == resolved_head_sha
+        assert len(salvage_events) == 1
+        payload = salvage_events[0].payload
+        assert payload is not None
+        assert payload["branch_pr_lookup"] == {
+            "branch_name": remote_push_branch,
+            "expected_head_repo_slug": "contributor/repo",
+            "match_count": 1,
+            "source": "open_pr_resolver",
+        }
+        assert operator_events == []
+        assert resolver.calls == [
+            {
+                "repo_url": "https://github.com/example/repo.git",
+                "branch_name": remote_push_branch,
+                "base_branch": None,
+            }
+        ]
+        assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
     async def test_preserved_active_pushed_branch_pr_lookup_failure_requires_operator_recovery(
