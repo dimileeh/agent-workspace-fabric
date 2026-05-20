@@ -2507,6 +2507,7 @@ class ControlWorker:
             workspaces = await repo.list_schedulable_workspaces(
                 status=WorkspaceStatus.requested,
                 limit=candidate_limit,
+                node_id=self._config.node_id or "local",
                 after=candidate_after,
                 scoring_at=scoring_at,
             )
@@ -3138,6 +3139,13 @@ async def _record_capacity_queue_decision(
 ) -> None:
     attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
     if attempt is None:
+        _log.warning(
+            "worker.capacity_queue_decision_missing_attempt",
+            workspace_id=workspace.id,
+            workspace_status=workspace.status,
+            decision=decision,
+            reason_code=reason_code,
+        )
         return
 
     queue_repo = QueueDecisionRepository(session)

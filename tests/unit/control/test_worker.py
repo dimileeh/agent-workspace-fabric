@@ -1031,6 +1031,120 @@ class TestRunOnce:
         assert all(decision.reason_code != "LOCAL_CAPACITY_DEFERRED" for decision in decisions)
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_scans_only_workspaces_for_worker_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        remote_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "remote-capacity-request",
+            create_task_attempt=True,
+        )
+        local_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "local-capacity-request",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            remote = await WorkspaceRepository(s).get(remote_id)
+            local = await WorkspaceRepository(s).get(local_id)
+            assert remote is not None
+            assert local is not None
+            remote.node_id = "worker-node-b"
+            local.node_id = "worker-node-a"
+            await s.commit()
+        await _reserve_workspace(
+            session_factory,
+            remote_id,
+            node_id="worker-node-b",
+            steady_cpu=2.0,
+            steady_memory_gb=1.0,
+            peak_cpu=2.0,
+            peak_memory_gb=1.0,
+        )
+        await _reserve_workspace(
+            session_factory,
+            local_id,
+            node_id="worker-node-a",
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=1.0,
+            peak_memory_gb=1.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-a",
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            remote = await WorkspaceRepository(s).get(remote_id)
+            local = await WorkspaceRepository(s).get(local_id)
+            remote_decisions = await QueueDecisionRepository(s).list_for_workspace(remote_id)
+
+        assert provisioner.calls == [local_id]
+        assert remote is not None
+        assert remote.status == WorkspaceStatus.requested.value
+        assert local is not None
+        assert local.status == WorkspaceStatus.ready.value
+        assert remote_decisions == []
+
+    @pytest.mark.unit
+    async def test_capacity_queue_decision_warns_when_attempt_is_missing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "missing-attempt-capacity-decision",
+            create_task_attempt=False,
+        )
+        decided_at = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            assert workspace is not None
+            with structlog.testing.capture_logs() as captured:
+                await worker_module._record_capacity_queue_decision(
+                    s,
+                    workspace,
+                    decision="deferred",
+                    reason_code="LOCAL_CAPACITY_DEFERRED",
+                    decided_at=decided_at,
+                    allocated=worker_module._AllocatedReservationTotals(),
+                    demand=worker_module._ReservationDemand(
+                        workspace_id=requested_id,
+                        steady_cpu=1.0,
+                        steady_memory_gb=1.0,
+                        peak_cpu=1.0,
+                        peak_memory_gb=1.0,
+                        disk_mb=0,
+                        dind_slots=0,
+                    ),
+                    blockers=[],
+                )
+
+        assert any(
+            event.get("event") == "worker.capacity_queue_decision_missing_attempt"
+            and event.get("log_level") == "warning"
+            and event.get("workspace_id") == requested_id
+            for event in captured
+        )
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_skips_repeated_unchanged_capacity_deferral(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1629,6 +1743,7 @@ class TestRunOnce:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
@@ -1644,6 +1759,7 @@ class TestRunOnce:
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
                 after=after,
                 scoring_at=scoring_time,
             )
@@ -2438,6 +2554,7 @@ class TestRunOnce:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
@@ -2448,6 +2565,7 @@ class TestRunOnce:
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
                 after=after,
             )
 
@@ -2832,10 +2950,11 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del exclude_ids, after
+            del exclude_ids, node_id, after
             assert status == WorkspaceStatus.ready
             assert scoring_at == frozen_scoring_at
             result = await self._session.execute(
@@ -2943,6 +3062,7 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
@@ -2958,6 +3078,7 @@ class TestRunOnceExecution:
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
                 after=after,
                 scoring_at=scoring_time,
             )
@@ -3483,6 +3604,7 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
@@ -3498,6 +3620,7 @@ class TestRunOnceExecution:
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
                 after=after,
                 scoring_at=scoring_time,
             )
@@ -3930,10 +4053,11 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            node_id: str | None = None,
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del self, after, scoring_at
+            del self, node_id, after, scoring_at
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
@@ -9521,10 +9645,11 @@ async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
         after: SchedulerOrderCursor | None = None,
         scoring_at: datetime | None = None,
     ) -> list[Workspace]:
-        del self, exclude_ids, after, scoring_at
+        del self, exclude_ids, node_id, after, scoring_at
         assert status == WorkspaceStatus.ready
         assert limit == candidate_limit
         return pages.pop(0) if pages else []

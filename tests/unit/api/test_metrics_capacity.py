@@ -23,6 +23,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import metrics as metrics_service
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -179,6 +180,53 @@ async def metrics_app_and_client(
             yield app, c
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_active_latest_totals_for_workspace_scope_delegates_to_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[WorkspaceStatus | str, ...] | None, str | None]] = []
+    expected = {
+        "workspace_count": 7,
+        "steady_cpu": 1.0,
+        "steady_memory_gb": 2.0,
+        "peak_cpu": 3.0,
+        "peak_memory_gb": 4.0,
+        "disk_mb": 5,
+        "dind_slots": 6,
+    }
+
+    async def _fake_totals(
+        self: ResourceReservationRepository,
+        *,
+        statuses: tuple[WorkspaceStatus | str, ...] | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, float | int]:
+        del self
+        calls.append((statuses, node_id))
+        return expected
+
+    class _NoSqlSession:
+        async def execute(self, statement: object) -> object:
+            del statement
+            raise AssertionError("metrics should delegate aggregation to repository")
+
+    monkeypatch.setattr(
+        ResourceReservationRepository,
+        "active_latest_totals_for_workspace_scope",
+        _fake_totals,
+        raising=False,
+    )
+
+    totals = await metrics_service._active_latest_totals_for_workspace_scope(  # noqa: SLF001
+        _NoSqlSession(),  # type: ignore[arg-type]
+        statuses=(WorkspaceStatus.requested,),
+        node_id="worker-node-a",
+    )
+
+    assert totals == expected
+    assert calls == [((WorkspaceStatus.requested,), "worker-node-a")]
 
 
 @pytest.mark.unit
