@@ -878,12 +878,17 @@ def _existing_project_profile_path(repository: Path) -> Path | None:
     return None
 
 
-def _resolve_state_directory(env: Mapping[str, str]) -> Path:
+def _resolve_state_directory(
+    env: Mapping[str, str],
+    *,
+    home_environ: Mapping[str, str] | None = None,
+) -> Path:
     """Resolve the AWF host state directory matching the Compose default."""
     raw = env.get("AWF_HOST_WORK_DIR") or ""
     if raw:
         return Path(raw).expanduser().resolve()
-    home = env.get("HOME", "~")
+    home_env = os.environ if home_environ is None else home_environ
+    home = home_env.get("HOME", "~")
     return (Path(home) / ".awf" / "service").expanduser().resolve()
 
 

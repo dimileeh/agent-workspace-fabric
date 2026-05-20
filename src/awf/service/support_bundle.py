@@ -35,7 +35,7 @@ class _DoctorCollectorKwargs(TypedDict, total=False):
     """Optional path context forwarded to the doctor collector."""
 
     compose_file: Path
-    compose_env_file: Path
+    compose_env_file: Path | None
 
 
 class _StatusCollectorKwargs(TypedDict, total=False):
@@ -43,7 +43,7 @@ class _StatusCollectorKwargs(TypedDict, total=False):
 
     environ: Mapping[str, str]
     compose_file: Path
-    compose_env_file: Path
+    compose_env_file: Path | None
 
 
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:

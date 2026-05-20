@@ -3156,6 +3156,33 @@ def test_init_without_path_uses_compose_env_host_work_dir_for_state_directory(
 
 
 @pytest.mark.unit
+def test_init_without_path_uses_host_home_when_service_env_sets_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """HOME is a host path fallback, not a service env setting."""
+    from awf.service import config as config_mod
+
+    monkeypatch.chdir(tmp_path)
+    host_home = tmp_path / "host-home"
+    service_home = tmp_path / "service-home"
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    monkeypatch.setattr(
+        config_mod,
+        "local_service_environ",
+        lambda **_kwargs: {"HOME": str(service_home)},
+    )
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (host_home / ".awf" / "service").exists()
+    assert not (service_home / ".awf" / "service").exists()
+    assert str((host_home / ".awf" / "service").resolve()) in result.output
+
+
+@pytest.mark.unit
 def test_init_with_path_keeps_existing_project_onboarding_behavior(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
