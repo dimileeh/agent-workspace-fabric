@@ -3293,13 +3293,14 @@ async def _add_mismatched_node_active_workspace_reservations(
         .exists()
     )
     result = await session.execute(
-        select(Workspace.id).where(
+        select(Workspace.id, Workspace.node_id).where(
             Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
-            Workspace.node_id == node_id,
+            or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
             active_reservation_exists,
         )
     )
-    workspace_ids = tuple(result.scalars())
+    workspace_nodes_by_id = dict(result.tuples().all())
+    workspace_ids = tuple(workspace_nodes_by_id)
     if not workspace_ids:
         return
 
@@ -3307,6 +3308,8 @@ async def _add_mismatched_node_active_workspace_reservations(
     for workspace_id in workspace_ids:
         reservation = reservations.get(workspace_id)
         if reservation is None or reservation.node_id == node_id:
+            continue
+        if workspace_nodes_by_id[workspace_id] is None and reservation.node_id is not None:
             continue
         allocated.add(_reservation_demand_from_reservation(reservation))
 

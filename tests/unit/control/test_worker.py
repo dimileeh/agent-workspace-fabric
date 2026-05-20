@@ -1376,6 +1376,68 @@ class TestRunOnce:
         assert allocated["dind_slots"] == 1
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_counts_null_node_workspace_with_null_node_reservation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "null-node-reservation-capacity-holder",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            active = await WorkspaceRepository(s).get(active_id)
+            assert active is not None
+            active.node_id = None
+            await s.commit()
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            node_id="worker-node-b",
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+
+        async with session_factory() as s:
+            allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
+
+            class _NullNodeReservationRepository:
+                async def active_latest_by_workspace_ids(
+                    self,
+                    workspace_ids: tuple[str, ...],
+                ) -> dict[str, SimpleNamespace]:
+                    assert workspace_ids == (active_id,)
+                    return {
+                        active_id: SimpleNamespace(
+                            workspace_id=active_id,
+                            node_id=None,
+                            steady_cpu=3.0,
+                            steady_memory_gb=8.0,
+                            peak_cpu=6.0,
+                            peak_memory_gb=16.0,
+                            disk_mb=None,
+                            dind_slots=1,
+                        )
+                    }
+
+            await worker_module._add_mismatched_node_active_workspace_reservations(  # noqa: SLF001
+                s,
+                reservation_repo=_NullNodeReservationRepository(),  # type: ignore[arg-type]
+                allocated=allocated,
+                node_id="worker-node-a",
+            )
+
+        assert allocated.workspace_count == 1
+        assert allocated.peak_cpu == 6.0
+        assert allocated.peak_memory_gb == 16.0
+        assert allocated.dind_slots == 1
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(
         self,
         session_factory: async_sessionmaker[AsyncSession],
