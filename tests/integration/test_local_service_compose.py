@@ -105,6 +105,7 @@ def _compose_published_host_port(mapping: str) -> str:
     return fields[-2]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("mapping", "expected"),
     [
@@ -286,7 +287,7 @@ def test_local_service_compose_port_templates_support_default_and_override_value
     assert _compose_template_value(api_host, override_env) == "9100"
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 def test_compose_template_value_matches_common_interpolation_forms() -> None:
     assert _compose_template_value("${AWF_BARE}", {"AWF_BARE": "resolved"}) == "resolved"
     assert _compose_template_value("${AWF_BARE}", {}) == ""
