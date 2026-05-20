@@ -4310,6 +4310,35 @@ def test_line_lookup_helpers_cover_fallback_paths() -> None:
         )
         == 1
     )
+    workflow_with_multiline_run = """
+steps:
+  - name: First summary
+    run: echo first
+    continue-on-error: true
+  - run: |
+      echo second
+      echo done
+    continue-on-error: true
+""".strip()
+    multiline_run_step = {
+        "run": "echo second\necho done\n",
+        "continue-on-error": True,
+    }
+    assert (
+        quality_gate_module._line_for_workflow_step(
+            workflow_with_multiline_run,
+            multiline_run_step,
+        )
+        == 5
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            workflow_with_multiline_run,
+            multiline_run_step,
+            key="continue-on-error",
+        )
+        == 8
+    )
 
 
 @pytest.mark.unit

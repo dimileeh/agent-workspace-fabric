@@ -6,11 +6,12 @@ import re
 import shlex
 import tomllib
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
 import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from awf.db.repositories import owned_paths_overlap
 
@@ -2262,6 +2263,9 @@ def _line_for_workflow_step(text: str, step: Mapping[str, Any]) -> int | None:
             line = _line_containing(text, f"{key}: {value}")
             if line is not None:
                 return line
+            line = _line_for_workflow_step_key_from_yaml_nodes(text, step, key=key)
+            if line is not None:
+                return line
     return None
 
 
@@ -2271,6 +2275,9 @@ def _line_for_workflow_step_key(
     *,
     key: str,
 ) -> int | None:
+    yaml_node_line = _line_for_workflow_step_key_from_yaml_nodes(text, step, key=key)
+    if yaml_node_line is not None:
+        return yaml_node_line
     step_line = _line_for_workflow_step(text, step)
     lines = text.splitlines()
     if step_line is not None:
@@ -2302,6 +2309,51 @@ def _line_for_workflow_step_key(
             if key_pattern.match(lines[index - 1]):
                 return index
     return _line_matching(text, rf"^\s*{re.escape(key)}\s*:")
+
+
+def _line_for_workflow_step_key_from_yaml_nodes(
+    text: str,
+    step: Mapping[str, Any],
+    *,
+    key: str,
+) -> int | None:
+    try:
+        document = yaml.compose(text)
+    except yaml.YAMLError:
+        return None
+    if document is None:
+        return None
+    for node in _workflow_sequence_mapping_nodes(document):
+        if not _workflow_step_node_matches(node, step):
+            continue
+        for key_node, _value_node in node.value:
+            if isinstance(key_node, ScalarNode) and key_node.value == key:
+                return key_node.start_mark.line + 1
+    return None
+
+
+def _workflow_sequence_mapping_nodes(node: Node) -> Iterator[MappingNode]:
+    if isinstance(node, SequenceNode):
+        for item in node.value:
+            if isinstance(item, MappingNode):
+                yield item
+            yield from _workflow_sequence_mapping_nodes(item)
+        return
+    if isinstance(node, MappingNode):
+        for _key_node, value_node in node.value:
+            yield from _workflow_sequence_mapping_nodes(value_node)
+
+
+def _workflow_step_node_matches(node: MappingNode, step: Mapping[str, Any]) -> bool:
+    scalar_values: dict[str, str] = {}
+    for key_node, value_node in node.value:
+        if isinstance(key_node, ScalarNode) and isinstance(value_node, ScalarNode):
+            scalar_values[key_node.value] = value_node.value
+    for key in ("name", "id", "uses", "run"):
+        step_value = _string_value(step.get(key))
+        if step_value and scalar_values.get(key) == step_value:
+            return True
+    return False
 
 
 def _line_containing(text: str, needle: str) -> int | None:
