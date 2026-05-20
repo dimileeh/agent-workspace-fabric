@@ -1439,7 +1439,6 @@ def _shell_tokens(command: str) -> tuple[str, ...] | None:
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
-        lexer.commenters = ""
         return tuple(token for token in lexer if token)
     except ValueError:
         return None
