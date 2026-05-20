@@ -402,6 +402,138 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_comment_named_validation_continue_on_error_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        run: uv run pytest
+        continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.tests.steps.Post PR comment.continue-on-error"
+    assert violations[0].line == 9
+    assert "continue-on-error is only allowed for comment/notify steps" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_comment_named_unrelated_action_continue_on_error_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/setup-python@v5
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/setup-python@v5
+        continue-on-error: true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.tests.steps.Post PR comment.continue-on-error"
+    assert violations[0].line == 9
+    assert "continue-on-error is only allowed for comment/notify steps" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_comment_named_github_script_continue_on_error_with_script_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await exec.exec("uv", ["run", "pytest"]);
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            await exec.exec("uv", ["run", "pytest"]);
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.tests.steps.Post PR comment.continue-on-error"
+    assert violations[0].line == 9
+    assert "continue-on-error is only allowed for comment/notify steps" in violations[0].reason
+
+
+@pytest.mark.unit
 def test_workflow_removing_pytest_continue_on_error_true_is_allowed() -> None:
     old_text = """
 name: CI

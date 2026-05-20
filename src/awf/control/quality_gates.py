@@ -39,6 +39,11 @@ _COMMENT_NOTIFY_ACTION_USES: Final[frozenset[str]] = frozenset(
         "peter-evans/create-or-update-comment",
     }
 )
+_COMMENT_NOTIFY_CAPABLE_ACTION_USES: Final[frozenset[str]] = frozenset(
+    {
+        "actions/github-script",
+    }
+)
 _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "comment",
     "pr comment",
@@ -1152,14 +1157,17 @@ def _workflow_existing_step_violations(
     old_continue = old_step.get("continue-on-error")
     new_continue = new_step.get("continue-on-error")
     if _is_true(new_continue) and not _is_true(old_continue):
-        if not _is_comment_or_notify_step(new_step):
+        if not _allows_comment_continue_on_error(new_step):
             violations.append(
                 _violation(
                     path=path,
                     protected_pattern=protected_pattern,
                     section=f"{section_prefix}.continue-on-error",
                     line=_line_for_workflow_step_key(new_text, new_step, key="continue-on-error"),
-                    reason="continue-on-error is only allowed for comment/notify steps",
+                    reason=(
+                        "continue-on-error is only allowed for comment/notify steps "
+                        "with safe command/action semantics"
+                    ),
                 )
             )
     elif old_continue != new_continue and not (
@@ -1310,6 +1318,18 @@ def _is_comment_or_notify_step(step: Mapping[str, Any]) -> bool:
         label_parts.append(_uses_action(uses) or uses)
     label = " ".join(label_parts).lower()
     return any(marker in label for marker in _COMMENT_STEP_MARKERS)
+
+
+def _allows_comment_continue_on_error(step: Mapping[str, Any]) -> bool:
+    if not _is_comment_or_notify_step(step):
+        return False
+
+    run = _string_value(step.get("run"))
+    if run is not None and (not _is_informational_run_command(run) or _is_validation_command(run)):
+        return False
+
+    uses = _string_value(step.get("uses"))
+    return uses is None or _is_comment_or_notify_capable_step_uses(step, uses)
 
 
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
@@ -1574,6 +1594,19 @@ def _is_comment_or_notify_uses(uses: str) -> bool:
         return False
     action, ref = parts
     return action.lower() in _COMMENT_NOTIFY_ACTION_USES and _is_pinned_workflow_uses_ref(ref)
+
+
+def _is_comment_or_notify_capable_step_uses(step: Mapping[str, Any], uses: str) -> bool:
+    parts = _uses_action_and_ref(uses)
+    if parts is None:
+        return False
+    action, ref = parts
+    normalized_action = action.lower()
+    if not _is_pinned_workflow_uses_ref(ref):
+        return False
+    if normalized_action in _COMMENT_NOTIFY_ACTION_USES:
+        return True
+    return normalized_action in _COMMENT_NOTIFY_CAPABLE_ACTION_USES and "with" not in step
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
