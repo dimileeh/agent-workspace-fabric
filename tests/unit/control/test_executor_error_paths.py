@@ -86,6 +86,17 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_pre_push_checks(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", include_plan_only_diff: bool = False
+) -> None:
+    if include_plan_only_diff:
+        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
+    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
+    fake.queue_result(returncode=0, stdout="ab commit\n")  # pre-push log
+
+
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
@@ -1533,9 +1544,7 @@ class TestBranchDriftRecovery:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="sha\n")  # pre-push rev-parse HEAD
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
-        fake.queue_result(returncode=0, stdout="ab commit\n")  # pre-push log
+        _queue_pre_push_checks(fake, head="sha")
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
 
@@ -1594,9 +1603,7 @@ class TestBranchDriftRecovery:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        fake.queue_result(returncode=0, stdout="sha\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="ab commit\n")
+        _queue_pre_push_checks(fake, head="sha")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
 
@@ -1664,9 +1671,7 @@ class TestBranchDriftRecovery:
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="tests ok")
-        fake.queue_result(returncode=0, stdout="sha\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="ab commit\n")
+        _queue_pre_push_checks(fake, head="sha")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
 
@@ -2852,10 +2857,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        fake.queue_result(returncode=0, stdout="src/app.py\n")
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="abc1234 commit\n")
+        _queue_pre_push_checks(fake, include_plan_only_diff=True)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
 
@@ -3034,10 +3036,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
-        # pr_creator pre-push diagnostics:
-        fake.queue_result(returncode=0, stdout="deadbeef\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="abc commit\n")
+        _queue_pre_push_checks(fake, head="deadbeef")
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")  # gh pr create
 
@@ -3076,6 +3075,7 @@ class TestPrMonitorFactoryPath:
             await session.commit()
 
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit
@@ -3083,9 +3083,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
-        fake.queue_result(returncode=0, stdout="deadbeef\n")  # rev-parse HEAD
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
-        fake.queue_result(returncode=0, stdout="abc commit\n")  # ahead of base
+        _queue_pre_push_checks(fake, head="deadbeef")
         fake.queue_result(returncode=0)  # git push
 
         executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
@@ -3129,9 +3127,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
-        fake.queue_result(returncode=0, stdout="deadbeef\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="abc commit\n")
+        _queue_pre_push_checks(fake, head="deadbeef")
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")
 

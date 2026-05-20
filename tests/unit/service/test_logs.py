@@ -108,6 +108,15 @@ def test_service_logs_command_defaults_and_follow_flag() -> None:
     ]
 
 
+@pytest.mark.unit
+def test_resolve_local_service_compose_file_returns_custom_path_without_search(
+    tmp_path: Path,
+) -> None:
+    custom_compose = tmp_path / "compose.custom.yml"
+
+    assert _resolve_local_service_compose_file(custom_compose) == custom_compose
+
+
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_returns_captured_output_for_non_follow_success() -> None:

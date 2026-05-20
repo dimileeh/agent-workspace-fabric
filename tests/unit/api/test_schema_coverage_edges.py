@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from awf.api import schemas as api_schemas
 
@@ -18,6 +19,12 @@ def test_workspace_validation_accepts_non_empty_command_entries() -> None:
     request = api_schemas.WorkspaceValidation.model_validate({"commands": ["pytest -q"]})
 
     assert request.commands == ["pytest -q"]
+
+
+@pytest.mark.unit
+def test_workspace_create_payload_without_legacy_repo_url_uses_normal_validation() -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCreateRequest.model_validate({"task_title": "Missing repo"})
 
 
 @pytest.mark.unit
