@@ -2469,7 +2469,6 @@ class ControlWorker:
         candidate_after: SchedulerOrderCursor | None = None
         scoring_at = datetime.now(UTC)
         decided_at = datetime.now(UTC)
-        saw_requested_candidates = False
 
         while len(claimed) < self._config.max_concurrent_provisions:
             workspaces = await repo.list_schedulable_workspaces(
@@ -2481,7 +2480,6 @@ class ControlWorker:
             if not workspaces:
                 break
 
-            saw_requested_candidates = True
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
             page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
                 session,
@@ -2515,9 +2513,6 @@ class ControlWorker:
             )
             if candidate_after is None:
                 break
-
-        if not saw_requested_candidates:
-            await self._log_stale_requested_claims(session, workspace_ids)
 
         return claimed
 

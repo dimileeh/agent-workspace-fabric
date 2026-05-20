@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import structlog
 from sqlalchemy import event, select, update
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1560,6 +1561,64 @@ class TestRunOnce:
             decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
 
         assert decisions == []
+
+    @pytest.mark.unit
+    async def test_capacity_requested_race_does_not_log_prelock_stale_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-race-requested-log",
+            create_task_attempt=True,
+        )
+
+        class _UnexpectedProvisioner:
+            async def provision(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+            async def provision_claimed(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_UnexpectedProvisioner(),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=4.0,
+            ),
+        )
+
+        async def _race_after_filter(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            async with session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.transition_if_current(
+                    requested_id,
+                    from_status=WorkspaceStatus.requested,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="OTHER_WORKER_CLAIMED",
+                )
+                assert ws is not None
+                await session.commit()
+            return [requested_id]
+
+        worker._filter_current_status = _race_after_filter  # type: ignore[method-assign]
+
+        with structlog.testing.capture_logs() as captured:
+            assert await worker.run_once() == 0
+
+        assert not any(event.get("event") == "worker.skip_stale_dispatch" for event in captured)
 
     @pytest.mark.unit
     async def test_requested_ordered_decision_failure_prevents_provision_dispatch(
