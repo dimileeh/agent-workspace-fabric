@@ -1038,7 +1038,13 @@ def _init_env_error_payload(
 
 
 def _compose_root_env_file(env_file: Path) -> Path | None:
-    """Return the root `.env` paired with the local Compose env file."""
+    """Return the root `.env` paired with a verified local Compose env file.
+
+    Relative env-file paths come from the no-asset-root fallback used outside an
+    AWF source checkout. They are intentionally not treated as local Compose
+    asset paths, which keeps root-env fallback and `--env-file` forwarding tied
+    to absolute paths resolved from the verified bootstrap asset root.
+    """
 
     if not env_file.is_absolute():
         return None

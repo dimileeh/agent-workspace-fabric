@@ -6,6 +6,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -793,6 +795,37 @@ services:
 
 
 @pytest.mark.unit
+def test_compose_interpolation_environ_preserves_case_distinct_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Case-distinct Compose variables need exact subprocess env keys."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      LOWER: "${my_var:?set my_var}"
+      UPPER: "${MY_VAR:?set MY_VAR}"
+""",
+    )
+    service_environ = {"MY_VAR": "service-value"}
+
+    monkeypatch.delenv("MY_VAR", raising=False)
+    monkeypatch.delenv("my_var", raising=False)
+
+    env = service_environment.compose_interpolation_environ(
+        service_environ,
+        compose_file=compose_file,
+        compose_env_file=None,
+    )
+
+    assert env == {"MY_VAR": "service-value", "my_var": "service-value"}
+
+
+@pytest.mark.unit
 def test_service_logs_ignores_unclosed_braced_compose_interpolation(tmp_path: Path) -> None:
     """Malformed braced expressions should not be treated as Compose inputs."""
     from awf.service import environment as service_environment
@@ -951,6 +984,67 @@ services:
 
     assert lock.enter_count >= 2
     assert lock.exit_count == lock.enter_count
+
+
+@pytest.mark.unit
+def test_service_logs_compose_interpolation_cache_serializes_concurrent_misses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHE_TOKEN:?set AWF_CACHE_TOKEN}"
+""",
+    )
+    original_safe_load = service_environment.yaml.safe_load
+    active_parses = 0
+    max_active_parses = 0
+    parse_lock = threading.Lock()
+
+    def _safe_load(payload: str) -> object:
+        nonlocal active_parses, max_active_parses
+        with parse_lock:
+            active_parses += 1
+            max_active_parses = max(max_active_parses, active_parses)
+        try:
+            time.sleep(0.05)
+            return original_safe_load(payload)
+        finally:
+            with parse_lock:
+                active_parses -= 1
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    monkeypatch.setattr(service_environment.yaml, "safe_load", _safe_load)
+
+    errors: list[BaseException] = []
+    results: list[tuple[str, ...]] = []
+    start = threading.Barrier(4)
+
+    def _worker() -> None:
+        try:
+            start.wait(timeout=2)
+            results.append(service_environment.compose_interpolation_keys(compose_file))
+        except BaseException as exc:  # pragma: no cover - re-raised by the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    assert results == [("AWF_CACHE_TOKEN",)] * 4
+    assert max_active_parses == 1
 
 
 @pytest.mark.unit

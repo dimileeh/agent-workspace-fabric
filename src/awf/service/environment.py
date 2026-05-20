@@ -180,24 +180,19 @@ def _cached_compose_interpolation_keys(
             _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
             return cached
 
-    try:
-        payload: object = yaml.safe_load(contents)
-    except yaml.YAMLError:
-        keys: tuple[str, ...] = ()
-    else:
-        collected_keys: set[str] = set()
-        _collect_compose_interpolation_keys(payload, collected_keys)
-        keys = tuple(sorted(collected_keys))
+        try:
+            payload: object = yaml.safe_load(contents)
+        except yaml.YAMLError:
+            keys: tuple[str, ...] = ()
+        else:
+            collected_keys: set[str] = set()
+            _collect_compose_interpolation_keys(payload, collected_keys)
+            keys = tuple(sorted(collected_keys))
 
-    with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
-        cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
-        if cached is not None:
-            _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
-            return cached
         _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
         if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
             _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
-    return keys
+        return keys
 
 
 def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
