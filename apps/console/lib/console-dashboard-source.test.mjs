@@ -22,7 +22,7 @@ test("capacity panel only shows oldest queued fact when the queue is populated",
 
   assert.match(
     panelSource,
-    /saturation\.capacity_queue\.queued_workspace_count > 0 \|\|\s*saturation\.capacity_queue\.oldest_wait_seconds !== null/,
+    /saturation\.capacity_queue\.queued_workspace_count > 0 &&\s*saturation\.capacity_queue\.oldest_wait_seconds !== null/,
   );
 });
 

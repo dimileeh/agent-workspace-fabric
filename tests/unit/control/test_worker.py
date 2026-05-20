@@ -1930,6 +1930,7 @@ class TestRunOnce:
             in unreserved_select
         )
         assert "anon_1.workspace_id is null" in unreserved_select
+        assert "order by workspaces.id" in unreserved_select
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(

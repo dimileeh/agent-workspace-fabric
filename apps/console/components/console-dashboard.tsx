@@ -2450,8 +2450,8 @@ function ResourceCapacityPanel({
   const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
   const showOldestQueued =
     saturation !== null &&
-    (saturation.capacity_queue.queued_workspace_count > 0 ||
-      saturation.capacity_queue.oldest_wait_seconds !== null);
+    saturation.capacity_queue.queued_workspace_count > 0 &&
+    saturation.capacity_queue.oldest_wait_seconds !== null;
 
   return (
     <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>

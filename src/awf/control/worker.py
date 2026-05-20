@@ -3455,6 +3455,7 @@ async def _add_unreserved_active_workspace_defaults(
             or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
             active_reservation_workspace_ids.c.workspace_id.is_(None),
         )
+        .order_by(Workspace.id)
     )
     for workspace_id, resolved_profile in await session.execute(stmt):
         allocated.add(
