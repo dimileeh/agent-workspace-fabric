@@ -6968,7 +6968,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert operations == []
 
     @pytest.mark.unit
-    async def test_preserved_active_validation_salvage_without_executor_does_not_block_stale_failure(
+    async def test_preserved_active_validation_salvage_without_executor_blocks_stale_cleanup(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -6979,14 +6979,17 @@ class TestRunOnceStaleActiveExecutionRecovery:
             "preserved-validation-event-no-executor",
             WorkspaceStatus.running,
             compose_project_name="awf_preserved_validation_event_no_executor",
+            create_task_attempt=True,
         )
         async with session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
             ws.execution_claimed_by = "stale-worker"
             ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=25)
-            await repo.add_event(
+            preserved_event = await repo.add_event(
                 ws,
                 event_type=PRESERVED_EXECUTION_EVENT_TYPE,
                 reason_code=PRESERVED_EXECUTION_REASON_CODE,
@@ -7002,6 +7005,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 payload={
                     "workspace_status": WorkspaceStatus.running.value,
                     "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
                 },
             )
             await repo.add_event(
@@ -7014,7 +7018,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 },
             )
             await s.commit()
+            attempt_id = attempt.id
+            task_id = attempt.task_id
 
+        cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -7022,21 +7029,41 @@ class TestRunOnceStaleActiveExecutionRecovery:
             runtime_inspector=_RecordingRuntimeInspector(
                 {"awf_preserved_validation_event_no_executor": _live_agent_snapshot()}
             ),
-            runtime_cleaner=_RecordingRuntimeCleaner(),
+            runtime_cleaner=cleaner,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 active_execution_preservation_grace_seconds=0.0,
             ),
         )
-
-        assert await worker._stale_active_execution_can_fail(  # noqa: SLF001
-            _ActiveExecutionCandidate(
-                workspace_id=workspace_id,
-                status=WorkspaceStatus.running,
-                repo_url=str(origin_repo),
-                compose_project_name="awf_preserved_validation_event_no_executor",
-            )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_preserved_validation_event_no_executor",
         )
+
+        await worker._recover_stale_active_execution(candidate)  # noqa: SLF001
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_salvage_blocked"
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["blocked_reason"] == "validation_executor_unavailable"
+        assert blocked_payload["attempt_id"] == attempt_id
+        assert blocked_payload["task_id"] == task_id
+        assert blocked_payload["preservation_expired"] is True
+        assert operations == []
+        assert cleaner.calls == []
 
     @pytest.mark.unit
     async def test_preserved_active_validation_slot_exhaustion_after_grace_does_not_block_stale_failure(

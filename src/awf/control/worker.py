@@ -1841,7 +1841,15 @@ class ControlWorker:
                 if dispatched or candidate.workspace_id in self._execution_tasks:
                     return True
                 if self._executor is None:
-                    return False
+                    await self._record_preserved_active_salvage_blocked(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_executor_unavailable",
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        preservation_expired=preservation_expired,
+                    )
+                    return True
                 if self._available_execution_slots() <= 0:
                     return (
                         not preservation_expired
