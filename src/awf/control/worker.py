@@ -3016,7 +3016,6 @@ class ControlWorker:
             .select_from(Operation)
             .where(
                 Operation.workspace_id == workspace_id,
-                Operation.type == OperationType.validate.value,
                 Operation.status.in_(
                     (
                         OperationStatus.pending.value,
@@ -3024,7 +3023,16 @@ class ControlWorker:
                     )
                 ),
                 Operation.payload["source"].as_string() == _ACTIVE_EXECUTION_SALVAGE_SOURCE,
-                recovery_mode.in_(("validate_only", "rebase_only")),
+                or_(
+                    and_(
+                        Operation.type == OperationType.validate.value,
+                        recovery_mode.in_(("validate_only", "rebase_only")),
+                    ),
+                    and_(
+                        Operation.type == OperationType.rebase.value,
+                        recovery_mode == "rebase_only",
+                    ),
+                ),
                 Operation.payload["reason_code"].as_string()
                 == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
             )

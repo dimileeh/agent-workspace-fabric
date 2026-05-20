@@ -7348,6 +7348,50 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
     @pytest.mark.unit
+    async def test_preserved_active_validation_recovery_lookup_includes_active_rebase_operation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-active-recovery-rebase-operation",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_active_recovery_rebase_operation",
+        )
+        async with session_factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                status=OperationStatus.running,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "rebase_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "event-current",
+                    "preservation_event": {"id": "event-current"},
+                },
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({None: _live_agent_snapshot()}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        async with session_factory() as s:
+            assert await worker._has_active_preserved_validation_recovery(  # noqa: SLF001
+                s,
+                workspace_id,
+                preservation_event_id="event-current",
+            )
+
+    @pytest.mark.unit
     async def test_preserved_active_existing_validation_recovery_redispatch_logs(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -7409,6 +7453,59 @@ class TestRunOnceStaleActiveExecutionRecovery:
             and event.get("dispatched") is True
             for event in captured
         )
+
+    @pytest.mark.unit
+    async def test_preserved_active_existing_rebase_recovery_redispatches(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-active-rebase-recovery-redispatch",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_active_rebase_recovery_redispatch",
+        )
+        async with session_factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "rebase_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "event-current",
+                    "preservation_event": {"id": "event-current"},
+                },
+            )
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_active_rebase_recovery_redispatch": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_active_rebase_recovery_redispatch",
+            )
+        )
+        await worker.wait_for_execution_tasks()
+
+        assert recovered
+        assert executor.calls == [workspace_id]
 
     @pytest.mark.unit
     async def test_preserved_active_pr_handoff_attaches_one_monitor_after_restart(
