@@ -3762,10 +3762,9 @@ async def test_record_git_object_recovery_event_persists_workspace_event(
 async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path(".awf/workspace.yml")}
-    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0.awf/workspace.yml\0")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3783,11 +3782,46 @@ async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
 
 
 @pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_blocks_protected_rename_source(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    runner.queue_result(
+        returncode=0,
+        stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
+    )
+    runner.queue_result(returncode=0)  # cat-file base:.github/workflows/ci.yml
+    runner.queue_result(returncode=0, stdout=workflow_text)
+    runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    runner.queue_result(returncode=0)  # ls-tree confirms renamed source is absent from HEAD
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_rename_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=["src/**"],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert ".github/workflows/ci.yml" in kwargs["message"]
+    assert "--name-status" in runner.calls[0].args
+    assert "-z" in runner.calls[0].args
+
+
+@pytest.mark.unit
 async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3809,10 +3843,9 @@ async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
 async def test_verify_recovered_post_agent_commit_rejects_plan_only_recovery(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("docs/awf-plans/ws_plan_only.md")}
-    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0docs/awf-plans/ws_plan_only.md\0")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3834,11 +3867,9 @@ async def test_verify_recovered_post_agent_commit_rejects_orphaned_history(
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0src/app.py\0")
     runner.queue_result(returncode=1, stderr="not an ancestor")
     executor = _executor_with_runner(runner, tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("src/app.py")}
-    )
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3860,11 +3891,9 @@ async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0src/app.py\0")
     runner.queue_result(returncode=0)
     executor = _executor_with_runner(runner, tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("src/app.py")}
-    )
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert await executor._verify_recovered_post_agent_commit(
@@ -3876,6 +3905,41 @@ async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
     )
 
     executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_committed_quality_gate_guard_blocks_protected_rename_source(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    runner.queue_result(
+        returncode=0,
+        stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
+    )
+    runner.queue_result(returncode=0)  # cat-file base:.github/workflows/ci.yml
+    runner.queue_result(returncode=0, stdout=workflow_text)
+    runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    runner.queue_result(returncode=0)  # ls-tree confirms renamed source is absent from HEAD
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    blocked = await executor._fail_if_protected_quality_gate_committed_output(
+        workspace_id="ws_rename_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=["src/**"],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    assert blocked is True
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert ".github/workflows/ci.yml" in kwargs["message"]
+    assert "--name-status" in runner.calls[0].args
+    assert "-z" in runner.calls[0].args
 
 
 @pytest.mark.unit
@@ -4004,6 +4068,60 @@ async def test_committed_paths_since_raises_when_git_diff_fails(tmp_path: Path) 
 
     with pytest.raises(RuntimeError, match="git diff --name-only failed"):
         await executor._committed_paths_since(tmp_path / "worktree", "baseline-sha")
+
+
+@pytest.mark.unit
+async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # cat-file base-sha:.github/workflows/ci.yml
+    runner.queue_result(returncode=0, stdout="base workflow\n")
+    runner.queue_result(returncode=0)  # cat-file :.github/workflows/ci.yml
+    runner.queue_result(returncode=0, stdout="staged workflow\n")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    diffs = await executor._protected_file_diffs_for_staged_paths(
+        worktree_path=tmp_path / "worktree",
+        base_ref="base-sha",
+        changed_paths=[".github/workflows/ci.yml"],
+    )
+
+    assert diffs[".github/workflows/ci.yml"].old_text == "base workflow\n"
+    assert diffs[".github/workflows/ci.yml"].new_text == "staged workflow\n"
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "base-sha:.github/workflows/ci.yml"],
+        ["show", "base-sha:.github/workflows/ci.yml"],
+        ["cat-file", "-e", ":.github/workflows/ci.yml"],
+        ["show", ":.github/workflows/ci.yml"],
+    ]
+
+
+@pytest.mark.unit
+async def test_staged_protected_file_diffs_treat_deleted_index_path_as_absent(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # cat-file base-sha:pyproject.toml
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner.queue_result(returncode=128, stderr="fatal: path 'pyproject.toml' is not in the index")
+    runner.queue_result(returncode=0)  # ls-files confirms deleted index path is absent
+    executor = _executor_with_runner(runner, tmp_path)
+
+    diffs = await executor._protected_file_diffs_for_staged_paths(
+        worktree_path=tmp_path / "worktree",
+        base_ref="base-sha",
+        changed_paths=["pyproject.toml"],
+    )
+
+    assert diffs["pyproject.toml"].old_text == '[project]\nname = "demo"\n'
+    assert diffs["pyproject.toml"].new_text is None
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "base-sha:pyproject.toml"],
+        ["show", "base-sha:pyproject.toml"],
+        ["cat-file", "-e", ":pyproject.toml"],
+        ["ls-files", "--stage", "-z", "--", ":(literal)pyproject.toml"],
+    ]
 
 
 @pytest.mark.unit

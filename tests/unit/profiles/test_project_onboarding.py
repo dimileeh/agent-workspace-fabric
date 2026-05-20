@@ -14,6 +14,7 @@ from awf.profiles.models import (
     DockerMode,
     EgressMode,
     ProfileEgress,
+    ProfileResolution,
     ProfileSecurity,
     WorkspaceProfile,
 )
@@ -387,6 +388,22 @@ def test_preview_workspace_profile_populates_diagnostics_for_disk_profiles(tmp_p
     assert preview.diagnostics.missing_secrets == ("API_TOKEN",)
     assert preview.diagnostics.missing_ports == ("api",)
     assert preview.diagnostics.missing_healthchecks == ("api",)
+
+
+@pytest.mark.unit
+def test_preview_workspace_profile_falls_back_to_generated_yaml_for_non_repo_source(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile(name="generic", source="onboarding:generic")
+    resolution = ProfileResolution(
+        profile=profile,
+        network_posture="restricted",
+        reason="synthetic profile",
+    )
+
+    preview = preview_workspace_profile(tmp_path, resolution)
+
+    assert preview.draft.yaml == onboarding_module._profile_yaml(profile)  # noqa: SLF001
 
 
 @pytest.mark.unit

@@ -872,6 +872,14 @@ async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
     fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # repair changed gate file
+    fake.queue_result(
+        returncode=0,
+        stdout="[tool.coverage.report]\nfail_under = 99\n",
+    )  # old protected gate content
+    fake.queue_result(
+        returncode=0,
+        stdout="[tool.coverage.report]\nfail_under = 90\n",
+    )  # staged protected gate content
 
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)

@@ -116,7 +116,7 @@ def _is_docker_down(args: list[str]) -> bool:
 
 
 def _is_git_push(args: list[str]) -> bool:
-    return len(args) >= 4 and args[0] == "git" and args[3] == "push"
+    return args[:1] == ["git"] and "push" in args
 
 
 def _is_resolve_thread(args: list[str]) -> bool:

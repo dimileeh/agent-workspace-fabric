@@ -46,12 +46,23 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
+from awf.control.protected_file_diffs import (
+    changed_paths_from_name_status_z as _parse_name_status_z,
+)
+from awf.control.protected_file_diffs import (
+    git_show_text,
+    protected_file_diffs_for_committed_paths,
+)
 from awf.control.quality_gates import (
+    ProtectedFileDiff,
     QualityGateViolation,
+    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
+    quality_gate_violation_details,
     quality_gate_violation_message,
 )
 from awf.control.state_machine import WorkspaceStateMachine
@@ -141,6 +152,16 @@ from awf.service.provider_recovery import (
 )
 
 _log = get_logger(__name__)
+
+
+def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
+    return [
+        "git",
+        *git_safe_directory_config_args(worktree_path),
+        "-C",
+        str(worktree_path),
+        *args,
+    ]
 
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
@@ -4310,7 +4331,7 @@ class PullRequestMonitorRunner:
         worktree_path = self._worktrees_root / workspace_id
 
         async def _git(*args: str) -> tuple[int, str, str]:
-            r = await self._deps.runner.run(["git", "-C", str(worktree_path), *args])
+            r = await self._deps.runner.run(_git_worktree_command(worktree_path, *args))
             return r.returncode, r.stdout, r.stderr
 
         # Defense: if a previous SyncBase attempt left the repo in a
@@ -4542,7 +4563,7 @@ class PullRequestMonitorRunner:
         if not worktree_path.exists():
             return False
         status = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+            _git_worktree_command(worktree_path, "status", "--porcelain")
         )
         if not status.ok:
             _log.warning(
@@ -4577,7 +4598,7 @@ class PullRequestMonitorRunner:
                 return False
             status = repaired_status
 
-        add = await self._deps.runner.run(["git", "-C", str(worktree_path), "add", "-A"])
+        add = await self._deps.runner.run(_git_worktree_command(worktree_path, "add", "-A"))
         if not add.ok:
             _log.warning(
                 "monitor.dirty_add_failed",
@@ -4587,13 +4608,13 @@ class PullRequestMonitorRunner:
             return False
 
         cached = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "diff", "--cached", "--quiet"]
+            _git_worktree_command(worktree_path, "diff", "--cached", "--quiet")
         )
         if cached.returncode == 0:
             return False
 
         commit = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "commit", "-m", message]
+            _git_worktree_command(worktree_path, "commit", "-m", message)
         )
         if not commit.ok:
             _log.warning(
@@ -4637,7 +4658,7 @@ class PullRequestMonitorRunner:
             )
 
         violations = list(protected_scope_block.violations)
-        paths = [violation.path for violation in violations]
+        paths = _quality_gate_violation_paths(violations)
         prompt = await self._protected_scope_committed_repair_prompt(
             workspace_id=workspace_id,
             violations=violations,
@@ -4659,6 +4680,7 @@ class PullRequestMonitorRunner:
                 "phase": "pre_push_committed_diff",
                 "paths": paths,
                 "protected_patterns": [violation.protected_pattern for violation in violations],
+                "violations": quality_gate_violation_details(violations),
                 "message": protected_scope_block.message,
             },
         )
@@ -4728,7 +4750,7 @@ class PullRequestMonitorRunner:
             )
             if not committed_dirty_changes:
                 dirty_status = await self._deps.runner.run(
-                    ["git", "-C", str(worktree_path), "status", "--porcelain"]
+                    _git_worktree_command(worktree_path, "status", "--porcelain")
                 )
                 if not dirty_status.ok or dirty_status.stdout.strip():
                     _log.error(
@@ -4840,7 +4862,7 @@ class PullRequestMonitorRunner:
         _log.warning(
             "monitor.protected_scope_repair_requested",
             workspace_id=workspace_id,
-            paths=[violation.path for violation in violations],
+            paths=_quality_gate_violation_paths(violations),
         )
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
@@ -4859,7 +4881,7 @@ class PullRequestMonitorRunner:
 
         worktree_path = self._worktrees_root / workspace_id
         repaired_status = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+            _git_worktree_command(worktree_path, "status", "--porcelain")
         )
         if not repaired_status.ok:
             return None
@@ -4882,7 +4904,7 @@ class PullRequestMonitorRunner:
             _log.warning(
                 "monitor.protected_scope_repair_failed",
                 workspace_id=workspace_id,
-                paths=[violation.path for violation in remaining],
+                paths=_quality_gate_violation_paths(remaining),
                 cli_failed=agent_run_err is not None,
             )
             await self._append_workspace_events(
@@ -4892,10 +4914,11 @@ class PullRequestMonitorRunner:
                         event_type="workspace.monitor_protected_scope_repair_failed",
                         reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
                         payload={
-                            "paths": [violation.path for violation in remaining],
+                            "paths": _quality_gate_violation_paths(remaining),
                             "protected_patterns": [
                                 violation.protected_pattern for violation in remaining
                             ],
+                            "violations": quality_gate_violation_details(remaining),
                             "message": quality_gate_violation_message(remaining),
                         },
                     )
@@ -4905,7 +4928,7 @@ class PullRequestMonitorRunner:
         _log.info(
             "monitor.protected_scope_repair_succeeded",
             workspace_id=workspace_id,
-            paths=[violation.path for violation in violations],
+            paths=_quality_gate_violation_paths(violations),
         )
         return repaired_status
 
@@ -4928,6 +4951,7 @@ class PullRequestMonitorRunner:
         fetch_result = await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",
@@ -4956,6 +4980,7 @@ class PullRequestMonitorRunner:
                 remote_blob_result = await self._deps.runner.run(
                     [
                         "git",
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
                         str(worktree_path),
                         "rev-parse",
@@ -4969,6 +4994,7 @@ class PullRequestMonitorRunner:
                 worktree_blob_result = await self._deps.runner.run(
                     [
                         "git",
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
                         str(worktree_path),
                         "hash-object",
@@ -5001,6 +5027,7 @@ class PullRequestMonitorRunner:
             diff_result = await self._deps.runner.run(
                 [
                     "git",
+                    *git_safe_directory_config_args(worktree_path),
                     "-C",
                     str(worktree_path),
                     "diff",
@@ -5052,9 +5079,21 @@ class PullRequestMonitorRunner:
             if workspace is None:
                 return []
             owned_paths = list(workspace.owned_paths)
+        try:
+            protected_file_diffs = await self._protected_file_diffs_for_status_paths(
+                worktree_path=self._worktrees_root / workspace_id,
+                changed_paths=changed_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read dirty protected-scope file contents "
+                "for validation before commit: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _protected_scope_violations_for_unpushed_commits(
@@ -5074,16 +5113,30 @@ class PullRequestMonitorRunner:
                 )
             owned_paths = list(workspace.owned_paths)
 
-        changed_paths = await self._changed_paths_since_remote_branch(
+        local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
         )
         if not changed_paths:
             return []
+        try:
+            protected_file_diffs = await protected_file_diffs_for_committed_paths(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                base_ref=local_base,
+                changed_paths=changed_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read committed protected-scope file contents "
+                "against the remote PR branch for validation: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _changed_paths_since_remote_branch(
@@ -5093,10 +5146,25 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         remote_push_url: str | None = None,
     ) -> tuple[str, ...]:
+        _, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        return changed_paths
+
+    async def _remote_branch_diff_base_and_changed_paths(
+        self,
+        *,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
         remote = remote_push_url or "origin"
         fetch_result = await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",
@@ -5117,11 +5185,12 @@ class PullRequestMonitorRunner:
             ref="FETCH_HEAD",
             error_context="against the remote PR branch",
         )
-        return await self._changed_paths_between_ref_and_head(
+        changed_paths = await self._changed_paths_between_ref_and_head(
             worktree_path=worktree_path,
             ref=local_base,
             error_context="against the remote PR branch",
         )
+        return local_base, changed_paths
 
     async def _merge_base_with_head(
         self,
@@ -5131,7 +5200,15 @@ class PullRequestMonitorRunner:
         error_context: str,
     ) -> str:
         merge_base_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "merge-base", ref, "HEAD"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "merge-base",
+                ref,
+                "HEAD",
+            ]
         )
         merge_base = merge_base_result.stdout.strip()
         if not merge_base_result.ok or not merge_base:
@@ -5153,7 +5230,17 @@ class PullRequestMonitorRunner:
     ) -> tuple[str, ...]:
         diff_spec = f"{ref}..HEAD"
         diff_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "diff", "--name-only", diff_spec, "--"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "diff",
+                "--name-status",
+                "-z",
+                diff_spec,
+                "--",
+            ]
         )
         if not diff_result.ok:
             raise ProtectedScopeDiffError(
@@ -5163,7 +5250,37 @@ class PullRequestMonitorRunner:
                 f"stdout={diff_result.stdout.strip() or '<empty>'} "
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
-        return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
+        try:
+            return _changed_paths_from_name_status_z(diff_result.stdout)
+        except ProtectedScopeDiffError as exc:
+            raise ProtectedScopeDiffError(
+                f"Could not parse committed diff {error_context} "
+                f"for protected-scope validation: {exc}"
+            ) from exc
+
+    async def _protected_file_diffs_for_status_paths(
+        self,
+        *,
+        worktree_path: Path,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in diff_classified_protected_paths(changed_paths):
+            worktree_file = worktree_path / path
+            old_text = await git_show_text(
+                self._deps.runner, worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            )
+            new_text = (
+                _read_worktree_text(worktree_file, display_path=path)
+                if worktree_file.exists()
+                else None
+            )
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+            )
+        return diffs
 
     async def _protected_scope_violations_for_sync_base_push(
         self,
@@ -5183,7 +5300,10 @@ class PullRequestMonitorRunner:
                 )
             owned_paths = list(workspace.owned_paths)
 
-        changed_from_remote = await self._changed_paths_since_remote_branch(
+        (
+            remote_branch_base,
+            changed_from_remote,
+        ) = await self._remote_branch_diff_base_and_changed_paths(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
@@ -5221,9 +5341,23 @@ class PullRequestMonitorRunner:
         )
         if not sync_base_authored_paths:
             return []
+        try:
+            protected_file_diffs = await protected_file_diffs_for_committed_paths(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                base_ref=remote_branch_base,
+                changed_paths=sync_base_authored_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read sync-base protected-scope file contents "
+                "against the remote PR branch for validation: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=sync_base_authored_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
 
     async def _protected_scope_diff_unavailable_block(
@@ -5321,10 +5455,11 @@ class PullRequestMonitorRunner:
                     event_type="workspace.monitor_protected_scope_push_blocked",
                     reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
                     payload={
-                        "paths": [violation.path for violation in violations],
+                        "paths": _quality_gate_violation_paths(violations),
                         "protected_patterns": [
                             violation.protected_pattern for violation in violations
                         ],
+                        "violations": quality_gate_violation_details(violations),
                         "message": message,
                     },
                 )
@@ -5399,7 +5534,10 @@ class PullRequestMonitorRunner:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             owned_paths = list(workspace.owned_paths) if workspace is not None else []
         paths = "\n".join(
-            f"  - {violation.path} (protected by {violation.protected_pattern})"
+            "  - "
+            f"{violation.path} :: {violation.section or violation.protected_pattern} :: "
+            f"line {violation.line if violation.line is not None else 'unknown'} :: "
+            f"{violation.reason}"
             for violation in violations
         )
         owned = "\n".join(f"  - {path}" for path in owned_paths) or "  - (none declared)"
@@ -5474,6 +5612,7 @@ class PullRequestMonitorRunner:
         return await self._deps.runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "fetch",
@@ -5503,7 +5642,7 @@ class PullRequestMonitorRunner:
             )
             return False
         delete_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "update-ref", "-d", broken_ref]
+            _git_worktree_command(worktree_path, "update-ref", "-d", broken_ref)
         )
         if not delete_result.ok:
             _log.warning(
@@ -5513,7 +5652,7 @@ class PullRequestMonitorRunner:
                 stderr=(delete_result.stderr or "")[:400],
             )
             return False
-        await self._deps.runner.run(["git", "-C", str(worktree_path), "worktree", "prune"])
+        await self._deps.runner.run(_git_worktree_command(worktree_path, "worktree", "prune"))
         await self._append_workspace_events(
             workspace_id=workspace_id,
             events=[
@@ -5538,14 +5677,12 @@ class PullRequestMonitorRunner:
 
     async def _count_base_behind(self, *, worktree_path: Path, base_branch: str) -> int:
         r = await self._deps.runner.run(
-            [
-                "git",
-                "-C",
-                str(worktree_path),
+            _git_worktree_command(
+                worktree_path,
                 "rev-list",
                 "--count",
                 f"HEAD..origin/{base_branch}",
-            ]
+            )
         )
         if not r.ok:
             raise BaseBehindCountError(_git_failure_message("git rev-list base behind", r))
@@ -5557,7 +5694,7 @@ class PullRequestMonitorRunner:
             ) from exc
 
     async def _rev_parse_head(self, worktree_path: Path) -> str:
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+        r = await self._deps.runner.run(_git_worktree_command(worktree_path, "rev-parse", "HEAD"))
         return r.stdout.strip() if r.ok else ""
 
     async def _git_push(
@@ -5628,7 +5765,9 @@ class PullRequestMonitorRunner:
                 returncode=1,
                 stderr=policy_block_message,
             )
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
+        r = await self._deps.runner.run(
+            _git_worktree_command(worktree_path, "push", remote, refspec)
+        )
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()
@@ -5670,19 +5809,17 @@ class PullRequestMonitorRunner:
         )
         if remote_url:
             fetch_result = await self._deps.runner.run(
-                [
-                    "git",
-                    "-C",
-                    str(worktree_path),
+                _git_worktree_command(
+                    worktree_path,
                     "fetch",
                     remote_url,
                     f"refs/heads/{remote_branch}",
-                ]
+                )
             )
             reset_target = "FETCH_HEAD"
         else:
             fetch_result = await self._deps.runner.run(
-                ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
+                _git_worktree_command(worktree_path, "fetch", "origin", remote_branch)
             )
             reset_target = f"origin/{remote_branch}"
         if not fetch_result.ok:
@@ -5705,7 +5842,7 @@ class PullRequestMonitorRunner:
                 stderr=stderr,
             )
         await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "reset", "--hard", reset_target]
+            _git_worktree_command(worktree_path, "reset", "--hard", reset_target)
         )
         return _GitPushResult(
             pushed=False,
@@ -7491,6 +7628,32 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
+    """Extract changed paths from ``git diff --name-status -z`` output."""
+    try:
+        return _parse_name_status_z(diff_stdout)
+    except ValueError as exc:
+        raise ProtectedScopeDiffError(str(exc)) from exc
+
+
+def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
+    return list(dict.fromkeys(violation.path for violation in violations))
+
+
+def _read_worktree_text(path: Path, *, display_path: str | None = None) -> str:
+    label = display_path or str(path)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProtectedScopeDiffError(
+            f"Could not read protected worktree file {label!r} as UTF-8 for classification"
+        ) from exc
+    except OSError as exc:
+        raise ProtectedScopeDiffError(
+            f"Could not read protected worktree file {label!r} for classification: {exc}"
+        ) from exc
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
