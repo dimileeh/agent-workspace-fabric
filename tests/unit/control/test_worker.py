@@ -1552,6 +1552,94 @@ class TestRunOnce:
         assert allocated.dind_slots == 1
 
     @pytest.mark.unit
+    async def test_capacity_gate_active_reservation_presence_uses_deduplicated_joins(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        reserved_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "reserved-join-capacity-holder",
+            create_task_attempt=True,
+        )
+        unreserved_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "unreserved-join-capacity-holder",
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            reserved = await repo.get(reserved_id)
+            unreserved = await repo.get(unreserved_id)
+            assert reserved is not None
+            assert unreserved is not None
+            reserved.node_id = "worker-node-a"
+            unreserved.node_id = "worker-node-a"
+            await s.commit()
+        await _reserve_workspace(
+            session_factory,
+            reserved_id,
+            node_id="worker-node-b",
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        statements: list[str] = []
+
+        def _capture_select(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from workspaces " in normalized:
+                statements.append(normalized)
+
+        engine = session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_select)
+        try:
+            async with session_factory() as s:
+                mismatched_allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
+                unreserved_allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
+                await worker_module._add_mismatched_node_active_workspace_reservations(  # noqa: SLF001
+                    s,
+                    reservation_repo=ResourceReservationRepository(s),
+                    allocated=mismatched_allocated,
+                    node_id="worker-node-a",
+                )
+                await worker_module._add_unreserved_active_workspace_defaults(  # noqa: SLF001
+                    s,
+                    allocated=unreserved_allocated,
+                    config=WorkerConfig(),
+                    node_id="worker-node-a",
+                )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture_select)
+
+        assert mismatched_allocated.workspace_count == 1
+        assert unreserved_allocated.workspace_count == 1
+        mismatched_select = next(
+            statement for statement in statements if "workspaces.node_id" in statement
+        )
+        unreserved_select = next(
+            statement for statement in statements if "workspaces.resolved_profile" in statement
+        )
+        assert " exists " not in mismatched_select
+        assert " exists " not in unreserved_select
+        assert " join (select distinct resource_reservations.workspace_id" in mismatched_select
+        assert (
+            "left outer join (select distinct resource_reservations.workspace_id"
+            in unreserved_select
+        )
+        assert "anon_1.workspace_id is null" in unreserved_select
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -3285,6 +3285,15 @@ async def _allocated_totals_for_capacity_gate(
     return allocated
 
 
+def _active_reservation_workspace_ids_subquery() -> Any:
+    return (
+        select(ResourceReservation.workspace_id.label("workspace_id"))
+        .where(ResourceReservation.released_at.is_(None))
+        .distinct()
+        .subquery()
+    )
+
+
 async def _add_mismatched_node_active_workspace_reservations(
     session: AsyncSession,
     *,
@@ -3293,19 +3302,16 @@ async def _add_mismatched_node_active_workspace_reservations(
     node_id: str,
 ) -> None:
     """Count local workspaces whose latest reservation still names a prior node."""
-    active_reservation_exists = (
-        select(ResourceReservation.id)
-        .where(
-            ResourceReservation.workspace_id == Workspace.id,
-            ResourceReservation.released_at.is_(None),
-        )
-        .exists()
-    )
+    active_reservation_workspace_ids = _active_reservation_workspace_ids_subquery()
     result = await session.execute(
-        select(Workspace.id, Workspace.node_id).where(
+        select(Workspace.id, Workspace.node_id)
+        .join(
+            active_reservation_workspace_ids,
+            active_reservation_workspace_ids.c.workspace_id == Workspace.id,
+        )
+        .where(
             Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
             or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
-            active_reservation_exists,
         )
     )
     workspace_nodes_by_id = dict(result.tuples().all())
@@ -3330,18 +3336,18 @@ async def _add_unreserved_active_workspace_defaults(
     config: WorkerConfig,
     node_id: str,
 ) -> None:
-    active_reservation_exists = (
-        select(ResourceReservation.id)
-        .where(
-            ResourceReservation.workspace_id == Workspace.id,
-            ResourceReservation.released_at.is_(None),
+    active_reservation_workspace_ids = _active_reservation_workspace_ids_subquery()
+    stmt = (
+        select(Workspace.id, Workspace.resolved_profile)
+        .outerjoin(
+            active_reservation_workspace_ids,
+            active_reservation_workspace_ids.c.workspace_id == Workspace.id,
         )
-        .exists()
-    )
-    stmt = select(Workspace.id, Workspace.resolved_profile).where(
-        Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
-        or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
-        ~active_reservation_exists,
+        .where(
+            Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
+            or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
+            active_reservation_workspace_ids.c.workspace_id.is_(None),
+        )
     )
     for workspace_id, resolved_profile in await session.execute(stmt):
         allocated.add(

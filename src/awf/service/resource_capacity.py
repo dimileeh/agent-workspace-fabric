@@ -97,7 +97,7 @@ def local_capacity_blocked_condition(
 ) -> Any | None:
     if limit is None:
         return None
-    return (requested > limit) | (allocated + requested > limit)
+    return allocated + requested > limit
 
 
 def local_capacity_blocker(
