@@ -3118,7 +3118,7 @@ class ControlWorker:
                 expected_branch_name=expected_branch_name,
                 base_commit=base_commit,
             )
-        if expected_branch_name is not None and branch_name != expected_branch_name:
+        if branch_name != expected_branch_name:
             return _PreservedWorktreeClassification(
                 state="ambiguous",
                 reason="branch_mismatch",
