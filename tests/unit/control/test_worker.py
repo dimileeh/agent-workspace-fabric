@@ -1592,12 +1592,16 @@ class TestRunOnce:
             ),
         )
 
+        race_triggered = False
+
         async def _race_after_filter(
             workspace_ids: list[str],
             *,
             expected: WorkspaceStatus,
             action: str,
         ) -> list[str]:
+            nonlocal race_triggered
+            race_triggered = True
             assert workspace_ids == [requested_id]
             assert expected == WorkspaceStatus.requested
             assert action == "provision"
@@ -1618,6 +1622,7 @@ class TestRunOnce:
         with structlog.testing.capture_logs() as captured:
             assert await worker.run_once() == 0
 
+        assert race_triggered is True
         assert not any(event.get("event") == "worker.skip_stale_dispatch" for event in captured)
 
     @pytest.mark.unit
