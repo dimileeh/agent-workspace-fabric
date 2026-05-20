@@ -1867,6 +1867,9 @@ class ControlWorker:
                 classification=classification,
                 attempt_id=attempt_id,
                 task_id=task_id,
+                branch_pr_lookup=(
+                    failed_branch_lookup.payload if failed_branch_lookup is not None else None
+                ),
             )
             self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
@@ -2142,6 +2145,7 @@ class ControlWorker:
         classification: _PreservedWorktreeClassification,
         attempt_id: str,
         task_id: str,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
     ) -> None:
         idempotency_key = _active_execution_salvage_idempotency_key(
             "validate",
@@ -2168,6 +2172,21 @@ class ControlWorker:
                 ws,
                 claim_cutoff=datetime.now(UTC),
             )
+            extra: dict[str, Any] = {
+                "action": "validate_only",
+                "requested_action": OperationType.validate.value,
+                "recovery_mode": "validate_only",
+                "source_workspace_id": ws.id,
+                "source_head_sha": classification.head_sha,
+                "source_base_sha": ws.base_commit,
+                "base_commit": ws.base_commit,
+                "head_sha": classification.head_sha,
+                "branch_name": ws.branch_name,
+                "remote_branch": ws.remote_push_branch or ws.branch_name,
+                "target_branch": ws.branch_base,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
@@ -2179,19 +2198,7 @@ class ControlWorker:
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
                 classification=classification,
-                extra={
-                    "action": "validate_only",
-                    "requested_action": OperationType.validate.value,
-                    "recovery_mode": "validate_only",
-                    "source_workspace_id": ws.id,
-                    "source_head_sha": classification.head_sha,
-                    "source_base_sha": ws.base_commit,
-                    "base_commit": ws.base_commit,
-                    "head_sha": classification.head_sha,
-                    "branch_name": ws.branch_name,
-                    "remote_branch": ws.remote_push_branch or ws.branch_name,
-                    "target_branch": ws.branch_base,
-                },
+                extra=extra,
             )
             operation, _created = await OperationRepository(session).create_idempotent(
                 workspace_id=ws.id,

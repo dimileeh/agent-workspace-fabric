@@ -7145,7 +7145,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert payload["decision"] == "validate_committed_work"
             assert payload["workspace_status"] == WorkspaceStatus.pushing.value
             assert payload["head_sha"] == head_sha
-            assert "branch_pr_lookup" not in payload
+            assert payload["branch_pr_lookup"] == {
+                "branch_name": branch_name,
+                "error_type": "RuntimeError",
+                "failure": "resolver_exception",
+                "source": "open_pr_resolver",
+            }
             validate_ops = [
                 operation
                 for operation in operations
