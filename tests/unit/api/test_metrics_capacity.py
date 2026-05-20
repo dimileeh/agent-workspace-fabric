@@ -230,6 +230,53 @@ async def test_active_latest_totals_for_workspace_scope_delegates_to_repository(
 
 
 @pytest.mark.unit
+async def test_active_latest_totals_for_scheduler_allocation_scope_delegates_to_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[WorkspaceStatus | str, ...], str]] = []
+    expected = {
+        "workspace_count": 2,
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 5.0,
+        "peak_memory_gb": 6.0,
+        "disk_mb": 7,
+        "dind_slots": 1,
+    }
+
+    async def _fake_totals(
+        self: ResourceReservationRepository,
+        *,
+        statuses: tuple[WorkspaceStatus | str, ...],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        del self
+        calls.append((statuses, node_id))
+        return expected
+
+    class _NoSqlSession:
+        async def execute(self, statement: object) -> object:
+            del statement
+            raise AssertionError("metrics should delegate aggregation to repository")
+
+    monkeypatch.setattr(
+        ResourceReservationRepository,
+        "active_latest_totals_for_scheduler_allocation_scope",
+        _fake_totals,
+        raising=False,
+    )
+
+    totals = await metrics_service._active_latest_totals_for_scheduler_allocation_scope(  # noqa: SLF001
+        _NoSqlSession(),  # type: ignore[arg-type]
+        statuses=(WorkspaceStatus.running,),
+        node_id="worker-node-a",
+    )
+
+    assert totals == expected
+    assert calls == [((WorkspaceStatus.running,), "worker-node-a")]
+
+
+@pytest.mark.unit
 async def test_resource_saturation_endpoint_uses_detected_docker_capacity_when_unset(
     metrics_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,

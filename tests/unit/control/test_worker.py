@@ -1490,7 +1490,7 @@ class TestRunOnce:
         assert allocated["dind_slots"] == 1
 
     @pytest.mark.unit
-    async def test_requested_capacity_gate_counts_null_node_workspace_with_null_node_reservation(
+    async def test_requested_capacity_gate_skips_null_node_workspace_with_null_node_reservation(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1546,10 +1546,10 @@ class TestRunOnce:
                 node_id="worker-node-a",
             )
 
-        assert allocated.workspace_count == 1
-        assert allocated.peak_cpu == 6.0
-        assert allocated.peak_memory_gb == 16.0
-        assert allocated.dind_slots == 1
+        assert allocated.workspace_count == 0
+        assert allocated.peak_cpu == 0.0
+        assert allocated.peak_memory_gb == 0.0
+        assert allocated.dind_slots == 0
 
     @pytest.mark.unit
     async def test_capacity_gate_active_reservation_presence_uses_deduplicated_joins(

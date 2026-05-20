@@ -3324,7 +3324,7 @@ async def _add_mismatched_node_active_workspace_reservations(
         reservation = reservations.get(workspace_id)
         if reservation is None or reservation.node_id == node_id:
             continue
-        if workspace_nodes_by_id[workspace_id] is None and reservation.node_id is not None:
+        if workspace_nodes_by_id[workspace_id] is None:
             continue
         allocated.add(_reservation_demand_from_reservation(reservation))
 

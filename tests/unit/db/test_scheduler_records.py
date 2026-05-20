@@ -608,3 +608,113 @@ async def test_resource_reservation_active_latest_totals_for_workspace_scope_use
         "disk_mb": 1500,
         "dind_slots": 2,
     }
+
+
+@pytest.mark.unit
+async def test_resource_reservation_active_latest_totals_for_scheduler_allocation_scope(
+    session: AsyncSession,
+) -> None:
+    local_workspace_id, _local_task_id, local_attempt_id = await _attempt(session)
+    null_local_id, _null_local_task_id, null_local_attempt_id = await _attempt(session)
+    null_remote_id, _null_remote_task_id, null_remote_attempt_id = await _attempt(session)
+    remote_local_id, _remote_local_task_id, remote_local_attempt_id = await _attempt(session)
+    remote_remote_id, _remote_remote_task_id, remote_remote_attempt_id = await _attempt(session)
+    workspace_repo = WorkspaceRepository(session)
+    for workspace_id, node_id in (
+        (local_workspace_id, "node-a"),
+        (null_local_id, None),
+        (null_remote_id, None),
+        (remote_local_id, "node-b"),
+        (remote_remote_id, "node-b"),
+    ):
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        workspace.node_id = node_id
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.provisioning,
+            reason_code="SEED",
+        )
+
+    reserved_at = datetime(2026, 5, 20, 13, 0, tzinfo=UTC)
+    repo = ResourceReservationRepository(session)
+    await repo.create(
+        workspace_id=local_workspace_id,
+        attempt_id=local_attempt_id,
+        node_id="node-b",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=4.0,
+        disk_mb=100,
+        dind_slots=0,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=null_local_id,
+        attempt_id=null_local_attempt_id,
+        node_id="node-a",
+        steady_cpu=5.0,
+        steady_memory_gb=6.0,
+        peak_cpu=7.0,
+        peak_memory_gb=8.0,
+        disk_mb=200,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=null_remote_id,
+        attempt_id=null_remote_attempt_id,
+        node_id="node-b",
+        steady_cpu=11.0,
+        steady_memory_gb=12.0,
+        peak_cpu=13.0,
+        peak_memory_gb=14.0,
+        disk_mb=300,
+        dind_slots=2,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=remote_local_id,
+        attempt_id=remote_local_attempt_id,
+        node_id="node-a",
+        steady_cpu=17.0,
+        steady_memory_gb=18.0,
+        peak_cpu=19.0,
+        peak_memory_gb=20.0,
+        disk_mb=400,
+        dind_slots=3,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=remote_remote_id,
+        attempt_id=remote_remote_attempt_id,
+        node_id="node-b",
+        steady_cpu=23.0,
+        steady_memory_gb=24.0,
+        peak_cpu=25.0,
+        peak_memory_gb=26.0,
+        disk_mb=500,
+        dind_slots=4,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+
+    totals = await repo.active_latest_totals_for_scheduler_allocation_scope(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-a",
+    )
+
+    assert totals == {
+        "workspace_count": 3,
+        "steady_cpu": 23.0,
+        "steady_memory_gb": 26.0,
+        "peak_cpu": 29.0,
+        "peak_memory_gb": 32.0,
+        "disk_mb": 700,
+        "dind_slots": 4,
+    }

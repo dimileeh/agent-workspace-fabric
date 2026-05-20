@@ -1219,6 +1219,20 @@ class ResourceReservationRepository:
             return empty_resource_reservation_totals()
         return await _fetch_resource_reservation_totals(self._session, stmt)
 
+    async def active_latest_totals_for_scheduler_allocation_scope(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            scheduler_allocation_node_id=node_id,
+        )
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
 
 def empty_resource_reservation_totals() -> dict[str, float | int]:
     return {
@@ -1250,6 +1264,7 @@ def _active_latest_resource_reservation_totals_stmt(
     statuses: Iterable[WorkspaceStatus | str] | None = None,
     reservation_node_id: str | None = None,
     workspace_node_id: str | None = None,
+    scheduler_allocation_node_id: str | None = None,
 ) -> Select[tuple[Any, ...]] | None:
     status_filter = _active_resource_reservation_status_filter(statuses)
     if status_filter is None:
@@ -1258,6 +1273,7 @@ def _active_latest_resource_reservation_totals_stmt(
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
             ResourceReservation.node_id.label("node_id"),
+            Workspace.node_id.label("workspace_node_id"),
             ResourceReservation.steady_cpu.label("steady_cpu"),
             ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
             ResourceReservation.peak_cpu.label("peak_cpu"),
@@ -1306,6 +1322,13 @@ def _active_latest_resource_reservation_totals_stmt(
     )
     if reservation_node_id is not None:
         stmt = stmt.where(latest_active_reservations.c.node_id == reservation_node_id)
+    if scheduler_allocation_node_id is not None:
+        stmt = stmt.where(
+            or_(
+                latest_active_reservations.c.node_id == scheduler_allocation_node_id,
+                latest_active_reservations.c.workspace_node_id == scheduler_allocation_node_id,
+            )
+        )
     return stmt
 
 
