@@ -2724,16 +2724,13 @@ class ControlWorker:
                 base_branch=base_branch,
             )
         except Exception as exc:
-            return _BranchOpenPRLookup(
+            _log.warning(
+                "worker.preserved_active_open_pr_lookup_failed",
                 branch_name=lookup_branch,
-                state="ambiguous",
-                ambiguity_reason="open_pr_lookup_failed",
-                payload={
-                    "branch_name": lookup_branch,
-                    "error": str(exc),
-                    "source": "open_pr_resolver",
-                },
+                base_branch=base_branch,
+                error_type=type(exc).__name__,
             )
+            return None
 
         try:
             summaries = [

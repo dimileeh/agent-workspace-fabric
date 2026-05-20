@@ -6882,18 +6882,120 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_pr_lookup_failure_falls_back_to_worktree_salvage(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushed-branch-pr-lookup-failure",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pr_lookup_failure",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work-pr-lookup-failure"
+        branch_name = f"awf/{workspace_id}"
+        _worktree, base_commit, head_sha = _seed_workspace_worktree(
+            worktrees_root=work_root / "worktrees",
+            origin=origin_repo,
+            workspace_id=workspace_id,
+            branch_name=branch_name,
+            commit_change=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.base_commit = base_commit
+            ws.branch_name = branch_name
+            ws.remote_push_branch = branch_name
+            await s.commit()
+
+        resolver = _RecordingBranchOpenPRResolver({branch_name: RuntimeError("gh pr list failed")})
+        executor = _BlockingExecutor()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_pr_lookup_failure": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        try:
+            await worker.run_once()
+            await asyncio.wait_for(executor.started.wait(), timeout=5.0)
+
+            async with session_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                operator_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_operator_required",
+                )
+                stale_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.stale_active_execution_detected",
+                )
+                salvage_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_validation_requested",
+                )
+                operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.subphase == "runtime_preserved_validation_requested"
+            assert operator_events == []
+            assert stale_events == []
+            assert len(salvage_events) == 1
+            payload = salvage_events[0].payload
+            assert payload is not None
+            assert payload["decision"] == "validate_committed_work"
+            assert payload["workspace_status"] == WorkspaceStatus.pushing.value
+            assert payload["head_sha"] == head_sha
+            assert "branch_pr_lookup" not in payload
+            validate_ops = [
+                operation
+                for operation in operations
+                if operation.type == OperationType.validate.value
+                and operation.payload is not None
+                and operation.payload.get("source") == "worker_restart"
+            ]
+            assert len(validate_ops) == 1
+            assert validate_ops[0].payload is not None
+            assert validate_ops[0].payload["source_head_sha"] == head_sha
+            assert resolver.calls == [
+                {
+                    "repo_url": str(origin_repo),
+                    "branch_name": branch_name,
+                    "base_branch": "development",
+                }
+            ]
+            assert executor.calls == [workspace_id]
+            assert cleaner.calls == []
+        finally:
+            executor.release.set()
+            await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("lookup_result", "ambiguity_reason", "lookup_payload"),
         [
-            (
-                RuntimeError("gh pr list failed"),
-                "open_pr_lookup_failed",
-                {
-                    "branch_name": "BRANCH",
-                    "error": "gh pr list failed",
-                    "source": "open_pr_resolver",
-                },
-            ),
             (
                 [
                     SimpleNamespace(
