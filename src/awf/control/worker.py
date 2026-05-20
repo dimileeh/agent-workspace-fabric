@@ -1806,7 +1806,26 @@ class ControlWorker:
             )
             return True
 
+        failed_branch_lookup = (
+            branch_lookup if branch_lookup is not None and branch_lookup.state == "failed" else None
+        )
+        branch_lookup_failure_reason = (
+            failed_branch_lookup.ambiguity_reason or "open_pr_lookup_failed"
+            if failed_branch_lookup is not None
+            else None
+        )
         if attempt_id is None or task_id is None:
+            if failed_branch_lookup is not None:
+                await self._record_preserved_active_operator_required(
+                    candidate,
+                    preserved_event=preserved_event,
+                    classification=None,
+                    ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    branch_pr_lookup=failed_branch_lookup.payload,
+                )
+                return True
             if preservation_expired:
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
@@ -1836,6 +1855,17 @@ class ControlWorker:
             self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
         if classification.state == "no_work":
+            if failed_branch_lookup is not None:
+                await self._record_preserved_active_operator_required(
+                    candidate,
+                    preserved_event=preserved_event,
+                    classification=classification,
+                    ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    branch_pr_lookup=failed_branch_lookup.payload,
+                )
+                return True
             await self._create_preserved_active_replacement(
                 candidate,
                 preserved_event=preserved_event,
@@ -1852,6 +1882,9 @@ class ControlWorker:
             ambiguity_reason=classification.reason,
             attempt_id=attempt_id,
             task_id=task_id,
+            branch_pr_lookup=(
+                failed_branch_lookup.payload if failed_branch_lookup is not None else None
+            ),
         )
         return True
 
@@ -2754,7 +2787,17 @@ class ControlWorker:
                 base_branch=base_branch,
                 error_type=type(exc).__name__,
             )
-            return None
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="failed",
+                ambiguity_reason="open_pr_lookup_failed",
+                payload={
+                    "branch_name": lookup_branch,
+                    "error_type": type(exc).__name__,
+                    "failure": "resolver_exception",
+                    "source": "open_pr_resolver",
+                },
+            )
 
         try:
             summaries = [
