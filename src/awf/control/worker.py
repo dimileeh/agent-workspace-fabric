@@ -502,15 +502,10 @@ class ControlWorker:
         return await self._list_requested()
 
     async def _list_requested(self) -> list[str]:
-        """Return requested candidate IDs for compatibility and non-capacity claims."""
-        candidate_limit = (
-            _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
-            if _local_capacity_configured(self._config)
-            else self._config.max_concurrent_provisions
-        )
+        """Return requested candidate IDs for non-capacity claims."""
         return await self._list_by_status(
             WorkspaceStatus.requested,
-            limit=candidate_limit,
+            limit=self._config.max_concurrent_provisions,
         )
 
     async def _list_ready(

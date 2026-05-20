@@ -41,10 +41,11 @@ from awf.service.resource_capacity import (
     ResourceCapacitySummary,
     WorkspaceResourceDefaults,
     default_dind_slots_from_profile,
-    local_capacity_blocked_condition,
+    local_capacity_blocker,
     local_capacity_limit,
     resource_capacity_summary,
 )
+from awf.service.scheduler import scheduler_order_key, scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import workspace_failure_details_payload
 
@@ -271,6 +272,53 @@ class CapacityQueueSummary:
     oldest_wait_seconds: int | None
     planned_resources: ReservedResources
     blocked_reason_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _CapacityQueueWorkspace:
+    id: str
+    task_class: str | None
+    task_policy: dict[str, Any]
+    created_at: datetime
+    resolved_profile: object
+
+
+@dataclass(frozen=True)
+class _CapacityQueueCandidate:
+    workspace: _CapacityQueueWorkspace
+    demand: ReservedResources
+
+
+@dataclass
+class _CapacityQueueAllocated:
+    active_workspace_count: int
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int = 0
+    dind_slots: int = 0
+
+    @classmethod
+    def from_reserved(cls, resources: ReservedResources) -> _CapacityQueueAllocated:
+        return cls(
+            active_workspace_count=resources.active_workspace_count,
+            steady_cpu=resources.steady_cpu,
+            steady_memory_gb=resources.steady_memory_gb,
+            peak_cpu=resources.peak_cpu,
+            peak_memory_gb=resources.peak_memory_gb,
+            disk_mb=resources.disk_mb,
+            dind_slots=resources.dind_slots,
+        )
+
+    def add(self, demand: ReservedResources) -> None:
+        self.active_workspace_count += demand.active_workspace_count
+        self.steady_cpu += demand.steady_cpu
+        self.steady_memory_gb += demand.steady_memory_gb
+        self.peak_cpu += demand.peak_cpu
+        self.peak_memory_gb += demand.peak_memory_gb
+        self.disk_mb += demand.disk_mb
+        self.dind_slots += demand.dind_slots
 
 
 @dataclass(frozen=True)
@@ -1383,13 +1431,6 @@ def _workspace_status_filter(
     return Workspace.status.in_(status_values)
 
 
-def _default_dind_slots_expression() -> Any:
-    return case(
-        (Workspace.resolved_profile["docker"]["mode"].as_string() == "dind", 1),
-        else_=0,
-    )
-
-
 async def _capacity_queue_summary(
     session: AsyncSession,
     *,
@@ -1444,6 +1485,7 @@ async def _capacity_queue_summary(
         allocated_resources=allocated_resources,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
+        scoring_at=now,
     )
     return CapacityQueueSummary(
         queued_workspace_count=requested_count,
@@ -1462,21 +1504,81 @@ async def _capacity_queue_blocked_reason_counts(
     allocated_resources: ReservedResources,
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
+    scoring_at: datetime | None = None,
 ) -> dict[str, int]:
     # Queue blockers must mirror scheduler enforcement, which only gates on
     # explicitly configured local capacity limits.
     del detected_local_capacity
     cpu_limit = settings.local_capacity_cpu_cores
     memory_limit = settings.local_capacity_memory_gb
+    configured_constraints = []
+    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
+        limit = local_capacity_limit(
+            constraint,
+            cpu_limit=cpu_limit,
+            memory_limit=memory_limit,
+            dind_slots=settings.local_capacity_dind_slots,
+        )
+        if limit is not None:
+            configured_constraints.append((constraint, limit))
+    if not configured_constraints:
+        return {}
 
+    candidates = await _capacity_queue_candidates(
+        session,
+        node_id=node_id,
+        resource_defaults=resource_defaults,
+    )
+    if not candidates:
+        return {}
+
+    scoring_time = scoring_at or datetime.now(UTC)
+    ordered_candidates = sorted(
+        candidates,
+        key=lambda candidate: scheduler_order_key(
+            scheduler_score_from_workspace(candidate.workspace, now=scoring_time)
+        ),
+    )
+    allocated = _CapacityQueueAllocated.from_reserved(allocated_resources)
+    counts: dict[str, int] = {}
+    deferred_frontiers: set[str] = set()
+    for candidate in ordered_candidates:
+        blockers = []
+        for constraint, limit in configured_constraints:
+            blocker = local_capacity_blocker(
+                constraint=constraint,
+                limit=limit,
+                allocated=getattr(allocated, constraint.dimension),
+                requested=getattr(candidate.demand, constraint.dimension),
+            )
+            if blocker is not None:
+                blockers.append(blocker)
+        if blockers:
+            for blocker in blockers:
+                if blocker.unsatisfiable or blocker.reason_code not in deferred_frontiers:
+                    counts[blocker.reason_code] = counts.get(blocker.reason_code, 0) + 1
+                if not blocker.unsatisfiable:
+                    deferred_frontiers.add(blocker.reason_code)
+            continue
+        allocated.add(candidate.demand)
+    return dict(sorted(counts.items()))
+
+
+async def _capacity_queue_candidates(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> list[_CapacityQueueCandidate]:
     latest_active_reservations = (
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
-            ResourceReservation.steady_cpu.label("steady_cpu"),
-            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
-            ResourceReservation.peak_cpu.label("peak_cpu"),
-            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
-            ResourceReservation.dind_slots.label("dind_slots"),
+            ResourceReservation.steady_cpu.label("reservation_steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("reservation_steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("reservation_peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("reservation_peak_memory_gb"),
+            ResourceReservation.disk_mb.label("reservation_disk_mb"),
+            ResourceReservation.dind_slots.label("reservation_dind_slots"),
             func.row_number()
             .over(
                 partition_by=ResourceReservation.workspace_id,
@@ -1490,57 +1592,20 @@ async def _capacity_queue_blocked_reason_counts(
         .where(ResourceReservation.released_at.is_(None))
         .subquery()
     )
-    demand = {
-        "steady_cpu": func.coalesce(
-            latest_active_reservations.c.steady_cpu,
-            resource_defaults.steady_cpu,
-        ),
-        "peak_cpu": func.coalesce(
-            latest_active_reservations.c.peak_cpu,
-            resource_defaults.peak_cpu,
-        ),
-        "steady_memory_gb": func.coalesce(
-            latest_active_reservations.c.steady_memory_gb,
-            resource_defaults.steady_memory_gb,
-        ),
-        "peak_memory_gb": func.coalesce(
-            latest_active_reservations.c.peak_memory_gb,
-            resource_defaults.peak_memory_gb,
-        ),
-        "dind_slots": func.coalesce(
-            latest_active_reservations.c.dind_slots,
-            _default_dind_slots_expression(),
-        ),
-    }
-    reason_expressions: list[tuple[str, Any]] = []
-    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
-        blocked = local_capacity_blocked_condition(
-            limit=local_capacity_limit(
-                constraint,
-                cpu_limit=cpu_limit,
-                memory_limit=memory_limit,
-                dind_slots=settings.local_capacity_dind_slots,
-            ),
-            allocated=getattr(allocated_resources, constraint.dimension),
-            requested=demand[constraint.dimension],
-        )
-        if blocked is None:
-            continue
-        reason_expressions.append(
-            (
-                constraint.reason_code,
-                func.coalesce(
-                    func.sum(case((blocked, 1), else_=0)),
-                    0,
-                ).label(constraint.reason_code),
-            )
-        )
-    if not reason_expressions:
-        return {}
-
     stmt = (
-        select(*(expression for _reason, expression in reason_expressions))
-        .select_from(Workspace)
+        select(
+            Workspace.id.label("queue_workspace_id"),
+            Workspace.task_class.label("queue_task_class"),
+            Workspace.task_policy.label("queue_task_policy"),
+            Workspace.created_at.label("queue_created_at"),
+            Workspace.resolved_profile.label("queue_resolved_profile"),
+            latest_active_reservations.c.reservation_steady_cpu,
+            latest_active_reservations.c.reservation_steady_memory_gb,
+            latest_active_reservations.c.reservation_peak_cpu,
+            latest_active_reservations.c.reservation_peak_memory_gb,
+            latest_active_reservations.c.reservation_disk_mb,
+            latest_active_reservations.c.reservation_dind_slots,
+        )
         # Workspace routing defines the local queue scope; reservation node_id can lag
         # during reassignment/backfill, but scheduler demand still uses this row.
         .outerjoin(
@@ -1554,14 +1619,65 @@ async def _capacity_queue_blocked_reason_counts(
             Workspace.status == WorkspaceStatus.requested.value,
             _workspace_node_scope_filter(node_id),
         )
+        .order_by(Workspace.created_at.asc(), Workspace.id.asc())
     )
-    row = (await session.execute(stmt)).one()
-    counts = {
-        reason: int(row._mapping[reason] or 0)
-        for reason, _expression in reason_expressions
-        if int(row._mapping[reason] or 0) > 0
-    }
-    return dict(sorted(counts.items()))
+    rows = (await session.execute(stmt)).all()
+    return [
+        _CapacityQueueCandidate(
+            workspace=_capacity_queue_workspace_from_row(row._mapping),
+            demand=_capacity_queue_demand_from_row(
+                values=row._mapping,
+                resource_defaults=resource_defaults,
+            ),
+        )
+        for row in rows
+    ]
+
+
+def _capacity_queue_workspace_from_row(values: Any) -> _CapacityQueueWorkspace:
+    return _CapacityQueueWorkspace(
+        id=str(values["queue_workspace_id"]),
+        task_class=values["queue_task_class"],
+        task_policy=dict(values["queue_task_policy"] or {}),
+        created_at=values["queue_created_at"],
+        resolved_profile=values["queue_resolved_profile"],
+    )
+
+
+def _capacity_queue_demand_from_row(
+    *,
+    values: Any,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> ReservedResources:
+    return ReservedResources(
+        active_workspace_count=1,
+        steady_cpu=_float_or_default(
+            values["reservation_steady_cpu"],
+            resource_defaults.steady_cpu,
+        ),
+        steady_memory_gb=_float_or_default(
+            values["reservation_steady_memory_gb"],
+            resource_defaults.steady_memory_gb,
+        ),
+        peak_cpu=_float_or_default(
+            values["reservation_peak_cpu"],
+            resource_defaults.peak_cpu,
+        ),
+        peak_memory_gb=_float_or_default(
+            values["reservation_peak_memory_gb"],
+            resource_defaults.peak_memory_gb,
+        ),
+        disk_mb=int(values["reservation_disk_mb"] or 0),
+        dind_slots=(
+            int(values["reservation_dind_slots"])
+            if values["reservation_dind_slots"] is not None
+            else default_dind_slots_from_profile(values["queue_resolved_profile"])
+        ),
+    )
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    return default if value is None else float(value)
 
 
 def _local_capacity_node_id(settings: Settings) -> str:

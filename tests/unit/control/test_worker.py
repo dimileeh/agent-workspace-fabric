@@ -903,6 +903,38 @@ class TestRunOnce:
         assert workspace.status == WorkspaceStatus.ready.value
 
     @pytest.mark.unit
+    async def test_list_requested_uses_non_capacity_limit_when_called_directly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        observed_limits: list[int] = []
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=2.0,
+            ),
+        )
+
+        async def _record_list_by_status(
+            status: WorkspaceStatus,
+            *,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            del status, exclude_ids
+            observed_limits.append(limit)
+            return []
+
+        monkeypatch.setattr(worker, "_list_by_status", _record_list_by_status)
+
+        assert await worker._list_requested() == []  # noqa: SLF001
+        assert observed_limits == [1]
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_records_one_ordered_decision_for_defaulted_claim(
         self,
         session_factory: async_sessionmaker[AsyncSession],
