@@ -17,12 +17,12 @@ from sqlalchemy.engine import make_url
 
 from awf.service import provider_readiness
 from awf.service.config import (
-    _COMPOSE_ENV_FILE_OMITTED,
+    COMPOSE_ENV_FILE_OMITTED,
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     LOCAL_SERVICE_COMPOSE_FILE,
+    ComposeEnvFileInput,
+    ComposeEnvFileOmitted,
     ServiceSettings,
-    _ComposeEnvFileInput,
-    _ComposeEnvFileOmitted,
     local_service_environ,
 )
 from awf.service.doctor import reasons as _reasons
@@ -68,13 +68,13 @@ async def collect_doctor_report(
     path_exists: PathPredicate | None = None,
     path_is_dir: PathPredicate | None = None,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
-    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
 ) -> DoctorReport:
     """Collect read-only local diagnostics for operator troubleshooting."""
 
     env = os.environ if environ is None else environ
     service_env_file: Path | None
-    if isinstance(compose_env_file, _ComposeEnvFileOmitted):
+    if isinstance(compose_env_file, ComposeEnvFileOmitted):
         resolved_compose_env_file = _local_service_compose_env_file(compose_file)
         service_env_file = resolved_compose_env_file or LOCAL_SERVICE_COMPOSE_ENV_FILE
     else:

@@ -37,12 +37,30 @@ _AWF_SOURCE_ROOT_MARKERS = (
 )
 
 
-class _ComposeEnvFileOmitted:
+__all__ = [
+    "COMPOSE_ENV_FILE_OMITTED",
+    "DEFAULT_LOCAL_SERVICE_API_BASE_URL",
+    "DEFAULT_LOCAL_SERVICE_DATABASE_URL",
+    "DEFAULT_LOCAL_SERVICE_WORK_DIR",
+    "ComposeEnvFileInput",
+    "ComposeEnvFileOmitted",
+    "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+    "LOCAL_SERVICE_COMPOSE_FILE",
+    "ServiceSettings",
+    "local_service_environ",
+    "resolve_local_service_compose_env_file",
+    "resolve_local_service_provider_environ",
+    "resolve_service_settings",
+    "service_config_payload",
+]
+
+
+class ComposeEnvFileOmitted:
     """Sentinel for distinguishing omitted env-file arguments from explicit null."""
 
 
-_COMPOSE_ENV_FILE_OMITTED = _ComposeEnvFileOmitted()
-type _ComposeEnvFileInput = Path | None | _ComposeEnvFileOmitted
+COMPOSE_ENV_FILE_OMITTED = ComposeEnvFileOmitted()
+type ComposeEnvFileInput = Path | None | ComposeEnvFileOmitted
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -241,14 +259,14 @@ def resolve_local_service_provider_environ(
     provider_environ: Mapping[str, str] | None,
     environ: Mapping[str, str],
     compose_file: Path | None,
-    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
 ) -> Mapping[str, str]:
     """Resolve provider auth inputs from explicit or adjacent Compose env files."""
 
     if provider_environ is not None:
         return provider_environ
 
-    discover_adjacent_env_file = isinstance(compose_env_file, _ComposeEnvFileOmitted)
+    discover_adjacent_env_file = isinstance(compose_env_file, ComposeEnvFileOmitted)
     env_file = None if discover_adjacent_env_file else cast(Path | None, compose_env_file)
     if env_file is None and discover_adjacent_env_file and compose_file is not None:
         env_file = _provider_env_file_from_compose_file(

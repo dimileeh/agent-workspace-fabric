@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import gc
 import inspect
 import json
@@ -78,6 +79,48 @@ def _diagnostic_text(error: ProductionSettingsError) -> str:
         )
         for diagnostic in error.diagnostics
     )
+
+
+@pytest.mark.unit
+def test_compose_env_file_sentinel_is_public_service_contract() -> None:
+    assert isinstance(
+        service_config.COMPOSE_ENV_FILE_OMITTED,
+        service_config.ComposeEnvFileOmitted,
+    )
+    assert {
+        "COMPOSE_ENV_FILE_OMITTED",
+        "ComposeEnvFileInput",
+        "ComposeEnvFileOmitted",
+    }.issubset(service_config.__all__)
+
+    repo_root = Path(__file__).resolve().parents[3]
+    service_modules = (
+        repo_root / "src" / "awf" / "service" / "status.py",
+        repo_root / "src" / "awf" / "service" / "readiness.py",
+        repo_root / "src" / "awf" / "service" / "doctor" / "__init__.py",
+        repo_root / "src" / "awf" / "service" / "support_bundle.py",
+    )
+    private_sentinel_names = {
+        "_COMPOSE_ENV_FILE_OMITTED",
+        "_ComposeEnvFileInput",
+        "_ComposeEnvFileOmitted",
+    }
+    private_imports: list[tuple[str, str]] = []
+    for module_path in service_modules:
+        tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module != "awf.service.config":
+                continue
+            private_imports.extend(
+                (module_path.relative_to(repo_root).as_posix(), alias.name)
+                for alias in node.names
+                if alias.name in private_sentinel_names
+            )
+
+    assert private_imports == []
 
 
 @pytest.mark.unit
