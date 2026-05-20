@@ -566,10 +566,29 @@ async def list_open_pull_requests_for_branch(
                 "base_branch": base_branch,
             },
         )
-    return [
-        _parse_branch_open_pull_request(item, repo=repo, branch_name=stripped_branch)
-        for item in payload
-    ]
+    results: list[BranchOpenPullRequest] = []
+    parse_failures: list[tuple[int, PullRequestMetadataError]] = []
+    for index, item in enumerate(payload):
+        try:
+            results.append(
+                _parse_branch_open_pull_request(item, repo=repo, branch_name=stripped_branch)
+            )
+        except PullRequestMetadataError as exc:
+            parse_failures.append((index, exc))
+
+    if not results and parse_failures:
+        raise parse_failures[0][1]
+
+    for index, parse_error in parse_failures:
+        _log.warning(
+            "github.open_pr_item_parse_failed",
+            repo_slug=repo.slug(),
+            branch_name=stripped_branch,
+            item_index=index,
+            reason_code=parse_error.reason_code,
+            error=redact_audit_text(parse_error.message),
+        )
+    return results
 
 
 class BranchOpenPullRequestResolver:

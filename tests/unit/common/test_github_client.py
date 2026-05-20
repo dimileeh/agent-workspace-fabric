@@ -416,6 +416,53 @@ class TestListOpenPullRequestsForBranch:
         assert "headRepositoryOwner" in json_fields
 
     @pytest.mark.unit
+    async def test_skips_malformed_items_when_parseable_match_exists(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                        "headRepository": None,
+                    },
+                    {
+                        "number": 278,
+                        "url": "https://github.com/dimileeh/aira-web/pull/278",
+                        "headRefName": "feature/head",
+                        "headRefOid": "g" * 40,
+                        "headRepository": {
+                            "name": "aira-web",
+                            "nameWithOwner": "dimileeh/aira-web",
+                        },
+                    },
+                ]
+            ),
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            matches = await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert len(matches) == 1
+        assert matches[0].number == 278
+        assert matches[0].head_repo_slug == "dimileeh/aira-web"
+        event = next(
+            (item for item in captured if item.get("event") == "github.open_pr_item_parse_failed"),
+            None,
+        )
+        assert event is not None
+        assert event.get("log_level") == "warning"
+        assert event.get("repo_slug") == "dimileeh/aira-web"
+        assert event.get("branch_name") == "feature/head"
+
+    @pytest.mark.unit
     async def test_missing_head_repository_identity_is_invalid(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
