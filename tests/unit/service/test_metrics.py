@@ -1517,6 +1517,7 @@ async def test_capacity_queue_blocked_reason_counts_loads_latest_requested_deman
     assert "left outer join" in statements[0]
     assert "select workspaces.id as queue_workspace_id" in statements[0]
     assert "workspaces.repo_url" not in statements[0]
+    assert " limit " in statements[0]
 
 
 @pytest.mark.unit

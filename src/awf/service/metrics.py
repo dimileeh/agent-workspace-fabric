@@ -83,6 +83,7 @@ DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
 MIN_FAILURE_EXAMPLE_LIMIT = 1
 MAX_FAILURE_EXAMPLE_LIMIT = 25
 DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT = 5
+DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT = 500
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -1575,10 +1576,13 @@ async def _capacity_queue_blocked_reason_counts(
     if not configured_constraints:
         return {}
 
+    # Blocker counts are a bounded FIFO diagnostic on the hot metrics path; the
+    # queue totals above remain whole-queue aggregates.
     candidates = await _capacity_queue_candidates(
         session,
         node_id=node_id,
         resource_defaults=resource_defaults,
+        limit=DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT,
     )
     if not candidates:
         return {}
@@ -1667,6 +1671,7 @@ async def _capacity_queue_candidates(
     *,
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
+    limit: int,
 ) -> list[_CapacityQueueCandidate]:
     latest_active_reservations = (
         select(
@@ -1719,6 +1724,7 @@ async def _capacity_queue_candidates(
             _workspace_node_scope_filter(node_id),
         )
         .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        .limit(limit)
     )
     rows = (await session.execute(stmt)).all()
     return [
