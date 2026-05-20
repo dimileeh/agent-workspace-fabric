@@ -235,6 +235,16 @@ class _AllocatedReservationTotals:
         self.dind_slots += demand.dind_slots
 
 
+type _AllocatedReservationSignature = tuple[int, float, float, float, float, int, int]
+
+
+@dataclass(frozen=True)
+class _RequestedCapacityClaimResult:
+    workspace_ids: list[str]
+    resume_after: SchedulerOrderCursor | None = None
+    allocated_signature: _AllocatedReservationSignature | None = None
+
+
 @dataclass(frozen=True)
 class _ActiveExecutionCandidate:
     workspace_id: str
@@ -338,6 +348,8 @@ class ControlWorker:
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
         self._next_terminal_runtime_release_scan_at = 0.0
+        self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
+        self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -2441,38 +2453,55 @@ class ControlWorker:
                     claimed.append(workspace_id)
             return claimed
 
-        async def _operation(session: AsyncSession) -> list[str]:
+        async def _operation(session: AsyncSession) -> _RequestedCapacityClaimResult:
             await _acquire_local_capacity_scheduler_lock(
                 session,
                 node_id=self._config.node_id or "local",
             )
-            return await self._claim_requested_ids_with_capacity(session)
+            return await self._claim_requested_ids_with_capacity(
+                session,
+                resume_after=self._requested_capacity_resume_after,
+                resume_allocated_signature=self._requested_capacity_resume_signature,
+            )
 
-        return await run_db_operation_with_retry(
+        result = await run_db_operation_with_retry(
             self._session_factory,
             _operation,
             commit=True,
             retry_commit_failures=False,
             on_retry=self._log_transient_db_retry,
         )
+        self._requested_capacity_resume_after = result.resume_after
+        self._requested_capacity_resume_signature = result.allocated_signature
+        return result.workspace_ids
 
     async def _claim_requested_ids_with_capacity(
         self,
         session: AsyncSession,
-    ) -> list[str]:
+        *,
+        resume_after: SchedulerOrderCursor | None,
+        resume_allocated_signature: _AllocatedReservationSignature | None,
+    ) -> _RequestedCapacityClaimResult:
         reservation_repo = ResourceReservationRepository(session)
         allocated = await _allocated_totals_for_capacity_gate(
             session,
             reservation_repo=reservation_repo,
             config=self._config,
         )
+        allocated_signature = _allocated_reservation_signature(allocated)
         claimed: list[str] = []
         repo = WorkspaceRepository(session)
         candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
-        candidate_after: SchedulerOrderCursor | None = None
-        scoring_at = datetime.now(UTC)
+        candidate_after = (
+            resume_after if resume_allocated_signature == allocated_signature else None
+        )
+        scoring_at = (
+            candidate_after.scoring_at if candidate_after is not None else datetime.now(UTC)
+        )
         decided_at = datetime.now(UTC)
         capacity_refill_pages_remaining: int | None = None
+        next_resume_after: SchedulerOrderCursor | None = None
+        next_resume_signature: _AllocatedReservationSignature | None = None
 
         while len(claimed) < self._config.max_concurrent_provisions:
             workspaces = await repo.list_schedulable_workspaces(
@@ -2483,6 +2512,11 @@ class ControlWorker:
             )
             if not workspaces:
                 break
+            page_end_cursor = _scheduler_candidate_cursor(
+                workspaces,
+                scoring_at=scoring_at,
+                dialect_name=repo.dialect_name,
+            )
 
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
             page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
@@ -2514,19 +2548,22 @@ class ControlWorker:
                 if capacity_refill_pages_remaining is None:
                     capacity_refill_pages_remaining = _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
                 if capacity_refill_pages_remaining <= 0:
+                    next_resume_after = page_end_cursor
+                    if next_resume_after is not None:
+                        next_resume_signature = _allocated_reservation_signature(allocated)
                     break
                 capacity_refill_pages_remaining -= 1
             else:
                 capacity_refill_pages_remaining = None
-            candidate_after = _scheduler_candidate_cursor(
-                workspaces,
-                scoring_at=scoring_at,
-                dialect_name=repo.dialect_name,
-            )
+            candidate_after = page_end_cursor
             if candidate_after is None:
                 break
 
-        return claimed
+        return _RequestedCapacityClaimResult(
+            workspace_ids=claimed,
+            resume_after=next_resume_after,
+            allocated_signature=next_resume_signature,
+        )
 
     async def _claim_requested_capacity_candidates(
         self,
@@ -3269,6 +3306,20 @@ def _allocated_totals_from_repository(
         peak_memory_gb=float(totals.get("peak_memory_gb", 0.0) or 0.0),
         disk_mb=int(totals.get("disk_mb", 0) or 0),
         dind_slots=int(totals.get("dind_slots", 0) or 0),
+    )
+
+
+def _allocated_reservation_signature(
+    allocated: _AllocatedReservationTotals,
+) -> _AllocatedReservationSignature:
+    return (
+        allocated.workspace_count,
+        allocated.steady_cpu,
+        allocated.steady_memory_gb,
+        allocated.peak_cpu,
+        allocated.peak_memory_gb,
+        allocated.disk_mb,
+        allocated.dind_slots,
     )
 
 

@@ -1519,6 +1519,74 @@ class TestRunOnce:
         assert all(decisions[workspace_id] == [] for workspace_id in unscanned_ids)
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_resumes_after_bounded_blocked_scan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        candidate_window = _scheduler_candidate_fetch_limit(1)
+        scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+        blocked_ids: list[str] = []
+        for index in range(candidate_window * scanned_page_limit):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"resume-capacity-blocked-{index}",
+                create_task_attempt=True,
+                created_at=now + timedelta(seconds=index),
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+            blocked_ids.append(blocked_id)
+        fitting_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "fitting-after-bounded-blocked-scan",
+            create_task_attempt=True,
+            created_at=now + timedelta(seconds=len(blocked_ids)),
+        )
+        await _reserve_workspace(
+            session_factory,
+            fitting_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert provisioner.calls == []
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            blocked = [await repo.get(workspace_id) for workspace_id in blocked_ids]
+            fitting = await repo.get(fitting_id)
+
+        assert provisioner.calls == [fitting_id]
+        assert fitting is not None
+        assert fitting.status == WorkspaceStatus.ready.value
+        assert all(workspace is not None for workspace in blocked)
+        assert all(workspace.status == WorkspaceStatus.requested.value for workspace in blocked)
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_preserves_scheduler_priority_before_fifo(
         self,
         session_factory: async_sessionmaker[AsyncSession],
