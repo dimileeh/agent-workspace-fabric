@@ -4269,6 +4269,17 @@ jobs:
               body: context.sha,
             });
 """,
+        """
+        with:
+          script: |
+            const token = process['env']['GITHUB_TOKEN'];
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: token,
+            });
+""",
     ],
 )
 def test_added_github_script_step_with_script_unsafe_inputs_are_blocked(
