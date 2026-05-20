@@ -59,6 +59,9 @@ class StatusCollector(Protocol):
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: Path | None = None,
     ) -> Awaitable[dict[str, object]]: ...  # pragma: no cover
 
 
@@ -244,6 +247,9 @@ async def run_service_bootstrap(
         sleep=sleep,
         monotonic=monotonic,
         provider_environ=service_env,
+        environ=service_env,
+        compose_file=assets.compose_file,
+        compose_env_file=assets.compose_env_file,
     )
     return ServiceBootstrapResult(
         stages=tuple(completed),
@@ -562,6 +568,9 @@ async def _poll_status(
     sleep: Sleep,
     monotonic: Monotonic,
     provider_environ: Mapping[str, str],
+    environ: Mapping[str, str],
+    compose_file: Path,
+    compose_env_file: Path | None,
 ) -> dict[str, object]:
     timeout_seconds = max(0.0, options.timeout_seconds)
     poll_interval_seconds = max(0.01, options.poll_interval_seconds)
@@ -575,6 +584,9 @@ async def _poll_status(
                 settings,
                 strict_providers=options.strict_providers,
                 provider_environ=provider_environ,
+                environ=environ,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
             )
             last_error = None
         except Exception as exc:

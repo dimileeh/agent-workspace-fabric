@@ -302,6 +302,7 @@ def test_bootstrap_uses_explicit_service_environment_without_reloading_env_file(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -352,6 +353,7 @@ def test_bootstrap_mirrors_awf_docker_host_to_docker_cli_environment(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = strict_providers
@@ -405,6 +407,7 @@ def test_bootstrap_mirrors_mixed_case_awf_docker_host_to_docker_cli_environment(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -497,6 +500,7 @@ def test_bootstrap_overrides_stale_docker_host_with_runtime_awf_docker_host(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -548,6 +552,7 @@ def test_bootstrap_removes_stale_caller_docker_host_variants_when_awf_host_is_fo
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -604,6 +609,7 @@ def test_bootstrap_clears_docker_context_when_awf_docker_host_is_forced(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -661,6 +667,7 @@ def test_bootstrap_clears_docker_context_when_docker_host_is_resolved(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -749,6 +756,7 @@ def test_bootstrap_partial_provider_environment_preserves_local_service_environm
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -797,6 +805,7 @@ def test_bootstrap_uses_ambient_compose_profiles_for_ollama_bridge_stage(
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
     ) -> dict[str, object]:
         nonlocal collected_provider_environ
         _ = settings, strict_providers
@@ -1136,6 +1145,67 @@ def test_bootstrap_passes_compose_env_file_when_available(
             "-f",
             str(source_root / "docker/compose/local-service.yml"),
         ]
+
+
+@pytest.mark.unit
+def test_bootstrap_forwards_compose_context_to_status_collector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_checkout_root: Path,
+) -> None:
+    compose_env_file = source_checkout_root / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_TOKEN=persisted-token\n", encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap,
+        "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+        Path("docker/compose/.env"),
+        raising=False,
+    )
+    service_env = {"AWF_API_TOKEN": "runtime-token"}
+    captured: dict[str, object] = {}
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: Path | None = None,
+    ) -> dict[str, object]:
+        _ = strict_providers
+        captured["provider_environ"] = dict(provider_environ or {})
+        captured["environ"] = dict(environ or {})
+        captured["compose_file"] = compose_file
+        captured["compose_env_file"] = compose_env_file
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+            service_environ=service_env,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert captured == {
+        "provider_environ": service_env,
+        "environ": service_env,
+        "compose_file": source_checkout_root / "docker/compose/local-service.yml",
+        "compose_env_file": compose_env_file,
+    }
 
 
 @pytest.mark.unit

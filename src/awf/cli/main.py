@@ -1126,6 +1126,12 @@ def _env_context_looks_like_section_header(lines: list[str]) -> bool:
     return sum(1 for line in lines if line.strip().startswith("#")) > 1
 
 
+def _env_context_is_single_adjacent_comment(lines: list[str]) -> bool:
+    """Return whether context is exactly one comment directly above an assignment."""
+
+    return len(lines) == 1 and lines[0].strip().startswith("#")
+
+
 def _merge_env_seed_contents_with_overlay_keys(
     seed_contents: bytes,
     overlay_contents: bytes,
@@ -1206,6 +1212,7 @@ def _merge_env_seed_contents_with_overlay_keys(
                 key in seed_keys
                 or key in seen_overlay_assignment_keys
                 or _env_context_looks_like_section_header(context)
+                or _env_context_is_single_adjacent_comment(context)
             ):
                 duplicate_context.setdefault(key, []).extend(context)
         pending_context = []
