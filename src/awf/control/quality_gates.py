@@ -350,13 +350,22 @@ def _classify_pyproject_change(
 ) -> list[QualityGateViolation]:
     path = _normalize_path(diff.path)
     if diff.old_text is None or diff.new_text is None:
+        reason = _absent_protected_file_content_reason(
+            old_text=diff.old_text,
+            new_text=diff.new_text,
+            added_reason="new pyproject.toml file added outside declared owned_paths",
+            deleted_reason="pyproject.toml deleted outside declared owned_paths",
+            unavailable_reason=(
+                "could not read old and new pyproject.toml content for classification"
+            ),
+        )
         return [
             _violation(
                 path=path,
                 protected_pattern=protected_pattern,
                 section="pyproject.toml",
                 line=None,
-                reason="could not read old and new pyproject.toml content for classification",
+                reason=reason,
             )
         ]
     if diff.old_text == diff.new_text:
@@ -487,18 +496,55 @@ def _pyproject_policy_section_violations(
                         reason=reason,
                     )
                 )
-                continue
+                if _coverage_policy_without_fail_under(old_value) == (
+                    _coverage_policy_without_fail_under(new_value)
+                ):
+                    continue
         line_text = new_text if new_value is not None else old_text
         violations.append(
             _violation(
                 path=path,
                 protected_pattern=protected_pattern,
                 section=section,
-                line=_line_for_toml_section(line_text, section),
+                line=(
+                    _line_for_toml_section_or_descendant(line_text, section)
+                    if section_keys == ("tool", "coverage")
+                    else _line_for_toml_section(line_text, section)
+                ),
                 reason=f"protected pyproject policy section changed: {section}",
             )
         )
     return violations
+
+
+def _absent_protected_file_content_reason(
+    *,
+    old_text: str | None,
+    new_text: str | None,
+    added_reason: str,
+    deleted_reason: str,
+    unavailable_reason: str,
+) -> str:
+    if old_text is None and new_text is not None:
+        return added_reason
+    if old_text is not None and new_text is None:
+        return deleted_reason
+    return unavailable_reason
+
+
+def _coverage_policy_without_fail_under(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    coverage = dict(value)
+    report = coverage.get("report")
+    if isinstance(report, Mapping):
+        report_without_fail_under = dict(report)
+        report_without_fail_under.pop("fail_under", None)
+        if report_without_fail_under:
+            coverage["report"] = report_without_fail_under
+        else:
+            coverage.pop("report", None)
+    return coverage
 
 
 def _pyproject_dependency_violations(
@@ -903,13 +949,20 @@ def _classify_workflow_change(
 ) -> list[QualityGateViolation]:
     path = _normalize_path(diff.path)
     if diff.old_text is None or diff.new_text is None:
+        reason = _absent_protected_file_content_reason(
+            old_text=diff.old_text,
+            new_text=diff.new_text,
+            added_reason="new workflow file added outside declared owned_paths",
+            deleted_reason="workflow file deleted outside declared owned_paths",
+            unavailable_reason="could not read old and new workflow content for classification",
+        )
         return [
             _violation(
                 path=path,
                 protected_pattern=protected_pattern,
                 section=path,
                 line=None,
-                reason="could not read old and new workflow content for classification",
+                reason=reason,
             )
         ]
     if diff.old_text == diff.new_text:
@@ -1790,6 +1843,8 @@ def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
     if new_is_sha:
         return True
     if old_is_sha:
+        # A raw SHA cannot be ordered against a tag without resolving refs; locally
+        # we can only require the replacement to be a fully pinned version tag.
         return _is_full_workflow_version_ref(new_ref)
     return _is_workflow_version_ref_non_downgrade(old_ref, new_ref)
 

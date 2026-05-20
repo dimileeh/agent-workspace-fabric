@@ -221,6 +221,46 @@ show_missing = false
 
 
 @pytest.mark.unit
+def test_pyproject_fail_under_change_reports_other_coverage_policy_changes() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+show_missing = true
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = false
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == [
+        "tool.coverage.report.fail_under",
+        "tool.coverage",
+    ]
+    assert [violation.line for violation in violations] == [5, 4]
+    assert "coverage fail_under lowered from 99 to 80" in violations[0].reason
+    assert violations[1].reason == "protected pyproject policy section changed: tool.coverage"
+
+
+@pytest.mark.unit
 def test_pyproject_reports_all_unknown_top_level_section_changes() -> None:
     old_text = """
 [project]
@@ -2864,6 +2904,82 @@ def test_missing_protected_file_diff_blocks_conservatively() -> None:
     assert len(violations) == 1
     assert violations[0].section == "pyproject.toml"
     assert "diff unavailable" in violations[0].reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_text", "new_text", "expected_reason"),
+    [
+        (
+            None,
+            "[project]\nname = 'demo'\n",
+            "new pyproject.toml file added outside declared owned_paths",
+        ),
+        (
+            "[project]\nname = 'demo'\n",
+            None,
+            "pyproject.toml deleted outside declared owned_paths",
+        ),
+    ],
+)
+def test_pyproject_absent_diff_side_reports_file_lifecycle_reason(
+    old_text: str | None,
+    new_text: str | None,
+    expected_reason: str,
+) -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "pyproject.toml"
+    assert violations[0].reason == expected_reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_text", "new_text", "expected_reason"),
+    [
+        (
+            None,
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            "new workflow file added outside declared owned_paths",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            None,
+            "workflow file deleted outside declared owned_paths",
+        ),
+    ],
+)
+def test_workflow_absent_diff_side_reports_file_lifecycle_reason(
+    old_text: str | None,
+    new_text: str | None,
+    expected_reason: str,
+) -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == ".github/workflows/ci.yml"
+    assert violations[0].reason == expected_reason
 
 
 @pytest.mark.unit
