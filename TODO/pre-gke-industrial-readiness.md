@@ -78,7 +78,9 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | No active AWF workspaces after the 2026-05-20 operator containment stop. PRs [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), and [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) remain open and require recovery/re-adoption after the local AWF rebuild. PRs [#263](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/263), [#265](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/265), [#266](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/266), [#267](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/267), [#269](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/269), and [#271](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/271) have landed on `development`. |
+| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_986a024640994f17a0f39897` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_6b8303d60f8949d78b1237e7`. |
+| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_0367e5e1266d4acdbd13441a` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_285b5bf215fd4b329eb1af65`. |
+| P0 AWF Dogfood Stability | Automate preserved-active restart recovery | `ws_53702c4210de4ec59e9ec059` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_77bb4cce4aea4892bb41e0e6`. |
 
 ### Reschedule Required Slices
 
@@ -90,9 +92,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_6b8303d60f8949d78b1237e7` | Codex / `gpt-5.5` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
-| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_285b5bf215fd4b329eb1af65` | Codex / `gpt-5.5` / `xhigh` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
-| P0 AWF Dogfood Stability | Automate preserved-active restart recovery | `ws_77bb4cce4aea4892bb41e0e6` | Codex / `gpt-5.5` / `xhigh` | recovery_required | Workspace cancelled 2026-05-20 to stop stale PR-monitor churn; PR [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) remains open and must be cleaned/re-adopted or relaunched after the local AWF rebuild. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | The 2026-05-20 recovery-required PRs were re-adopted as fresh active monitors `ws_986a024640994f17a0f39897`, `ws_0367e5e1266d4acdbd13441a`, and `ws_53702c4210de4ec59e9ec059`. |
 
 ### Pending Capacity Slices
 
@@ -538,9 +538,9 @@ root-cause history.
   bypasses, test-command narrowing, and job/step removals; include file,
   section/path, approximate line, and reason in block messages; document the
   policy in `docs/PROTECTED_FILES.md`; and pass the seven unit cases plus
-  executor/PR-monitor regressions. PR #268 from cancelled workspace
-  `ws_285b5bf215fd4b329eb1af65` requires recovery/re-adoption after the
-  local AWF rebuild.
+  executor/PR-monitor regressions. Active PR #268 is now monitored by fresh
+  workspace `ws_0367e5e1266d4acdbd13441a` after the 2026-05-20 AWF rebuild;
+  cancelled stale monitor `ws_285b5bf215fd4b329eb1af65` is superseded.
 - [x] Repair deterministic post-agent pre-commit hook rewrites before failing
   otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
   failed `ws_06ee567d44eb479bb0f68478`,
@@ -944,6 +944,9 @@ and production configuration footguns.
   commit but before validation/push, restart after PR creation but before
   monitor handoff, and restart with no usable worktree changes; useful completed
   work cannot be terminalized without an automatic salvage/reschedule path.
+  Active PR #272 is now monitored by fresh workspace
+  `ws_53702c4210de4ec59e9ec059` after the 2026-05-20 AWF rebuild; cancelled
+  stale monitor `ws_77bb4cce4aea4892bb41e0e6` is superseded.
 
 ## P0: API / CLI / MCP Contract Parity
 
