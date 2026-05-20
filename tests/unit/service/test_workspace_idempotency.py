@@ -569,6 +569,7 @@ async def test_create_auto_profile_replay_conflicts_when_requested_tier_changes(
 async def test_create_replay_conflicts_when_agent_effort_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify effort mismatch invalidates workspace create idempotency replay."""
     service = WorkspaceService(factory)
     idempotency_key = "service-create-v2-agent-effort"
     request_payload = _v2_request().model_dump(mode="python")

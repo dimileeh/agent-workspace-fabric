@@ -40,6 +40,7 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
+    """Assert workspace create help exposes model and effort flags."""
     visible_help = click.unstyle(stdout)
     assert "--model" in visible_help
     assert "--effort" in visible_help
