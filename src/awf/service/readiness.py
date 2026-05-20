@@ -95,6 +95,7 @@ class SloMetricsCollector(Protocol):
 class _StatusCollectorKwargs(TypedDict, total=False):
     strict_providers: Iterable[str] | None
     provider_environ: Mapping[str, str] | None
+    environ: Mapping[str, str] | None
     compose_file: Path | None
     compose_env_file: ComposeEnvFileInput
 
@@ -218,6 +219,7 @@ async def collect_core_readiness_report(
     status_kwargs: _StatusCollectorKwargs = {
         "strict_providers": strict,
         "provider_environ": provider_env,
+        "environ": env,
         "compose_file": compose_file,
     }
     if not isinstance(compose_env_file, ComposeEnvFileOmitted):

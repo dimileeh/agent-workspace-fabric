@@ -653,6 +653,7 @@ async def test_core_readiness_resolves_provider_environment_from_compose_env_fil
     assert doctor_provider_env["AWF_GITHUB_TOKEN"] == compose_token
     assert status_provider_env["PATH"] == "/usr/bin"
     assert doctor_provider_env["PATH"] == "/usr/bin"
+    assert captured_status["environ"] is base_environ
     assert captured_status["compose_file"] == compose_file
     assert captured_status["compose_env_file"] == compose_env_file
     assert captured_doctor["environ"] is base_environ

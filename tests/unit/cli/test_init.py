@@ -3442,6 +3442,34 @@ def test_init_without_path_uses_compose_env_host_work_dir_for_state_directory(
 
 
 @pytest.mark.unit
+def test_init_without_path_prefers_shell_host_work_dir_over_seeded_compose_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Honor a shell state-dir override during first-run compose env seeding."""
+    monkeypatch.chdir(tmp_path)
+    host_home = tmp_path / "home"
+    shell_state_dir = tmp_path / "shell-state"
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text(
+        "AWF_API_HOST_PORT=8000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(shell_state_dir))
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert shell_state_dir.exists()
+    assert shell_state_dir.is_dir()
+    assert not (host_home / ".awf" / "service").exists()
+    assert str(shell_state_dir.resolve()) in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_uses_host_home_when_service_env_sets_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
