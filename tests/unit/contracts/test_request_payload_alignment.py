@@ -382,6 +382,7 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "kind": "feature_branch_pr",
             "agent": "codex",
             "model": "gemini",
+            "effort": "xhigh",
             "external_id": "ext_42",
             "task_class": "docs_task",
             "priority": 10,
@@ -431,6 +432,7 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "task_kind": "feature_branch_pr",
             "agent": "codex",
             "model": "gemini",
+            "effort": "xhigh",
             "task_external_id": "ext_42",
             "task_class": "docs_task",
             "priority": 10,
@@ -514,6 +516,7 @@ async def test_mcp_create_omits_unspecified_optional_task_fields() -> None:
         mcp_request.model_dump(mode="json", exclude_none=True)
     )
     assert "model" not in mcp_request.task.model_fields_set
+    assert "effort" not in mcp_request.task.model_fields_set
     assert "external_id" not in mcp_request.task.model_fields_set
     assert "task_class" not in mcp_request.task.model_fields_set
     assert "priority" not in mcp_request.task.model_fields_set
