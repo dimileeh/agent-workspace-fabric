@@ -1256,6 +1256,71 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_compose_interpolation_cache_caches_unexpected_parse_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHE_TOKEN:?set AWF_CACHE_TOKEN}"
+""",
+    )
+    parse_started = threading.Event()
+    release_parse = threading.Event()
+    parse_count = 0
+    parse_lock = threading.Lock()
+
+    def _safe_load(_payload: str) -> object:
+        nonlocal parse_count
+        with parse_lock:
+            parse_count += 1
+            current_parse = parse_count
+        if current_parse == 1:
+            parse_started.set()
+            if not release_parse.wait(timeout=2):
+                raise AssertionError("failing compose parse was not released")
+        raise RuntimeError("synthetic compose parser failure")
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+    monkeypatch.setattr(service_environment.yaml, "safe_load", _safe_load)
+
+    errors: list[BaseException] = []
+    start = threading.Barrier(4)
+
+    def _worker() -> None:
+        try:
+            start.wait(timeout=2)
+            service_environment.compose_interpolation_keys(compose_file)
+        except BaseException as exc:  # pragma: no cover - asserted by the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    try:
+        for thread in threads:
+            thread.start()
+        assert parse_started.wait(timeout=2)
+        time.sleep(0.05)
+    finally:
+        release_parse.set()
+        for thread in threads:
+            thread.join(timeout=2)
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+        service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert len(errors) == 4
+    assert all(isinstance(error, RuntimeError) for error in errors)
+    assert all("synthetic compose parser failure" in str(error) for error in errors)
+    assert parse_count == 1
+
+
+@pytest.mark.unit
 def test_service_logs_reloads_compose_interpolation_keys_when_file_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

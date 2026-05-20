@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import yaml
 from dotenv import dotenv_values
@@ -29,9 +29,20 @@ _COMPOSE_INTERPOLATION_PATTERN = re.compile(
 )
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
 _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING = object()
-_COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[tuple[str, str, int], tuple[str, ...]] = (
-    OrderedDict()
-)
+
+
+class _ComposeInterpolationKeysCacheFailure:
+    """Cached unexpected parser failure without retained traceback frames."""
+
+    def __init__(self, exception_type: type[Exception], message: str) -> None:
+        self.exception_type = exception_type
+        self.message = message
+
+
+_COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[
+    tuple[str, str, int],
+    tuple[str, ...] | _ComposeInterpolationKeysCacheFailure,
+] = OrderedDict()
 _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK = threading.Lock()
 _COMPOSE_INTERPOLATION_KEYS_INFLIGHT: dict[tuple[str, str, int], threading.Event] = {}
 
@@ -190,6 +201,8 @@ def _cached_compose_interpolation_keys(
             )
             if cached is not _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING:
                 _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
+                if isinstance(cached, _ComposeInterpolationKeysCacheFailure):
+                    _raise_compose_interpolation_cache_failure(cached)
                 return cast(tuple[str, ...], cached)
             inflight = _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key)
             if inflight is None:
@@ -198,16 +211,25 @@ def _cached_compose_interpolation_keys(
                 break
         inflight.wait()
 
-    parsed = False
     try:
         keys = _parse_compose_interpolation_keys(contents)
-        parsed = True
-    finally:
-        if not parsed:
-            with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
-                if _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key) is inflight:
-                    del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
-                inflight.set()
+    except Exception as exc:
+        with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+            _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = _ComposeInterpolationKeysCacheFailure(
+                type(exc), str(exc)
+            )
+            if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
+                _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
+            if _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key) is inflight:
+                del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
+            inflight.set()
+        raise
+    except BaseException:
+        with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+            if _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key) is inflight:
+                del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
+            inflight.set()
+        raise
 
     with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
         _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
@@ -217,6 +239,16 @@ def _cached_compose_interpolation_keys(
             del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
         inflight.set()
     return keys
+
+
+def _raise_compose_interpolation_cache_failure(
+    failure: _ComposeInterpolationKeysCacheFailure,
+) -> NoReturn:
+    try:
+        exception = failure.exception_type(failure.message)
+    except TypeError as exc:
+        raise RuntimeError(failure.message) from exc
+    raise exception
 
 
 def _parse_compose_interpolation_keys(contents: str) -> tuple[str, ...]:

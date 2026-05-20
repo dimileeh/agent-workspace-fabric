@@ -978,11 +978,11 @@ def _resolve_service_runtime_env_files(
 def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Path | None:
     """Return the Compose env path from `_resolve_service_compose_paths`, if present."""
 
-    from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+    from awf.service.config import _is_local_service_compose_file_path
 
     if _compose_root_env_file(env_file) is None:
         return None
-    if compose_file.name != LOCAL_SERVICE_COMPOSE_FILE.name:
+    if not _is_local_service_compose_file_path(compose_file):
         return None
     if compose_file.expanduser().resolve().parent != env_file.expanduser().resolve().parent:
         return None
