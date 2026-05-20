@@ -1803,7 +1803,10 @@ class ControlWorker:
                 if self._executor is None:
                     return False
                 if self._available_execution_slots() <= 0:
-                    return not preservation_expired
+                    return (
+                        not preservation_expired
+                        or self._can_dispatch_execution_when_slot_available()
+                    )
                 return True
 
             extracted_pr_number = (
@@ -3487,7 +3490,7 @@ class ControlWorker:
                     if event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE:
                         can_dispatch_validation = self._executor is not None and (
                             candidate.workspace_id in self._execution_tasks
-                            or self._available_execution_slots() > 0
+                            or self._can_dispatch_execution_when_slot_available()
                         )
                         if not can_dispatch_validation:
                             continue
@@ -3782,6 +3785,9 @@ class ControlWorker:
 
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
+
+    def _can_dispatch_execution_when_slot_available(self) -> bool:
+        return self._executor is not None and self._config.max_concurrent_executions > 0
 
     def _dispatchable_execution_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
         dispatchable: list[str] = []
