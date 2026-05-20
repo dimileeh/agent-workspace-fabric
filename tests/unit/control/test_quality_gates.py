@@ -4280,6 +4280,28 @@ jobs:
               body: token,
             });
 """,
+        """
+        with:
+          script: |
+            const token = github.token;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: token,
+            });
+""",
+        """
+        with:
+          script: |
+            const token = context.token;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: token,
+            });
+""",
     ],
 )
 def test_added_github_script_step_with_script_unsafe_inputs_are_blocked(

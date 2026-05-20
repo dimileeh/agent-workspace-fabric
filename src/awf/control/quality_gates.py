@@ -77,6 +77,8 @@ _GITHUB_SCRIPT_BLOCKED_ACCESS_RE: Final = re.compile(
     r"|\b(?:eval|fetch|Function|require|setInterval|setTimeout)\s*\("
     r"|\bimport\s*\("
     r"|\bprocess\s*(?:\.|\?\.|\[)"
+    r"|\b(?:github|context)\s*(?:\.|\?\.)\s*token\b"
+    r"|\b(?:github|context)\s*(?:\?\.)?\[\s*(?:['\"]token['\"]|`token`)\s*\]"
     r"|\bgithub\s*\["
     r"|\bgithub\.(?:graphql|paginate|request)\s*\("
 )
