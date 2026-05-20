@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -69,6 +69,40 @@ class ServiceSettings:
     local_capacity_dind_slots: int | None = None
 
 
+@dataclass
+class _ProjectDotenvLookup:
+    """Cache project dotenv candidate discovery within one settings resolution."""
+
+    _candidates: tuple[Path, ...] | None = None
+    _values_by_file: dict[Path, dict[str, str]] = field(default_factory=dict)
+
+    def value(self, key: str) -> str | None:
+        for env_file in self._candidate_paths():
+            if not env_file.exists():
+                continue
+            value = _env_value(self._values(env_file), key)
+            if value is not None:
+                return value
+        return None
+
+    def _candidate_paths(self) -> tuple[Path, ...]:
+        if self._candidates is None:
+            self._candidates = _project_dotenv_candidates()
+        return self._candidates
+
+    def _values(self, env_file: Path) -> dict[str, str]:
+        cache_key = env_file.resolve()
+        values = self._values_by_file.get(cache_key)
+        if values is None:
+            values = {
+                env_key: env_value
+                for env_key, env_value in dotenv_values(env_file).items()
+                if env_value is not None
+            }
+            self._values_by_file[cache_key] = values
+        return values
+
+
 def resolve_service_settings(
     base: Settings | None = None,
     *,
@@ -87,8 +121,13 @@ def resolve_service_settings(
     env = os.environ if environ is None else environ
     service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
+    project_dotenv_lookup = _ProjectDotenvLookup()
 
-    database_url_explicit = _database_url_env_is_explicit(env, service_env)
+    database_url_explicit = _database_url_env_is_explicit(
+        env,
+        service_env,
+        project_dotenv_lookup=project_dotenv_lookup,
+    )
     if not database_url_explicit:
         database_url_explicit = _settings_database_url_is_explicit(
             settings,
@@ -104,6 +143,7 @@ def resolve_service_settings(
         env,
         service_env,
         require_init_field=environ is not None,
+        project_dotenv_lookup=project_dotenv_lookup,
     )
     work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
@@ -261,6 +301,7 @@ def _resolve_service_api_base_url(
     service_environ: Mapping[str, str],
     *,
     require_init_field: bool = False,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
 ) -> str:
     """Return the host-side API base URL matching Compose port overrides."""
 
@@ -268,6 +309,7 @@ def _resolve_service_api_base_url(
     if host_api_base_url is not None and _api_base_url_env_is_explicit(
         environ,
         service_environ,
+        project_dotenv_lookup=project_dotenv_lookup,
     ):
         return host_api_base_url
     if _settings_api_base_url_is_explicit(
@@ -340,6 +382,8 @@ def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> 
 def _api_base_url_env_is_explicit(
     environ: Mapping[str, str],
     service_environ: Mapping[str, str],
+    *,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
 ) -> bool:
     """Return true when the host environment carries a non-derivable API URL.
 
@@ -359,7 +403,7 @@ def _api_base_url_env_is_explicit(
         return False
     return not (
         _env_value(service_environ, "AWF_API_HOST_PORT")
-        and _project_dotenv_value("AWF_API_BASE_URL") == api_base_url
+        and _project_dotenv_value("AWF_API_BASE_URL", lookup=project_dotenv_lookup) == api_base_url
     )
 
 
@@ -389,6 +433,8 @@ def _settings_database_url_is_explicit(
 def _database_url_env_is_explicit(
     environ: Mapping[str, str],
     service_environ: Mapping[str, str],
+    *,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
 ) -> bool:
     """Return true when the host environment carries a non-derivable database URL.
 
@@ -408,25 +454,18 @@ def _database_url_env_is_explicit(
         return False
     return not (
         _env_value(service_environ, "AWF_POSTGRES_HOST_PORT")
-        and _project_dotenv_value("AWF_DATABASE_URL") == database_url
+        and _project_dotenv_value("AWF_DATABASE_URL", lookup=project_dotenv_lookup) == database_url
     )
 
 
-def _project_dotenv_value(key: str) -> str | None:
+def _project_dotenv_value(
+    key: str,
+    *,
+    lookup: _ProjectDotenvLookup | None = None,
+) -> str | None:
     """Return a value from the project .env associated with local Compose."""
 
-    for env_file in _project_dotenv_candidates():
-        if not env_file.exists():
-            continue
-        values = {
-            env_key: env_value
-            for env_key, env_value in dotenv_values(env_file).items()
-            if env_value is not None
-        }
-        value = _env_value(values, key)
-        if value is not None:
-            return value
-    return None
+    return (lookup or _ProjectDotenvLookup()).value(key)
 
 
 def _project_dotenv_candidates() -> tuple[Path, ...]:

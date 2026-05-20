@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-_COMPOSE_TEMPLATE_RE = re.compile(r"\$\{([^}]*)\}")
-
 
 def _compose_template_token_value(template: str, inner: str, env: dict[str, str]) -> str:
     if not inner:
@@ -40,10 +38,28 @@ def _compose_template_token_value(template: str, inner: str, env: dict[str, str]
 
 
 def _compose_template_value(value: str, env: dict[str, str]) -> str:
-    return _COMPOSE_TEMPLATE_RE.sub(
-        lambda match: _compose_template_token_value(match.group(0), match.group(1), env),
-        value,
-    )
+    rendered: list[str] = []
+    index = 0
+    while index < len(value):
+        if value.startswith("$$", index):
+            rendered.append("$")
+            index += 2
+            continue
+        if value.startswith("${", index):
+            end = value.find("}", index + 2)
+            if end == -1:
+                rendered.append(value[index])
+                index += 1
+                continue
+            template = value[index : end + 1]
+            rendered.append(
+                _compose_template_token_value(template, template[2:-1], env),
+            )
+            index = end + 1
+            continue
+        rendered.append(value[index])
+        index += 1
+    return "".join(rendered)
 
 
 def _compose_published_host_port(mapping: str) -> str:
@@ -221,6 +237,11 @@ def test_local_service_compose_port_templates_support_default_and_override_value
 def test_compose_template_value_matches_common_interpolation_forms() -> None:
     assert _compose_template_value("${AWF_BARE}", {"AWF_BARE": "resolved"}) == "resolved"
     assert _compose_template_value("${AWF_BARE}", {}) == ""
+    assert (
+        _compose_template_value("$${AWF_ESCAPED:-5433}", {"AWF_ESCAPED": "15433"})
+        == "${AWF_ESCAPED:-5433}"
+    )
+    assert _compose_template_value("prefix $$ ${AWF_BARE}", {"AWF_BARE": "ok"}) == "prefix $ ok"
     assert _compose_template_value("${AWF_DEFAULT-default}", {}) == "default"
     assert _compose_template_value("${AWF_DEFAULT-default}", {"AWF_DEFAULT": ""}) == ""
     assert _compose_template_value("${AWF_DEFAULT:-default}", {"AWF_DEFAULT": ""}) == "default"

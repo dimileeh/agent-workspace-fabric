@@ -521,6 +521,54 @@ def test_project_dotenv_value_continues_past_env_without_requested_key(
 
 
 @pytest.mark.unit
+def test_resolve_service_settings_reuses_project_dotenv_candidates_for_default_url_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    (checkout / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}",
+                f"AWF_API_BASE_URL={DEFAULT_LOCAL_SERVICE_API_BASE_URL}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text(
+        "AWF_POSTGRES_HOST_PORT=15433\nAWF_API_HOST_PORT=9100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    candidate_calls = 0
+    real_project_dotenv_candidates = service_config._project_dotenv_candidates  # noqa: SLF001
+
+    def recording_project_dotenv_candidates() -> tuple[Path, ...]:
+        nonlocal candidate_calls
+        candidate_calls += 1
+        return real_project_dotenv_candidates()
+
+    monkeypatch.setattr(
+        service_config,
+        "_project_dotenv_candidates",
+        recording_project_dotenv_candidates,
+    )
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+    assert settings.api_base_url == "http://localhost:9100"
+    assert candidate_calls == 1
+
+
+@pytest.mark.unit
 def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
     explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
 
