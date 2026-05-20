@@ -347,8 +347,18 @@ def _docker_cli_environ(
         resolved, "DOCKER_HOST"
     )
     scrubbed_keys = {"AWF_DOCKER_HOST"}
+    caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
+    docker_host_found, docker_host_value = env_lookup(resolved, "DOCKER_HOST")
+    clears_docker_host = (
+        docker_host_found
+        and not docker_host_value
+        and caller_docker_host_found
+        and bool(caller_docker_host_value)
+    )
     if docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
+    elif clears_docker_host:
+        scrubbed_keys.add("DOCKER_HOST")
     for key in list(resolved):
         if key.upper() in scrubbed_keys:
             del resolved[key]
