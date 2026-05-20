@@ -2486,6 +2486,91 @@ class TestRunOnce:
         assert all(workspace.status == WorkspaceStatus.requested.value for workspace in blocked)
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_resets_resume_cursor_when_age_boost_threshold_changes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        frozen_now = datetime(2026, 1, 1, 0, 14, 59, tzinfo=UTC)
+
+        class FrozenDatetime(datetime):
+            current = frozen_now
+
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                if tz is None:
+                    return cls.current.replace(tzinfo=None)
+                return cls.current.astimezone(tz)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        candidate_window = _scheduler_candidate_fetch_limit(1)
+        scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+        blocked_ids: list[str] = []
+        for index in range(candidate_window * scanned_page_limit * 2):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"age-reset-capacity-blocked-{index}",
+                create_task_attempt=True,
+                created_at=frozen_now + timedelta(seconds=index),
+                task_policy={"scheduler": {"base_priority": 1}},
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+            blocked_ids.append(blocked_id)
+        fitting_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "age-boosted-fitting-before-capacity-resume-cursor",
+            create_task_attempt=True,
+            created_at=frozen_now - timedelta(minutes=14, seconds=59),
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        await _reserve_workspace(
+            session_factory,
+            fitting_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert provisioner.calls == []
+
+        FrozenDatetime.current = frozen_now + timedelta(seconds=1)
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            fitting = await repo.get(fitting_id)
+            blocked = [await repo.get(workspace_id) for workspace_id in blocked_ids]
+
+        assert provisioner.calls == [fitting_id]
+        assert fitting is not None
+        assert fitting.status == WorkspaceStatus.ready.value
+        assert all(workspace is not None for workspace in blocked)
+        assert all(workspace.status == WorkspaceStatus.requested.value for workspace in blocked)
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_resets_resume_cursor_when_requested_queue_changes(
         self,
         session_factory: async_sessionmaker[AsyncSession],

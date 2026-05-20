@@ -81,6 +81,8 @@ from awf.service.resource_capacity import (
     local_capacity_limit,
 )
 from awf.service.scheduler import (
+    AGE_BOOST_INTERVAL_SECONDS,
+    AGE_BOOST_MAX,
     SchedulerOrderCursor,
     scheduler_order_key,
     scheduler_score_from_workspace,
@@ -2592,9 +2594,10 @@ class ControlWorker:
         allocated_signature = _allocated_reservation_signature(allocated)
         claimed: list[str] = []
         repo = WorkspaceRepository(session)
+        node_id = self._config.node_id or "local"
         requested_queue_signature = await _requested_capacity_queue_signature(
             session,
-            node_id=self._config.node_id or "local",
+            node_id=node_id,
         )
         decided_at = datetime.now(UTC)
         # A provider circuit can open between polls without changing the queue
@@ -2605,15 +2608,20 @@ class ControlWorker:
             or _utc_datetime(resume_provider_suppression_expires_at) > decided_at
         )
         candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
-        candidate_after = (
-            resume_after
-            if (
-                resume_allocated_signature == allocated_signature
-                and resume_requested_queue_signature == requested_queue_signature
-                and resume_provider_suppression_open
+        candidate_after: SchedulerOrderCursor | None = None
+        if (
+            resume_after is not None
+            and resume_allocated_signature == allocated_signature
+            and resume_requested_queue_signature == requested_queue_signature
+            and resume_provider_suppression_open
+            and not await _requested_capacity_age_boost_changed(
+                session,
+                node_id=node_id,
+                since=resume_after.scoring_at,
+                now=decided_at,
             )
-            else None
-        )
+        ):
+            candidate_after = resume_after
         scoring_at = candidate_after.scoring_at if candidate_after is not None else decided_at
         capacity_refill_pages_remaining: int | None = None
         next_resume_after: SchedulerOrderCursor | None = None
@@ -3592,6 +3600,39 @@ async def _requested_capacity_queue_signature(
         str(max_workspace_id) if max_workspace_id is not None else None,
         str(ids_digest),
     )
+
+
+async def _requested_capacity_age_boost_changed(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    since: datetime,
+    now: datetime,
+) -> bool:
+    since_utc = _utc_datetime(since)
+    now_utc = _utc_datetime(now)
+    if now_utc <= since_utc:
+        return False
+
+    threshold_windows = [
+        and_(
+            Workspace.created_at
+            > since_utc - timedelta(seconds=boost * AGE_BOOST_INTERVAL_SECONDS),
+            Workspace.created_at <= now_utc - timedelta(seconds=boost * AGE_BOOST_INTERVAL_SECONDS),
+        )
+        for boost in range(1, AGE_BOOST_MAX + 1)
+    ]
+    if not threshold_windows:
+        return False
+
+    stmt = (
+        select(Workspace.id)
+        .where(Workspace.status == WorkspaceStatus.requested.value)
+        .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        .where(or_(*threshold_windows))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
 
 
 def _requested_capacity_queue_digest_payload(
