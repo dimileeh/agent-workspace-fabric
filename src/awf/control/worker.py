@@ -239,7 +239,7 @@ class _AllocatedReservationTotals:
 _ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
 
 type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
-type _RequestedCapacityQueueSignature = tuple[int, datetime | None, str | None]
+type _RequestedCapacityQueueSignature = tuple[int, datetime | None, datetime | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -3116,6 +3116,9 @@ def _ordered_queue_decision_matches(
         return False
     if decision.reason_code == reason_code:
         return _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
+    # A defaulted reservation is recorded while capacity candidates are claimed
+    # and is the ordering record for that attempt; suppress the follow-up
+    # ordered-provisioning row even though its decision timestamp differs.
     return (
         reason_code == ORDERED_REQUESTED_PROVISIONING_REASON
         and decision.reason_code == LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON
@@ -3393,15 +3396,19 @@ async def _requested_capacity_queue_signature(
         select(
             func.count(Workspace.id),
             func.max(Workspace.updated_at),
+            func.max(Workspace.created_at),
             func.max(Workspace.id),
         )
         .where(Workspace.status == WorkspaceStatus.requested.value)
         .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
     )
-    count, latest_updated_at, max_workspace_id = (await session.execute(stmt)).one()
+    count, latest_updated_at, latest_created_at, max_workspace_id = (
+        await session.execute(stmt)
+    ).one()
     return (
         int(count or 0),
         _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
+        _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
         str(max_workspace_id) if max_workspace_id is not None else None,
     )
 

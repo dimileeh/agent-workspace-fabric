@@ -788,6 +788,102 @@ class TestRunOnce:
         ) == worker_module._allocated_reservation_signature(aggregate_total)  # noqa: SLF001
 
     @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_changes_when_created_at_advances(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        generated_ids = iter(
+            [
+                "ws_ffffffffffffffffffffffff",
+                "ws_cccccccccccccccccccccccc",
+                "ws_dddddddddddddddddddddddd",
+                "ws_000000000000000000000000",
+                "ws_111111111111111111111111",
+            ]
+        )
+        monkeypatch.setattr(repositories_module, "new_workspace_id", lambda: next(generated_ids))
+        initial_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        anchor_updated_at = datetime(2026, 1, 5, tzinfo=UTC)
+        replacement_created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        replacement_updated_at = datetime(2026, 1, 4, tzinfo=UTC)
+
+        anchor_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-anchor",
+            created_at=initial_created_at,
+        )
+        leaving_ids = [
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-leaving-a",
+                created_at=initial_created_at,
+            ),
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-leaving-b",
+                created_at=initial_created_at,
+            ),
+        ]
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == anchor_id)
+                .values(updated_at=anchor_updated_at)
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            before = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        replacement_ids = [
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-replacement-a",
+                created_at=replacement_created_at,
+            ),
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-replacement-b",
+                created_at=replacement_created_at,
+            ),
+        ]
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id.in_(leaving_ids))
+                .values(status=WorkspaceStatus.ready.value)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id.in_(replacement_ids))
+                .values(updated_at=replacement_updated_at)
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            after = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        assert before[0] == after[0] == 3
+        assert before[1] == after[1] == anchor_updated_at
+        assert before[2] == initial_created_at
+        assert after[2] == replacement_created_at
+        assert before[-1] == after[-1] == anchor_id
+        assert before != after
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],
