@@ -188,6 +188,44 @@ fail_under = 99
 
 
 @pytest.mark.unit
+def test_pyproject_non_numeric_coverage_fail_under_change_is_blocked() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = "99"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.path == "pyproject.toml"
+    assert violation.section == "tool.coverage.report.fail_under"
+    assert violation.line == 5
+    assert "coverage fail_under changed from 99 to '99'" in violation.reason
+    assert "must remain numeric" in violation.reason
+
+
+@pytest.mark.unit
 def test_pyproject_unchanged_coverage_fail_under_policy_change_is_specific() -> None:
     old_text = """
 [project]

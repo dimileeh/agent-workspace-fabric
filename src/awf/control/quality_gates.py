@@ -532,6 +532,31 @@ def _pyproject_policy_section_violations(
                     _coverage_policy_without_fail_under(new_value)
                 ):
                     continue
+            elif old_fail_under != new_fail_under:
+                reason = (
+                    "coverage fail_under changed from "
+                    f"{_format_toml_policy_value(old_fail_under)} to "
+                    f"{_format_toml_policy_value(new_fail_under)} "
+                    "(fail_under must remain numeric; policy change requires ownership of pyproject.toml)"
+                )
+                line_text = new_text if new_fail_under is not None else old_text
+                violations.append(
+                    _violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        section="tool.coverage.report.fail_under",
+                        line=_line_for_toml_key(
+                            line_text,
+                            section="tool.coverage.report",
+                            key="fail_under",
+                        ),
+                        reason=reason,
+                    )
+                )
+                if _coverage_policy_without_fail_under(old_value) == (
+                    _coverage_policy_without_fail_under(new_value)
+                ):
+                    continue
         line_text = new_text if new_value is not None else old_text
         violations.append(
             _violation(
@@ -2244,6 +2269,14 @@ def _is_number(value: object) -> bool:
 
 def _format_number(value: float) -> str:
     return str(int(value)) if value.is_integer() else f"{value:g}"
+
+
+def _format_toml_policy_value(value: object) -> str:
+    if value is None:
+        return "unset"
+    if _is_number(value):
+        return _format_number(float(cast(int | float, value)))
+    return repr(value)
 
 
 def _line_for_toml_section(text: str, section: str) -> int | None:
