@@ -2454,38 +2454,93 @@ class ControlWorker:
         session: AsyncSession,
         workspace_ids: list[str],
     ) -> list[str]:
-        stmt = select(Workspace).where(
-            Workspace.id.in_(workspace_ids),
-            Workspace.status == WorkspaceStatus.requested.value,
-        )
-        workspaces_by_id = {
-            workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
-        }
-        candidates = _order_scheduler_workspaces(
-            [
-                workspaces_by_id[workspace_id]
-                for workspace_id in workspace_ids
-                if workspace_id in workspaces_by_id
-            ]
-        )
-        if not candidates:
-            await self._log_stale_requested_claims(session, workspace_ids)
-            return []
-
         reservation_repo = ResourceReservationRepository(session)
         allocated = await _allocated_totals_for_capacity_gate(
             session,
             reservation_repo=reservation_repo,
             config=self._config,
         )
+        claimed: list[str] = []
+        repo = WorkspaceRepository(session)
+        candidate_limit = max(
+            len(workspace_ids),
+            _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions),
+        )
+        candidate_after: SchedulerOrderCursor | None = None
+        scoring_at = datetime.now(UTC)
+        decided_at = datetime.now(UTC)
+        saw_requested_candidates = False
+
+        while len(claimed) < self._config.max_concurrent_provisions:
+            workspaces = await repo.list_schedulable_workspaces(
+                status=WorkspaceStatus.requested,
+                limit=candidate_limit,
+                after=candidate_after,
+                scoring_at=scoring_at,
+            )
+            if not workspaces:
+                break
+
+            saw_requested_candidates = True
+            workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+            page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
+                session,
+                workspaces,
+                limit=len(workspaces),
+                scoring_at=scoring_at,
+            )
+            page_candidates = [
+                workspaces_by_id[workspace_id]
+                for workspace_id in page_dispatchable_ids
+                if workspace_id in workspaces_by_id
+            ]
+            page_claimed = await self._claim_requested_capacity_candidates(
+                session,
+                repo=repo,
+                reservation_repo=reservation_repo,
+                candidates=page_candidates,
+                allocated=allocated,
+                claim_slots=self._config.max_concurrent_provisions - len(claimed),
+                decided_at=decided_at,
+            )
+            claimed.extend(page_claimed)
+            if len(claimed) >= self._config.max_concurrent_provisions:
+                break
+            if len(workspaces) < candidate_limit:
+                break
+            candidate_after = _scheduler_candidate_cursor(
+                workspaces,
+                scoring_at=scoring_at,
+                dialect_name=repo.dialect_name,
+            )
+            if candidate_after is None:
+                break
+
+        if not saw_requested_candidates:
+            await self._log_stale_requested_claims(session, workspace_ids)
+
+        return claimed
+
+    async def _claim_requested_capacity_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        repo: WorkspaceRepository,
+        reservation_repo: ResourceReservationRepository,
+        candidates: list[Workspace],
+        allocated: _AllocatedReservationTotals,
+        claim_slots: int,
+        decided_at: datetime,
+    ) -> list[str]:
+        if not candidates or claim_slots <= 0:
+            return []
+
         reservations = await reservation_repo.active_latest_by_workspace_ids(
             workspace.id for workspace in candidates
         )
         claimed: list[str] = []
-        now = datetime.now(UTC)
-        repo = WorkspaceRepository(session)
         for workspace in candidates:
-            if len(claimed) >= self._config.max_concurrent_provisions:
+            if len(claimed) >= claim_slots:
                 break
             demand = _reservation_demand_for_workspace(
                 workspace,
@@ -2508,7 +2563,7 @@ class ControlWorker:
                     workspace,
                     decision=QUEUE_DECISION_DEFERRED,
                     reason_code=reason_code,
-                    decided_at=now,
+                    decided_at=decided_at,
                     allocated=allocated,
                     demand=demand,
                     blockers=blockers,
@@ -2520,7 +2575,7 @@ class ControlWorker:
                     workspace,
                     decision=QUEUE_DECISION_ORDERED,
                     reason_code=LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
-                    decided_at=now,
+                    decided_at=decided_at,
                     allocated=allocated,
                     demand=demand,
                     blockers=[],
