@@ -511,6 +511,309 @@ class TestFetchPrStatus:
         assert c.comment_id == "9001"
         assert c.body_excerpt == "Summary with suggestions"
         assert c.blocks_merge is False
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_no_reviews_has_no_blocking_reviews(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=_sample_pr_payload())
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_commented_bot_reviews_are_advisory_not_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9101,
+                        "body": "Greptile summary with suggestions.",
+                        "state": "COMMENTED",
+                        "author": {"login": "greptile-apps[bot]"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9102,
+                        "body": "CodeRabbit advisory checklist.",
+                        "state": "COMMENTED",
+                        "author": {"login": "coderabbitai[bot]"},
+                        "submittedAt": "2026-05-06T11:01:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9101", "9102"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_changes_requested_review_body_stays_triageable_when_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9201,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert len(status.blocking_reviews) == 1
+        blocker = status.blocking_reviews[0]
+        assert blocker.comment_id == "9201"
+        assert blocker.source_kind == "review"
+        assert blocker.state == "CHANGES_REQUESTED"
+        assert blocker.blocks_merge is True
+        assert status.unresolved_review_comments[0].blocks_merge is False
+
+    @pytest.mark.unit
+    async def test_viewer_owned_changes_requested_review_is_not_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9202,
+                        "body": "Self-authored change request should not block the monitor.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "token-owner"},
+                        "viewerDidAuthor": True,
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_non_counting_changes_requested_review_is_advisory_not_blocking(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9251,
+                        "body": "External contributor advisory change request.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "external-reviewer"},
+                        "authorCanPushToRepository": False,
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        query_arg = next(arg for arg in fake.calls[0].args if arg.startswith("query="))
+        assert "authorCanPushToRepository" in query_arg
+        assert len(status.unresolved_review_comments) == 1
+        review = status.unresolved_review_comments[0]
+        assert review.comment_id == "9251"
+        assert review.state == "CHANGES_REQUESTED"
+        assert review.blocks_merge is False
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_later_approval_from_same_reviewer_clears_blocking_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9301,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9302,
+                        "body": "Looks good now.",
+                        "state": "APPROVED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:05:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9301", "9302"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_later_commented_review_does_not_clear_blocking_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9351,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9352,
+                        "body": "One more non-blocking note.",
+                        "state": "COMMENTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:05:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9351", "9352"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
+        assert len(status.blocking_reviews) == 1
+        blocker = status.blocking_reviews[0]
+        assert blocker.comment_id == "9351"
+        assert blocker.blocks_merge is True
+
+    @pytest.mark.unit
+    async def test_later_dismissed_review_clears_blocking_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9361,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9362,
+                        "body": "Dismissed stale review record.",
+                        "state": "DISMISSED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:05:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9361", "9362"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_empty_body_changes_requested_review_still_blocks(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9401,
+                        "body": "   ",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+        assert len(status.blocking_reviews) == 1
+        blocker = status.blocking_reviews[0]
+        assert blocker.comment_id == "9401"
+        assert blocker.body_excerpt == ""
+        assert blocker.blocks_merge is True
+
+    @pytest.mark.unit
+    async def test_top_level_issue_comments_are_advisory_not_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 9501,
+                        "body": "CodeRabbit advisory top-level summary.",
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai[bot]"},
+                        "createdAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:9501"]
+        assert status.unresolved_review_comments[0].blocks_merge is False
+        assert status.blocking_reviews == ()
 
     @pytest.mark.unit
     async def test_preserves_full_unresolved_review_thread_comment_history(self) -> None:
