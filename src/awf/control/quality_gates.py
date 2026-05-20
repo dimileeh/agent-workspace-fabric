@@ -1451,7 +1451,7 @@ def _step_identity(step: Mapping[str, Any]) -> tuple[str, str] | None:
     uses = _string_value(step.get("uses"))
     if uses:
         action = _uses_action(uses)
-        return ("uses", action or uses)
+        return ("uses", action.lower() if action is not None else uses)
     run = _string_value(step.get("run"))
     if run:
         return ("run", run)
@@ -1892,7 +1892,7 @@ def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
         return False
     old_action, old_ref = old_parts
     new_action, new_ref = new_parts
-    if old_action != new_action or old_ref == new_ref:
+    if old_action.lower() != new_action.lower() or old_ref == new_ref:
         return False
     if not _is_pinned_workflow_uses_ref(old_ref) or not _is_pinned_workflow_uses_ref(new_ref):
         return False
