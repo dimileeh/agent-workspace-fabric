@@ -177,7 +177,9 @@ def _queue_protected_workflow_diff(
     old_text: str = _PROTECTED_WORKFLOW_OLD,
     new_text: str = _PROTECTED_WORKFLOW_BLOCKED,
 ) -> None:
+    cmd.queue_result(returncode=0)  # cat-file base:path
     cmd.queue_result(returncode=0, stdout=old_text)
+    cmd.queue_result(returncode=0)  # cat-file HEAD:path
     cmd.queue_result(returncode=0, stdout=new_text)
 
 
@@ -3782,11 +3784,7 @@ jobs:
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
-    cmd.queue_result(returncode=0, stdout=old_text)  # git show merge-base:path
-    cmd.queue_result(returncode=0, stdout=new_text)  # git show HEAD:path
-    cmd.queue_result(
-        returncode=0, stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
-    )
+    _queue_protected_workflow_diff(cmd, old_text=old_text, new_text=new_text)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -4866,6 +4864,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
         returncode=0,
         stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
     )
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for protected revert check
     cmd.queue_result(returncode=0)  # workflow file now matches the remote PR branch baseline
@@ -4942,6 +4941,7 @@ async def test_ci_fix_stops_when_protected_revert_diff_baseline_unavailable(
         returncode=0,
         stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
     )
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=128, stderr="network reset")  # protected revert baseline fetch
     cmd.queue_result(returncode=0, stdout="")  # would continue to push without the fix
@@ -5460,8 +5460,7 @@ async def test_sync_base_protected_scope_diffs_use_remote_branch_base(
         returncode=0,
         stdout=_name_status_z(".github/workflows/ci.yml"),
     )  # diff against merged base
-    cmd.queue_result(returncode=0, stdout=workflow_text)
-    cmd.queue_result(returncode=0, stdout=workflow_text)
+    _queue_protected_workflow_diff(cmd, old_text=workflow_text, new_text=workflow_text)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -6858,6 +6857,7 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="removed workflow edit")
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
     runner = make_runner(
@@ -6933,7 +6933,8 @@ async def test_commit_dirty_worktree_fails_closed_when_protected_revert_check_er
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=128, stderr="bad revision")
     adapter = FakeAdapter()
     runner = make_runner(
@@ -7032,8 +7033,11 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="tool crashed before cleanup")
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0)  # cat-file HEAD:.github/workflows/ci.yml
+    cmd.queue_result(returncode=0, stdout=_PROTECTED_WORKFLOW_BLOCKED)
     runner = make_runner(
         factory=factory,
         cmd=cmd,

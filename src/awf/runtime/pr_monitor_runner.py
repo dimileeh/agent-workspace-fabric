@@ -5079,10 +5079,17 @@ class PullRequestMonitorRunner:
             if workspace is None:
                 return []
             owned_paths = list(workspace.owned_paths)
-        protected_file_diffs = await self._protected_file_diffs_for_status_paths(
-            worktree_path=self._worktrees_root / workspace_id,
-            changed_paths=changed_paths,
-        )
+        try:
+            protected_file_diffs = await self._protected_file_diffs_for_status_paths(
+                worktree_path=self._worktrees_root / workspace_id,
+                changed_paths=changed_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read dirty protected-scope file contents "
+                "for validation before commit: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
@@ -5113,12 +5120,19 @@ class PullRequestMonitorRunner:
         )
         if not changed_paths:
             return []
-        protected_file_diffs = await protected_file_diffs_for_committed_paths(
-            self._deps.runner,
-            worktree_path=worktree_path,
-            base_ref=local_base,
-            changed_paths=changed_paths,
-        )
+        try:
+            protected_file_diffs = await protected_file_diffs_for_committed_paths(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                base_ref=local_base,
+                changed_paths=changed_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read committed protected-scope file contents "
+                "against the remote PR branch for validation: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
@@ -5327,12 +5341,19 @@ class PullRequestMonitorRunner:
         )
         if not sync_base_authored_paths:
             return []
-        protected_file_diffs = await protected_file_diffs_for_committed_paths(
-            self._deps.runner,
-            worktree_path=worktree_path,
-            base_ref=remote_branch_base,
-            changed_paths=sync_base_authored_paths,
-        )
+        try:
+            protected_file_diffs = await protected_file_diffs_for_committed_paths(
+                self._deps.runner,
+                worktree_path=worktree_path,
+                base_ref=remote_branch_base,
+                changed_paths=sync_base_authored_paths,
+            )
+        except RuntimeError as exc:
+            raise ProtectedScopeDiffError(
+                "Could not read sync-base protected-scope file contents "
+                "against the remote PR branch for validation: "
+                f"{exc}"
+            ) from exc
         return find_protected_quality_gate_changes(
             changed_paths=sync_base_authored_paths,
             owned_paths=owned_paths,

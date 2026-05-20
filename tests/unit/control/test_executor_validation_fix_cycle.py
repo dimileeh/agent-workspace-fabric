@@ -624,7 +624,9 @@ dependencies = [
         fake.queue_result(returncode=0, stdout="")  # rev-parse --abbrev-ref HEAD
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
+        fake.queue_result(returncode=0)  # cat-file HEAD:pyproject.toml
         fake.queue_result(returncode=0, stdout=old_text)  # git show HEAD:pyproject.toml
+        fake.queue_result(returncode=0)  # cat-file :pyproject.toml
         fake.queue_result(returncode=0, stdout=new_text)  # git show :pyproject.toml
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
@@ -726,7 +728,9 @@ dependencies = [
         fake.queue_result(returncode=0)  # adapter.run (fix pass)
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
+        fake.queue_result(returncode=0)  # cat-file HEAD:pyproject.toml
         fake.queue_result(returncode=0, stdout="[tool.coverage]\nfail_under = 99\n")
+        fake.queue_result(returncode=0)  # cat-file :pyproject.toml
         fake.queue_result(returncode=0, stdout="[tool.coverage]\nfail_under = 0\n")
         fake.queue_result(
             returncode=0,

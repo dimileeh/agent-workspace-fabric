@@ -4120,7 +4120,7 @@ async def test_staged_protected_file_diffs_treat_deleted_index_path_as_absent(
         ["cat-file", "-e", "base-sha:pyproject.toml"],
         ["show", "base-sha:pyproject.toml"],
         ["cat-file", "-e", ":pyproject.toml"],
-        ["ls-files", "--stage", "-z", "--", "pyproject.toml"],
+        ["ls-files", "--stage", "-z", "--", ":(literal)pyproject.toml"],
     ]
 
 
