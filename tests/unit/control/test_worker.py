@@ -817,6 +817,137 @@ class TestRunOnce:
         }
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_defers_for_unreserved_active_local_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "unreserved-active-capacity-holder",
+        )
+        async with session_factory() as s:
+            active = await WorkspaceRepository(s).get(active_id)
+            assert active is not None
+            active.node_id = "worker-node-a"
+            active.resolved_profile = {"docker": {"mode": "dind"}}
+            await s.commit()
+
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "unreserved-active-capacity-deferred",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            node_id="worker-node-a",
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=1.0,
+            peak_memory_gb=1.0,
+            dind_slots=1,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-a",
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+                local_capacity_dind_slots=1,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            assert workspace is not None
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        assert provisioner.calls == []
+        assert workspace.status == WorkspaceStatus.requested.value
+        capacity_decision = next(
+            decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
+        )
+        allocated = capacity_decision.resource_summary["allocated"]
+        assert allocated["workspace_count"] == 1
+        assert allocated["peak_cpu"] == 6.0
+        assert allocated["peak_memory_gb"] == 16.0
+        assert allocated["dind_slots"] == 1
+        blockers = capacity_decision.resource_summary["blockers"]
+        assert {blocker["reason_code"] for blocker in blockers if isinstance(blocker, dict)} >= {
+            "PEAK_CPU_CAPACITY_SATURATED",
+            "PEAK_MEMORY_CAPACITY_SATURATED",
+            "DIND_CAPACITY_SATURATED",
+        }
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_ignores_unreserved_active_workspace_on_other_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "remote-unreserved-active-capacity-holder",
+        )
+        async with session_factory() as s:
+            active = await WorkspaceRepository(s).get(active_id)
+            assert active is not None
+            active.node_id = "worker-node-b"
+            active.resolved_profile = {"docker": {"mode": "dind"}}
+            await s.commit()
+
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "remote-unreserved-active-capacity-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            node_id="worker-node-a",
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-a",
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+                local_capacity_dind_slots=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        assert provisioner.calls == [requested_id]
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.ready.value
+        assert all(decision.reason_code != "LOCAL_CAPACITY_DEFERRED" for decision in decisions)
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_skips_repeated_unchanged_capacity_deferral(
         self,
         session_factory: async_sessionmaker[AsyncSession],

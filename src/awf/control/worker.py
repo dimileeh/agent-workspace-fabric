@@ -2473,11 +2473,10 @@ class ControlWorker:
             return []
 
         reservation_repo = ResourceReservationRepository(session)
-        allocated = _allocated_totals_from_repository(
-            await reservation_repo.active_latest_totals(
-                statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
-                node_id=self._config.node_id or "local",
-            )
+        allocated = await _allocated_totals_for_capacity_gate(
+            session,
+            reservation_repo=reservation_repo,
+            config=self._config,
         )
         reservations = await reservation_repo.active_latest_by_workspace_ids(
             workspace.id for workspace in candidates
@@ -3135,6 +3134,58 @@ def _capacity_blocker_payload_signature(
     return tuple(payload.get(field) for field in _CAPACITY_BLOCKER_SIGNATURE_FIELDS)
 
 
+async def _allocated_totals_for_capacity_gate(
+    session: AsyncSession,
+    *,
+    reservation_repo: ResourceReservationRepository,
+    config: WorkerConfig,
+) -> _AllocatedReservationTotals:
+    node_id = config.node_id or "local"
+    allocated = _allocated_totals_from_repository(
+        await reservation_repo.active_latest_totals(
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        )
+    )
+    await _add_unreserved_active_workspace_defaults(
+        session,
+        allocated=allocated,
+        config=config,
+        node_id=node_id,
+    )
+    return allocated
+
+
+async def _add_unreserved_active_workspace_defaults(
+    session: AsyncSession,
+    *,
+    allocated: _AllocatedReservationTotals,
+    config: WorkerConfig,
+    node_id: str,
+) -> None:
+    active_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .exists()
+    )
+    stmt = select(Workspace.id, Workspace.resolved_profile).where(
+        Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
+        or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
+        ~active_reservation_exists,
+    )
+    for workspace_id, resolved_profile in await session.execute(stmt):
+        allocated.add(
+            _default_reservation_demand_for_workspace(
+                workspace_id,
+                resolved_profile=resolved_profile,
+                config=config,
+            )
+        )
+
+
 def _allocated_totals_from_repository(
     totals: Mapping[str, float | int],
 ) -> _AllocatedReservationTotals:
@@ -3165,16 +3216,38 @@ def _reservation_demand_for_workspace(
             disk_mb=int(reservation.disk_mb or 0),
             dind_slots=int(reservation.dind_slots or 0),
         )
+    return _default_reservation_demand_for_workspace(
+        workspace.id,
+        resolved_profile=workspace.resolved_profile,
+        config=config,
+    )
+
+
+def _default_reservation_demand_for_workspace(
+    workspace_id: str,
+    *,
+    resolved_profile: object,
+    config: WorkerConfig,
+) -> _ReservationDemand:
     return _ReservationDemand(
-        workspace_id=workspace.id,
+        workspace_id=workspace_id,
         steady_cpu=config.workspace_steady_cpu,
         steady_memory_gb=config.workspace_steady_memory_gb,
         peak_cpu=config.workspace_peak_cpu,
         peak_memory_gb=config.workspace_peak_memory_gb,
         disk_mb=0,
-        dind_slots=0,
+        dind_slots=_default_dind_slots_from_profile(resolved_profile),
         defaulted=True,
     )
+
+
+def _default_dind_slots_from_profile(profile: object) -> int:
+    if not isinstance(profile, Mapping):
+        return 0
+    docker = profile.get("docker")
+    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
+        return 1
+    return 0
 
 
 def _local_capacity_blockers(
