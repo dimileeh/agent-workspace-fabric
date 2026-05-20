@@ -17,6 +17,7 @@ from awf.service.config import (
     ServiceSettings,
     local_service_environ,
 )
+from awf.service.environment import env_lookup, non_empty_env_value
 from awf.service.status import collect_service_status
 
 DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
@@ -321,20 +322,10 @@ def _bootstrap_stages(
 def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     """Return whether a Compose profile is enabled in the service env."""
 
-    raw = environ.get("COMPOSE_PROFILES", "")
+    _, raw = env_lookup(environ, "COMPOSE_PROFILES")
     return profile in {
         item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
     }
-
-
-def _non_empty_env_value(environ: Mapping[str, str], key: str) -> str | None:
-    """Look up a case-insensitive environment value and ignore empty strings."""
-
-    wanted = key.upper()
-    for existing, value in environ.items():
-        if existing.upper() == wanted and value:
-            return value
-    return None
 
 
 def _docker_cli_environ(
@@ -345,7 +336,7 @@ def _docker_cli_environ(
     resolved = dict(environ)
     # Keep Docker CLI host selection scoped to the resolved service environment;
     # falling back to ServiceSettings would reintroduce process-environment drift.
-    docker_host = _non_empty_env_value(resolved, "AWF_DOCKER_HOST") or _non_empty_env_value(
+    docker_host = non_empty_env_value(resolved, "AWF_DOCKER_HOST") or non_empty_env_value(
         resolved, "DOCKER_HOST"
     )
     scrubbed_keys = {"AWF_DOCKER_HOST"}

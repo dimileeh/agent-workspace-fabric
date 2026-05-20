@@ -766,7 +766,7 @@ services:
         calls.append(kwargs)
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("awf.service.logs.yaml.safe_load", _safe_load)
+    monkeypatch.setattr("awf.service.environment.yaml.safe_load", _safe_load)
     monkeypatch.delenv("AWF_CACHE_TOKEN", raising=False)
 
     run_service_logs(
