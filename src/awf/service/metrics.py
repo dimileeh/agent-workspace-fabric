@@ -23,6 +23,8 @@ from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     ProviderModelCircuitBreakerRepository,
     ResourceReservationRepository,
+    _resolve_session_dialect_name,
+    _scheduler_order_expressions,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -1576,18 +1578,19 @@ async def _capacity_queue_blocked_reason_counts(
     if not configured_constraints:
         return {}
 
-    # Blocker counts are a bounded FIFO diagnostic on the hot metrics path; the
-    # queue totals above remain whole-queue aggregates.
+    scoring_time = scoring_at or datetime.now(UTC)
+    # Blocker counts are a bounded scheduler-frontier diagnostic on the hot
+    # metrics path; the queue totals above remain whole-queue aggregates.
     candidates = await _capacity_queue_candidates(
         session,
         node_id=node_id,
         resource_defaults=resource_defaults,
         limit=DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT,
+        scoring_at=scoring_time,
     )
     if not candidates:
         return {}
 
-    scoring_time = scoring_at or datetime.now(UTC)
     candidates = await _provider_recovery_eligible_capacity_queue_candidates(
         session,
         candidates,
@@ -1672,7 +1675,12 @@ async def _capacity_queue_candidates(
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
     limit: int,
+    scoring_at: datetime,
 ) -> list[_CapacityQueueCandidate]:
+    order_expressions = _scheduler_order_expressions(
+        scoring_at=scoring_at,
+        dialect_name=_resolve_session_dialect_name(session, None),
+    )
     latest_active_reservations = (
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
@@ -1723,7 +1731,12 @@ async def _capacity_queue_candidates(
             Workspace.status == WorkspaceStatus.requested.value,
             _workspace_node_scope_filter(node_id),
         )
-        .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        .order_by(
+            order_expressions.class_priority.desc(),
+            order_expressions.effective_score.desc(),
+            Workspace.created_at.asc(),
+            Workspace.id.asc(),
+        )
         .limit(limit)
     )
     rows = (await session.execute(stmt)).all()

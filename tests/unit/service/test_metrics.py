@@ -1521,6 +1521,78 @@ async def test_capacity_queue_blocked_reason_counts_loads_latest_requested_deman
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_limits_after_scheduler_priority(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=30),
+        task_policy={"scheduler": {"base_priority": 0}},
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=29),
+        task_policy={"scheduler": {"base_priority": 0}},
+    )
+    high_priority_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=1),
+        task_policy={"scheduler": {"base_priority": 100}},
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        high_priority_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=5.0,
+        peak_memory_gb=2.0,
+        dind_slots=0,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await metrics._capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=4.0,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=0,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {"PEAK_CPU_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_capacity_queue_blocked_reason_counts_accumulates_fifo_demands(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
