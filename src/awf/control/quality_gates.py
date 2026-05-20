@@ -1100,8 +1100,8 @@ def _classify_workflow_change(
         return [new_error]
     assert old_workflow is not None
     assert new_workflow is not None
-    old_jobs = _workflow_jobs(old_workflow)
-    new_jobs = _workflow_jobs(new_workflow)
+    old_jobs = _workflow_jobs(old_workflow, diff.old_text)
+    new_jobs = _workflow_jobs(new_workflow, diff.new_text)
     if old_jobs is None or new_jobs is None:
         line_text = diff.new_text if new_jobs is None else diff.old_text
         return [
@@ -1209,13 +1209,76 @@ def _parse_workflow_yaml(
     return cast(Mapping[str, Any], loaded), None
 
 
-def _workflow_jobs(workflow: Mapping[str, Any]) -> Mapping[str, object] | None:
+def _workflow_jobs(workflow: Mapping[str, Any], text: str) -> Mapping[str, object] | None:
     jobs = workflow.get("jobs")
     if jobs is None:
         return {}
     if not isinstance(jobs, Mapping):
         return None
-    return cast(Mapping[str, object], jobs)
+    normalized_jobs: dict[str, object] = {}
+    for key, value in jobs.items():
+        job_id = _workflow_job_id(key, text)
+        if job_id in normalized_jobs:
+            return None
+        normalized_jobs[job_id] = value
+    return normalized_jobs
+
+
+def _workflow_job_id(key: object, text: str) -> str:
+    if isinstance(key, str):
+        return key
+    source_name = _workflow_source_scalar_key_name(key, _workflow_job_key_source_names(text))
+    if source_name is not None:
+        return source_name
+    return str(key)
+
+
+def _workflow_source_scalar_key_name(
+    loaded_key: object,
+    source_names: Sequence[str],
+) -> str | None:
+    matches = [
+        source_name
+        for source_name in source_names
+        if _yaml_scalar_key_matches_loaded_key(source_name, loaded_key)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _workflow_job_key_source_names(text: str) -> tuple[str, ...]:
+    jobs_node = _workflow_jobs_mapping_node(text)
+    if jobs_node is None:
+        return ()
+    return tuple(
+        key_node.value
+        for key_node, _value_node in jobs_node.value
+        if isinstance(key_node, ScalarNode)
+    )
+
+
+def _workflow_jobs_mapping_node(text: str) -> MappingNode | None:
+    document = _compose_workflow_yaml_document(text)
+    if not isinstance(document, MappingNode):
+        return None
+    for key_node, value_node in document.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == "jobs":
+            if isinstance(value_node, MappingNode):
+                return value_node
+            return None
+    return None
+
+
+def _yaml_scalar_key_matches_loaded_key(source_name: str, loaded_key: object) -> bool:
+    try:
+        loaded = yaml.safe_load(f"{source_name}: null\n")
+    except yaml.YAMLError:
+        return False
+    if not isinstance(loaded, Mapping) or len(loaded) != 1:
+        return False
+    source_key = next(iter(loaded))
+    return type(source_key) is type(loaded_key) and source_key == loaded_key
 
 
 def _workflow_top_level_violations(
