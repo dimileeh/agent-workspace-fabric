@@ -525,6 +525,23 @@ class TestHappyPath:
             assert persisted.execution_claim_expires_at == lease_expires_at
 
     @pytest.mark.unit
+    async def test_claim_ready_worker_restart_recovery_requires_real_execution_lease(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_running_worker_restart_recovery(factory)
+
+        ws = await executor._claim_ready(ws_id)
+
+        assert ws is None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.execution_claimed_by is None
+            assert persisted.execution_claim_expires_at is None
+
+    @pytest.mark.unit
     async def test_drives_ready_to_completed_and_records_pr_url(
         self,
         executor: WorkspaceExecutor,

@@ -143,6 +143,11 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 )
+_ACTIVE_RECOVERY_OPERATION_STATUSES: Final[tuple[str, ...]] = (
+    OperationStatus.pending.value,
+    OperationStatus.running.value,
+)
+_VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebase_only")
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
@@ -3497,6 +3502,69 @@ class WorkspaceRepository:
             .execution_options(synchronize_session=False)
         )
         return result.scalar_one_or_none() is not None
+
+    async def claim_worker_restart_recovery_execution(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+        claim_cutoff: datetime,
+    ) -> Workspace | None:
+        """Atomically adopt a worker-restart execution recovery lease."""
+        recovery_mode = Operation.payload["recovery_mode"].as_string()
+        active_worker_restart_recovery = (
+            select(literal(1))
+            .select_from(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.status.in_(_ACTIVE_RECOVERY_OPERATION_STATUSES),
+                Operation.payload["source"].as_string() == "worker_restart",
+                or_(
+                    and_(
+                        Operation.type == OperationType.validate.value,
+                        recovery_mode.in_(_VALIDATE_ONLY_RECOVERY_MODES),
+                    ),
+                    and_(
+                        Operation.type == OperationType.rebase.value,
+                        recovery_mode == "rebase_only",
+                    ),
+                ),
+            )
+            .exists()
+        )
+        claim_available = or_(
+            Workspace.execution_claimed_by.is_(None),
+            Workspace.execution_claim_expires_at.is_(None),
+            Workspace.execution_claim_expires_at <= claim_cutoff,
+            Workspace.execution_claimed_by == owner_id,
+        )
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.running.value,
+                active_worker_restart_recovery,
+                claim_available,
+            )
+            .values(
+                execution_claimed_by=owner_id,
+                execution_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .options(selectinload(Workspace.operations))
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def refresh_monitoring_pr_claim(
         self,

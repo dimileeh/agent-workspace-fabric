@@ -795,23 +795,6 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
     )
 
 
-def _execution_claim_allows_recovery_handoff(
-    workspace: Workspace,
-    *,
-    execution_owner_id: str | None,
-    claim_cutoff: datetime,
-) -> bool:
-    if workspace.execution_claimed_by is None or workspace.execution_claim_expires_at is None:
-        return True
-    if execution_owner_id is not None and workspace.execution_claimed_by == execution_owner_id:
-        return True
-
-    expires_at = workspace.execution_claim_expires_at
-    if expires_at.tzinfo is None and claim_cutoff.tzinfo is not None:
-        claim_cutoff = claim_cutoff.replace(tzinfo=None)
-    return expires_at <= claim_cutoff
-
-
 def _planning_validation_handoff_from_recovery_payload(
     *,
     workspace_id: str,
@@ -5475,7 +5458,19 @@ class WorkspaceExecutor:
                 await session.commit()
                 return ws
 
-            current = await repo.get_for_update(workspace_id)
+            current: Workspace | None = None
+            if execution_owner_id is not None and execution_lease_expires_at is not None:
+                current = await repo.claim_worker_restart_recovery_execution(
+                    workspace_id,
+                    owner_id=execution_owner_id,
+                    lease_expires_at=execution_lease_expires_at,
+                    claim_cutoff=datetime.now(UTC),
+                )
+                if current is not None:
+                    await session.commit()
+                    return current
+
+            current = await repo.get_with_operations(workspace_id)
             if current is None:
                 _log.warning("executor.skip_unknown", workspace_id=workspace_id)
                 return None
@@ -5485,21 +5480,12 @@ class WorkspaceExecutor:
                 and recovery is not None
                 and recovery.get("source") == "worker_restart"
             ):
-                if not _execution_claim_allows_recovery_handoff(
-                    current,
-                    execution_owner_id=execution_owner_id,
-                    claim_cutoff=datetime.now(UTC),
-                ):
-                    _log.info(
-                        "executor.skip_active_execution_claim",
-                        workspace_id=workspace_id,
-                        execution_claimed_by=current.execution_claimed_by,
-                    )
-                    return None
-                current.execution_claimed_by = execution_owner_id
-                current.execution_claim_expires_at = execution_lease_expires_at
-                await session.commit()
-                return current
+                _log.info(
+                    "executor.skip_active_execution_claim",
+                    workspace_id=workspace_id,
+                    execution_claimed_by=current.execution_claimed_by,
+                )
+                return None
             _log.info(
                 "executor.skip_not_ready",
                 workspace_id=workspace_id,
