@@ -2834,6 +2834,48 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_comment_action_step_with_body_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          body: Tests completed
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_added_informational_job_with_comment_action_uses_is_allowed() -> None:
     old_text = """
 name: CI

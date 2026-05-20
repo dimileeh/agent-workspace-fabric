@@ -63,7 +63,7 @@ _INFORMATIONAL_JOB_COMMENT_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset(
 )
 _INFORMATIONAL_JOB_READ_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset({"contents"})
 _INFORMATIONAL_STEP_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
-    {"continue-on-error", "id", "if", "name", "run", "uses"}
+    {"continue-on-error", "id", "if", "name", "run", "uses", "with"}
 )
 _INFORMATIONAL_RUN_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"echo", "printf"})
 _INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
