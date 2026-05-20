@@ -239,6 +239,7 @@ class _AllocatedReservationTotals:
 _ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
 
 type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
+type _RequestedCapacityQueueSignature = tuple[int, datetime | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class _RequestedCapacityClaimResult:
     workspace_ids: list[str]
     resume_after: SchedulerOrderCursor | None = None
     allocated_signature: _AllocatedReservationSignature | None = None
+    requested_queue_signature: _RequestedCapacityQueueSignature | None = None
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,9 @@ class ControlWorker:
         self._next_terminal_runtime_release_scan_at = 0.0
         self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
         self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
+        self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
+            None
+        )
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -2465,6 +2470,7 @@ class ControlWorker:
                 session,
                 resume_after=self._requested_capacity_resume_after,
                 resume_allocated_signature=self._requested_capacity_resume_signature,
+                resume_requested_queue_signature=(self._requested_capacity_resume_queue_signature),
             )
 
         result = await run_db_operation_with_retry(
@@ -2476,6 +2482,7 @@ class ControlWorker:
         )
         self._requested_capacity_resume_after = result.resume_after
         self._requested_capacity_resume_signature = result.allocated_signature
+        self._requested_capacity_resume_queue_signature = result.requested_queue_signature
         return result.workspace_ids
 
     async def _claim_requested_ids_with_capacity(
@@ -2484,6 +2491,7 @@ class ControlWorker:
         *,
         resume_after: SchedulerOrderCursor | None,
         resume_allocated_signature: _AllocatedReservationSignature | None,
+        resume_requested_queue_signature: _RequestedCapacityQueueSignature | None,
     ) -> _RequestedCapacityClaimResult:
         reservation_repo = ResourceReservationRepository(session)
         allocated = await _allocated_totals_for_capacity_gate(
@@ -2494,9 +2502,18 @@ class ControlWorker:
         allocated_signature = _allocated_reservation_signature(allocated)
         claimed: list[str] = []
         repo = WorkspaceRepository(session)
+        requested_queue_signature = await _requested_capacity_queue_signature(
+            session,
+            node_id=self._config.node_id or "local",
+        )
         candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
         candidate_after = (
-            resume_after if resume_allocated_signature == allocated_signature else None
+            resume_after
+            if (
+                resume_allocated_signature == allocated_signature
+                and resume_requested_queue_signature == requested_queue_signature
+            )
+            else None
         )
         scoring_at = (
             candidate_after.scoring_at if candidate_after is not None else datetime.now(UTC)
@@ -2505,6 +2522,7 @@ class ControlWorker:
         capacity_refill_pages_remaining: int | None = None
         next_resume_after: SchedulerOrderCursor | None = None
         next_resume_signature: _AllocatedReservationSignature | None = None
+        next_resume_queue_signature: _RequestedCapacityQueueSignature | None = None
 
         while len(claimed) < self._config.max_concurrent_provisions:
             workspaces = await repo.list_schedulable_workspaces(
@@ -2555,6 +2573,7 @@ class ControlWorker:
                     next_resume_after = page_end_cursor
                     if next_resume_after is not None:
                         next_resume_signature = _allocated_reservation_signature(allocated)
+                        next_resume_queue_signature = requested_queue_signature
                     break
                 capacity_refill_pages_remaining -= 1
             else:
@@ -2567,6 +2586,7 @@ class ControlWorker:
             workspace_ids=claimed,
             resume_after=next_resume_after,
             allocated_signature=next_resume_signature,
+            requested_queue_signature=next_resume_queue_signature,
         )
 
     async def _claim_requested_capacity_candidates(
@@ -3386,6 +3406,28 @@ def _allocated_reservation_signature(
         _capacity_signature_units(allocated.peak_memory_gb),
         allocated.disk_mb,
         allocated.dind_slots,
+    )
+
+
+async def _requested_capacity_queue_signature(
+    session: AsyncSession,
+    *,
+    node_id: str,
+) -> _RequestedCapacityQueueSignature:
+    stmt = (
+        select(
+            func.count(Workspace.id),
+            func.max(Workspace.updated_at),
+            func.max(Workspace.id),
+        )
+        .where(Workspace.status == WorkspaceStatus.requested.value)
+        .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+    )
+    count, latest_updated_at, max_workspace_id = (await session.execute(stmt)).one()
+    return (
+        int(count or 0),
+        _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
+        str(max_workspace_id) if max_workspace_id is not None else None,
     )
 
 
