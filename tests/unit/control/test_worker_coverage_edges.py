@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -200,6 +201,42 @@ def test_preserved_active_worktree_path_uses_public_provisioner_method(tmp_path:
     assert worker._preserved_active_worktree_path("ws_public") == tmp_path / "ws_public"  # noqa: SLF001
     assert provisioner.requests == ["ws_public"]
     assert not hasattr(provisioner, "_git")
+
+
+@pytest.mark.unit
+async def test_preserved_active_git_timeout_returns_failed_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+    recorded_kwargs: dict[str, object] = {}
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded_kwargs.update(kwargs)
+        raise subprocess.TimeoutExpired(
+            cmd=args,
+            timeout=kwargs["timeout"],
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr(worker_module.subprocess, "run", _run)
+
+    ok, stdout, stderr = await worker._run_preserved_active_git(  # noqa: SLF001
+        tmp_path,
+        "status",
+        "--porcelain=v1",
+    )
+
+    assert not ok
+    assert recorded_kwargs["timeout"] == worker_module._PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS
+    assert stdout == "partial stdout"
+    assert "partial stderr" in stderr
+    assert "git status --porcelain=v1 timed out" in stderr
 
 
 class _RefreshLoopWorker(ControlWorker):

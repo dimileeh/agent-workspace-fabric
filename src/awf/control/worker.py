@@ -128,6 +128,7 @@ _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
 )
 _ACTIVE_EXECUTION_SALVAGE_OWNER = "control_worker"
 _ACTIVE_EXECUTION_SALVAGE_SOURCE = "worker_restart"
+_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS = 30.0
 _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE = (
     "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED"
 )
@@ -2968,19 +2969,43 @@ class ControlWorker:
         worktree_path: Path,
         *args: str,
     ) -> tuple[bool, str, str]:
+        command = [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            *args,
+        ]
+
+        def _timeout_output(value: str | bytes | None) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value
+
         def _run() -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [
-                    "git",
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                    *args,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                return subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stderr = _timeout_output(exc.stderr).rstrip()
+                git_args = " ".join(args)
+                git_command = f"git {git_args}" if git_args else "git"
+                timeout_message = (
+                    f"{git_command} timed out after {_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS:g}s"
+                )
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=124,
+                    stdout=_timeout_output(exc.stdout),
+                    stderr=f"{stderr}\n{timeout_message}" if stderr else timeout_message,
+                )
 
         result = await asyncio.to_thread(_run)
         return result.returncode == 0, result.stdout, result.stderr
