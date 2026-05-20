@@ -562,6 +562,91 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_comment_validation_command_removal_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+        run: uv run coverage xml
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post coverage comment.run"
+    assert "workflow validation command changed without preserving existing command" in (
+        violation.reason
+    )
+
+
+@pytest.mark.unit
+def test_workflow_comment_validation_command_narrowing_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+        run: uv run pytest tests/unit tests/integration
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post coverage comment
+        run: uv run pytest tests/unit
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post coverage comment.run"
+    assert "workflow validation command changed without preserving existing command" in (
+        violation.reason
+    )
+
+
+@pytest.mark.unit
 def test_workflow_comment_step_new_validation_command_is_blocked() -> None:
     old_text = """
 name: CI

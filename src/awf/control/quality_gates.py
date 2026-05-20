@@ -1197,7 +1197,9 @@ def _workflow_existing_step_violations(
     old_run = _string_value(old_step.get("run"))
     new_run = _string_value(new_step.get("run"))
     if old_run != new_run:
-        if not _is_validation_command(old_run) and _is_validation_command(new_run):
+        old_run_is_validation = _is_validation_command(old_run)
+        new_run_is_validation = _is_validation_command(new_run)
+        if not old_run_is_validation and new_run_is_validation:
             violations.append(
                 _violation(
                     path=path,
@@ -1205,6 +1207,19 @@ def _workflow_existing_step_violations(
                     section=f"{section_prefix}.run",
                     line=_line_for_workflow_step_key(new_text, new_step, key="run"),
                     reason="workflow validation command introduced; introducing validation command is blocked",
+                )
+            )
+        elif old_run_is_validation and not _preserves_existing_validation_run(old_run, new_run):
+            violations.append(
+                _violation(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    section=f"{section_prefix}.run",
+                    line=_line_for_workflow_step_key(new_text, new_step, key="run"),
+                    reason=(
+                        "workflow validation command changed without preserving existing "
+                        f"command: {section_prefix}.run"
+                    ),
                 )
             )
         elif not (_is_comment_or_notify_step(new_step) or _is_informational_step(new_step)):
@@ -1389,6 +1404,21 @@ def _is_validation_command(command: str | None) -> bool:
         or _VALIDATION_UNITTEST_COMMAND_RE.search(normalized) is not None
         or _has_broad_validation_command_invocation(normalized)
     )
+
+
+def _preserves_existing_validation_run(old_run: str | None, new_run: str | None) -> bool:
+    if old_run is None or new_run is None:
+        return False
+    old_command = old_run.strip()
+    new_command = new_run.strip()
+    if not old_command or not new_command:
+        return False
+    if new_command == old_command:
+        return True
+    if not new_command.startswith(old_command):
+        return False
+    suffix = new_command[len(old_command) :].lstrip()
+    return suffix.startswith("&&") and "||" not in suffix
 
 
 def _has_broad_validation_command_invocation(command: str) -> bool:
