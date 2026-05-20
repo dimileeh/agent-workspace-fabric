@@ -1071,6 +1071,27 @@ class TestMergeStateStatus:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "merge_state_status",
+        (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS),
+    )
+    def test_protected_state_with_addressed_bot_thread_reaches_merge_attempt(
+        self,
+        merge_state_status: MergeStateStatus,
+    ) -> None:
+        thread = _thread("T_bot", author="greptile-apps")
+        state = MonitorState()
+        _mark_review_thread_addressed(state, thread, "false_positive")
+
+        action = decide(
+            _status(inline=(thread,), merge_state_status=merge_state_status),
+            state,
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
     def test_blocked_still_notifies_with_blocking_review(self) -> None:
         review = _review(
             "C_changes",

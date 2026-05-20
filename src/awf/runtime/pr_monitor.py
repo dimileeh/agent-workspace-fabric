@@ -742,13 +742,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         `git merge origin/<base>` + fix cycle; runs AFTER comments so
         a mergeable-CONFLICTING PR's conflict + comments can be fixed
         in one CLI pass.
-    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS relaxes to the normal
-        merge path when all other gates are green and no effective
-        blocking review or human defer remains.
-    8.  Deferred HUMAN feedback still unresolved on GitHub →
+    7.  Deferred HUMAN feedback still unresolved on GitHub →
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
         nits would linger forever.
+    8.  ``merge_state_status`` BLOCKED / HAS_HOOKS with unresolved
+        human-authored inline threads → NotifyHuman. Bot-only threads
+        already triaged by step 2 do not block the merge attempt.
     9.  All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
@@ -889,19 +889,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_human_defer:
         return NotifyHuman()
 
-    # 8. GitHub may report BLOCKED / HAS_HOOKS for branch-protection or
-    # required-review details that are stale or not inspectable from this
-    # slice. Once CI, mergeability, inline threads, human defers, and
-    # effective review blockers are clean, let the merge attempt be the
-    # final arbiter; merge failure handling already records the rejection.
-    if (
-        status.merge_state_status
-        in (
-            MergeStateStatus.BLOCKED,
-            MergeStateStatus.HAS_HOOKS,
-        )
-        and status.unresolved_inline_threads
-    ):
+    # 8. GitHub may report BLOCKED / HAS_HOOKS while unresolved bot
+    # threads linger after AWF triaged them as false-positive/deferred.
+    # Those bot-only threads should not stall auto-merge forever. Human
+    # inline threads are different: if GitHub still reports them unresolved,
+    # branch protection may be waiting on maintainer review state that this
+    # snapshot cannot inspect, so hand off instead of guessing.
+    if status.merge_state_status in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ) and any(not _is_bot_review_thread(t) for t in status.unresolved_inline_threads):
         return NotifyHuman()
 
     # 9. All green — terminal success action.
