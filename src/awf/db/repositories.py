@@ -15,6 +15,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast
@@ -2664,6 +2665,47 @@ class WorkspaceRepository:
         self._session.add(workspace)
         await self._session.flush()
         return workspace
+
+    async def create_replacement_from(
+        self,
+        source: Workspace,
+        *,
+        idempotency_key: str | None = None,
+        task_prompt: str | None = None,
+        task_policy: Mapping[str, Any] | None = None,
+        agent: str | None = None,
+        remote_push_branch: str | None = None,
+    ) -> Workspace:
+        """Create a fresh requested workspace from another workspace's request contract.
+
+        Runtime and PR-monitor fields stay on the source. Pass
+        ``remote_push_branch`` only for replacement flows that must preserve an
+        existing external target branch.
+        """
+        return await self.create(
+            repo_url=source.repo_url,
+            branch_base=source.branch_base,
+            task_title=source.task_title,
+            task_prompt=source.task_prompt if task_prompt is None else task_prompt,
+            task_external_id=source.task_external_id,
+            task_class=source.task_class,
+            owned_paths=list(source.owned_paths),
+            task_policy=deepcopy(
+                dict(task_policy if task_policy is not None else source.task_policy)
+            ),
+            auto_merge=source.auto_merge,
+            initial_review_grace_period_seconds=source.initial_review_grace_period_seconds,
+            agent=source.agent if agent is None else agent,
+            env_profile=source.env_profile,
+            profile_ref=source.profile_ref,
+            requested_profile=deepcopy(source.requested_profile),
+            resolved_profile=deepcopy(source.resolved_profile),
+            test_commands=list(source.test_commands),
+            requires_database=source.requires_database,
+            idempotency_key=idempotency_key,
+            task_kind=source.task_kind,
+            remote_push_branch=remote_push_branch,
+        )
 
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
         stmt = (

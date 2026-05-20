@@ -186,6 +186,77 @@ class TestCreate:
         assert events[0].new_state == WorkspaceStatus.requested.value
         assert events[0].reason_code == "CREATED"
 
+    @pytest.mark.unit
+    async def test_create_replacement_from_copies_request_fields(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        source = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="recover me",
+            task_prompt="recover this task",
+            task_external_id="task-123",
+            task_class="migration_task",
+            owned_paths=["src/awf/**"],
+            task_policy={"provider": {"model": "gpt-5.5"}},
+            auto_merge=False,
+            initial_review_grace_period_seconds=30.0,
+            agent="codex",
+            env_profile="python",
+            profile_ref="repo-profile",
+            requested_profile={"profile": {"name": "requested"}},
+            resolved_profile={"profile": {"name": "resolved"}},
+            test_commands=["uv run pytest"],
+            requires_database=True,
+            idempotency_key="source-key",
+            task_kind="sync_release_pr",
+            remote_push_branch="development",
+        )
+        source.branch_name = "release-sync/source"
+        source.base_commit = "a" * 40
+        source.pr_url = "https://github.com/example/a/pull/1"
+        source.monitor_last_commit_sha = "b" * 40
+
+        replacement = await repo.create_replacement_from(
+            source,
+            idempotency_key="replacement-key",
+        )
+
+        assert replacement.status == WorkspaceStatus.requested.value
+        assert replacement.id != source.id
+        assert replacement.idempotency_key == "replacement-key"
+        assert replacement.repo_url == source.repo_url
+        assert replacement.branch_base == source.branch_base
+        assert replacement.task_title == source.task_title
+        assert replacement.task_prompt == source.task_prompt
+        assert replacement.task_external_id == source.task_external_id
+        assert replacement.task_class == source.task_class
+        assert replacement.owned_paths == ["src/awf/**"]
+        assert replacement.task_policy == {"provider": {"model": "gpt-5.5"}}
+        assert replacement.auto_merge is False
+        assert replacement.initial_review_grace_period_seconds == 30.0
+        assert replacement.agent == source.agent
+        assert replacement.env_profile == source.env_profile
+        assert replacement.profile_ref == source.profile_ref
+        assert replacement.requested_profile == {"profile": {"name": "requested"}}
+        assert replacement.resolved_profile == {"profile": {"name": "resolved"}}
+        assert replacement.test_commands == ["uv run pytest"]
+        assert replacement.requires_database is True
+        assert replacement.task_kind == "sync_release_pr"
+        assert replacement.remote_push_branch is None
+        assert replacement.branch_name is None
+        assert replacement.base_commit is None
+        assert replacement.pr_url is None
+        assert replacement.monitor_last_commit_sha is None
+        assert replacement.owned_paths is not source.owned_paths
+        assert replacement.test_commands is not source.test_commands
+        assert replacement.task_policy is not source.task_policy
+        assert replacement.task_policy["provider"] is not source.task_policy["provider"]
+        assert replacement.requested_profile is not source.requested_profile
+        assert replacement.resolved_profile is not source.resolved_profile
+
 
 class TestRelationshipLoading:
     @pytest.mark.unit

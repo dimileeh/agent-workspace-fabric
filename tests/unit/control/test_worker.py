@@ -7124,6 +7124,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert replacement.requested_profile == {"source": "requested-profile"}
         assert replacement.resolved_profile == {"source": "resolved-profile"}
         assert replacement.test_commands == ["uv run pytest tests/unit/control/test_worker.py -q"]
+        assert replacement.task_kind == "feature_branch_pr"
+        assert replacement.branch_name is None
+        assert replacement.remote_push_branch is None
+        assert replacement.idempotency_key is not None
+        assert replacement.idempotency_key.startswith(f"active-salvage-replacement:{workspace_id}:")
         assert replacement_attempt.parent_attempt_id == original_attempt.id
         assert replacement_attempt.redispatch_from_attempt_id == original_attempt.id
         assert original_attempt.superseded_by_attempt_id == replacement_attempt.id

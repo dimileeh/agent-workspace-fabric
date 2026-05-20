@@ -2150,26 +2150,9 @@ class ControlWorker:
                 else None
             )
             if replacement is None:
-                replacement = await repo.create(
-                    repo_url=ws.repo_url,
-                    branch_base=ws.branch_base,
-                    task_title=ws.task_title,
-                    task_prompt=ws.task_prompt,
-                    agent=ws.agent,
-                    test_commands=list(ws.test_commands),
-                    requires_database=ws.requires_database,
-                    task_external_id=ws.task_external_id,
-                    task_class=ws.task_class,
-                    owned_paths=list(ws.owned_paths),
-                    task_policy=dict(ws.task_policy),
-                    auto_merge=ws.auto_merge,
-                    initial_review_grace_period_seconds=(ws.initial_review_grace_period_seconds),
-                    env_profile=ws.env_profile,
-                    profile_ref=ws.profile_ref,
-                    requested_profile=ws.requested_profile,
-                    resolved_profile=ws.resolved_profile,
+                replacement = await repo.create_replacement_from(
+                    ws,
                     idempotency_key=idempotency_key,
-                    task_kind=ws.task_kind,
                 )
                 task = await TaskRepository(session).get(task_id)
                 if task is None:
