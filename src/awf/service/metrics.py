@@ -16,6 +16,7 @@ from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, ResourceReservation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -33,6 +34,8 @@ from awf.service.orphan_resources import OrphanResourceSummary, summary_not_coll
 from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_NO_LOOP_REASON,
     PROVIDER_RECOVERY_STATE_KEY,
+    provider_cooldown_not_before,
+    provider_for_agent_model,
 )
 from awf.service.resource_capacity import (
     LOCAL_CAPACITY_CONSTRAINTS,
@@ -277,6 +280,7 @@ class CapacityQueueSummary:
 @dataclass(frozen=True)
 class _CapacityQueueWorkspace:
     id: str
+    agent: str
     task_class: str | None
     task_policy: dict[str, Any]
     created_at: datetime
@@ -1533,6 +1537,14 @@ async def _capacity_queue_blocked_reason_counts(
         return {}
 
     scoring_time = scoring_at or datetime.now(UTC)
+    candidates = await _provider_recovery_eligible_capacity_queue_candidates(
+        session,
+        candidates,
+        scoring_at=scoring_time,
+    )
+    if not candidates:
+        return {}
+
     ordered_candidates = sorted(
         candidates,
         key=lambda candidate: scheduler_order_key(
@@ -1562,6 +1574,42 @@ async def _capacity_queue_blocked_reason_counts(
             continue
         allocated.add(candidate.demand)
     return dict(sorted(counts.items()))
+
+
+async def _provider_recovery_eligible_capacity_queue_candidates(
+    session: AsyncSession,
+    candidates: list[_CapacityQueueCandidate],
+    *,
+    scoring_at: datetime,
+) -> list[_CapacityQueueCandidate]:
+    if not candidates:
+        return []
+
+    cooldown_eligible: list[_CapacityQueueCandidate] = []
+    circuit_candidate_pairs: dict[str, tuple[str, str]] = {}
+    for candidate in candidates:
+        workspace = candidate.workspace
+        not_before = provider_cooldown_not_before(workspace.task_policy)
+        if not_before is not None and not_before > scoring_at:
+            continue
+        model = agent_model_from_task_policy(workspace.task_policy)
+        provider = provider_for_agent_model(workspace.agent, model)
+        if provider is not None and model is not None:
+            circuit_candidate_pairs[workspace.id] = (provider, model)
+        cooldown_eligible.append(candidate)
+
+    if not circuit_candidate_pairs:
+        return cooldown_eligible
+
+    open_breakers = await ProviderModelCircuitBreakerRepository(session).open_breakers_for_pairs(
+        pairs=circuit_candidate_pairs.values(),
+        now=scoring_at,
+    )
+    return [
+        candidate
+        for candidate in cooldown_eligible
+        if circuit_candidate_pairs.get(candidate.workspace.id) not in open_breakers
+    ]
 
 
 async def _capacity_queue_candidates(
@@ -1595,6 +1643,7 @@ async def _capacity_queue_candidates(
     stmt = (
         select(
             Workspace.id.label("queue_workspace_id"),
+            Workspace.agent.label("queue_agent"),
             Workspace.task_class.label("queue_task_class"),
             Workspace.task_policy.label("queue_task_policy"),
             Workspace.created_at.label("queue_created_at"),
@@ -1637,6 +1686,7 @@ async def _capacity_queue_candidates(
 def _capacity_queue_workspace_from_row(values: Any) -> _CapacityQueueWorkspace:
     return _CapacityQueueWorkspace(
         id=str(values["queue_workspace_id"]),
+        agent=values["queue_agent"],
         task_class=values["queue_task_class"],
         task_policy=dict(values["queue_task_policy"] or {}),
         created_at=values["queue_created_at"],

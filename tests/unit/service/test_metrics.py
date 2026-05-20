@@ -1679,6 +1679,135 @@ async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_mem
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_excludes_provider_cooldown_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "not_before": (now + timedelta(minutes=5)).isoformat(),
+            }
+        },
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_excludes_open_provider_circuit_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    model = "gpt-5.3-codex-spark"
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        task_policy={"agent_model": model},
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+    async with session_factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model=model,
+            reason_code="PROVIDER_MODEL_CIRCUIT_OPEN",
+            failure_fingerprint="provider-capacity",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywhere(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
