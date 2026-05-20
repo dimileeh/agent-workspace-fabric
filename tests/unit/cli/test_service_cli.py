@@ -565,6 +565,42 @@ def test_service_logs_passes_source_checkout_compose_env_file(
 
 
 @pytest.mark.unit
+def test_service_logs_reuses_resolved_asset_root_for_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    root_lookups = 0
+
+    def _asset_root() -> Path:
+        nonlocal root_lookups
+        root_lookups += 1
+        return workspace_root
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", _asset_root)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "api"])
+
+    assert result.exit_code == 0, result.output
+    assert root_lookups == 1
+
+
+@pytest.mark.unit
 def test_service_logs_ignores_compose_env_without_verified_source_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
