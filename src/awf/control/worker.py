@@ -679,31 +679,14 @@ class ControlWorker:
         scoring_at: datetime,
         provider_recovery_decision_candidate_limit: int | None = None,
     ) -> list[str]:
-        if not candidate_workspaces:
-            return []
-
-        if provider_recovery_decision_candidate_limit is None:
-            eligible = await self._filter_provider_recovery_suppressed(
-                session,
-                candidate_workspaces,
-            )
-        else:
-            eligible = await self._filter_provider_recovery_suppressed(
-                session,
-                candidate_workspaces,
-                decision_candidate_limit=provider_recovery_decision_candidate_limit,
-            )
-        workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
-        eligible_workspaces_by_id: dict[str, Workspace] = {}
-        for workspace_id in eligible:
-            workspace = workspaces_by_id.get(workspace_id)
-            if workspace is not None:
-                eligible_workspaces_by_id.setdefault(workspace_id, workspace)
-        ordered_workspaces = _order_scheduler_workspaces(
-            list(eligible_workspaces_by_id.values()),
-            now=scoring_at,
+        result = await self._filter_scheduler_candidate_workspaces_with_result(
+            session,
+            candidate_workspaces,
+            limit=limit,
+            scoring_at=scoring_at,
+            provider_recovery_decision_candidate_limit=(provider_recovery_decision_candidate_limit),
         )
-        return [workspace.id for workspace in ordered_workspaces[:limit]]
+        return result.workspace_ids
 
     async def _filter_scheduler_candidate_workspaces_with_result(
         self,
@@ -3463,7 +3446,6 @@ async def _add_unreserved_active_workspace_defaults(
             or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
             active_reservation_workspace_ids.c.workspace_id.is_(None),
         )
-        .order_by(Workspace.id)
     )
     for workspace_id, resolved_profile in await session.execute(stmt):
         allocated.add(

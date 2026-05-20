@@ -40,6 +40,7 @@ from awf.control.worker import (
     _scheduler_candidate_fetch_limit,
     _scheduler_items_are_workspace_ids,
     _scheduler_items_are_workspaces,
+    _SchedulerCandidateFilterResult,
     _stale_active_execution_failure_message,
     _TerminalRuntimeCandidate,
     _utc_datetime,
@@ -2079,7 +2080,7 @@ class TestRunOnce:
             in unreserved_select
         )
         assert "anon_1.workspace_id is null" in unreserved_select
-        assert "order by workspaces.id" in unreserved_select
+        assert "order by workspaces.id" not in unreserved_select
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(
@@ -3301,12 +3302,12 @@ class TestRunOnce:
         filter_sessions: list[AsyncSession] = []
         filter_session_ids: list[int] = []
         retry_attempts: list[int] = []
-        original_filter = worker._filter_provider_recovery_suppressed
+        original_filter = worker._filter_provider_recovery_suppressed_with_result
 
         async def _flaky_filter(
             session: AsyncSession,
             workspaces: list[Workspace] | list[str],
-        ) -> list[str]:
+        ) -> _SchedulerCandidateFilterResult:
             nonlocal failures_remaining, filter_attempts
             filter_attempts += 1
             filter_sessions.append(session)
@@ -3319,7 +3320,9 @@ class TestRunOnce:
         async def _record_retry(_exc: BaseException, attempt: int) -> None:
             retry_attempts.append(attempt)
 
-        worker._filter_provider_recovery_suppressed = _flaky_filter  # type: ignore[method-assign]
+        worker._filter_provider_recovery_suppressed_with_result = (  # type: ignore[method-assign]
+            _flaky_filter
+        )
         worker._log_transient_db_retry = _record_retry  # type: ignore[method-assign]
 
         assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
@@ -3426,13 +3429,15 @@ class TestRunOnce:
                 after=after,
             )
 
-        async def _filter_provider_recovery_suppressed(
+        async def _filter_provider_recovery_suppressed_with_result(
             session: AsyncSession,
             workspaces: list[Workspace] | list[str],
-        ) -> list[str]:
+        ) -> _SchedulerCandidateFilterResult:
             filter_session_ids.append(id(session))
             assert not isinstance(workspaces[0], str)
-            return [workspace.id for workspace in workspaces]
+            return _SchedulerCandidateFilterResult(
+                workspace_ids=[workspace.id for workspace in workspaces],
+            )
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -3450,8 +3455,8 @@ class TestRunOnce:
                 max_concurrent_executions=1,
             ),
         )
-        worker._filter_provider_recovery_suppressed = (  # type: ignore[method-assign]
-            _filter_provider_recovery_suppressed
+        worker._filter_provider_recovery_suppressed_with_result = (  # type: ignore[method-assign]
+            _filter_provider_recovery_suppressed_with_result
         )
 
         assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
