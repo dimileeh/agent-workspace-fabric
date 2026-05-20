@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 import tomllib
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
@@ -540,7 +541,7 @@ def _dependency_group_violations(
         )
     for group in sorted(set(new_groups) - set(old_groups)):
         section = f"{section_prefix}.{group}"
-        new_dependencies = _dependency_map(new_groups[group])
+        new_dependencies = _dependency_entries(new_groups[group])
         if new_dependencies is None:
             violations.append(
                 _violation(
@@ -576,8 +577,8 @@ def _dependency_list_violations(
     old_text: str,
     new_text: str,
 ) -> list[QualityGateViolation]:
-    old_dependencies = _dependency_map(old_value)
-    new_dependencies = _dependency_map(new_value)
+    old_dependencies = _dependency_entries(old_value)
+    new_dependencies = _dependency_entries(new_value)
     if old_dependencies is None or new_dependencies is None:
         line_text = new_text if new_dependencies is None else old_text
         return [
@@ -590,8 +591,10 @@ def _dependency_list_violations(
             )
         ]
     violations: list[QualityGateViolation] = []
-    for name, old_raw in old_dependencies.items():
-        if name not in new_dependencies:
+    for name, old_entries in old_dependencies.items():
+        new_entries = new_dependencies.get(name)
+        if new_entries is None:
+            old_raw = next(iter(old_entries))
             violations.append(
                 _violation(
                     path=path,
@@ -602,13 +605,32 @@ def _dependency_list_violations(
                 )
             )
             continue
-        if old_raw != new_dependencies[name]:
+        for old_raw, old_count in old_entries.items():
+            if new_entries[old_raw] >= old_count:
+                continue
+            if _dependency_entry_count(new_entries) < _dependency_entry_count(old_entries):
+                violations.append(
+                    _violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        section=section,
+                        line=_line_containing(old_text, old_raw),
+                        reason=f"dependency removed: {name}",
+                    )
+                )
+                continue
             violations.append(
                 _violation(
                     path=path,
                     protected_pattern=protected_pattern,
                     section=section,
-                    line=_line_containing(new_text, new_dependencies[name])
+                    line=_line_containing(
+                        new_text,
+                        _replacement_dependency_raw(
+                            old_entries=old_entries,
+                            new_entries=new_entries,
+                        ),
+                    )
                     or _line_containing(old_text, old_raw),
                     reason=f"dependency changed: {name}",
                 )
@@ -616,20 +638,35 @@ def _dependency_list_violations(
     return violations
 
 
-def _dependency_map(value: object) -> dict[str, str] | None:
+def _dependency_entries(value: object) -> dict[str, Counter[str]] | None:
     if value is None:
         return {}
     if not isinstance(value, list):
         return None
-    dependencies: dict[str, str] = {}
+    dependencies: dict[str, Counter[str]] = {}
     for item in value:
         if not isinstance(item, str):
             return None
         name = _dependency_name(item)
         if name is None:
             return None
-        dependencies[name] = item
+        dependencies.setdefault(name, Counter())[item] += 1
     return dependencies
+
+
+def _dependency_entry_count(entries: Counter[str]) -> int:
+    return sum(entries.values())
+
+
+def _replacement_dependency_raw(
+    *,
+    old_entries: Counter[str],
+    new_entries: Counter[str],
+) -> str:
+    for new_raw, new_count in new_entries.items():
+        if new_count > old_entries[new_raw]:
+            return new_raw
+    return next(iter(new_entries))
 
 
 def _dependency_name(requirement: str) -> str | None:

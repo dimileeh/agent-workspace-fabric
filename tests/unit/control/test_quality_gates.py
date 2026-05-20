@@ -177,6 +177,43 @@ dev = [
 
 
 @pytest.mark.unit
+def test_pyproject_duplicate_dependency_entry_deletion_is_blocked() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "urllib3>=2.0.0; python_version >= '3.11'",
+    "urllib3>=1.26.0; python_version < '3.11'",
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "urllib3>=1.26.0; python_version < '3.11'",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "project.dependencies"
+    assert violation.line == 4
+    assert "dependency removed: urllib3" in violation.reason
+
+
+@pytest.mark.unit
 def test_pyproject_new_dependency_group_is_blocked() -> None:
     old_text = """
 [dependency-groups]
