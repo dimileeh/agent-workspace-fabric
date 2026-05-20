@@ -2521,6 +2521,25 @@ def test_merge_env_seed_contents_rejects_multiline_dotenv_values(
 
 
 @pytest.mark.unit
+def test_merge_env_seed_contents_allows_escaped_trailing_backslash_values() -> None:
+    """Treat paired trailing backslashes as a single-line dotenv value."""
+    from awf.cli import main as cli_main
+
+    seed_windows_path = "AWF_WINDOWS_PATH=C:" + "\\" * 2 + "\n"
+    overlay_windows_path = "AWF_ROOT_PATH=C:" + "\\" * 2 + "\n"
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (seed_windows_path + "AWF_API_TOKEN=compose\n").encode("utf-8"),
+        ("AWF_API_TOKEN=root\n" + overlay_windows_path).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ("AWF_ROOT_PATH",)
+    assert merged_contents.decode("utf-8") == (
+        seed_windows_path + "AWF_API_TOKEN=root\n" + overlay_windows_path
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("seed_contents", "overlay_contents"),
     (

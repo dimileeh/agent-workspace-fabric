@@ -1111,10 +1111,12 @@ def _env_contents_have_multiline_values(text: str) -> bool:
         if not stripped_value:
             continue
         quote = stripped_value[0]
+        line_without_newline = line.rstrip("\r\n")
+        trailing_backslashes = len(line_without_newline) - len(line_without_newline.rstrip("\\"))
         if (
             quote not in {"'", '"'}
             and line.endswith(("\n", "\r"))
-            and line.rstrip("\r\n").endswith("\\")
+            and trailing_backslashes % 2 == 1
         ):
             return True
         if quote in {"'", '"'} and not _env_value_has_same_line_closing_quote(
