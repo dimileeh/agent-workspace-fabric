@@ -1207,7 +1207,8 @@ def _merge_env_seed_contents_with_overlay_keys(
     for line in overlay_lines:
         key = _env_assignment_key(line)
         if key is not None:
-            overlay_assignments[_env_assignment_key_identity(key)] = line
+            normalized_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
+            overlay_assignments[_env_assignment_key_identity(key)] = normalized_line
 
     seed_keys: set[str] = set()
     for line in seed_lines:

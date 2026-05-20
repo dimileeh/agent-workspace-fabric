@@ -2481,6 +2481,22 @@ def test_merge_env_seed_matches_overlay_keys_case_insensitively() -> None:
 
 
 @pytest.mark.unit
+def test_merge_env_seed_normalizes_overlay_assignment_without_trailing_newline() -> None:
+    """A root overlay EOF assignment must not absorb the following seed line."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        b"AWF_API_TOKEN=compose-example\nAWF_COMPOSE_ONLY=compose-default\n",
+        b"AWF_API_TOKEN=migrated-token",
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "AWF_API_TOKEN=migrated-token\nAWF_COMPOSE_ONLY=compose-default\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_appends_trailing_shared_overlay_context_after_seed_lines() -> None:
     """Overlay EOF comments for shared keys belong at the merged file tail."""
     from awf.cli import main as cli_main
