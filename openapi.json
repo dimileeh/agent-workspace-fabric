@@ -339,7 +339,7 @@
             "title": "Oldest Workspace Id"
           },
           "planned_resources": {
-            "$ref": "#/components/schemas/ReservedResourcesResponse"
+            "$ref": "#/components/schemas/QueuePlannedResourcesResponse"
           },
           "queued_workspace_count": {
             "title": "Queued Workspace Count",
@@ -4246,6 +4246,44 @@
           "decided_at"
         ],
         "title": "QueueDecisionSummaryResponse",
+        "type": "object"
+      },
+      "QueuePlannedResourcesResponse": {
+        "properties": {
+          "dind_slots": {
+            "title": "Dind Slots",
+            "type": "integer"
+          },
+          "disk_mb": {
+            "title": "Disk Mb",
+            "type": "integer"
+          },
+          "peak_cpu": {
+            "title": "Peak Cpu",
+            "type": "number"
+          },
+          "peak_memory_gb": {
+            "title": "Peak Memory Gb",
+            "type": "number"
+          },
+          "steady_cpu": {
+            "title": "Steady Cpu",
+            "type": "number"
+          },
+          "steady_memory_gb": {
+            "title": "Steady Memory Gb",
+            "type": "number"
+          }
+        },
+        "required": [
+          "steady_cpu",
+          "steady_memory_gb",
+          "peak_cpu",
+          "peak_memory_gb",
+          "disk_mb",
+          "dind_slots"
+        ],
+        "title": "QueuePlannedResourcesResponse",
         "type": "object"
       },
       "ReadyResponse": {

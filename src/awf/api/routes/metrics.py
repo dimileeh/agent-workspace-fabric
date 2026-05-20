@@ -270,6 +270,17 @@ class ReservedResourcesResponse(BaseModel):
     dind_slots: int
 
 
+class QueuePlannedResourcesResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int
+    dind_slots: int
+
+
 class CapacityDimensionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -339,7 +350,7 @@ class CapacityQueueSummaryResponse(BaseModel):
     queued_workspace_count: int
     oldest_workspace_id: str | None = None
     oldest_wait_seconds: int | None = None
-    planned_resources: ReservedResourcesResponse
+    planned_resources: QueuePlannedResourcesResponse
     blocked_reason_counts: dict[str, int]
 
 

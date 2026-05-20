@@ -382,8 +382,14 @@ async def test_resource_saturation_endpoint_reports_allocated_capacity_and_queue
     assert body["capacity_queue"]["queued_workspace_count"] == 1
     assert body["capacity_queue"]["oldest_workspace_id"] == requested_id
     assert body["capacity_queue"]["oldest_wait_seconds"] >= 0
-    assert body["capacity_queue"]["planned_resources"]["active_workspace_count"] == 1
-    assert body["capacity_queue"]["planned_resources"]["peak_cpu"] == 6.0
+    assert body["capacity_queue"]["planned_resources"] == {
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 8.0,
+        "peak_cpu": 6.0,
+        "peak_memory_gb": 16.0,
+        "disk_mb": 0,
+        "dind_slots": 1,
+    }
     assert body["capacity_queue"]["blocked_reason_counts"] == {
         "DIND_CAPACITY_SATURATED": 1,
         "PEAK_CPU_CAPACITY_SATURATED": 1,
