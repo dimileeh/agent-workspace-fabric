@@ -1762,7 +1762,6 @@ class ControlWorker:
                 tuple[
                     str,
                     str,
-                    str,
                     str | None,
                     str | None,
                     str | None,
@@ -1772,7 +1771,6 @@ class ControlWorker:
             if not attach_existing_pr_monitor:
                 branch_recovery_context = (
                     ws.repo_url,
-                    ws.branch_base,
                     ws.id,
                     ws.branch_name,
                     ws.remote_push_branch,
@@ -1792,7 +1790,6 @@ class ControlWorker:
         assert branch_recovery_context is not None
         (
             repo_url,
-            branch_base,
             workspace_id,
             branch_name,
             remote_push_branch,
@@ -1801,7 +1798,9 @@ class ControlWorker:
         branch_lookup = await self._resolve_preserved_active_branch_open_pr(
             repo_url=repo_url,
             branch_name=remote_push_branch or branch_name,
-            base_branch=branch_base,
+            # A preserved branch PR may have been retargeted after creation.
+            # Recover by head branch and let match/ambiguity checks below guard safety.
+            base_branch=None,
         )
         if branch_lookup is not None and branch_lookup.state == "matched":
             await self._attach_preserved_active_pr_monitor(

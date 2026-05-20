@@ -705,6 +705,33 @@ class _RecordingBranchOpenPRResolver:
         return list(result)
 
 
+class _RetargetedBranchOpenPRResolver:
+    def __init__(
+        self,
+        results_by_branch: dict[str, list[SimpleNamespace]],
+    ) -> None:
+        self._results_by_branch = results_by_branch
+        self.calls: list[dict[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[SimpleNamespace]:
+        self.calls.append(
+            {
+                "repo_url": repo_url,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        if base_branch is not None:
+            return []
+        return list(self._results_by_branch[branch_name])
+
+
 class _SequenceBranchOpenPRResolver:
     def __init__(
         self,
@@ -6939,7 +6966,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
         branch_name = f"awf/{workspace_id}"
         resolved_head_sha = "e" * 40
-        resolver = _RecordingBranchOpenPRResolver(
+        resolver = _RetargetedBranchOpenPRResolver(
             {
                 branch_name: [
                     SimpleNamespace(
@@ -7031,7 +7058,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 {
                     "repo_url": str(origin_repo),
                     "branch_name": branch_name,
-                    "base_branch": "development",
+                    "base_branch": None,
                 }
             ]
             assert cleaner.calls == []
@@ -7108,7 +7135,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             }
         ]
         assert executor.resume_calls == [workspace_id]
@@ -7224,12 +7251,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             },
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             },
         ]
         assert executor.calls == []
@@ -7393,7 +7420,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             }
         ]
         assert executor.calls == []
@@ -7508,7 +7535,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             }
         ]
         assert cleaner.calls == []
@@ -7787,7 +7814,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": "development",
+                "base_branch": None,
             }
         ]
         assert cleaner.calls == []
