@@ -1277,20 +1277,21 @@ def _workflow_existing_step_violations(
                     reason="workflow validation command introduced; introducing validation command is blocked",
                 )
             )
-        elif old_run_is_validation and not _preserves_existing_validation_run(old_run, new_run):
-            violations.append(
-                _violation(
-                    path=path,
-                    protected_pattern=protected_pattern,
-                    section=f"{section_prefix}.run",
-                    line=_line_for_workflow_step_key(new_text, new_step, key="run"),
-                    reason=(
-                        "workflow validation command changed without preserving existing "
-                        f"command: {section_prefix}.run"
-                    ),
+        elif old_run_is_validation:
+            if not _preserves_existing_validation_run(old_run, new_run):
+                violations.append(
+                    _violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        section=f"{section_prefix}.run",
+                        line=_line_for_workflow_step_key(new_text, new_step, key="run"),
+                        reason=(
+                            "workflow validation command changed without preserving existing "
+                            f"command: {section_prefix}.run"
+                        ),
+                    )
                 )
-            )
-        elif not (_is_comment_or_notify_step(new_step) or _is_informational_step(new_step)):
+        elif not _is_informational_step(new_step):
             violations.append(
                 _violation(
                     path=path,

