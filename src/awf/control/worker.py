@@ -73,6 +73,7 @@ from awf.service.provider_recovery import (
 from awf.service.resource_capacity import (
     LOCAL_CAPACITY_CONSTRAINTS,
     LocalCapacityBlocker,
+    default_dind_slots_from_profile,
     local_capacity_blocker,
     local_capacity_limit,
 )
@@ -3422,18 +3423,9 @@ def _default_reservation_demand_for_workspace(
         peak_cpu=config.workspace_peak_cpu,
         peak_memory_gb=config.workspace_peak_memory_gb,
         disk_mb=0,
-        dind_slots=_default_dind_slots_from_profile(resolved_profile),
+        dind_slots=default_dind_slots_from_profile(resolved_profile),
         defaulted=True,
     )
-
-
-def _default_dind_slots_from_profile(profile: object) -> int:
-    if not isinstance(profile, Mapping):
-        return 0
-    docker = profile.get("docker")
-    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
-        return 1
-    return 0
 
 
 def _local_capacity_blockers(

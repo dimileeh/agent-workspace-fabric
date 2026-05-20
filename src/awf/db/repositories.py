@@ -1202,7 +1202,7 @@ class ResourceReservationRepository:
             reservation_node_id=node_id,
         )
         if stmt is None:
-            return _empty_resource_reservation_totals()
+            return empty_resource_reservation_totals()
         return await _fetch_resource_reservation_totals(self._session, stmt)
 
     async def active_latest_totals_for_workspace_scope(
@@ -1216,11 +1216,11 @@ class ResourceReservationRepository:
             workspace_node_id=node_id,
         )
         if stmt is None:
-            return _empty_resource_reservation_totals()
+            return empty_resource_reservation_totals()
         return await _fetch_resource_reservation_totals(self._session, stmt)
 
 
-def _empty_resource_reservation_totals() -> dict[str, float | int]:
+def empty_resource_reservation_totals() -> dict[str, float | int]:
     return {
         "workspace_count": 0,
         "steady_cpu": 0.0,

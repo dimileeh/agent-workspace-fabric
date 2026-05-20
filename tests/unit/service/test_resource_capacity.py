@@ -11,6 +11,7 @@ from awf.service.resource_capacity import (
     LocalCapacityLimits,
     ReservedResources,
     WorkspaceResourceDefaults,
+    default_dind_slots_from_profile,
     local_capacity_blocked_condition,
     local_capacity_blocker,
     local_capacity_limit,
@@ -39,6 +40,14 @@ def _reserved_resources(*, disk_mb: int = 0) -> ReservedResources:
         disk_mb=disk_mb,
         dind_slots=0,
     )
+
+
+@pytest.mark.unit
+def test_default_dind_slots_from_profile_detects_dind_mode() -> None:
+    assert default_dind_slots_from_profile({"docker": {"mode": "dind"}}) == 1
+    assert default_dind_slots_from_profile({"docker": {"mode": "host"}}) == 0
+    assert default_dind_slots_from_profile({"docker": {}}) == 0
+    assert default_dind_slots_from_profile(None) == 0
 
 
 @pytest.mark.unit

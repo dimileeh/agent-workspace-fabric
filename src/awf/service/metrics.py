@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -22,6 +22,7 @@ from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     ProviderModelCircuitBreakerRepository,
     ResourceReservationRepository,
+    empty_resource_reservation_totals,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -40,6 +41,7 @@ from awf.service.resource_capacity import (
     ReservedResources,
     ResourceCapacitySummary,
     WorkspaceResourceDefaults,
+    default_dind_slots_from_profile,
     local_capacity_blocked_condition,
     local_capacity_limit,
     resource_capacity_summary,
@@ -1288,7 +1290,7 @@ async def _active_latest_totals_for_scheduler_allocation_scope(
 
     status_filter = _workspace_status_filter(statuses)
     if status_filter is None:
-        return _empty_resource_reservation_totals()
+        return empty_resource_reservation_totals()
 
     latest_active_reservations = (
         select(
@@ -1359,18 +1361,6 @@ async def _active_latest_totals_for_scheduler_allocation_scope(
     }
 
 
-def _empty_resource_reservation_totals() -> dict[str, float | int]:
-    return {
-        "workspace_count": 0,
-        "steady_cpu": 0.0,
-        "steady_memory_gb": 0.0,
-        "peak_cpu": 0.0,
-        "peak_memory_gb": 0.0,
-        "disk_mb": 0,
-        "dind_slots": 0,
-    }
-
-
 def _reserved_resources_from_totals(
     persisted: dict[str, float | int],
     workspace_count: int,
@@ -1418,7 +1408,7 @@ async def _defaulted_dind_slots_for_session(
     if node_id is not None:
         stmt = stmt.where(_workspace_node_scope_filter(node_id))
     profiles = await session.scalars(stmt)
-    return sum(_default_dind_slots_from_profile(profile) for profile in profiles)
+    return sum(default_dind_slots_from_profile(profile) for profile in profiles)
 
 
 async def _unreserved_workspace_count_for_session(
@@ -1458,15 +1448,6 @@ def _workspace_status_filter(
     if not status_values:
         return None
     return Workspace.status.in_(status_values)
-
-
-def _default_dind_slots_from_profile(profile: object) -> int:
-    if not isinstance(profile, Mapping):
-        return 0
-    docker = profile.get("docker")
-    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
-        return 1
-    return 0
 
 
 def _default_dind_slots_expression() -> Any:

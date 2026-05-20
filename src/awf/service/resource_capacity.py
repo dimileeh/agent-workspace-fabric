@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,15 @@ LOCAL_CAPACITY_CONSTRAINTS: tuple[LocalCapacityConstraint, ...] = (
         limit_source=_DIND_LIMIT_SOURCE,
     ),
 )
+
+
+def default_dind_slots_from_profile(profile: object) -> int:
+    if not isinstance(profile, Mapping):
+        return 0
+    docker = profile.get("docker")
+    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
+        return 1
+    return 0
 
 
 def local_capacity_limit(
