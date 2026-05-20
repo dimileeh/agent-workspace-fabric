@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -681,6 +682,29 @@ def test_service_logs_blank_compose_cli_vars_clear_stale_caller_env(
     assert env["COMPOSE_PROFILES"] == ""
 
 
+@pytest.mark.unit
+def test_compose_cli_environ_skips_caller_lookup_for_absent_service_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller Compose values do not need inspection unless service env mentions them."""
+    from awf.service import environment as service_environment
+
+    original_env_lookup = service_environment.env_lookup
+    caller_lookup_keys: list[str] = []
+
+    def _env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
+        if environ is os.environ:
+            caller_lookup_keys.append(key)
+        return original_env_lookup(environ, key)
+
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "caller-project")
+    monkeypatch.setenv("COMPOSE_PROFILES", "caller-profile")
+    monkeypatch.setattr(service_environment, "env_lookup", _env_lookup)
+
+    assert service_environment.compose_cli_environ({}) == {}
+    assert caller_lookup_keys == []
+
+
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_uses_env_file_instead_of_copying_interpolation_secrets(
@@ -774,6 +798,29 @@ services:
     assert env["AWF_PLAIN_INTERPOLATION"] == "plain-value"
     assert "AWF_ESCAPED_INTERPOLATION" not in env
     assert "AWF_API_TOKEN" not in env
+
+
+@pytest.mark.unit
+def test_service_logs_ignores_unclosed_braced_compose_interpolation(tmp_path: Path) -> None:
+    """Malformed braced expressions should not be treated as Compose inputs."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      VALID: "${AWF_VALID_INTERPOLATION:-default}"
+      PLAIN: "$AWF_PLAIN_INTERPOLATION"
+      BROKEN: "${AWF_MISSING_BRACE_INTERPOLATION"
+""",
+    )
+
+    assert service_environment.compose_interpolation_keys(compose_file) == (
+        "AWF_PLAIN_INTERPOLATION",
+        "AWF_VALID_INTERPOLATION",
+    )
 
 
 @pytest.mark.unit

@@ -1013,6 +1013,8 @@ def _init_env_error_payload(
 def _compose_root_env_file(env_file: Path) -> Path | None:
     """Return the root `.env` paired with the local Compose env file."""
 
+    if not env_file.is_absolute():
+        return None
     if (
         env_file.name == ".env"
         and env_file.parent.name == "compose"

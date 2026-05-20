@@ -1484,6 +1484,17 @@ def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
 
 
 @pytest.mark.unit
+def test_compose_root_env_file_requires_absolute_compose_env_path(tmp_path: Path) -> None:
+    """Only verified absolute Compose env paths participate in root-env overlays."""
+    from awf.cli import main as cli_main
+
+    assert cli_main._compose_root_env_file(Path("docker/compose/.env")) is None  # noqa: SLF001
+    assert cli_main._compose_root_env_file(  # noqa: SLF001
+        tmp_path / "docker" / "compose" / ".env"
+    ) == (tmp_path / ".env")
+
+
+@pytest.mark.unit
 def test_service_env_resolution_ignores_current_compose_env_without_project_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
