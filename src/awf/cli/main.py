@@ -771,8 +771,9 @@ def _run_init_project_onboarding(
                 *,
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
+                **_kwargs: object,
             ) -> dict[str, object]:
-                _ = settings, strict_providers, provider_environ
+                _ = settings, strict_providers, provider_environ, _kwargs
                 try:
                     return await service_status_task
                 except Exception as exc:

@@ -495,6 +495,58 @@ def test_init_uses_cached_service_status_for_doctor_report(
 
 
 @pytest.mark.unit
+def test_init_cached_service_status_accepts_readiness_collector_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"status": 0, "doctor": 0, "doctor_status": 0}
+
+    status_payload = {
+        "service": "awf",
+        "status": "ok",
+        "checks": {},
+        "agent_readiness": {"status": "ok"},
+    }
+
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
+        calls["status"] += 1
+        return status_payload
+
+    async def _collect_doctor_report(
+        _settings: object,
+        **kwargs: object,
+    ) -> object:
+        calls["doctor"] += 1
+        status_collector = kwargs["status_collector"]
+        collected_status = await status_collector(
+            _settings,
+            strict_providers=frozenset(),
+            provider_environ=kwargs["provider_environ"],
+            environ=kwargs["environ"],
+            compose_file=tmp_path / "docker" / "compose" / "local-service.yml",
+            compose_env_file=tmp_path / "docker" / "compose" / ".env",
+        )
+        calls["doctor_status"] += 1
+        assert collected_status is status_payload
+        return SimpleNamespace(status="ok", diagnostics=())
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
+    monkeypatch.setattr("awf.service.status.collect_service_status", _collect_service_status)
+    monkeypatch.setattr("awf.service.doctor.collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(
+        "awf.service.doctor.render_doctor_pretty",
+        lambda report: f"AWF doctor: {getattr(report, 'status', 'ok')}\n",
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls["status"] == 1
+    assert calls["doctor"] == 1
+    assert calls["doctor_status"] == 1
+
+
+@pytest.mark.unit
 def test_init_reports_local_prerequisite_failures_without_api_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
