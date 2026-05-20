@@ -210,8 +210,7 @@ def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
                 keys.add(key)
         return
     if isinstance(value, Mapping):
-        for nested_key, nested_value in value.items():
-            _collect_compose_interpolation_keys(nested_key, keys)
+        for nested_value in value.values():
             _collect_compose_interpolation_keys(nested_value, keys)
         return
     if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):

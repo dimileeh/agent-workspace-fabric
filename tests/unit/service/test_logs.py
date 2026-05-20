@@ -816,6 +816,27 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_ignores_compose_mapping_key_interpolation(tmp_path: Path) -> None:
+    """Compose interpolation inputs should be collected from YAML values only."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    labels:
+      "${AWF_LABEL_KEY_INTERPOLATION}": "static-label"
+      static.label: "${AWF_LABEL_VALUE_INTERPOLATION}"
+""",
+    )
+
+    assert service_environment.compose_interpolation_keys(compose_file) == (
+        "AWF_LABEL_VALUE_INTERPOLATION",
+    )
+
+
+@pytest.mark.unit
 def test_service_logs_caches_compose_interpolation_keys_until_file_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
