@@ -6732,14 +6732,14 @@ def _stale_pending_check_warning_key(
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
+    _, human_deferred = _collect_defer_items(status, state)
+    if human_deferred:
+        return "human review feedback was deferred by the agent and remains unresolved"
     if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
         return (
             f"GitHub reports merge state {status.merge_state_status.value}; "
             "required protection or review hooks need a human"
         )
-    _, human_deferred = _collect_defer_items(status, state)
-    if human_deferred:
-        return "human review feedback was deferred by the agent and remains unresolved"
     return None
 
 

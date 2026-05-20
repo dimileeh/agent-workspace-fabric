@@ -4500,6 +4500,16 @@ class TestNotificationAndGraceHelpers:
         )
         assert (
             _notify_human_reason(
+                _status(
+                    reviews=(deferred_review,),
+                    merge_state_status=MergeStateStatus.BLOCKED,
+                ),
+                deferred_state,
+            )
+            == "human review feedback was deferred by the agent and remains unresolved"
+        )
+        assert (
+            _notify_human_reason(
                 _status(reviews=(deferred_review,)),
                 deferred_state,
             )
