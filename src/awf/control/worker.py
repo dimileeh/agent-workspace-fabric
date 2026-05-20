@@ -2622,11 +2622,6 @@ class ControlWorker:
                 ws,
                 claim_cutoff=claim_cutoff,
             )
-            if claim_cleanup["action"] == "cleared_stale":
-                ws.execution_claimed_by = None
-                ws.execution_claim_expires_at = None
-            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE
-            await repo.advance_workspace_version(ws)
             extra: dict[str, Any] = {
                 "ambiguity_reason": ambiguity_reason,
                 "source_workspace_id": ws.id,
@@ -2654,11 +2649,36 @@ class ControlWorker:
                 idempotency_key=idempotency_key,
             )
             payload_with_operation = {**payload, "operation_id": operation.id}
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=operation.id,
+                        preservation_event_id=preserved_event.id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                        requested_action=OperationType.refresh,
+                        preserve_current_salvage_operation=False,
+                        error_message=(
+                            "Cancelled superseded active operation before worker-restart "
+                            "operator-required recovery."
+                        ),
+                    )
+                )
+                if cancelled_active_operations:
+                    payload_with_operation["cancelled_active_operations"] = (
+                        cancelled_active_operations
+                    )
             operation.payload = payload_with_operation
             operation.result = {
                 "decision": "operator_recovery_required",
                 "reason_code": _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
             }
+            if claim_cleanup["action"] == "cleared_stale":
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE
+            await repo.advance_workspace_version(ws)
             await repo.add_event(
                 ws,
                 event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
