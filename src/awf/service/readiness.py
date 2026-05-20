@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.onboarding import preview_project_onboarding
@@ -90,6 +90,22 @@ class SloMetricsCollector(Protocol):
         *,
         since_hours: int,
     ) -> Awaitable[SloMetricsSummary | Mapping[str, object]]: ...
+
+
+class _StatusCollectorKwargs(TypedDict, total=False):
+    strict_providers: Iterable[str] | None
+    provider_environ: Mapping[str, str] | None
+    compose_file: Path | None
+    compose_env_file: _ComposeEnvFileInput
+
+
+class _DoctorCollectorKwargs(TypedDict, total=False):
+    strict_providers: Iterable[str] | None
+    provider_environ: Mapping[str, str] | None
+    environ: Mapping[str, str]
+    status_collector: StatusCollector | None
+    compose_file: Path
+    compose_env_file: _ComposeEnvFileInput
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -199,22 +215,15 @@ async def collect_core_readiness_report(
 
     checks: list[CoreReadinessCheck] = []
     status_payload: dict[str, object] | None = None
+    status_kwargs: _StatusCollectorKwargs = {
+        "strict_providers": strict,
+        "provider_environ": provider_env,
+        "compose_file": compose_file,
+    }
+    if not isinstance(compose_env_file, _ComposeEnvFileOmitted):
+        status_kwargs["compose_env_file"] = compose_env_file
     try:
-        if isinstance(compose_env_file, _ComposeEnvFileOmitted):
-            status_payload = await status_collector(
-                settings,
-                strict_providers=strict,
-                provider_environ=provider_env,
-                compose_file=compose_file,
-            )
-        else:
-            status_payload = await status_collector(
-                settings,
-                strict_providers=strict,
-                provider_environ=provider_env,
-                compose_file=compose_file,
-                compose_env_file=compose_env_file,
-            )
+        status_payload = await status_collector(settings, **status_kwargs)
         checks.append(_service_status_check(status_payload))
         checks.append(_provider_readiness_check(status_payload))
         checks.append(_cleanup_posture_check(status_payload))
@@ -230,26 +239,17 @@ async def collect_core_readiness_report(
         )
 
     cached_status_collector = _cached_status_collector(status_payload)
+    doctor_kwargs: _DoctorCollectorKwargs = {
+        "strict_providers": strict,
+        "provider_environ": provider_env,
+        "environ": env,
+        "status_collector": cached_status_collector,
+        "compose_file": compose_file,
+    }
+    if not isinstance(compose_env_file, _ComposeEnvFileOmitted):
+        doctor_kwargs["compose_env_file"] = compose_env_file
     try:
-        if isinstance(compose_env_file, _ComposeEnvFileOmitted):
-            doctor_report = await doctor_collector(
-                settings,
-                strict_providers=strict,
-                provider_environ=provider_env,
-                environ=env,
-                status_collector=cached_status_collector,
-                compose_file=compose_file,
-            )
-        else:
-            doctor_report = await doctor_collector(
-                settings,
-                strict_providers=strict,
-                provider_environ=provider_env,
-                environ=env,
-                status_collector=cached_status_collector,
-                compose_file=compose_file,
-                compose_env_file=compose_env_file,
-            )
+        doctor_report = await doctor_collector(settings, **doctor_kwargs)
         checks.append(_doctor_check(doctor_report))
     except Exception as exc:
         checks.append(

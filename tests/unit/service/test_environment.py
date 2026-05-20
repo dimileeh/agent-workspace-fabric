@@ -27,3 +27,17 @@ def test_env_lookup_uses_exact_key_fast_path() -> None:
     from awf.service.environment import env_lookup
 
     assert env_lookup(_ExactKeyOnlyMapping(), "AWF_TOKEN") == (True, "direct-token")
+
+
+@pytest.mark.unit
+def test_env_lookup_fallback_uses_stable_case_variant_priority() -> None:
+    from awf.service.environment import env_lookup
+
+    assert env_lookup(
+        {"docker_host": "lowercase", "Docker_Host": "mixedcase"},
+        "DOCKER_HOST",
+    ) == (True, "mixedcase")
+    assert env_lookup(
+        {"Docker_Host": "mixedcase", "docker_host": "lowercase"},
+        "DOCKER_HOST",
+    ) == (True, "mixedcase")

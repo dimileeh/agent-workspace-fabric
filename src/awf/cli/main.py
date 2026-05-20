@@ -1188,7 +1188,26 @@ def _env_context_has_key_specific_comment(lines: list[str], key: str) -> bool:
     return any(_env_comment_looks_key_specific(line, key) for line in lines)
 
 
-def _split_env_file_header_context(lines: list[str], key: str) -> tuple[list[str], list[str]]:
+def _env_context_has_file_header_marker(lines: list[str]) -> bool:
+    """Return whether comments explicitly describe dotenv-file-level context."""
+
+    comments = [line.strip().lstrip("#").strip().lower() for line in lines]
+    return any(
+        ".env" in comment
+        or "dotenv" in comment
+        or "environment file" in comment
+        or "settings here" in comment
+        or "overrides here" in comment
+        for comment in comments
+    )
+
+
+def _split_env_file_header_context(
+    lines: list[str],
+    key: str,
+    *,
+    seed_has_leading_context: bool,
+) -> tuple[list[str], list[str]]:
     """Split leading overlay comments into file-header and assignment context."""
 
     if not _env_context_looks_like_file_header(lines):
@@ -1209,6 +1228,12 @@ def _split_env_file_header_context(lines: list[str], key: str) -> tuple[list[str
             split_at = index
             break
     if split_at is None:
+        if (
+            seed_has_leading_context
+            and len(lines) <= 2
+            and not _env_context_has_file_header_marker(lines)
+        ):
+            return [], lines
         return lines, []
     return lines[:split_at], lines[split_at:]
 
@@ -1298,6 +1323,7 @@ def _merge_env_seed_contents_with_overlay_keys(
             file_header_context, pending_context = _split_env_file_header_context(
                 pending_context,
                 key,
+                seed_has_leading_context=seed_has_leading_context,
             )
         context = [*duplicate_context.pop(key_identity, []), *pending_context]
         context_has_key_specific_comment = _env_context_has_key_specific_comment(context, key)
@@ -1307,6 +1333,7 @@ def _merge_env_seed_contents_with_overlay_keys(
                     first_overlay_assignment
                     and seed_has_leading_context
                     and not context_has_key_specific_comment
+                    and (file_header_context or _env_context_is_single_adjacent_comment(context))
                 ):
                     context = []
                 seed_leading_context[key_identity] = context

@@ -43,9 +43,17 @@ def env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
     if value is not None:
         return True, value
     wanted = key.upper()
+    best_priority: tuple[bool, bool, str] | None = None
+    best_value = ""
     for existing, value in environ.items():
-        if existing.upper() == wanted:
-            return True, value
+        if existing.upper() != wanted:
+            continue
+        priority = (existing != wanted, existing.upper() != existing, existing)
+        if best_priority is None or priority < best_priority:
+            best_priority = priority
+            best_value = value
+    if best_priority is not None:
+        return True, best_value
     return False, ""
 
 

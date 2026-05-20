@@ -2499,6 +2499,49 @@ def test_merge_env_seed_keeps_first_key_comment_when_seed_has_header() -> None:
 
 
 @pytest.mark.unit
+def test_merge_env_seed_keeps_short_first_key_context_when_seed_has_header() -> None:
+    """Short first-key comment blocks are more likely key docs than file headers."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "# Compose service defaults.",
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Created for staging access.",
+                    "# Rotate this value with release credentials.",
+                    "AWF_API_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "# Created for staging access.",
+                "# Rotate this value with release credentials.",
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_preserves_overlay_header_when_seed_starts_with_blank_line() -> None:
     """A blank-only seed preamble should not suppress the overlay file header."""
     from awf.cli import main as cli_main
