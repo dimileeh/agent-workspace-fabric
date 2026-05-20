@@ -1660,13 +1660,42 @@ def _is_informational_run_command(command: str | None) -> bool:
     if command is None:
         return True
     safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
-    for line in command.splitlines():
+    logical_lines = _logical_shell_lines(command)
+    if logical_lines is None:
+        return False
+    for line in logical_lines:
         tokens = _shell_tokens(line)
         if tokens is None:
             return False
         if not _informational_shell_tokens_are_safe(tokens, safe_env_names):
             return False
     return True
+
+
+def _logical_shell_lines(command: str) -> tuple[str, ...] | None:
+    lines: list[str] = []
+    current_line: str | None = None
+    for physical_line in command.splitlines():
+        if current_line is None:
+            current_line = physical_line
+        else:
+            current_line += physical_line
+
+        if _has_trailing_shell_line_continuation(current_line):
+            current_line = current_line[:-1]
+            continue
+
+        lines.append(current_line)
+        current_line = None
+
+    if current_line is not None:
+        return None
+    return tuple(lines)
+
+
+def _has_trailing_shell_line_continuation(line: str) -> bool:
+    trailing_backslashes = len(line) - len(line.rstrip("\\"))
+    return trailing_backslashes % 2 == 1
 
 
 def _shell_tokens(command: str) -> tuple[str, ...] | None:

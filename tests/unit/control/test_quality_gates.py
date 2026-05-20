@@ -1164,6 +1164,63 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_comment_named_github_script_continue_on_error_with_safe_script_is_allowed() -> (
+    None
+):
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `Validation complete for ${context.sha}`,
+            });
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `Validation complete for ${context.sha}`,
+            });
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_removing_pytest_continue_on_error_true_is_allowed() -> None:
     old_text = """
 name: CI
@@ -4936,6 +4993,9 @@ jobs:
         ("echo `date`", False),
         ("echo $(date)", False),
         ("echo ok | tee log", False),
+        ('echo "Validation complete for" \\\n  "${{ github.sha }}"', True),
+        ('echo "secret" \\\n  "${{ secrets.GITHUB_TOKEN }}"', False),
+        ('echo "pending" \\', False),
         ('echo "unterminated', False),
     ],
 )
@@ -4957,6 +5017,7 @@ def test_informational_run_command_shell_safety_edges(
         ("pytest", "pytest &&", False),
         ("pytest", "pytest && && ruff check", False),
         ("pytest", "pytest && ruff check | tee log", False),
+        ("pytest", "pytest-randomly -p no:randomly && coverage", False),
         ("pytest", "pytest && bad`cmd`", False),
         (
             "pytest",
