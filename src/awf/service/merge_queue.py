@@ -28,7 +28,7 @@ from awf.api.schemas import (
     StaleReasonResponse,
     WorkspaceEventResponse,
 )
-from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
     MergeCandidate,
     Operation,
@@ -57,14 +57,6 @@ from awf.service.provider_recovery import provider_recovery_state_for_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
 MERGE_QUEUE_WAIT_REASON_CODE = "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
-
-_PATHLESS_OWNED_PATH_BLOCKER_TASK_KINDS = frozenset(
-    {
-        TaskKind.sync_feature_pr.value,
-        TaskKind.monitor_release_pr.value,
-        TaskKind.sync_release_pr.value,
-    }
-)
 
 _RECOVERY_OPERATION_TYPES = {
     OperationType.validate.value,
@@ -755,11 +747,6 @@ def _candidate_blocks_target(
     candidate_paths = _candidate_owned_paths(candidate)
     target_paths = _candidate_owned_paths(target)
     if not candidate_paths or not target_paths:
-        if (
-            candidate.workspace.task_kind in _PATHLESS_OWNED_PATH_BLOCKER_TASK_KINDS
-            or target.workspace.task_kind in _PATHLESS_OWNED_PATH_BLOCKER_TASK_KINDS
-        ):
-            return False
         return True
     return any(
         owned_paths_overlap(candidate_path, target_path)

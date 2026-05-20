@@ -14,7 +14,6 @@ from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
     OperationType,
-    TaskKind,
     WorkspaceStatus,
 )
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace
@@ -85,7 +84,7 @@ async def _seed_candidate(
     base_branch: str = "development",
     canonical: bool = True,
     owned_paths: list[str] | None = None,
-    task_kind: str = TaskKind.feature_branch_pr.value,
+    task_kind: str = "feature_branch_pr",
 ) -> tuple[str, str, str]:
     declared_owned_paths = ["src/shared/**"] if owned_paths is None else owned_paths
     workspace_repo = WorkspaceRepository(session)
@@ -233,38 +232,6 @@ async def test_missing_owned_paths_conservatively_block_later_candidate(
     assert blockers[0].workspace_id == older_workspace_id
     assert blockers[0].blocker_state == "merge_eligible"
     assert blockers[0].reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
-
-
-@pytest.mark.unit
-async def test_missing_owned_paths_do_not_block_later_candidate_for_pathless_sync_feature_pr(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    async with factory() as session:
-        await _seed_candidate(
-            session,
-            title="Older unscoped monitor candidate",
-            pr_number=17,
-            created_at=now,
-            owned_paths=[],
-            task_kind=TaskKind.sync_feature_pr.value,
-        )
-        _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_candidate(
-            session,
-            title="Later candidate",
-            pr_number=18,
-            created_at=now + timedelta(minutes=5),
-            owned_paths=["src/shared/**"],
-        )
-        await session.commit()
-
-    async with factory() as session:
-        blockers = await list_merge_queue_blockers_for_candidate(
-            session,
-            candidate_id=later_candidate_id,
-        )
-
-    assert blockers == []
 
 
 @pytest.mark.unit
@@ -516,7 +483,7 @@ def _candidate(
     stale: bool = False,
     repo_url: str = "git@github.com:example/service.git",
     base_branch: str = "development",
-    task_kind: str = TaskKind.feature_branch_pr.value,
+    task_kind: str = "feature_branch_pr",
     operations: list[Operation] | None = None,
     owned_paths: list[str] | None = None,
 ) -> MergeCandidate:
@@ -700,22 +667,13 @@ def test_merge_queue_private_policy_helpers_cover_policy_edges() -> None:
         )
         is None
     )
-    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
+    assert merge_queue._candidate_blocks_target(  # noqa: SLF001
         _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
         target,
     )
     assert merge_queue._candidate_blocks_target(  # noqa: SLF001
         target,
         _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
-    )
-    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
-        _candidate(
-            candidate_id="monitor",
-            created_at=now,
-            owned_paths=[],
-            task_kind=TaskKind.sync_feature_pr.value,
-        ),
-        _candidate(candidate_id="later", created_at=now + timedelta(minutes=1)),
     )
 
 
