@@ -1460,7 +1460,7 @@ async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywher
     assert summary.reserved_resources.dind_slots == 2
     assert summary.allocated_resources.active_workspace_count == 1
     assert summary.allocated_resources.dind_slots == 1
-    assert summary.capacity_queue.planned_resources.active_workspace_count == 1
+    assert summary.capacity_queue.queued_workspace_count == 1
     assert summary.capacity_queue.planned_resources.dind_slots == 1
     assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
 
