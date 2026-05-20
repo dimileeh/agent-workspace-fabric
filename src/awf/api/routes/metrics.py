@@ -273,7 +273,6 @@ class ReservedResourcesResponse(BaseModel):
 class QueuePlannedResourcesResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    active_workspace_count: int
     steady_cpu: float
     steady_memory_gb: float
     peak_cpu: float

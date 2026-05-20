@@ -299,9 +299,8 @@ def test_capacity_queue_planned_resources_uses_queue_specific_schema(
 
     assert planned_resources_ref == {"$ref": "#/components/schemas/QueuePlannedResourcesResponse"}
     planned_resources = schemas["QueuePlannedResourcesResponse"]
-    assert "active_workspace_count" in planned_resources["properties"]
+    assert "active_workspace_count" not in planned_resources["properties"]
     assert set(planned_resources["required"]) == {
-        "active_workspace_count",
         "steady_cpu",
         "steady_memory_gb",
         "peak_cpu",

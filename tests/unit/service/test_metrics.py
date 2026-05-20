@@ -53,6 +53,7 @@ async def _reservation_for_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
     *,
+    node_id: str = "local",
     steady_cpu: float,
     steady_memory_gb: float,
     peak_cpu: float,
@@ -85,7 +86,7 @@ async def _reservation_for_workspace(
         reservation = await ResourceReservationRepository(session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
-            node_id="local",
+            node_id=node_id,
             steady_cpu=steady_cpu,
             steady_memory_gb=steady_memory_gb,
             peak_cpu=peak_cpu,
@@ -684,6 +685,116 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
 
 
 @pytest.mark.unit
+async def test_resource_saturation_scopes_capacity_view_to_local_node(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    local_running_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    sibling_running_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    local_requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=5),
+    )
+    sibling_requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=10),
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            local_running_id: "node-a",
+            local_requested_id: "node-a",
+            sibling_running_id: "node-b",
+            sibling_requested_id: "node-b",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        local_running_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        sibling_running_id,
+        node_id="node-b",
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=40.0,
+        peak_memory_gb=80.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        local_requested_id,
+        node_id="node-a",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=6.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        sibling_requested_id,
+        node_id="node-b",
+        steady_cpu=30.0,
+        steady_memory_gb=60.0,
+        peak_cpu=60.0,
+        peak_memory_gb=120.0,
+        dind_slots=1,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.workspace_counts.running == 1
+    assert summary.workspace_counts.requested == 1
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.steady_cpu == 3.0
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.steady_cpu == 2.0
+    assert summary.capacity_queue.queued_workspace_count == 1
+    assert summary.capacity_queue.oldest_workspace_id == local_requested_id
+    assert summary.capacity_queue.planned_resources.steady_cpu == 1.0
+    assert summary.capacity_queue.planned_resources.dind_slots == 1
+    assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_exposes_open_provider_circuit_breakers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1218,6 +1329,7 @@ async def test_capacity_queue_blocked_reason_counts_aggregates_requested_demands
                     local_capacity_memory_gb=24.0,
                     local_capacity_dind_slots=1,
                 ),
+                node_id="local",
                 allocated_resources=ReservedResources(
                     active_workspace_count=1,
                     steady_cpu=2.0,
@@ -1287,6 +1399,7 @@ async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_mem
                 local_capacity_memory_gb=None,
                 local_capacity_dind_slots=1,
             ),
+            node_id="local",
             allocated_resources=ReservedResources(
                 active_workspace_count=0,
                 steady_cpu=0.0,

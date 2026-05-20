@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import expression
@@ -27,6 +27,7 @@ from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
 )
+from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.provider_recovery import (
@@ -672,7 +673,8 @@ async def summarize_resource_saturation_for_session(
     """Build the resource saturation payload for local console capacity views."""
 
     generated_at = _to_utc(now or datetime.now(UTC))
-    status_counts = await _count_current_by_status(session)
+    node_id = _local_capacity_node_id(settings)
+    status_counts = await _count_current_by_status(session, node_id=node_id)
     workspace_counts = _workspace_saturation_counts(status_counts)
     worker = WorkerConcurrencySettings(
         max_concurrent_provisions=settings.worker_max_concurrent_provisions,
@@ -687,6 +689,7 @@ async def summarize_resource_saturation_for_session(
     reserved_resources = await _reserved_resources_for_session(
         session,
         workspace_counts.active_total,
+        node_id=node_id,
         resource_defaults=resource_defaults,
     )
     allocated_workspace_count = _sum_status_counts(
@@ -696,6 +699,7 @@ async def summarize_resource_saturation_for_session(
     allocated_resources = await _allocated_resources_for_session(
         session,
         allocated_workspace_count,
+        node_id=node_id,
         resource_defaults=resource_defaults,
     )
     concurrency = _resource_concurrency(status_counts, worker=worker)
@@ -724,6 +728,7 @@ async def summarize_resource_saturation_for_session(
     capacity_queue = await _capacity_queue_summary(
         session,
         settings=settings,
+        node_id=node_id,
         allocated_resources=allocated_resources,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
@@ -796,9 +801,15 @@ async def _count_by_status(
     return counts
 
 
-async def _count_current_by_status(session: AsyncSession) -> dict[str, int]:
+async def _count_current_by_status(
+    session: AsyncSession,
+    *,
+    node_id: str | None = None,
+) -> dict[str, int]:
     counts = {status.value: 0 for status in WorkspaceStatus}
     stmt = select(Workspace.status, func.count()).group_by(Workspace.status)
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
     rows = await session.execute(stmt)
     for status, count in rows.all():
         counts[str(status)] = int(count)
@@ -1216,10 +1227,11 @@ async def _reserved_resources_for_session(
     session: AsyncSession,
     active_workspace_count: int,
     *,
+    node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await ResourceReservationRepository(session).active_latest_totals()
-    defaulted_dind_slots = await _defaulted_dind_slots_for_session(session)
+    persisted = await ResourceReservationRepository(session).active_latest_totals(node_id=node_id)
+    defaulted_dind_slots = await _defaulted_dind_slots_for_session(session, node_id=node_id)
     return _reserved_resources_from_totals(
         persisted,
         active_workspace_count,
@@ -1232,14 +1244,17 @@ async def _allocated_resources_for_session(
     session: AsyncSession,
     allocated_workspace_count: int,
     *,
+    node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
     persisted = await ResourceReservationRepository(session).active_latest_totals(
-        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
     )
     defaulted_dind_slots = await _defaulted_dind_slots_for_session(
         session,
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
     )
     return _reserved_resources_from_totals(
         persisted,
@@ -1276,6 +1291,7 @@ async def _defaulted_dind_slots_for_session(
     session: AsyncSession,
     *,
     statuses: Iterable[WorkspaceStatus | str] | None = None,
+    node_id: str | None = None,
 ) -> int:
     if statuses is None:
         status_filter = ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
@@ -1296,12 +1312,13 @@ async def _defaulted_dind_slots_for_session(
         )
         .exists()
     )
-    profiles = await session.scalars(
-        select(Workspace.resolved_profile).where(
-            status_filter,
-            ~active_reservation_exists,
-        )
+    stmt = select(Workspace.resolved_profile).where(
+        status_filter,
+        ~active_reservation_exists,
     )
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
+    profiles = await session.scalars(stmt)
     return sum(_default_dind_slots_from_profile(profile) for profile in profiles)
 
 
@@ -1325,17 +1342,21 @@ async def _capacity_queue_summary(
     session: AsyncSession,
     *,
     settings: Settings,
+    node_id: str,
     allocated_resources: ReservedResources,
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
     now: datetime,
 ) -> CapacityQueueSummary:
-    queued_count = await session.scalar(
-        select(func.count(Workspace.id)).where(Workspace.status == WorkspaceStatus.requested.value)
+    requested_filter = and_(
+        Workspace.status == WorkspaceStatus.requested.value,
+        _workspace_node_scope_filter(node_id),
     )
+    queued_count = await session.scalar(select(func.count(Workspace.id)).where(requested_filter))
     requested_count = int(queued_count or 0)
     planned_totals = await ResourceReservationRepository(session).active_latest_totals(
-        statuses=(WorkspaceStatus.requested,)
+        statuses=(WorkspaceStatus.requested,),
+        node_id=node_id,
     )
     planned_resources = _reserved_resources_from_totals(
         planned_totals,
@@ -1344,12 +1365,13 @@ async def _capacity_queue_summary(
         defaulted_dind_slots=await _defaulted_dind_slots_for_session(
             session,
             statuses=(WorkspaceStatus.requested,),
+            node_id=node_id,
         ),
     )
     oldest_row = (
         await session.execute(
             select(Workspace.id, Workspace.created_at)
-            .where(Workspace.status == WorkspaceStatus.requested.value)
+            .where(requested_filter)
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
             .limit(1)
         )
@@ -1365,6 +1387,7 @@ async def _capacity_queue_summary(
     blockers = await _capacity_queue_blocked_reason_counts(
         session,
         settings=settings,
+        node_id=node_id,
         allocated_resources=allocated_resources,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
@@ -1382,6 +1405,7 @@ async def _capacity_queue_blocked_reason_counts(
     session: AsyncSession,
     *,
     settings: Settings,
+    node_id: str,
     allocated_resources: ReservedResources,
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
@@ -1395,6 +1419,7 @@ async def _capacity_queue_blocked_reason_counts(
     latest_active_reservations = (
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.node_id.label("node_id"),
             ResourceReservation.steady_cpu.label("steady_cpu"),
             ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
             ResourceReservation.peak_cpu.label("peak_cpu"),
@@ -1469,9 +1494,13 @@ async def _capacity_queue_blocked_reason_counts(
             and_(
                 latest_active_reservations.c.workspace_id == Workspace.id,
                 latest_active_reservations.c.reservation_rank == 1,
+                latest_active_reservations.c.node_id == node_id,
             ),
         )
-        .where(Workspace.status == WorkspaceStatus.requested.value)
+        .where(
+            Workspace.status == WorkspaceStatus.requested.value,
+            _workspace_node_scope_filter(node_id),
+        )
     )
     row = (await session.execute(stmt)).one()
     counts = {
@@ -1480,6 +1509,15 @@ async def _capacity_queue_blocked_reason_counts(
         if int(row._mapping[reason] or 0) > 0
     }
     return dict(sorted(counts.items()))
+
+
+def _local_capacity_node_id(settings: Settings) -> str:
+    configured = settings.worker_node_id.strip() if settings.worker_node_id else ""
+    return configured or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
+
+
+def _workspace_node_scope_filter(node_id: str) -> Any:
+    return or_(Workspace.node_id == node_id, Workspace.node_id.is_(None))
 
 
 def _resource_concurrency(
