@@ -2204,6 +2204,24 @@ class ControlWorker:
                 claim_cleanup=claim_cleanup,
                 extra=extra,
             )
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=None,
+                        preservation_event_id=preserved_event.id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                        requested_action=OperationType.remonitor,
+                        preserve_current_salvage_operation=False,
+                        error_message=(
+                            "Cancelled superseded active operation before worker-restart "
+                            "PR monitor attachment."
+                        ),
+                    )
+                )
+                if cancelled_active_operations:
+                    payload["cancelled_active_operations"] = cancelled_active_operations
             await repo.transition(
                 ws,
                 to=WorkspaceStatus.monitoring_pr,
@@ -2332,8 +2350,14 @@ class ControlWorker:
         session: AsyncSession,
         *,
         workspace_id: str,
-        replacement_operation_id: str,
+        replacement_operation_id: str | None,
         preservation_event_id: str,
+        reason_code: str = _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+        requested_action: OperationType = OperationType.validate,
+        preserve_current_salvage_operation: bool = True,
+        error_message: str = (
+            "Cancelled superseded active operation before worker-restart validation recovery."
+        ),
     ) -> list[dict[str, object]]:
         operation_repo = OperationRepository(session)
         active_operations: list[Operation] = []
@@ -2348,7 +2372,7 @@ class ControlWorker:
 
         cancelled: list[dict[str, object]] = []
         for operation in active_operations:
-            if operation.id == replacement_operation_id:
+            if replacement_operation_id is not None and operation.id == replacement_operation_id:
                 continue
             if operation.type not in {
                 OperationType.validate.value,
@@ -2357,7 +2381,8 @@ class ControlWorker:
                 continue
             payload = operation.payload if isinstance(operation.payload, Mapping) else {}
             if (
-                payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
+                preserve_current_salvage_operation
+                and payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
                 and _payload_preservation_event_id(payload) == preservation_event_id
             ):
                 continue
@@ -2368,19 +2393,19 @@ class ControlWorker:
                 "previous_status": operation.status,
             }
             cancelled.append(detail)
+            result: dict[str, object] = {
+                "status": OperationStatus.cancelled.value,
+                "reason_code": reason_code,
+                "requested_action": requested_action.value,
+            }
+            if replacement_operation_id is not None:
+                result["replacement_operation_id"] = replacement_operation_id
             await operation_repo.finish(
                 operation,
                 status=OperationStatus.cancelled,
-                result={
-                    "status": OperationStatus.cancelled.value,
-                    "reason_code": _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
-                    "requested_action": OperationType.validate.value,
-                    "replacement_operation_id": replacement_operation_id,
-                },
-                error_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
-                error_message=(
-                    "Cancelled superseded active operation before worker-restart validation recovery."
-                ),
+                result=result,
+                error_code=reason_code,
+                error_message=error_message,
             )
         return cancelled
 

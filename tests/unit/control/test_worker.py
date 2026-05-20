@@ -7387,6 +7387,120 @@ class TestRunOnceStaleActiveExecutionRecovery:
             await worker.wait_for_execution_tasks()
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("status", "operation_type", "operation_status"),
+        [
+            (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
+            (WorkspaceStatus.pushing, OperationType.push, OperationStatus.running),
+        ],
+    )
+    async def test_preserved_active_pr_handoff_cancels_superseded_active_operations(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        status: WorkspaceStatus,
+        operation_type: OperationType,
+        operation_status: OperationStatus,
+    ) -> None:
+        compose_project_name = f"awf_preserved_pr_handoff_cancel_{status.value}"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            f"preserved-pr-handoff-cancel-{status.value}",
+            status,
+            compose_project_name=compose_project_name,
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": status.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            original_operation = await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                status=operation_status,
+                payload={
+                    "source": "workspace_executor",
+                    "workspace_status": status.value,
+                },
+            )
+            await s.commit()
+            attempt_id = attempt.id
+            task_id = attempt.task_id
+            original_operation_id = original_operation.id
+            branch_name = ws.branch_name
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        await worker._attach_preserved_active_pr_monitor(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=status,
+                repo_url=str(origin_repo),
+                compose_project_name=compose_project_name,
+            ),
+            preserved_event=preserved_event,
+            attempt_id=attempt_id,
+            task_id=task_id,
+            open_pr=worker_module._OpenPullRequestSummary(  # noqa: SLF001
+                pr_url="https://github.com/example/repo/pull/272",
+                pr_number=272,
+                head_ref=branch_name,
+                head_sha="c" * 40,
+            ),
+            branch_pr_lookup={
+                "branch_name": branch_name,
+                "match_count": 1,
+                "source": "open_pr_resolver",
+            },
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            original_operation = await OperationRepository(s).get(original_operation_id)
+            assert original_operation is not None
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+            )
+
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert original_operation.status == OperationStatus.cancelled.value
+        assert original_operation.error_code == "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+        assert original_operation.result is not None
+        assert (
+            original_operation.result["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+        )
+        assert original_operation.result["requested_action"] == OperationType.remonitor.value
+        assert len(salvage_events) == 1
+        payload = salvage_events[0].payload
+        assert payload is not None
+        assert payload["cancelled_active_operations"] == [
+            {
+                "operation_id": original_operation_id,
+                "operation_type": operation_type.value,
+                "previous_status": operation_status.value,
+            }
+        ]
+
+    @pytest.mark.unit
     async def test_preserved_active_pr_handoff_derives_missing_pr_number_before_attach(
         self,
         session_factory: async_sessionmaker[AsyncSession],
