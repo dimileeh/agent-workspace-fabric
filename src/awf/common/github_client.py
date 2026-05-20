@@ -434,6 +434,7 @@ _PR_ADOPTION_VIEW_JSON_FIELDS = (
 _BRANCH_OPEN_PR_LIST_JSON_FIELDS = (
     "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner"
 )
+_BRANCH_OPEN_PR_LIST_LIMIT = 1000
 
 
 def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
@@ -524,6 +525,8 @@ async def list_open_pull_requests_for_branch(
         stripped_branch,
         "--state",
         "open",
+        "--limit",
+        str(_BRANCH_OPEN_PR_LIST_LIMIT),
     ]
     if base_branch is not None and base_branch.strip():
         command.extend(["--base", base_branch.strip()])

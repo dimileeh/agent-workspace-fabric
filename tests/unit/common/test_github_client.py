@@ -367,6 +367,20 @@ class TestFetchPullRequestAdoptionMetadata:
 
 class TestListOpenPullRequestsForBranch:
     @pytest.mark.unit
+    async def test_requests_explicit_limit_above_default_page_size(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+
+        await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="feature/head",
+        )
+
+        args = fake.calls[0].args
+        assert int(args[args.index("--limit") + 1]) > 30
+
+    @pytest.mark.unit
     async def test_returns_head_repository_identity_for_branch_matches(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
