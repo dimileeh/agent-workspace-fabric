@@ -3068,13 +3068,18 @@ def _ordered_queue_decision_matches(
 ) -> bool:
     if decision is None:
         return False
-    return (
+    if not (
         decision.workspace_id == candidate.workspace_id
         and decision.task_id == candidate.task_id
         and decision.attempt_id == candidate.attempt_id
         and decision.decision == QUEUE_DECISION_ORDERED
-        and decision.reason_code == reason_code
-        and _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
+    ):
+        return False
+    if decision.reason_code == reason_code:
+        return _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
+    return (
+        reason_code == ORDERED_REQUESTED_PROVISIONING_REASON
+        and decision.reason_code == LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON
     )
 
 

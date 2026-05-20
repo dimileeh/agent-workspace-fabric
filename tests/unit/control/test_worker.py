@@ -863,6 +863,43 @@ class TestRunOnce:
         assert workspace.status == WorkspaceStatus.ready.value
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_records_one_ordered_decision_for_defaulted_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-defaulted-ordered-once",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            assert workspace is not None
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        ordered_decisions = [decision for decision in decisions if decision.decision == "ordered"]
+        assert provisioner.calls == [requested_id]
+        assert workspace.status == WorkspaceStatus.ready.value
+        assert len(ordered_decisions) == 1
+        assert ordered_decisions[0].reason_code == "LOCAL_CAPACITY_RESERVATION_DEFAULTED"
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_for_unreserved_active_local_workspace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
