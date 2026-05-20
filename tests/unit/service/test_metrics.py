@@ -795,6 +795,94 @@ async def test_resource_saturation_scopes_capacity_view_to_local_node(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_allocated_capacity_matches_scheduler_null_node_rules(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=6.0,
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    local_mismatched_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    null_remote_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            local_mismatched_id: "node-a",
+            null_remote_id: None,
+            requested_id: "node-a",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        local_mismatched_id,
+        node_id="node-b",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=2.0,
+        peak_memory_gb=4.0,
+        dind_slots=0,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        null_remote_id,
+        node_id="node-b",
+        steady_cpu=3.0,
+        steady_memory_gb=8.0,
+        peak_cpu=6.0,
+        peak_memory_gb=16.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        requested_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.reserved_resources.active_workspace_count == 3
+    assert summary.capacity_queue.planned_resources.active_workspace_count == 1
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.peak_cpu == 2.0
+    assert summary.allocated_resources.dind_slots == 0
+    assert summary.capacity_queue.blocked_reason_counts == {}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_exposes_open_provider_circuit_breakers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
