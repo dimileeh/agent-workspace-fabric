@@ -56,6 +56,9 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "report",
 )
 _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
+_INFORMATIONAL_STEP_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
+    {"continue-on-error", "id", "if", "name", "run", "uses"}
+)
 _INFORMATIONAL_RUN_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"echo", "printf"})
 _INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
 _INFORMATIONAL_RUN_BLOCKED_OPERATORS: Final[frozenset[str]] = frozenset(
@@ -1396,6 +1399,8 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
 
 
 def _is_informational_step(step: Mapping[str, Any]) -> bool:
+    if any(key not in _INFORMATIONAL_STEP_ALLOWED_KEYS for key in step):
+        return False
     uses = _string_value(step.get("uses"))
     if uses is not None and not _is_comment_or_notify_uses(uses):
         return False
