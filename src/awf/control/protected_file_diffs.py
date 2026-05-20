@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from awf.common.commands import AsyncCommandRunner
+from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.control.quality_gates import (
     ProtectedFileDiff,
@@ -83,6 +83,29 @@ async def git_show_text(
     refspec: str,
 ) -> str | None:
     """Return `git show` text, treating missing paths as absent content."""
+    exists_result = await runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "cat-file",
+            "-e",
+            refspec,
+        ]
+    )
+    if not exists_result.ok:
+        if await _git_refspec_base_exists(
+            runner,
+            worktree_path=worktree_path,
+            refspec=refspec,
+        ):
+            return None
+        raise RuntimeError(
+            f"git cat-file -e failed for {refspec!r} in {worktree_path}: "
+            f"{_git_error_details(exists_result)}"
+        )
+
     result = await runner.run(
         [
             "git",
@@ -95,15 +118,37 @@ async def git_show_text(
     )
     if result.ok:
         return result.stdout
-    error_text = (result.stderr or result.stdout or "").lower()
-    if "path " in error_text and (
-        "does not exist" in error_text
-        or "exists on disk, but not in" in error_text
-        or "missing" in error_text
-    ):
-        return None
-    details = (result.stderr or result.stdout or "<no output>").strip()
-    raise RuntimeError(f"git show failed for {refspec!r} in {worktree_path}: {details}")
+    raise RuntimeError(
+        f"git show failed for {refspec!r} in {worktree_path}: {_git_error_details(result)}"
+    )
+
+
+async def _git_refspec_base_exists(
+    runner: AsyncCommandRunner,
+    *,
+    worktree_path: Path,
+    refspec: str,
+) -> bool:
+    base_ref, separator, _path = refspec.partition(":")
+    if not separator or not base_ref:
+        return False
+    result = await runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"{base_ref}^{{commit}}",
+        ]
+    )
+    return result.ok
+
+
+def _git_error_details(result: CommandResult) -> str:
+    return (result.stderr or result.stdout or "<no output>").strip()
 
 
 async def protected_file_diffs_for_committed_paths(

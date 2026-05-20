@@ -181,8 +181,10 @@ fail_under = 99
     assert violation.path == "pyproject.toml"
     assert violation.section == "tool.coverage.report.fail_under"
     assert violation.line == 5
-    assert "coverage fail_under raised from 80 to 99" in violation.reason
-    assert "requires ownership of pyproject.toml" in violation.reason
+    assert violation.reason == (
+        "coverage fail_under raised from 80 to 99 "
+        "(policy change requires ownership of pyproject.toml)"
+    )
 
 
 @pytest.mark.unit
@@ -592,6 +594,48 @@ dev = [
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_pyproject_changed_pep735_include_group_reports_evaluation_limit() -> None:
+    old_text = """
+[dependency-groups]
+test = [
+    "pytest>=8.0.0",
+]
+dev = [
+    { include-group = "test" },
+]
+""".strip()
+    new_text = """
+[dependency-groups]
+test = [
+    "pytest>=8.0.0",
+]
+dev = [
+    { include-group = "test" },
+    "ruff>=0.9.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "dependency-groups.dev"
+    assert violations[0].reason == (
+        "dependency section contains PEP 735 include-group entries that "
+        "require ownership of pyproject.toml for evaluation: dependency-groups.dev"
+    )
 
 
 @pytest.mark.unit

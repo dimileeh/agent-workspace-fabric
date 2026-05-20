@@ -22,13 +22,19 @@ Allowed without ownership:
 
 - Adding new entries to `[project].dependencies`.
 - Adding new entries to `[project.optional-dependencies]`, including `dev`.
-- Adding new entries to existing top-level `[dependency-groups]`.
+- Adding new dependency strings to existing top-level `[dependency-groups]`
+  lists that AWF can evaluate locally.
 - Metadata-only edits under `[project]` and `[project.urls]`.
 
 Blocked without ownership:
 
 - Removing or rewriting dependencies, including `pytest-*` dependencies.
 - Removing optional dependency groups.
+- Creating new group keys under top-level `[dependency-groups]` without
+  ownership.
+- Changing PEP 735 dependency groups that contain `{ include-group = ... }`
+  entries, because AWF cannot prove those edits are dependency-only additions
+  without ownership.
 - Editing `[tool.pytest.*]`, `[tool.coverage.*]`, `[tool.ruff.*]`,
   `[tool.mypy.*]`, `[build-system]`, or `tool.hatch` build configuration.
 - Lowering numeric coverage thresholds such as

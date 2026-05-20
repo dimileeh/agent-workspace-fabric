@@ -468,8 +468,8 @@ def _pyproject_policy_section_violations(
                 elif new_number > old_number:
                     reason = (
                         "coverage fail_under raised from "
-                        f"{_format_number(old_number)} to {_format_number(new_number)}; "
-                        "this protected coverage policy change requires ownership of pyproject.toml"
+                        f"{_format_number(old_number)} to {_format_number(new_number)} "
+                        "(policy change requires ownership of pyproject.toml)"
                     )
                 else:
                     reason = (
@@ -673,7 +673,10 @@ def _dependency_group_violations(
                     protected_pattern=protected_pattern,
                     section=section,
                     line=_line_for_toml_section(new_text, section),
-                    reason=f"dependency group has unsupported format: {section}",
+                    reason=_dependency_group_entry_unsupported_reason(
+                        section=section,
+                        value=new_groups[group],
+                    ),
                 )
             )
             continue
@@ -705,13 +708,17 @@ def _dependency_list_violations(
     new_dependencies = _dependency_entries(new_value)
     if old_dependencies is None or new_dependencies is None:
         line_text = new_text if new_dependencies is None else old_text
+        unsupported_value = new_value if new_dependencies is None else old_value
         return [
             _violation(
                 path=path,
                 protected_pattern=protected_pattern,
                 section=section,
                 line=_line_for_toml_section(line_text, section),
-                reason=f"dependency section has unsupported format: {section}",
+                reason=_dependency_list_unsupported_reason(
+                    section=section,
+                    value=unsupported_value,
+                ),
             )
         ]
     violations: list[QualityGateViolation] = []
@@ -777,6 +784,30 @@ def _dependency_entries(value: object) -> dict[str, Counter[str]] | None:
             return None
         dependencies.setdefault(name, Counter())[item] += 1
     return dependencies
+
+
+def _dependency_list_unsupported_reason(*, section: str, value: object) -> str:
+    if _contains_pep735_include_group(value):
+        return (
+            "dependency section contains PEP 735 include-group entries that "
+            f"require ownership of pyproject.toml for evaluation: {section}"
+        )
+    return f"dependency section has unsupported format: {section}"
+
+
+def _dependency_group_entry_unsupported_reason(*, section: str, value: object) -> str:
+    if _contains_pep735_include_group(value):
+        return (
+            "dependency section contains PEP 735 include-group entries that "
+            f"require ownership of pyproject.toml for evaluation: {section}"
+        )
+    return f"dependency group has unsupported format: {section}"
+
+
+def _contains_pep735_include_group(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(isinstance(item, Mapping) and "include-group" in item for item in value)
 
 
 def _dependency_entry_count(entries: Counter[str]) -> int:

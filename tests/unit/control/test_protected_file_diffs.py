@@ -116,7 +116,9 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
     tmp_path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
     runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner.queue_result(returncode=0)
     runner.queue_result(returncode=0, stdout='[project]\nname = "demo2"\n')
 
     diffs = await protected_file_diffs_for_committed_paths(
@@ -129,32 +131,22 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
     assert set(diffs) == {"pyproject.toml"}
     assert diffs["pyproject.toml"].old_text == '[project]\nname = "demo"\n'
     assert diffs["pyproject.toml"].new_text == '[project]\nname = "demo2"\n'
-    assert [call.args[-2:] for call in runner.calls] == [
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "origin/main:pyproject.toml"],
         ["show", "origin/main:pyproject.toml"],
+        ["cat-file", "-e", "HEAD:pyproject.toml"],
         ["show", "HEAD:pyproject.toml"],
     ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "stderr",
-    [
-        "fatal: path '.github/workflows/ci.yml' does not exist in 'HEAD'",
-        "fatal: Path '.github/workflows/ci.yml' exists on disk, but not in 'HEAD'",
-        (
-            "fatal: path '.github/workflows/ci.yml' does not exist "
-            "(neither on disk nor in the index)"
-        ),
-        "fatal: path missing",
-    ],
-)
 async def test_git_show_text_returns_none_for_missing_path(
     tmp_path,
-    stderr: str,
 ) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr=stderr)
+    runner.queue_result(returncode=128, stderr="fatal: Pfad fehlt")
+    runner.queue_result(returncode=0, stdout="HEAD\n")
 
     assert (
         await git_show_text(
@@ -164,13 +156,18 @@ async def test_git_show_text_returns_none_for_missing_path(
         )
         is None
     )
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "HEAD:.github/workflows/ci.yml"],
+        ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_git_show_text_raises_for_unexpected_git_error(tmp_path) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
+    runner.queue_result(returncode=128, stderr="fatal: not a valid object name")
+    runner.queue_result(returncode=1)
 
     with pytest.raises(RuntimeError) as excinfo:
         await git_show_text(
@@ -180,7 +177,28 @@ async def test_git_show_text_raises_for_unexpected_git_error(tmp_path) -> None:
         )
 
     message = str(excinfo.value)
-    assert "git show failed" in message
+    assert "git cat-file -e failed" in message
     assert "bad-ref:pyproject.toml" in message
     assert str(tmp_path) in message
-    assert "bad revision" in message
+    assert "not a valid object name" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_git_show_text_raises_when_show_fails_after_object_precheck(tmp_path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=128, stderr="fatal: object cannot be shown as text")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await git_show_text(
+            runner,
+            worktree_path=tmp_path,
+            refspec="HEAD:pyproject.toml",
+        )
+
+    message = str(excinfo.value)
+    assert "git show failed" in message
+    assert "HEAD:pyproject.toml" in message
+    assert str(tmp_path) in message
+    assert "object cannot be shown as text" in message
