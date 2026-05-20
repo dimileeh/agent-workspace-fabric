@@ -1195,6 +1195,7 @@ class ResourceReservationRepository:
         self,
         *,
         statuses: Iterable[WorkspaceStatus | str] | None = None,
+        node_id: str | None = None,
     ) -> dict[str, float | int]:
         if statuses is None:
             status_filter = ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
@@ -1206,7 +1207,7 @@ class ResourceReservationRepository:
             if not status_values:
                 return _empty_resource_reservation_totals()
             status_filter = Workspace.status.in_(status_values)
-        latest_active_reservations = (
+        latest_active_reservations_query = (
             select(
                 ResourceReservation.workspace_id.label("workspace_id"),
                 ResourceReservation.steady_cpu.label("steady_cpu"),
@@ -1230,8 +1231,12 @@ class ResourceReservationRepository:
                 ResourceReservation.released_at.is_(None),
                 status_filter,
             )
-            .subquery()
         )
+        if node_id is not None:
+            latest_active_reservations_query = latest_active_reservations_query.where(
+                ResourceReservation.node_id == node_id
+            )
+        latest_active_reservations = latest_active_reservations_query.subquery()
         stmt = (
             select(
                 func.count(latest_active_reservations.c.workspace_id),

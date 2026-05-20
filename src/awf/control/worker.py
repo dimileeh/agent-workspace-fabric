@@ -2471,7 +2471,8 @@ class ControlWorker:
         reservation_repo = ResourceReservationRepository(session)
         allocated = _allocated_totals_from_repository(
             await reservation_repo.active_latest_totals(
-                statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES
+                statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+                node_id=self._config.node_id or "local",
             )
         )
         reservations = await reservation_repo.active_latest_by_workspace_ids(

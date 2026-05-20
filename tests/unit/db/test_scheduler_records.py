@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     QueueDecisionCreate,
     QueueDecisionRepository,
@@ -332,3 +332,114 @@ async def test_resource_reservation_release_uses_single_update_returning(
     assert len(statements) == 1
     assert statements[0].startswith("update resource_reservations ")
     assert " returning " in statements[0]
+
+
+@pytest.mark.unit
+async def test_resource_reservation_active_latest_totals_can_filter_by_node_id(
+    session: AsyncSession,
+) -> None:
+    first_workspace_id, _first_task_id, first_attempt_id = await _attempt(session)
+    second_workspace_id, _second_task_id, second_attempt_id = await _attempt(session)
+    requested_workspace_id, _requested_task_id, requested_attempt_id = await _attempt(session)
+    workspace_repo = WorkspaceRepository(session)
+    for workspace_id in (first_workspace_id, second_workspace_id):
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.provisioning,
+            reason_code="SEED",
+        )
+
+    reserved_at = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
+    repo = ResourceReservationRepository(session)
+    await repo.create(
+        workspace_id=first_workspace_id,
+        attempt_id=first_attempt_id,
+        node_id="node-a",
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=80.0,
+        peak_memory_gb=160.0,
+        disk_mb=9999,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at - timedelta(minutes=5),
+    )
+    await repo.create(
+        workspace_id=first_workspace_id,
+        attempt_id=first_attempt_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=8.0,
+        peak_memory_gb=16.0,
+        disk_mb=1000,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=second_workspace_id,
+        attempt_id=second_attempt_id,
+        node_id="node-b",
+        steady_cpu=3.0,
+        steady_memory_gb=6.0,
+        peak_cpu=12.0,
+        peak_memory_gb=24.0,
+        disk_mb=2000,
+        dind_slots=0,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await repo.create(
+        workspace_id=requested_workspace_id,
+        attempt_id=requested_attempt_id,
+        node_id="node-a",
+        steady_cpu=100.0,
+        steady_memory_gb=100.0,
+        peak_cpu=100.0,
+        peak_memory_gb=100.0,
+        disk_mb=100,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+
+    global_totals = await repo.active_latest_totals(statuses=(WorkspaceStatus.provisioning,))
+    node_a_totals = await repo.active_latest_totals(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-a",
+    )
+    node_b_totals = await repo.active_latest_totals(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-b",
+    )
+
+    assert global_totals == {
+        "workspace_count": 2,
+        "steady_cpu": 5.0,
+        "steady_memory_gb": 10.0,
+        "peak_cpu": 20.0,
+        "peak_memory_gb": 40.0,
+        "disk_mb": 3000,
+        "dind_slots": 1,
+    }
+    assert node_a_totals == {
+        "workspace_count": 1,
+        "steady_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 8.0,
+        "peak_memory_gb": 16.0,
+        "disk_mb": 1000,
+        "dind_slots": 1,
+    }
+    assert node_b_totals == {
+        "workspace_count": 1,
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 6.0,
+        "peak_cpu": 12.0,
+        "peak_memory_gb": 24.0,
+        "disk_mb": 2000,
+        "dind_slots": 0,
+    }
