@@ -7398,7 +7398,7 @@ def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
     }
 
 
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
 
 
 def _extract_pr_number(pr_url: str) -> int | None:

@@ -161,7 +161,7 @@ _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE = "workspace.active_execution_salva
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
 _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {
         TaskKind.monitor_release_pr.value,

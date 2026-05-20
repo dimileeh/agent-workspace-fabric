@@ -4360,6 +4360,8 @@ class TestPrNumberExtraction:
             ("https://github.com/dimileeh/aira-web/pull/123", 123),
             ("https://github.com/dimileeh/aira-web/pull/123/", 123),
             ("https://github.com/dimileeh/aira-web/pull/123/files", 123),
+            ("https://github.com/dimileeh/aira-web/pull/123?notification_referrer_id=abc", 123),
+            ("https://github.com/dimileeh/aira-web/pull/123#discussion_r3275054005", 123),
             ("not a url", None),
             ("https://github.com/dimileeh/aira-web/issues/5", None),
         ],

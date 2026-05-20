@@ -32,6 +32,7 @@ from awf.control.worker import (
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _execution_claim_is_stale,
+    _extract_pr_number,
     _has_running_agent_runtime,
     _json_datetime,
     _monitor_claim_is_stale,
@@ -11426,6 +11427,26 @@ def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
     )
 
     assert "no compose project is persisted for the workspace" in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/example/repo/pull/275", 275),
+        ("https://github.com/example/repo/pull/275/", 275),
+        ("https://github.com/example/repo/pull/275/files", 275),
+        ("https://github.com/example/repo/pull/275?notification_referrer_id=abc", 275),
+        ("https://github.com/example/repo/pull/275#discussion_r3275054005", 275),
+        ("https://github.com/example/repo/pull/not-a-number?notification_referrer_id=abc", None),
+        ("https://github.com/example/repo/issues/275?notification_referrer_id=abc", None),
+    ],
+)
+def test_extract_pr_number_accepts_query_and_fragment_boundaries(
+    url: str,
+    expected: int | None,
+) -> None:
+    assert _extract_pr_number(url) == expected
 
 
 @pytest.mark.unit
