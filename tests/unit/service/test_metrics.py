@@ -1309,6 +1309,50 @@ async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_mem
 
 
 @pytest.mark.unit
+async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywhere(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    allocated_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        for workspace_id in (allocated_workspace_id, requested_workspace_id):
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.resolved_profile = {"docker": {"mode": "dind"}}
+        await session.commit()
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=Settings(
+            _env_file=None,
+            work_dir="/tmp/awf-work",
+            local_capacity_dind_slots=1,
+        ),
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.dind_slots == 2
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.dind_slots == 1
+    assert summary.capacity_queue.planned_resources.active_workspace_count == 1
+    assert summary.capacity_queue.planned_resources.dind_slots == 1
+    assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_prefers_active_reservations_and_falls_back_for_old_rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

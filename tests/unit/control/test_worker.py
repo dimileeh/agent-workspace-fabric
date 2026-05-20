@@ -1007,6 +1007,61 @@ class TestRunOnce:
         assert len(deferred_decisions) == 1
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_does_not_record_defaulted_ordered_decision_for_lost_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "defaulted-capacity-lost-claim",
+            create_task_attempt=True,
+        )
+
+        class LostClaimRepository:
+            dialect_name = "postgresql"
+
+            async def transition_if_current(
+                self,
+                workspace_id: str,
+                *,
+                from_status: WorkspaceStatus,
+                to: WorkspaceStatus,
+                reason_code: str,
+            ) -> None:
+                assert workspace_id == requested_id
+                assert from_status == WorkspaceStatus.requested
+                assert to == WorkspaceStatus.provisioning
+                assert reason_code == "WORKER_CLAIMED"
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=object(),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            assert workspace is not None
+
+            claimed = await worker._claim_requested_capacity_candidates(  # noqa: SLF001
+                s,
+                repo=LostClaimRepository(),  # type: ignore[arg-type]
+                reservation_repo=ResourceReservationRepository(s),
+                candidates=[workspace],
+                allocated=worker_module._AllocatedReservationTotals(),  # noqa: SLF001
+                claim_slots=1,
+                decided_at=datetime.now(UTC),
+            )
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        assert claimed == []
+        assert all(
+            decision.reason_code != "LOCAL_CAPACITY_RESERVATION_DEFAULTED" for decision in decisions
+        )
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_records_changed_capacity_deferral(
         self,
         session_factory: async_sessionmaker[AsyncSession],

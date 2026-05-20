@@ -2569,17 +2569,6 @@ class ControlWorker:
                     blockers=blockers,
                 )
                 continue
-            if demand.defaulted:
-                await _record_capacity_queue_decision(
-                    session,
-                    workspace,
-                    decision=QUEUE_DECISION_ORDERED,
-                    reason_code=LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
-                    decided_at=decided_at,
-                    allocated=allocated,
-                    demand=demand,
-                    blockers=[],
-                )
             ws = await repo.transition_if_current(
                 workspace.id,
                 from_status=WorkspaceStatus.requested,
@@ -2589,6 +2578,17 @@ class ControlWorker:
             if ws is None:
                 await self._log_stale_requested_claims(session, [workspace.id])
                 continue
+            if demand.defaulted:
+                await _record_capacity_queue_decision(
+                    session,
+                    ws,
+                    decision=QUEUE_DECISION_ORDERED,
+                    reason_code=LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
+                    decided_at=decided_at,
+                    allocated=allocated,
+                    demand=demand,
+                    blockers=[],
+                )
             claimed.append(workspace.id)
             allocated.add(demand)
         return claimed

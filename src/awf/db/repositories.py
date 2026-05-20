@@ -1210,6 +1210,7 @@ class ResourceReservationRepository:
         latest_active_reservations_query = (
             select(
                 ResourceReservation.workspace_id.label("workspace_id"),
+                ResourceReservation.node_id.label("node_id"),
                 ResourceReservation.steady_cpu.label("steady_cpu"),
                 ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
                 ResourceReservation.peak_cpu.label("peak_cpu"),
@@ -1232,10 +1233,6 @@ class ResourceReservationRepository:
                 status_filter,
             )
         )
-        if node_id is not None:
-            latest_active_reservations_query = latest_active_reservations_query.where(
-                ResourceReservation.node_id == node_id
-            )
         latest_active_reservations = latest_active_reservations_query.subquery()
         stmt = (
             select(
@@ -1256,6 +1253,8 @@ class ResourceReservationRepository:
             .select_from(latest_active_reservations)
             .where(latest_active_reservations.c.reservation_rank == 1)
         )
+        if node_id is not None:
+            stmt = stmt.where(latest_active_reservations.c.node_id == node_id)
         row = (await self._session.execute(stmt)).one()
         return {
             "workspace_count": int(row[0] or 0),

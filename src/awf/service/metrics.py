@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1219,10 +1219,12 @@ async def _reserved_resources_for_session(
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
     persisted = await ResourceReservationRepository(session).active_latest_totals()
+    defaulted_dind_slots = await _defaulted_dind_slots_for_session(session)
     return _reserved_resources_from_totals(
         persisted,
         active_workspace_count,
         resource_defaults=resource_defaults,
+        defaulted_dind_slots=defaulted_dind_slots,
     )
 
 
@@ -1235,10 +1237,15 @@ async def _allocated_resources_for_session(
     persisted = await ResourceReservationRepository(session).active_latest_totals(
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES
     )
+    defaulted_dind_slots = await _defaulted_dind_slots_for_session(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+    )
     return _reserved_resources_from_totals(
         persisted,
         allocated_workspace_count,
         resource_defaults=resource_defaults,
+        defaulted_dind_slots=defaulted_dind_slots,
     )
 
 
@@ -1247,6 +1254,7 @@ def _reserved_resources_from_totals(
     workspace_count: int,
     *,
     resource_defaults: WorkspaceResourceDefaults,
+    defaulted_dind_slots: int = 0,
 ) -> ReservedResources:
     fallback_count = max(0, workspace_count - int(persisted["workspace_count"]))
     return ReservedResources(
@@ -1260,7 +1268,56 @@ def _reserved_resources_from_totals(
             persisted["peak_memory_gb"] + fallback_count * resource_defaults.peak_memory_gb
         ),
         disk_mb=int(persisted["disk_mb"]),
-        dind_slots=int(persisted["dind_slots"]),
+        dind_slots=int(persisted["dind_slots"]) + defaulted_dind_slots,
+    )
+
+
+async def _defaulted_dind_slots_for_session(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+) -> int:
+    if statuses is None:
+        status_filter = ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
+    else:
+        status_values = tuple(
+            status.value if isinstance(status, WorkspaceStatus) else str(status)
+            for status in statuses
+        )
+        if not status_values:
+            return 0
+        status_filter = Workspace.status.in_(status_values)
+
+    active_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .exists()
+    )
+    profiles = await session.scalars(
+        select(Workspace.resolved_profile).where(
+            status_filter,
+            ~active_reservation_exists,
+        )
+    )
+    return sum(_default_dind_slots_from_profile(profile) for profile in profiles)
+
+
+def _default_dind_slots_from_profile(profile: object) -> int:
+    if not isinstance(profile, Mapping):
+        return 0
+    docker = profile.get("docker")
+    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
+        return 1
+    return 0
+
+
+def _default_dind_slots_expression() -> Any:
+    return case(
+        (Workspace.resolved_profile["docker"]["mode"].as_string() == "dind", 1),
+        else_=0,
     )
 
 
@@ -1284,6 +1341,10 @@ async def _capacity_queue_summary(
         planned_totals,
         requested_count,
         resource_defaults=resource_defaults,
+        defaulted_dind_slots=await _defaulted_dind_slots_for_session(
+            session,
+            statuses=(WorkspaceStatus.requested,),
+        ),
     )
     oldest_row = (
         await session.execute(
@@ -1369,7 +1430,10 @@ async def _capacity_queue_blocked_reason_counts(
             latest_active_reservations.c.peak_memory_gb,
             resource_defaults.peak_memory_gb,
         ),
-        "dind_slots": func.coalesce(latest_active_reservations.c.dind_slots, 0),
+        "dind_slots": func.coalesce(
+            latest_active_reservations.c.dind_slots,
+            _default_dind_slots_expression(),
+        ),
     }
     reason_expressions: list[tuple[str, Any]] = []
     for constraint in LOCAL_CAPACITY_CONSTRAINTS:

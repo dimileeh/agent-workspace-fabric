@@ -443,3 +443,75 @@ async def test_resource_reservation_active_latest_totals_can_filter_by_node_id(
         "disk_mb": 2000,
         "dind_slots": 0,
     }
+
+
+@pytest.mark.unit
+async def test_resource_reservation_active_latest_totals_filters_node_after_latest_rank(
+    session: AsyncSession,
+) -> None:
+    workspace_id, _task_id, attempt_id = await _attempt(session)
+    workspace_repo = WorkspaceRepository(session)
+    workspace = await workspace_repo.get(workspace_id)
+    assert workspace is not None
+    await workspace_repo.transition(
+        workspace,
+        to=WorkspaceStatus.provisioning,
+        reason_code="SEED",
+    )
+
+    reserved_at = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
+    repo = ResourceReservationRepository(session)
+    await repo.create(
+        workspace_id=workspace_id,
+        attempt_id=attempt_id,
+        node_id="node-a",
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=80.0,
+        peak_memory_gb=160.0,
+        disk_mb=9999,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at - timedelta(minutes=5),
+    )
+    await repo.create(
+        workspace_id=workspace_id,
+        attempt_id=attempt_id,
+        node_id="node-b",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=8.0,
+        peak_memory_gb=16.0,
+        disk_mb=1000,
+        dind_slots=0,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+
+    node_a_totals = await repo.active_latest_totals(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-a",
+    )
+    node_b_totals = await repo.active_latest_totals(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-b",
+    )
+
+    assert node_a_totals == {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+    assert node_b_totals == {
+        "workspace_count": 1,
+        "steady_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 8.0,
+        "peak_memory_gb": 16.0,
+        "disk_mb": 1000,
+        "dind_slots": 0,
+    }
