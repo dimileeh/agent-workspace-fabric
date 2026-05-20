@@ -2286,6 +2286,11 @@ def workspace_create(
     branch_base: str = typer.Option("development", "--base"),
     agent: str = typer.Option("codex", "--agent"),
     model: str | None = typer.Option(None, "--model"),
+    effort: str | None = typer.Option(
+        None,
+        "--effort",
+        help="Optional reasoning effort override for the selected agent runtime.",
+    ),
     task_class: TaskClass | None = typer.Option(None, "--task-class"),
     priority: int | None = typer.Option(None, "--priority"),
     human_boost: int | None = typer.Option(None, "--human-boost"),
@@ -2366,6 +2371,8 @@ def workspace_create(
 
     if model is not None:
         body["task"]["model"] = model
+    if effort is not None:
+        body["task"]["effort"] = effort
     if task_class is not None:
         body["task"]["task_class"] = task_class.value
     if external_id is not None:

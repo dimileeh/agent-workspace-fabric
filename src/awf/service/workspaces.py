@@ -1111,6 +1111,7 @@ def workspace_create_payload_matches(
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
         == _requested_task_provider_recovery_policy(payload)
+        and _stored_task_agent_effort(existing) == payload.task.effort
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
         and (
@@ -1452,6 +1453,12 @@ def _stored_task_agent_model(existing: Workspace) -> str | None:
     """Return the agent model string stored in the workspace's task policy."""
     model = _stored_task_policy(existing).get("agent_model")
     return model if isinstance(model, str) and model else None
+
+
+def _stored_task_agent_effort(existing: Workspace) -> str | None:
+    """Return the agent effort string stored in the workspace's task policy."""
+    effort = _stored_task_policy(existing).get("agent_effort")
+    return effort if isinstance(effort, str) and effort else None
 
 
 def _stored_task_policy(existing: Workspace) -> Mapping[str, Any]:
@@ -2945,6 +2952,8 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
         )
     if payload.task.model is not None:
         policy["agent_model"] = payload.task.model
+    if payload.task.effort is not None:
+        policy["agent_effort"] = payload.task.effort
     if payload.task.out_of_scope_changes is not None:
         policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
     if payload.task.provider_recovery is not None:
