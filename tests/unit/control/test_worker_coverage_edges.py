@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -60,6 +61,10 @@ class _NoopProvisioner:
 
     async def provision_claimed(self, workspace_id: str) -> None:
         del workspace_id
+
+    def get_worktree_path(self, workspace_id: str) -> Path | None:
+        del workspace_id
+        return None
 
 
 class _RecordingExecutor:
@@ -171,6 +176,30 @@ class _ExplodingSessionFactory:
     def __call__(self) -> object:
         self.calls += 1
         raise AssertionError("session factory should not be opened for empty limits")
+
+
+class _PublicWorktreePathProvisioner(_NoopProvisioner):
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.requests: list[str] = []
+
+    def get_worktree_path(self, workspace_id: str) -> Path:
+        self.requests.append(workspace_id)
+        return self.root / workspace_id
+
+
+@pytest.mark.unit
+def test_preserved_active_worktree_path_uses_public_provisioner_method(tmp_path: Path) -> None:
+    provisioner = _PublicWorktreePathProvisioner(tmp_path)
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=provisioner,  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+
+    assert worker._preserved_active_worktree_path("ws_public") == tmp_path / "ws_public"  # noqa: SLF001
+    assert provisioner.requests == ["ws_public"]
+    assert not hasattr(provisioner, "_git")
 
 
 class _RefreshLoopWorker(ControlWorker):

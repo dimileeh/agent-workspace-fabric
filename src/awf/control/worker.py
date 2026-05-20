@@ -57,7 +57,6 @@ from awf.db.resilience import (
 )
 from awf.db.session import session_scope
 from awf.node.cleanup import WorkspaceCleanupResult
-from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
@@ -319,6 +318,23 @@ class WorkspaceExecutorProtocol(Protocol):
     ) -> None: ...
 
 
+class ProvisionerProtocol(Protocol):
+    async def provision(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> None: ...
+
+    async def provision_claimed(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> None: ...
+
+    def get_worktree_path(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> Path | None: ...
+
+
 class BranchOpenPullRequestResolverProtocol(Protocol):
     async def resolve(  # pragma: no cover - Protocol method declaration only.
         self,
@@ -357,7 +373,7 @@ class ControlWorker:
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        provisioner: Provisioner,
+        provisioner: ProvisionerProtocol,
         executor: WorkspaceExecutorProtocol | None = None,
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
@@ -2896,11 +2912,7 @@ class ControlWorker:
         )
 
     def _preserved_active_worktree_path(self, workspace_id: str) -> Path | None:
-        git_manager = getattr(self._provisioner, "_git", None)
-        worktrees_dir = getattr(git_manager, "_worktrees_dir", None)
-        if isinstance(worktrees_dir, Path):
-            return worktrees_dir / workspace_id
-        return None
+        return self._provisioner.get_worktree_path(workspace_id)
 
     async def _run_preserved_active_git(
         self,

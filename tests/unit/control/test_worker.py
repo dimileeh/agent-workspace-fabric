@@ -557,6 +557,10 @@ class _TransitioningProvisioner:
             await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_READY")
             await s.commit()
 
+    def get_worktree_path(self, workspace_id: str) -> Path | None:
+        del workspace_id
+        return None
+
 
 class _RecordingExecutor:
     def __init__(self) -> None:
