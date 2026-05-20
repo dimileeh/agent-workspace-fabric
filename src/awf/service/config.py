@@ -123,7 +123,8 @@ def resolve_service_settings(
     database_url = settings.database_url
     project_dotenv_lookup = _ProjectDotenvLookup()
 
-    database_url_explicit = _database_url_env_is_explicit(
+    host_database_url = _env_value(env, "AWF_DATABASE_URL")
+    database_url_explicit = host_database_url is not None and _database_url_env_is_explicit(
         env,
         service_env,
         project_dotenv_lookup=project_dotenv_lookup,
@@ -395,8 +396,7 @@ def _api_base_url_env_is_explicit(
     """
 
     api_base_url = _env_value(environ, "AWF_API_BASE_URL")
-    if api_base_url is None:
-        return False
+    assert api_base_url is not None
     if api_base_url != DEFAULT_LOCAL_SERVICE_API_BASE_URL:
         return True
     if _env_value(environ, "AWF_API_HOST_PORT"):
@@ -446,8 +446,7 @@ def _database_url_env_is_explicit(
     """
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
-    if database_url is None:
-        return False
+    assert database_url is not None
     if database_url != DEFAULT_LOCAL_SERVICE_DATABASE_URL:
         return True
     if _env_value(environ, "AWF_POSTGRES_HOST_PORT"):

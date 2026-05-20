@@ -227,6 +227,19 @@ def test_settings_constructor_fields_track_pydantic_alias_input() -> None:
 
 
 @pytest.mark.unit
+def test_settings_constructor_field_tracking_lock_is_reentrant() -> None:
+    lock = common_config._SETTINGS_INIT_FIELDS_LOCK  # noqa: SLF001
+
+    lock.acquire()
+    try:
+        acquired_recursively = lock.acquire(blocking=False)
+        assert acquired_recursively is True
+        lock.release()
+    finally:
+        lock.release()
+
+
+@pytest.mark.unit
 def test_settings_constructor_field_tracking_uses_lock_for_all_dict_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

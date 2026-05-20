@@ -538,7 +538,7 @@ class _SettingsIdentityRef(weakref.ref[Settings]):
 
 
 _SETTINGS_INIT_FIELDS_BY_SETTINGS: dict[_SettingsIdentityRef, frozenset[str]] = {}
-_SETTINGS_INIT_FIELDS_LOCK = threading.Lock()
+_SETTINGS_INIT_FIELDS_LOCK = threading.RLock()
 
 
 def _discard_settings_constructor_fields(reference: weakref.ReferenceType[Settings]) -> None:
