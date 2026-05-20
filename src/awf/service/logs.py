@@ -17,6 +17,7 @@ from awf.service.environment import (
     compose_cli_environ,
     compose_interpolation_environ,
     docker_cli_client_environ,
+    env_lookup,
     non_empty_env_value,
 )
 
@@ -209,7 +210,15 @@ def _docker_cli_environ(
     if environ is None:
         return None
     awf_docker_host = non_empty_env_value(environ, "AWF_DOCKER_HOST")
-    docker_host = awf_docker_host or non_empty_env_value(environ, "DOCKER_HOST")
+    docker_host_found, docker_host_value = env_lookup(environ, "DOCKER_HOST")
+    docker_host = awf_docker_host or (docker_host_value if docker_host_value else None)
+    caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
+    clears_docker_host = (
+        docker_host_found
+        and not docker_host_value
+        and caller_docker_host_found
+        and bool(caller_docker_host_value)
+    )
     compose_env = compose_interpolation_environ(
         environ,
         compose_file=compose_file,
@@ -224,6 +233,7 @@ def _docker_cli_environ(
         and not compose_cli_env
         and not docker_cli_env
         and not cleared_docker_cli_keys
+        and not clears_docker_host
     ):
         # Compose reads ordinary service values through --env-file; only pass an
         # explicit subprocess environment when a resolved value must override the
@@ -237,6 +247,8 @@ def _docker_cli_environ(
     scrubbed_keys = {"AWF_DOCKER_HOST", *cleared_docker_cli_keys}
     if docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
+    elif clears_docker_host:
+        scrubbed_keys.add("DOCKER_HOST")
     for key in list(resolved):
         if key.upper() in scrubbed_keys:
             del resolved[key]
