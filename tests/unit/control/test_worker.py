@@ -1264,6 +1264,81 @@ class TestRunOnce:
         assert all(decision.reason_code != "LOCAL_CAPACITY_DEFERRED" for decision in decisions)
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_counts_local_workspace_with_mismatched_reservation_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "mismatched-node-capacity-holder",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            active = await WorkspaceRepository(s).get(active_id)
+            assert active is not None
+            active.node_id = "worker-node-a"
+            await s.commit()
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            node_id="worker-node-b",
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "mismatched-node-capacity-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            node_id="worker-node-a",
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                node_id="worker-node-a",
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+                local_capacity_dind_slots=1,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        assert provisioner.calls == []
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.requested.value
+        capacity_decision = next(
+            decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
+        )
+        allocated = capacity_decision.resource_summary["allocated"]
+        assert allocated["workspace_count"] == 1
+        assert allocated["peak_cpu"] == 6.0
+        assert allocated["peak_memory_gb"] == 16.0
+        assert allocated["dind_slots"] == 1
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(
         self,
         session_factory: async_sessionmaker[AsyncSession],

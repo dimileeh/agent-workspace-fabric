@@ -3256,6 +3256,12 @@ async def _allocated_totals_for_capacity_gate(
             node_id=node_id,
         )
     )
+    await _add_mismatched_node_active_workspace_reservations(
+        session,
+        reservation_repo=reservation_repo,
+        allocated=allocated,
+        node_id=node_id,
+    )
     await _add_unreserved_active_workspace_defaults(
         session,
         allocated=allocated,
@@ -3263,6 +3269,41 @@ async def _allocated_totals_for_capacity_gate(
         node_id=node_id,
     )
     return allocated
+
+
+async def _add_mismatched_node_active_workspace_reservations(
+    session: AsyncSession,
+    *,
+    reservation_repo: ResourceReservationRepository,
+    allocated: _AllocatedReservationTotals,
+    node_id: str,
+) -> None:
+    """Count local workspaces whose latest reservation still names a prior node."""
+    active_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .exists()
+    )
+    result = await session.execute(
+        select(Workspace.id).where(
+            Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
+            Workspace.node_id == node_id,
+            active_reservation_exists,
+        )
+    )
+    workspace_ids = tuple(result.scalars())
+    if not workspace_ids:
+        return
+
+    reservations = await reservation_repo.active_latest_by_workspace_ids(workspace_ids)
+    for workspace_id in workspace_ids:
+        reservation = reservations.get(workspace_id)
+        if reservation is None or reservation.node_id == node_id:
+            continue
+        allocated.add(_reservation_demand_from_reservation(reservation))
 
 
 async def _add_unreserved_active_workspace_defaults(
@@ -3330,19 +3371,25 @@ def _reservation_demand_for_workspace(
     config: WorkerConfig,
 ) -> _ReservationDemand:
     if reservation is not None:
-        return _ReservationDemand(
-            workspace_id=workspace.id,
-            steady_cpu=reservation.steady_cpu,
-            steady_memory_gb=reservation.steady_memory_gb,
-            peak_cpu=reservation.peak_cpu,
-            peak_memory_gb=reservation.peak_memory_gb,
-            disk_mb=int(reservation.disk_mb or 0),
-            dind_slots=int(reservation.dind_slots or 0),
-        )
+        return _reservation_demand_from_reservation(reservation)
     return _default_reservation_demand_for_workspace(
         workspace.id,
         resolved_profile=workspace.resolved_profile,
         config=config,
+    )
+
+
+def _reservation_demand_from_reservation(
+    reservation: ResourceReservation,
+) -> _ReservationDemand:
+    return _ReservationDemand(
+        workspace_id=reservation.workspace_id,
+        steady_cpu=reservation.steady_cpu,
+        steady_memory_gb=reservation.steady_memory_gb,
+        peak_cpu=reservation.peak_cpu,
+        peak_memory_gb=reservation.peak_memory_gb,
+        disk_mb=int(reservation.disk_mb or 0),
+        dind_slots=int(reservation.dind_slots or 0),
     )
 
 
