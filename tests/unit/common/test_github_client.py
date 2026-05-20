@@ -626,6 +626,80 @@ class TestFetchPrStatus:
         assert status.blocking_reviews == ()
 
     @pytest.mark.unit
+    async def test_later_commented_review_does_not_clear_blocking_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9351,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9352,
+                        "body": "One more non-blocking note.",
+                        "state": "COMMENTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:05:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9351", "9352"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [True, False]
+        assert len(status.blocking_reviews) == 1
+        blocker = status.blocking_reviews[0]
+        assert blocker.comment_id == "9351"
+        assert blocker.blocks_merge is True
+
+    @pytest.mark.unit
+    async def test_later_dismissed_review_does_not_clear_blocking_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9361,
+                        "body": "Please fix this before merge.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    },
+                    {
+                        "databaseId": 9362,
+                        "body": "Dismissed stale review record.",
+                        "state": "DISMISSED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T11:05:00Z",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["9361", "9362"]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [True, False]
+        assert len(status.blocking_reviews) == 1
+        blocker = status.blocking_reviews[0]
+        assert blocker.comment_id == "9361"
+        assert blocker.blocks_merge is True
+
+    @pytest.mark.unit
     async def test_empty_body_changes_requested_review_still_blocks(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

@@ -1265,8 +1265,11 @@ def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> 
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
+    merge_gating_states = {"APPROVED", "CHANGES_REQUESTED"}
     latest_by_reviewer: dict[str, _FetchedReview] = {}
     for fetched in fetched_reviews:
+        if fetched.comment.state not in merge_gating_states:
+            continue
         current = latest_by_reviewer.get(fetched.reviewer_key)
         if current is None or _review_is_later(fetched, current):
             latest_by_reviewer[fetched.reviewer_key] = fetched
