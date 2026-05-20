@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.requests import Request
 
+import awf.api.request_admission as request_admission
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
 from awf.api.routes import callbacks as callbacks_route
@@ -29,6 +30,7 @@ _VALID_BODY = {
     "target_url": "https://operator.example.com/awf/events",
     "event_types": ["workspace.*", "merge.*", "operation.*"],
 }
+_STABLE_REQUEST_ADMISSION_CLOCK = 1000.0
 
 
 class _NoLegacyIPv4Labels:
@@ -68,6 +70,14 @@ def _direct_callback_request() -> Request:
             "client": ("198.51.100.42", 42100),
             "app": FastAPI(),
         }
+    )
+
+
+def _install_stable_request_admission_limiter(state: object) -> None:
+    setattr(
+        state,
+        request_admission._LIMITER_STATE_KEY,  # noqa: SLF001
+        request_admission.RequestAdmissionLimiter(clock=lambda: _STABLE_REQUEST_ADMISSION_CLOCK),
     )
 
 
@@ -185,6 +195,7 @@ async def callback_app_and_client(
 ) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    _install_stable_request_admission_limiter(app.state)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield app, c
 
