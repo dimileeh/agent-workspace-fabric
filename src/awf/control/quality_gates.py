@@ -61,6 +61,21 @@ _INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
 _INFORMATIONAL_RUN_BLOCKED_OPERATORS: Final[frozenset[str]] = frozenset(
     {"|", "|&", "||", "&", "<", ">", "<<", ">>", "<>", ">|", "<<<"}
 )
+_VALIDATION_RUN_APPEND_BLOCKED_OPERATORS: Final[frozenset[str]] = (
+    _INFORMATIONAL_RUN_BLOCKED_OPERATORS | frozenset({";"})
+)
+_VALIDATION_RUN_DIRECT_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
+    {"coverage", "mypy", "pytest", "ruff"}
+)
+_VALIDATION_RUN_MODULE_NAMES: Final[frozenset[str]] = (
+    _VALIDATION_RUN_DIRECT_COMMAND_NAMES | frozenset({"unittest"})
+)
+_VALIDATION_RUN_TEST_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
+    {"cargo", "go", "gradle", "gradlew", "make", "mvn", "nox", "tox"}
+)
+_VALIDATION_RUN_TARGET_NAMES: Final[frozenset[str]] = frozenset(
+    {"check", "coverage", "lint", "test", "tests"}
+)
 _VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_-])"
     r"(?:pytest|ruff|mypy|coverage)"
@@ -1457,7 +1472,100 @@ def _preserves_existing_validation_run(old_run: str | None, new_run: str | None)
     if not new_command.startswith(old_command):
         return False
     suffix = new_command[len(old_command) :].lstrip()
-    return suffix.startswith("&&") and "||" not in suffix
+    appended_commands = _validation_run_append_commands(suffix)
+    return appended_commands is not None and all(
+        _validation_run_append_command_is_safe(command) for command in appended_commands
+    )
+
+
+def _validation_run_append_commands(suffix: str) -> tuple[tuple[str, ...], ...] | None:
+    tokens = _shell_tokens(suffix)
+    if tokens is None or not tokens or tokens[0] != "&&":
+        return None
+
+    commands: list[tuple[str, ...]] = []
+    command_tokens: list[str] = []
+    expecting_command = True
+    for index, token in enumerate(tokens):
+        if token == "&&":
+            if expecting_command:
+                if index == 0:
+                    continue
+                return None
+            commands.append(tuple(command_tokens))
+            command_tokens = []
+            expecting_command = True
+            continue
+        if token in _VALIDATION_RUN_APPEND_BLOCKED_OPERATORS:
+            return None
+        command_tokens.append(token)
+        expecting_command = False
+
+    if expecting_command:
+        return None
+    commands.append(tuple(command_tokens))
+    return tuple(commands)
+
+
+def _validation_run_append_command_is_safe(tokens: Sequence[str]) -> bool:
+    if not tokens or any("$(" in token or "`" in token for token in tokens):
+        return False
+
+    command_words = _strip_shell_command_prefixes(tokens)
+    if not command_words:
+        return False
+    command_name = _command_basename(command_words[0])
+    if command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES:
+        return True
+    if command_name.startswith("python"):
+        return _python_runs_validation_module(
+            command_words[1:]
+        ) or _python_runs_validation_test_path(command_words[1:])
+    if command_name in {"npm", "pnpm", "yarn", "bun"}:
+        return _package_manager_runs_validation_command(command_words[1:])
+    if command_name in _VALIDATION_RUN_TEST_COMMAND_NAMES:
+        return _command_args_include_validation_target(command_words[1:])
+    return False
+
+
+def _python_runs_validation_module(words: Sequence[str]) -> bool:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-") and remaining[0] != "-m":
+        remaining = remaining[1:]
+    return (
+        len(remaining) >= 2
+        and remaining[0] == "-m"
+        and remaining[1] in _VALIDATION_RUN_MODULE_NAMES
+    )
+
+
+def _python_runs_validation_test_path(words: Sequence[str]) -> bool:
+    return any(word == "tests" or word.startswith("tests/") for word in words)
+
+
+def _package_manager_runs_validation_command(words: Sequence[str]) -> bool:
+    remaining = tuple(word for word in words if word != "--")
+    remaining = _strip_package_manager_options(remaining)
+    if not remaining:
+        return False
+    if remaining[0] in {"exec", "run"}:
+        remaining = _strip_package_manager_options(remaining[1:])
+    if not remaining:
+        return False
+    command_name = _command_basename(remaining[0])
+    return command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES or _is_validation_run_target(
+        command_name
+    )
+
+
+def _command_args_include_validation_target(words: Sequence[str]) -> bool:
+    return any(_is_validation_run_target(word) for word in words if not word.startswith("-"))
+
+
+def _is_validation_run_target(value: str) -> bool:
+    return value in _VALIDATION_RUN_TARGET_NAMES or value.startswith(
+        ("check:", "check-", "coverage:", "coverage-", "lint:", "lint-", "test:", "test-")
+    )
 
 
 def _has_broad_validation_command_invocation(command: str) -> bool:
