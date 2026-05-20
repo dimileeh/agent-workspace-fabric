@@ -8833,6 +8833,122 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("status", "operation_type", "operation_status"),
+        [
+            (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
+            (WorkspaceStatus.validating, OperationType.validate, OperationStatus.running),
+            (WorkspaceStatus.pushing, OperationType.push, OperationStatus.pending),
+            (WorkspaceStatus.pushing, OperationType.push, OperationStatus.running),
+        ],
+    )
+    async def test_preserved_active_without_usable_work_cancels_superseded_active_operation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        status: WorkspaceStatus,
+        operation_type: OperationType,
+        operation_status: OperationStatus,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            f"preserved-no-work-cancel-{status.value}-{operation_status.value}",
+            status,
+            compose_project_name=f"awf_preserved_no_work_cancel_{status.value}_{operation_status.value}",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            original_operation = await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                status=operation_status,
+                payload={
+                    "source": "workspace_executor",
+                    "workspace_status": status.value,
+                },
+            )
+            original_operation_id = original_operation.id
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {
+                    f"awf_preserved_no_work_cancel_{status.value}_{operation_status.value}": (
+                        _live_agent_snapshot()
+                    )
+                }
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            original = await WorkspaceRepository(s).get(workspace_id)
+            assert original is not None
+            original_operation = await OperationRepository(s).get(original_operation_id)
+            assert original_operation is not None
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+
+        retry_ops = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.retry.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+        ]
+        active_execution_ops = [
+            operation
+            for operation in operations
+            if operation.type in {OperationType.validate.value, OperationType.push.value}
+            and operation.status in {OperationStatus.pending.value, OperationStatus.running.value}
+        ]
+
+        assert original.status == WorkspaceStatus.cancelled.value
+        assert len(retry_ops) == 1
+        retry_operation = retry_ops[0]
+        assert original_operation.status == OperationStatus.cancelled.value
+        assert original_operation.error_code == "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED"
+        assert original_operation.result is not None
+        assert original_operation.result["reason_code"] == (
+            "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED"
+        )
+        assert original_operation.result["requested_action"] == OperationType.retry.value
+        assert original_operation.result["replacement_operation_id"] == retry_operation.id
+        assert active_execution_ops == []
+        expected_cancelled_operations = [
+            {
+                "operation_id": original_operation_id,
+                "operation_type": operation_type.value,
+                "previous_status": operation_status.value,
+            }
+        ]
+        assert retry_operation.payload is not None
+        assert retry_operation.payload["cancelled_active_operations"] == (
+            expected_cancelled_operations
+        )
+        assert len(salvage_events) == 1
+        assert salvage_events[0].payload is not None
+        assert salvage_events[0].payload["cancelled_active_operations"] == (
+            expected_cancelled_operations
+        )
+
+    @pytest.mark.unit
     async def test_preserved_active_without_usable_work_preserves_sync_remote_push_branch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
