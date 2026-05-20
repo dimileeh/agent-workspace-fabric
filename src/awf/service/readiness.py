@@ -205,12 +205,14 @@ async def collect_core_readiness_report(
                 settings,
                 strict_providers=strict,
                 provider_environ=provider_env,
+                compose_file=compose_file,
             )
         else:
             status_payload = await status_collector(
                 settings,
                 strict_providers=strict,
                 provider_environ=provider_env,
+                compose_file=compose_file,
                 compose_env_file=compose_env_file,
             )
         checks.append(_service_status_check(status_payload))

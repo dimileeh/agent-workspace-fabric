@@ -826,6 +826,55 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_omits_env_when_caller_matches_interpolation_value_and_env_file_is_stale(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A matching caller env already overrides a stale Compose env-file value."""
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_API_TOKEN:?set AWF_API_TOKEN}"
+""",
+    )
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text("AWF_API_TOKEN=stale-token\n", encoding="utf-8")
+    service_environ = {"AWF_API_TOKEN": "service-token"}
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    for key in (
+        "AWF_DOCKER_HOST",
+        "COMPOSE_PROFILES",
+        "COMPOSE_PROJECT_NAME",
+        "DOCKER_API_VERSION",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWF_API_TOKEN", "service-token")
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    assert calls[0]["env"] is None
+
+
+@pytest.mark.unit
 def test_service_logs_ignores_unclosed_braced_compose_interpolation(tmp_path: Path) -> None:
     """Malformed braced expressions should not be treated as Compose inputs."""
     from awf.service import environment as service_environment

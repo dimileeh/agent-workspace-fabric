@@ -9,6 +9,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 
 import yaml
 from dotenv import dotenv_values
@@ -27,6 +28,7 @@ _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
 )
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
+_COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING = object()
 _COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[tuple[str, str, int], tuple[str, ...]] = (
     OrderedDict()
 )
@@ -120,17 +122,15 @@ def compose_interpolation_environ(
             continue
         caller_found, caller_value = env_lookup(os.environ, key)
         env_file_found, env_file_value = env_lookup(env_file_values, key)
-        # Equal values from the caller environment or the Compose env file can
-        # stay out of this override map because the Docker subprocess env starts
-        # from dict(os.environ) and the compose command also receives
-        # compose_env_file via --env-file.
-        # A stale caller value must be overridden because it wins over --env-file.
-        caller_override_needed = caller_found and caller_value != value
-        # A stale --env-file value must be overridden by the resolved service value.
-        env_file_override_needed = env_file_found and env_file_value != value
-        # Service-env-only values need an explicit subprocess env entry for interpolation.
-        service_env_only = not caller_found and not env_file_found
-        if caller_override_needed or env_file_override_needed or service_env_only:
+        # Caller env wins over --env-file for interpolation. If it already
+        # matches the resolved service value, a stale env-file value is harmless.
+        if caller_found:
+            if caller_value != value:
+                resolved[key] = value
+            continue
+        # Without a caller value, Compose can read matching values from
+        # --env-file; stale or missing env-file values need an explicit override.
+        if not env_file_found or env_file_value != value:
             resolved[key] = value
     return resolved
 
@@ -177,10 +177,12 @@ def _cached_compose_interpolation_keys(
     cache_key = (_compose_file, contents_digest, contents_size)
     while True:
         with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
-            cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
-            if cached is not None:
+            cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(
+                cache_key, _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING
+            )
+            if cached is not _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING:
                 _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
-                return cached
+                return cast(tuple[str, ...], cached)
             inflight = _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key)
             if inflight is None:
                 inflight = threading.Event()

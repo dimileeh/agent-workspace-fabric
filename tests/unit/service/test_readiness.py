@@ -604,6 +604,8 @@ async def test_core_readiness_resolves_provider_environment_from_compose_env_fil
 ) -> None:
     demo_path = tmp_path / "demo"
     _write_demo_project(demo_path)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
     compose_env_file = tmp_path / "compose.env"
     compose_token = "ghp_core_readiness_compose_token"
     compose_env_file.write_text(f"AWF_GITHUB_TOKEN={compose_token}\n", encoding="utf-8")
@@ -634,6 +636,7 @@ async def test_core_readiness_resolves_provider_environment_from_compose_env_fil
         demo_path=demo_path,
         strict_providers=frozenset({"github"}),
         environ=base_environ,
+        compose_file=compose_file,
         compose_env_file=compose_env_file,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -650,6 +653,8 @@ async def test_core_readiness_resolves_provider_environment_from_compose_env_fil
     assert doctor_provider_env["AWF_GITHUB_TOKEN"] == compose_token
     assert status_provider_env["PATH"] == "/usr/bin"
     assert doctor_provider_env["PATH"] == "/usr/bin"
+    assert captured_status["compose_file"] == compose_file
+    assert captured_status["compose_env_file"] == compose_env_file
     assert captured_doctor["environ"] is base_environ
 
 
@@ -707,7 +712,51 @@ async def test_core_readiness_honors_explicit_null_compose_env_file(
     assert isinstance(doctor_provider_env, dict)
     assert "AWF_GITHUB_TOKEN" not in status_provider_env
     assert "AWF_GITHUB_TOKEN" not in doctor_provider_env
+    assert captured_status["compose_file"] == compose_file
+    assert captured_status["compose_env_file"] is None
     assert captured_doctor["compose_env_file"] is None
+
+
+@pytest.mark.unit
+async def test_core_readiness_forwards_compose_file_to_status_collector_when_env_file_omitted(
+    tmp_path: Path,
+) -> None:
+    demo_path = tmp_path / "demo"
+    _write_demo_project(demo_path)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    captured_status: dict[str, object] = {}
+
+    async def _status_collector(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
+        return {
+            "status": "ok",
+            "checks": {
+                "workspace_cleanup": {"ok": True},
+                "orphan_resources": {"ok": True},
+                "stranded_workspaces": {"ok": True},
+            },
+            "agent_readiness": {"status": "ok"},
+        }
+
+    async def _doctor_collector(*_args: object, **_kwargs: object) -> DoctorReport:
+        return DoctorReport(service="awf-local", status="ok", diagnostics=())
+
+    report = await collect_core_readiness_report(
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
+        demo_path=demo_path,
+        compose_file=compose_file,
+        status_collector=_status_collector,
+        doctor_collector=_doctor_collector,
+        failure_analysis_collector=_classified_failure_collector,  # type: ignore[arg-type]
+        slo_metrics_collector=_ok_slo_collector,
+    )
+
+    assert report.status == "ok"
+    assert captured_status["compose_file"] == compose_file
+    assert "compose_env_file" not in captured_status
 
 
 @pytest.mark.unit
