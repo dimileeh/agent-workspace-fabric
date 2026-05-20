@@ -75,6 +75,11 @@ _BROAD_VALIDATION_SCRIPT_STEMS: Final[frozenset[str]] = frozenset(
 _SHELL_SEGMENT_SPLIT_RE: Final = re.compile(r"(?:&&|\|\||;|\n)")
 _COMMAND_PREFIX_WORDS: Final[frozenset[str]] = frozenset({"command", "sudo", "time"})
 _ENV_ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_UNBRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_SENSITIVE_ENV_NAME_RE: Final = re.compile(
+    r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
+    re.IGNORECASE,
+)
 _PACKAGE_MANAGER_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
     {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-c", "-w"}
 )
@@ -1407,11 +1412,23 @@ def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
         return True
     if any("$(" in token or "`" in token for token in remaining):
         return False
+    if _has_unsafe_informational_parameter_expansion(remaining):
+        return False
     while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]) is not None:
         remaining = remaining[1:]
     if not remaining:
         return True
     return _command_basename(remaining[0]) in _INFORMATIONAL_RUN_COMMAND_NAMES
+
+
+def _has_unsafe_informational_parameter_expansion(tokens: Sequence[str]) -> bool:
+    for token in tokens:
+        if "${" in token:
+            return True
+        for match in _UNBRACED_SHELL_PARAMETER_RE.finditer(token):
+            if _SENSITIVE_ENV_NAME_RE.search(match.group(1)) is not None:
+                return True
+    return False
 
 
 def _is_validation_command(command: str | None) -> bool:

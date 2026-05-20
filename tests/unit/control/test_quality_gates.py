@@ -1088,6 +1088,60 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "${VAR}"',
+        'echo "${VAR:0:4}"',
+        'printf "%s\\n" "$AWF_API_TOKEN"',
+        'echo "token=$GH_TOKEN"',
+    ],
+)
+def test_added_informational_step_blocks_secret_bearing_expansions(
+    command: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Summary report
+        run: {command}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Summary report"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_added_informational_job_blocks_arbitrary_run_commands() -> None:
     old_text = """
 name: CI
