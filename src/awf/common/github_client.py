@@ -1278,6 +1278,8 @@ def _effective_blocking_reviews(
     merge_gating_states = {"APPROVED", "CHANGES_REQUESTED"}
     latest_by_reviewer: dict[str, _FetchedReview] = {}
     for fetched in fetched_reviews:
+        if fetched.viewer_did_author:
+            continue
         if not fetched.counts_for_required_review:
             continue
         if fetched.comment.state not in merge_gating_states:

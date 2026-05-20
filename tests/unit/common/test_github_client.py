@@ -592,6 +592,33 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
+    async def test_viewer_owned_changes_requested_review_is_not_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 9202,
+                        "body": "Self-authored change request should not block the monitor.",
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "token-owner"},
+                        "viewerDidAuthor": True,
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+        assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
     async def test_non_counting_changes_requested_review_is_advisory_not_blocking(
         self,
     ) -> None:
