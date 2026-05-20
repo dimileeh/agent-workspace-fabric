@@ -27,7 +27,8 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, literal, or_, select, text
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
@@ -239,7 +240,13 @@ class _AllocatedReservationTotals:
 _ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
 
 type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
-type _RequestedCapacityQueueSignature = tuple[int, datetime | None, datetime | None, str | None]
+type _RequestedCapacityQueueSignature = tuple[
+    int,
+    datetime | None,
+    datetime | None,
+    str | None,
+    str,
+]
 
 
 @dataclass(frozen=True)
@@ -3392,17 +3399,59 @@ async def _requested_capacity_queue_signature(
     *,
     node_id: str,
 ) -> _RequestedCapacityQueueSignature:
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        stmt = (
+            select(
+                func.count(Workspace.id),
+                func.max(Workspace.updated_at),
+                func.max(Workspace.created_at),
+                func.max(Workspace.id),
+            )
+            .where(Workspace.status == WorkspaceStatus.requested.value)
+            .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        )
+        count, latest_updated_at, latest_created_at, max_workspace_id = (
+            await session.execute(stmt)
+        ).one()
+        digest = hashlib.sha256()
+        ids_stmt = (
+            select(Workspace.id)
+            .where(Workspace.status == WorkspaceStatus.requested.value)
+            .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+            .order_by(Workspace.id)
+        )
+        for workspace_id in (await session.execute(ids_stmt)).scalars():
+            digest.update(workspace_id.encode("utf-8"))
+            digest.update(b"\0")
+        return (
+            int(count or 0),
+            _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
+            _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
+            str(max_workspace_id) if max_workspace_id is not None else None,
+            digest.hexdigest(),
+        )
+
     stmt = (
         select(
             func.count(Workspace.id),
             func.max(Workspace.updated_at),
             func.max(Workspace.created_at),
             func.max(Workspace.id),
+            func.md5(
+                func.coalesce(
+                    func.string_agg(
+                        Workspace.id,
+                        aggregate_order_by(literal(","), Workspace.id),
+                    ),
+                    literal(""),
+                )
+            ),
         )
         .where(Workspace.status == WorkspaceStatus.requested.value)
         .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
     )
-    count, latest_updated_at, latest_created_at, max_workspace_id = (
+    count, latest_updated_at, latest_created_at, max_workspace_id, ids_digest = (
         await session.execute(stmt)
     ).one()
     return (
@@ -3410,6 +3459,7 @@ async def _requested_capacity_queue_signature(
         _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
         _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
         str(max_workspace_id) if max_workspace_id is not None else None,
+        str(ids_digest),
     )
 
 

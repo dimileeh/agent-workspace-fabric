@@ -880,7 +880,93 @@ class TestRunOnce:
         assert before[1] == after[1] == anchor_updated_at
         assert before[2] == initial_created_at
         assert after[2] == replacement_created_at
-        assert before[-1] == after[-1] == anchor_id
+        assert before[3] == after[3] == anchor_id
+        assert before != after
+
+    @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_changes_when_composition_changes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        generated_ids = iter(
+            [
+                "ws_ffffffffffffffffffffffff",
+                "ws_cccccccccccccccccccccccc",
+                "ws_dddddddddddddddddddddddd",
+                "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "ws_bbbbbbbbbbbbbbbbbbbbbbbb",
+            ]
+        )
+        monkeypatch.setattr(repositories_module, "new_workspace_id", lambda: next(generated_ids))
+        anchor_at = datetime(2026, 1, 5, tzinfo=UTC)
+        queued_at = datetime(2026, 1, 2, tzinfo=UTC)
+
+        anchor_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-composition-anchor",
+            created_at=anchor_at,
+        )
+        leaving_ids = [
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-composition-leaving-a",
+                created_at=queued_at,
+            ),
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-composition-leaving-b",
+                created_at=queued_at,
+            ),
+        ]
+
+        async with session_factory() as session:
+            before = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        replacement_ids = [
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-composition-replacement-a",
+                created_at=queued_at,
+            ),
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                "signature-composition-replacement-b",
+                created_at=queued_at,
+            ),
+        ]
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id.in_(leaving_ids))
+                .values(status=WorkspaceStatus.ready.value)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id.in_(replacement_ids))
+                .values(updated_at=queued_at)
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            after = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        assert before[0] == after[0] == 3
+        assert before[1] == after[1] == anchor_at
+        assert before[2] == after[2] == anchor_at
+        assert before[3] == after[3] == anchor_id
         assert before != after
 
     @pytest.mark.unit

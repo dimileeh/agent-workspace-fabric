@@ -2448,6 +2448,10 @@ function ResourceCapacityPanel({
 }) {
   const totalReason = workspaceSummary ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count : 0;
   const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
+  const showOldestQueued =
+    saturation !== null &&
+    (saturation.capacity_queue.queued_workspace_count > 0 ||
+      saturation.capacity_queue.oldest_wait_seconds !== null);
 
   return (
     <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
@@ -2497,10 +2501,12 @@ function ResourceCapacityPanel({
               label="Capacity queue"
               value={`${saturation.capacity_queue.queued_workspace_count} requested`}
             />
-            <Fact
-              label="Oldest queued"
-              value={compactDuration(saturation.capacity_queue.oldest_wait_seconds)}
-            />
+            {showOldestQueued ? (
+              <Fact
+                label="Oldest queued"
+                value={compactDuration(saturation.capacity_queue.oldest_wait_seconds)}
+              />
+            ) : null}
             <Fact label="Reserved disk" value={formatCapacityValue(saturation.reserved_resources.disk_mb, "mb")} />
             <Fact label="DinD slots" value={`${saturation.reserved_resources.dind_slots} reserved`} />
             <Fact

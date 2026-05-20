@@ -17,6 +17,15 @@ test("task details modal locks body scroll in a layout effect", () => {
   );
 });
 
+test("capacity panel only shows oldest queued fact when the queue is populated", () => {
+  const panelSource = extractFunctionSource("ResourceCapacityPanel");
+
+  assert.match(
+    panelSource,
+    /saturation\.capacity_queue\.queued_workspace_count > 0 \|\|\s*saturation\.capacity_queue\.oldest_wait_seconds !== null/,
+  );
+});
+
 function extractFunctionSource(functionName) {
   const marker = `function ${functionName}(`;
   const start = dashboardSource.indexOf(marker);
