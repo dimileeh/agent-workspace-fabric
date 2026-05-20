@@ -87,6 +87,36 @@ _SENSITIVE_WORKFLOW_WITH_INPUT_NAMES: Final[frozenset[str]] = frozenset(
     {"access-key", "api-key", "client-secret", "deploy-key", "private-key", "ssh-key"}
 )
 _WORKFLOW_PINNED_BUMP_ALLOWED_WITH_KEYS: Final[dict[str, frozenset[str]]] = {
+    "actions/cache": frozenset(
+        {
+            "enablecrossosarchive",
+            "fail-on-cache-miss",
+            "key",
+            "lookup-only",
+            "path",
+            "restore-keys",
+            "save-always",
+            "upload-chunk-size",
+        }
+    ),
+    "actions/cache/restore": frozenset(
+        {
+            "enablecrossosarchive",
+            "fail-on-cache-miss",
+            "key",
+            "lookup-only",
+            "path",
+            "restore-keys",
+        }
+    ),
+    "actions/cache/save": frozenset(
+        {
+            "enablecrossosarchive",
+            "key",
+            "path",
+            "upload-chunk-size",
+        }
+    ),
     "actions/setup-python": frozenset({"python-version"}),
 }
 _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
@@ -566,12 +596,18 @@ def _pyproject_policy_section_violations(
                     _coverage_policy_without_fail_under(new_value)
                 ):
                     continue
-            elif old_fail_under != new_fail_under:
-                reason = (
-                    "coverage fail_under changed from "
-                    f"{_format_toml_policy_value(old_fail_under)} to "
-                    f"{_format_toml_policy_value(new_fail_under)} "
-                    "(fail_under must remain numeric; policy change requires ownership of pyproject.toml)"
+                violations.append(
+                    _coverage_policy_section_violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        new_text=new_text,
+                    )
+                )
+                continue
+            if old_fail_under != new_fail_under:
+                reason = _coverage_fail_under_non_numeric_change_reason(
+                    old_fail_under,
+                    new_fail_under,
                 )
                 line_text = new_text if new_fail_under is not None else old_text
                 violations.append(
@@ -591,6 +627,14 @@ def _pyproject_policy_section_violations(
                     _coverage_policy_without_fail_under(new_value)
                 ):
                     continue
+                violations.append(
+                    _coverage_policy_section_violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        new_text=new_text,
+                    )
+                )
+                continue
         line_text = new_text if new_value is not None else old_text
         violations.append(
             _violation(
@@ -606,6 +650,44 @@ def _pyproject_policy_section_violations(
             )
         )
     return violations
+
+
+def _coverage_fail_under_non_numeric_change_reason(
+    old_fail_under: Any,
+    new_fail_under: Any,
+) -> str:
+    policy_suffix = "(policy change requires ownership of pyproject.toml)"
+    if old_fail_under is None:
+        return (
+            "coverage fail_under added at "
+            f"{_format_toml_policy_value(new_fail_under)} {policy_suffix}"
+        )
+    if new_fail_under is None:
+        return (
+            "coverage fail_under removed from "
+            f"{_format_toml_policy_value(old_fail_under)} {policy_suffix}"
+        )
+    return (
+        "coverage fail_under changed from "
+        f"{_format_toml_policy_value(old_fail_under)} to "
+        f"{_format_toml_policy_value(new_fail_under)} "
+        "(fail_under must remain numeric; policy change requires ownership of pyproject.toml)"
+    )
+
+
+def _coverage_policy_section_violation(
+    *,
+    path: str,
+    protected_pattern: str,
+    new_text: str,
+) -> QualityGateViolation:
+    return _violation(
+        path=path,
+        protected_pattern=protected_pattern,
+        section="tool.coverage",
+        line=_line_for_toml_section_or_descendant(new_text, "tool.coverage"),
+        reason="protected pyproject policy section changed: tool.coverage",
+    )
 
 
 def _absent_protected_file_content_reason(
@@ -2126,11 +2208,32 @@ def _is_validation_run_target(value: str) -> bool:
 
 
 def _has_broad_validation_command_invocation(command: str) -> bool:
-    for segment in _SHELL_SEGMENT_SPLIT_RE.split(command):
-        words = _shell_words(segment)
-        if _words_start_broad_validation_command(words):
-            return True
-    return False
+    segments = _shell_command_word_segments(command)
+    if segments is None:
+        segments = tuple(
+            _shell_words(segment) for segment in _SHELL_SEGMENT_SPLIT_RE.split(command)
+        )
+    return any(_words_start_broad_validation_command(words) for words in segments)
+
+
+def _shell_command_word_segments(command: str) -> tuple[tuple[str, ...], ...] | None:
+    normalized = command.replace("\r\n", "\n").replace("\r", "\n").replace("\n", ";")
+    tokens = _shell_tokens(normalized)
+    if tokens is None:
+        return None
+
+    segments: list[tuple[str, ...]] = []
+    segment: list[str] = []
+    for token in tokens:
+        if token in _SHELL_COMMAND_SEPARATORS:
+            if segment:
+                segments.append(tuple(segment))
+                segment = []
+            continue
+        segment.append(token)
+    if segment:
+        segments.append(tuple(segment))
+    return tuple(segments)
 
 
 def _shell_words(segment: str) -> tuple[str, ...]:

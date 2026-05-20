@@ -226,6 +226,89 @@ fail_under = "99"
 
 
 @pytest.mark.unit
+def test_pyproject_added_coverage_fail_under_message_is_specific() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+show_missing = true
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+show_missing = false
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == [
+        "tool.coverage.report.fail_under",
+        "tool.coverage",
+    ]
+    assert violations[0].line == 5
+    assert violations[0].reason == (
+        "coverage fail_under added at 99 (policy change requires ownership of pyproject.toml)"
+    )
+    assert "must remain numeric" not in violations[0].reason
+    assert violations[1].reason == "protected pyproject policy section changed: tool.coverage"
+
+
+@pytest.mark.unit
+def test_pyproject_removed_coverage_fail_under_message_is_specific() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+show_missing = true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == [
+        "tool.coverage.report.fail_under",
+        "tool.coverage",
+    ]
+    assert violations[0].line == 5
+    assert violations[0].reason == (
+        "coverage fail_under removed from 99 (policy change requires ownership of pyproject.toml)"
+    )
+    assert "must remain numeric" not in violations[0].reason
+    assert violations[1].reason == "protected pyproject policy section changed: tool.coverage"
+
+
+@pytest.mark.unit
 def test_pyproject_unchanged_coverage_fail_under_policy_change_is_specific() -> None:
     old_text = """
 [project]
@@ -3424,6 +3507,52 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_pinned_uses_version_bump_allows_cache_input_update() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v3.3.2
+        with:
+          path: .pytest_cache
+          key: pytest-linux-v1
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4.2.0
+        with:
+          path: .pytest_cache
+          key: pytest-linux-v2
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 def test_workflow_pinned_uses_version_bump_allows_unchanged_sensitive_with_input() -> None:
     old_text = """
 name: CI
@@ -5387,6 +5516,8 @@ def test_validation_run_preservation_allows_only_safe_validation_appends(
         ("gcloud run deploy api", True),
         ("firebase deploy", True),
         ("twine upload dist/*", True),
+        ('echo "results && build #"', False),
+        ("echo ok\nnpm --prefix apps/console run build", True),
         ("env FOO=bar echo release", False),
     ],
 )

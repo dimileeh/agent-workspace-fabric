@@ -55,7 +55,7 @@ Allowed without ownership:
   allowed pinned `uses:` bump when the action/input pair is explicitly
   allowlisted and the new value does not reference unsafe GitHub Actions
   expressions. The current allowlist permits `actions/setup-python`
-  `python-version` updates.
+  `python-version` updates and selected `actions/cache` cache-key/path inputs.
 - Adding jobs that are informational/comment/notify only and do not run tests,
   lint, coverage, build, deploy, publish, or release commands.
 
