@@ -574,6 +574,32 @@ def test_resolve_service_compose_paths_returns_absolute_asset_root_paths_from_ro
 
 
 @pytest.mark.unit
+def test_resolve_service_compose_paths_anchors_root_fallback_from_subdirectory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Asset-root fallback env paths should not depend on launch directory."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+
+    asset_root = tmp_path / "workspace"
+    asset_root.mkdir()
+    project_subdir = asset_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
+
+    compose_file, env_file, env_example = cli_main._resolve_service_compose_paths()  # noqa: SLF001
+
+    assert compose_file == asset_root / LOCAL_SERVICE_COMPOSE_FILE
+    assert compose_file.is_absolute()
+    assert env_file == asset_root / ".env"
+    assert env_file.is_absolute()
+    assert env_example == asset_root / ".env.example"
+    assert env_example.is_absolute()
+
+
+@pytest.mark.unit
 def test_init_without_path_runs_service_bootstrap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1328,7 +1354,7 @@ def test_init_without_path_preserves_comment_only_root_env_overlay(
 def test_init_without_path_keeps_trailing_shared_overlay_context_with_seed_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Keep final shared-key overlay comments adjacent to the overlaid seed key."""
+    """Keep final shared-key overlay comments at the end of the seeded file."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
@@ -1366,11 +1392,11 @@ def test_init_without_path_keeps_trailing_shared_overlay_context_with_seed_key(
         "\n".join(
             [
                 "AWF_API_TOKEN=migrated-token",
-                "",
-                "# Keep this note with the migrated API token.",
                 "AWF_COMPOSE_ONLY=compose-default",
                 "# Root-only service setting",
                 "AWF_ROOT_ONLY=root-value",
+                "",
+                "# Keep this note with the migrated API token.",
             ]
         )
         + "\n"
@@ -2423,6 +2449,47 @@ def test_merge_env_seed_matches_overlay_keys_case_insensitively() -> None:
             [
                 "AWF_API_TOKEN=migrated-token",
                 "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_merge_env_seed_appends_trailing_shared_overlay_context_after_seed_lines() -> None:
+    """Overlay EOF comments for shared keys belong at the merged file tail."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=migrated-token",
+                    "",
+                    "# Keep this EOF note at the end.",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+                "",
+                "# Keep this EOF note at the end.",
             ]
         )
         + "\n"

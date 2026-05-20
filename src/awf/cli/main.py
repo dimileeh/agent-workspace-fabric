@@ -906,9 +906,14 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
         resolved_asset_root = asset_root.resolve()
         compose_local_service = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
         # get_bootstrap_asset_root() verifies this in production; keep the
-        # guard so tests or stubs that bypass validation fall back to root .env.
+        # guard so tests or stubs that bypass validation fall back to the
+        # asset-root .env without depending on the launch directory.
         if not compose_local_service.is_file():
-            return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
+            return (
+                compose_local_service,
+                resolved_asset_root / ".env",
+                resolved_asset_root / ".env.example",
+            )
         compose_file = compose_local_service
         compose_env = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
         root_env = resolved_asset_root / ".env"
@@ -1235,7 +1240,7 @@ def _merge_env_seed_contents_with_overlay_keys(
             overlay_last_assignment_index[_env_assignment_key_identity(key)] = index
 
     seed_leading_context: dict[str, list[str]] = {}
-    seed_trailing_context: dict[str, list[str]] = {}
+    seed_final_context: list[str] = []
     file_header_context: list[str] = []
     overlay_only_lines: list[str] = []
     overlay_only_keys: list[str] = []
@@ -1283,7 +1288,7 @@ def _merge_env_seed_contents_with_overlay_keys(
         seen_overlay_assignment_keys.add(key_identity)
         last_assignment_key = key_identity
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
-        seed_trailing_context[last_assignment_key] = pending_context
+        seed_final_context = pending_context
     elif pending_context:
         overlay_only_lines.extend(pending_context)
 
@@ -1292,7 +1297,6 @@ def _merge_env_seed_contents_with_overlay_keys(
     # and overlay header comments are omitted to avoid duplicate file headers.
     merged_lines: list[str] = [] if seed_has_leading_context else list(file_header_context)
     emitted_seed_leading_context: set[str] = set()
-    emitted_seed_trailing_context: set[str] = set()
     for line in seed_lines:
         key = _env_assignment_key(line)
         if key is None:
@@ -1310,16 +1314,11 @@ def _merge_env_seed_contents_with_overlay_keys(
             merged_lines.append(line)
         else:
             merged_lines.append(_env_assignment_line_with_key(overlay_assignment, key))
-        if (
-            key_identity in seed_trailing_context
-            and key_identity not in emitted_seed_trailing_context
-        ):
-            merged_lines.extend(seed_trailing_context[key_identity])
-            emitted_seed_trailing_context.add(key_identity)
 
-    if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
+    tail_lines = [*overlay_only_lines, *seed_final_context]
+    if tail_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
         merged_lines[-1] = f"{merged_lines[-1]}\n"
-    merged_lines.extend(overlay_only_lines)
+    merged_lines.extend(tail_lines)
 
     return "".join(merged_lines).encode("utf-8"), tuple(overlay_only_keys)
 
