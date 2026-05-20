@@ -964,16 +964,38 @@ def _resolve_service_env_files(
 def _resolve_service_runtime_env_files(
     compose_file: Path,
     env_file: Path,
+    *,
+    paths_verified: bool = False,
 ) -> tuple[Path, Path | None]:
     """Return service env files using compose paths already verified upstream."""
 
     return _resolve_service_env_files(
         env_file,
-        trusted_compose_env_file=_trusted_service_compose_env_file(
-            compose_file,
-            env_file,
+        trusted_compose_env_file=(
+            _trusted_service_compose_env_file_from_verified_paths(compose_file, env_file)
+            if paths_verified
+            else _trusted_service_compose_env_file(compose_file, env_file)
         ),
     )
+
+
+def _trusted_service_compose_env_file_from_verified_paths(
+    compose_file: Path,
+    env_file: Path,
+) -> Path | None:
+    """Return the Compose env path from already verified local-service paths."""
+
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+
+    if _compose_root_env_file(env_file) is None:
+        return None
+    resolved_compose_file = compose_file.expanduser().resolve()
+    resolved_env_file = env_file.expanduser().resolve()
+    if resolved_compose_file.parent != resolved_env_file.parent:
+        return None
+    if resolved_compose_file.name != LOCAL_SERVICE_COMPOSE_FILE.name:
+        return None
+    return env_file
 
 
 def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Path | None:
@@ -1638,7 +1660,11 @@ def _run_init_service_bootstrap(
             env_example,
             env_overlay=_init_env_overlay_source(env_file, env_example),
         )
-    active_env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    active_env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
 
     if pretty:
         typer.echo("AWF init: local service bootstrap")
@@ -1849,7 +1875,11 @@ def service_status(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -1897,7 +1927,11 @@ def service_doctor(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -2010,7 +2044,11 @@ def service_readiness(
         raise typer.Exit(code=2) from exc
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -2092,7 +2130,11 @@ def service_bootstrap(
         strict_providers=frozenset(strict_providers),
     )
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     settings = resolve_service_settings(
         Settings(_env_file=env_file),
@@ -2151,7 +2193,11 @@ def service_logs(
     from awf.service.logs import ServiceLogsError, run_service_logs
 
     compose_file, env_file, _ = _resolve_service_compose_paths()
-    env_file, compose_env_file = _resolve_service_runtime_env_files(compose_file, env_file)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
     service_env = local_service_environ(env_file=env_file)
     try:
         result = run_service_logs(
