@@ -5370,7 +5370,15 @@ class WorkspaceExecutor:
                 refspec,
             ]
         )
-        return result.stdout if result.ok else None
+        if result.ok:
+            return result.stdout
+        error_text = (result.stderr or result.stdout or "").lower()
+        if "path " in error_text and (
+            "does not exist" in error_text or "exists on disk, but not in" in error_text
+        ):
+            return None
+        details = (result.stderr or result.stdout or "<no output>").strip()
+        raise RuntimeError(f"git show failed for {refspec!r} in {worktree_path}: {details}")
 
     async def _git_diff_text(
         self,
