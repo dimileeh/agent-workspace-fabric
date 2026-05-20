@@ -1642,6 +1642,84 @@ jobs:
 
 
 @pytest.mark.unit
+def test_workflow_step_line_lookup_uses_yaml_node_for_duplicate_labels() -> None:
+    workflow = """
+steps:
+  - name: Publish report
+    run: echo first
+  - name: Publish report
+    run: uv run pytest
+""".strip()
+    second_step = {"name": "Publish report", "run": "uv run pytest"}
+    expected_name_line = workflow.splitlines().index("  - name: Publish report", 2) + 1
+    expected_run_line = workflow.splitlines().index("    run: uv run pytest") + 1
+
+    assert (
+        quality_gate_module._line_for_workflow_step(
+            workflow,
+            second_step,
+        )
+        == expected_name_line
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            workflow,
+            second_step,
+            key="run",
+        )
+        == expected_run_line
+    )
+
+
+@pytest.mark.unit
+def test_workflow_yaml_node_lookup_reuses_composed_document(monkeypatch) -> None:
+    workflow = """
+steps:
+  - name: Publish report
+    run: echo pending
+    continue-on-error: true
+""".strip()
+    step = {"name": "Publish report", "run": "echo pending", "continue-on-error": True}
+    cache_clear = getattr(
+        getattr(quality_gate_module, "_compose_workflow_yaml_document", None),
+        "cache_clear",
+        None,
+    )
+    if cache_clear is not None:
+        cache_clear()
+    compose_calls = 0
+    real_compose = quality_gate_module.yaml.compose
+
+    def counting_compose(text: str):
+        nonlocal compose_calls
+        compose_calls += 1
+        return real_compose(text)
+
+    monkeypatch.setattr(quality_gate_module.yaml, "compose", counting_compose)
+    try:
+        assert (
+            quality_gate_module._line_for_workflow_step_key_from_yaml_nodes(
+                workflow,
+                step,
+                key="name",
+            )
+            == 2
+        )
+        assert (
+            quality_gate_module._line_for_workflow_step_key_from_yaml_nodes(
+                workflow,
+                step,
+                key="run",
+            )
+            == 3
+        )
+        assert compose_calls == 1
+    finally:
+        if cache_clear is not None:
+            cache_clear()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

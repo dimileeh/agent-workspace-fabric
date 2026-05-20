@@ -8,6 +8,7 @@ import tomllib
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Final, cast
 
 import yaml
@@ -2323,10 +2324,10 @@ def _line_for_workflow_step(text: str, step: Mapping[str, Any]) -> int | None:
     for key in ("name", "id", "uses", "run"):
         value = _string_value(step.get(key))
         if value:
-            line = _line_containing(text, f"{key}: {value}")
+            line = _line_for_workflow_step_key_from_yaml_nodes(text, step, key=key)
             if line is not None:
                 return line
-            line = _line_for_workflow_step_key_from_yaml_nodes(text, step, key=key)
+            line = _line_containing(text, f"{key}: {value}")
             if line is not None:
                 return line
     return None
@@ -2380,10 +2381,7 @@ def _line_for_workflow_step_key_from_yaml_nodes(
     *,
     key: str,
 ) -> int | None:
-    try:
-        document = yaml.compose(text)
-    except yaml.YAMLError:
-        return None
+    document = _compose_workflow_yaml_document(text)
     if document is None:
         return None
     for node in _workflow_sequence_mapping_nodes(document):
@@ -2393,6 +2391,14 @@ def _line_for_workflow_step_key_from_yaml_nodes(
             if isinstance(key_node, ScalarNode) and key_node.value == key:
                 return key_node.start_mark.line + 1
     return None
+
+
+@lru_cache(maxsize=64)
+def _compose_workflow_yaml_document(text: str) -> Node | None:
+    try:
+        return cast(Node | None, yaml.compose(text))
+    except yaml.YAMLError:
+        return None
 
 
 def _workflow_sequence_mapping_nodes(node: Node) -> Iterator[MappingNode]:
@@ -2412,11 +2418,14 @@ def _workflow_step_node_matches(node: MappingNode, step: Mapping[str, Any]) -> b
     for key_node, value_node in node.value:
         if isinstance(key_node, ScalarNode) and isinstance(value_node, ScalarNode):
             scalar_values[key_node.value] = value_node.value
-    for key in ("name", "id", "uses", "run"):
-        step_value = _string_value(step.get(key))
-        if step_value and scalar_values.get(key) == step_value:
-            return True
-    return False
+    expected_values = {
+        key: step_value
+        for key in ("name", "id", "uses", "run")
+        if (step_value := _string_value(step.get(key)))
+    }
+    return bool(expected_values) and all(
+        scalar_values.get(key) == step_value for key, step_value in expected_values.items()
+    )
 
 
 def _line_containing(text: str, needle: str) -> int | None:
