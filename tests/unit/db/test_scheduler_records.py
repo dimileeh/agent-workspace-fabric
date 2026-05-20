@@ -6,9 +6,10 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.ids import new_resource_reservation_id
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     QueueDecisionCreate,
@@ -717,4 +718,109 @@ async def test_resource_reservation_active_latest_totals_for_scheduler_allocatio
         "peak_memory_gb": 32.0,
         "disk_mb": 700,
         "dind_slots": 4,
+    }
+
+
+@pytest.mark.unit
+async def test_resource_reservation_scheduler_allocation_scope_counts_null_node_reservation(
+    session: AsyncSession,
+) -> None:
+    null_null_id, _null_null_task_id, null_null_attempt_id = await _attempt(session)
+    null_remote_id, _null_remote_task_id, null_remote_attempt_id = await _attempt(session)
+    workspace_repo = WorkspaceRepository(session)
+    for workspace_id in (null_null_id, null_remote_id):
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        workspace.node_id = None
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.provisioning,
+            reason_code="SEED",
+        )
+
+    reserved_at = datetime(2026, 5, 20, 13, 0, tzinfo=UTC)
+    repo = ResourceReservationRepository(session)
+    await session.execute(
+        text("ALTER TABLE resource_reservations ALTER COLUMN node_id DROP NOT NULL")
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO resource_reservations (
+                id,
+                workspace_id,
+                attempt_id,
+                node_id,
+                steady_cpu,
+                steady_memory_gb,
+                peak_cpu,
+                peak_memory_gb,
+                disk_mb,
+                dind_slots,
+                phase,
+                reserved_at,
+                released_at,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                :id,
+                :workspace_id,
+                :attempt_id,
+                NULL,
+                :steady_cpu,
+                :steady_memory_gb,
+                :peak_cpu,
+                :peak_memory_gb,
+                :disk_mb,
+                :dind_slots,
+                :phase,
+                :reserved_at,
+                NULL,
+                :reserved_at,
+                :reserved_at
+            )
+            """
+        ),
+        {
+            "id": new_resource_reservation_id(),
+            "workspace_id": null_null_id,
+            "attempt_id": null_null_attempt_id,
+            "steady_cpu": 5.0,
+            "steady_memory_gb": 6.0,
+            "peak_cpu": 7.0,
+            "peak_memory_gb": 8.0,
+            "disk_mb": 200,
+            "dind_slots": 1,
+            "phase": "workspace_lifecycle",
+            "reserved_at": reserved_at,
+        },
+    )
+    await repo.create(
+        workspace_id=null_remote_id,
+        attempt_id=null_remote_attempt_id,
+        node_id="node-b",
+        steady_cpu=11.0,
+        steady_memory_gb=12.0,
+        peak_cpu=13.0,
+        peak_memory_gb=14.0,
+        disk_mb=300,
+        dind_slots=2,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+
+    totals = await repo.active_latest_totals_for_scheduler_allocation_scope(
+        statuses=(WorkspaceStatus.provisioning,),
+        node_id="node-a",
+    )
+
+    assert totals == {
+        "workspace_count": 1,
+        "steady_cpu": 5.0,
+        "steady_memory_gb": 6.0,
+        "peak_cpu": 7.0,
+        "peak_memory_gb": 8.0,
+        "disk_mb": 200,
+        "dind_slots": 1,
     }

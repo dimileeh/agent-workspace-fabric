@@ -1327,6 +1327,10 @@ def _active_latest_resource_reservation_totals_stmt(
             or_(
                 latest_active_reservations.c.node_id == scheduler_allocation_node_id,
                 latest_active_reservations.c.workspace_node_id == scheduler_allocation_node_id,
+                and_(
+                    latest_active_reservations.c.node_id.is_(None),
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                ),
             )
         )
     return stmt
