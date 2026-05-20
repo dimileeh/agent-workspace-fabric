@@ -746,12 +746,8 @@ class GitHubClient:
             for index, node in enumerate(review_nodes)
         ]
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
-        blocking_review_ids = {comment.comment_id for comment in blocking_reviews}
         reviews: list[ReviewComment] = [
-            replace(
-                fetched.comment,
-                blocks_merge=fetched.comment.comment_id in blocking_review_ids,
-            )
+            fetched.comment
             for fetched in fetched_reviews
             if not fetched.viewer_did_author and fetched.has_body
         ]

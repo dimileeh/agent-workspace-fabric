@@ -561,7 +561,7 @@ class TestFetchPrStatus:
         assert status.blocking_reviews == ()
 
     @pytest.mark.unit
-    async def test_changes_requested_review_is_effective_blocking_review(self) -> None:
+    async def test_changes_requested_review_body_stays_triageable_when_blocking(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -589,7 +589,7 @@ class TestFetchPrStatus:
         assert blocker.source_kind == "review"
         assert blocker.state == "CHANGES_REQUESTED"
         assert blocker.blocks_merge is True
-        assert status.unresolved_review_comments[0].blocks_merge is True
+        assert status.unresolved_review_comments[0].blocks_merge is False
 
     @pytest.mark.unit
     async def test_viewer_owned_changes_requested_review_is_not_blocking(self) -> None:
@@ -718,7 +718,7 @@ class TestFetchPrStatus:
         )
 
         assert [c.comment_id for c in status.unresolved_review_comments] == ["9351", "9352"]
-        assert [c.blocks_merge for c in status.unresolved_review_comments] == [True, False]
+        assert [c.blocks_merge for c in status.unresolved_review_comments] == [False, False]
         assert len(status.blocking_reviews) == 1
         blocker = status.blocking_reviews[0]
         assert blocker.comment_id == "9351"

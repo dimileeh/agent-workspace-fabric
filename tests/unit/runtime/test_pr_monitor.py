@@ -131,7 +131,9 @@ def _status(
         (
             "blocking changes-requested review",
             _status(
-                reviews=(_review("C_policy", blocks_merge=True, state="CHANGES_REQUESTED"),),
+                blocking_reviews=(
+                    _review("C_policy", blocks_merge=True, state="CHANGES_REQUESTED"),
+                ),
             ),
             MonitorState(),
             NotifyHuman,
@@ -1269,8 +1271,16 @@ class TestTerminalSuccess:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
-    def test_changes_requested_human_review_blocks_merge(self) -> None:
-        review = _review(
+    def test_changes_requested_review_body_routes_to_agent_before_human_handoff(
+        self,
+    ) -> None:
+        review_body = _review(
+            "C_changes",
+            blocks_merge=False,
+            author="human-reviewer",
+            state="CHANGES_REQUESTED",
+        )
+        blocker = _review(
             "C_changes",
             blocks_merge=True,
             author="human-reviewer",
@@ -1278,8 +1288,32 @@ class TestTerminalSuccess:
         )
 
         action = decide(
-            _status(reviews=(review,), blocking_reviews=(review,)),
+            _status(reviews=(review_body,), blocking_reviews=(blocker,)),
             MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+
+        assert isinstance(action, AddressComments)
+        assert action.review_comments == (review_body,)
+
+    @pytest.mark.unit
+    def test_changes_requested_human_review_blocks_merge_after_triage(self) -> None:
+        review_body = _review(
+            "C_changes",
+            blocks_merge=False,
+            author="human-reviewer",
+            state="CHANGES_REQUESTED",
+        )
+        blocker = _review(
+            "C_changes",
+            blocks_merge=True,
+            author="human-reviewer",
+            state="CHANGES_REQUESTED",
+        )
+
+        action = decide(
+            _status(reviews=(review_body,), blocking_reviews=(blocker,)),
+            MonitorState(threads_addressed_ids={"C_changes": "fixed"}),
             MonitorConfig(auto_merge=True),
         )
 
