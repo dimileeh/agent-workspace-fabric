@@ -30,6 +30,20 @@ from tests.postgres import postgres_test_url_sync
 
 _runner = CliRunner()
 _POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+_DOCKER_COMPOSE_CALLER_ENV_KEYS = frozenset(
+    {
+        "AWF_DOCKER_HOST",
+        "COMPOSE_PROFILES",
+        "COMPOSE_PROJECT_NAME",
+        "DOCKER_API_VERSION",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+    }
+)
 
 
 def _combined_output(result: Any) -> str:
@@ -49,6 +63,12 @@ def _ok_disk_usage(_path: Path) -> _FakeDiskUsage:
 def _write_gc_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _clear_docker_compose_caller_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.upper() in _DOCKER_COMPOSE_CALLER_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
 
 
 def _create_gc_cli_workspace(
@@ -126,6 +146,7 @@ def _default_local_service_compose_file(
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    _clear_docker_compose_caller_env(monkeypatch)
 
 
 def _write_non_source_compose_env(tmp_path: Path, contents: str) -> Path:
