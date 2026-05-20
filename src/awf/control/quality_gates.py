@@ -451,6 +451,19 @@ def _pyproject_policy_section_violations(
                         "coverage fail_under unchanged at "
                         f"{_format_number(new_number)} while coverage policy changed"
                     )
+                    violations.append(
+                        _violation(
+                            path=path,
+                            protected_pattern=protected_pattern,
+                            section="tool.coverage",
+                            line=_line_for_toml_section_or_descendant(
+                                new_text,
+                                "tool.coverage",
+                            ),
+                            reason=reason,
+                        )
+                    )
+                    continue
                 violations.append(
                     _violation(
                         path=path,
@@ -733,6 +746,7 @@ def _pyproject_unknown_change_violations(
     old_text: str,
     new_text: str,
 ) -> list[QualityGateViolation]:
+    violations: list[QualityGateViolation] = []
     for top_key in sorted(set(old_doc) | set(new_doc)):
         old_value = old_doc.get(top_key)
         new_value = new_doc.get(top_key)
@@ -746,7 +760,7 @@ def _pyproject_unknown_change_violations(
                 new_text=new_text,
             )
             if violation is not None:
-                return [violation]
+                violations.append(violation)
             continue
         if top_key == "tool":
             violation = _tool_unknown_change_violation(
@@ -758,12 +772,12 @@ def _pyproject_unknown_change_violations(
                 new_text=new_text,
             )
             if violation is not None:
-                return [violation]
+                violations.append(violation)
             continue
         if top_key in {"build-system", "dependency-groups"}:
             continue
         if old_value != new_value:
-            return [
+            violations.append(
                 _violation(
                     path=path,
                     protected_pattern=protected_pattern,
@@ -773,8 +787,8 @@ def _pyproject_unknown_change_violations(
                     ),
                     reason=f"pyproject section changed outside allowed metadata/dependency edits: {top_key}",
                 )
-            ]
-    return []
+            )
+    return violations
 
 
 def _project_unknown_change_violation(
@@ -1853,6 +1867,13 @@ def _format_number(value: float) -> str:
 def _line_for_toml_section(text: str, section: str) -> int | None:
     header = f"[{section}]"
     return _line_containing(text, header)
+
+
+def _line_for_toml_section_or_descendant(text: str, section: str) -> int | None:
+    exact_line = _line_for_toml_section(text, section)
+    if exact_line is not None:
+        return exact_line
+    return _line_matching(text, rf"^\s*\[{re.escape(section)}(?:\.|\])")
 
 
 def _line_for_toml_key(text: str, *, section: str, key: str) -> int | None:

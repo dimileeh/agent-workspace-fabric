@@ -214,9 +214,46 @@ show_missing = false
     assert len(violations) == 1
     violation = violations[0]
     assert violation.path == "pyproject.toml"
-    assert violation.section == "tool.coverage.report.fail_under"
-    assert violation.line == 5
+    assert violation.section == "tool.coverage"
+    assert violation.line == 4
     assert "coverage fail_under unchanged at 99 while coverage policy changed" in violation.reason
+
+
+@pytest.mark.unit
+def test_pyproject_reports_all_unknown_top_level_section_changes() -> None:
+    old_text = """
+[project]
+name = "demo"
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[custom]
+enabled = true
+
+[scripts]
+lint = "ruff check ."
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == ["custom", "scripts"]
+    assert [violation.line for violation in violations] == [4, 7]
+    assert [violation.reason for violation in violations] == [
+        "pyproject section changed outside allowed metadata/dependency edits: custom",
+        "pyproject section changed outside allowed metadata/dependency edits: scripts",
+    ]
 
 
 @pytest.mark.unit
