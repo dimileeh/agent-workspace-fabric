@@ -4272,8 +4272,10 @@ async def test_unpushed_commit_protected_scope_detects_rename_source(
         returncode=0,
         stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
     )
+    cmd.queue_result(returncode=0)  # cat-file merge-base:.github/workflows/ci.yml
     cmd.queue_result(returncode=0, stdout=workflow_text)
     cmd.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    cmd.queue_result(returncode=0)  # ls-tree confirms renamed source is absent from HEAD
     cmd.queue_result(returncode=0, stdout="diff --git a/.github/workflows/ci.yml b/docs/ci.yml\n")
     runner = make_runner(
         factory=factory,

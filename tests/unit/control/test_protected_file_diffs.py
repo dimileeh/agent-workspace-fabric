@@ -146,7 +146,7 @@ async def test_git_show_text_returns_none_for_missing_path(
 ) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=128, stderr="fatal: Pfad fehlt")
-    runner.queue_result(returncode=0, stdout="HEAD\n")
+    runner.queue_result(returncode=0)
 
     assert (
         await git_show_text(
@@ -158,7 +158,36 @@ async def test_git_show_text_returns_none_for_missing_path(
     )
     assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
         ["cat-file", "-e", "HEAD:.github/workflows/ci.yml"],
-        ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        ["ls-tree", "-z", "HEAD", "--", ".github/workflows/ci.yml"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_git_show_text_raises_when_failed_ref_path_still_exists(
+    tmp_path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: object file is corrupt")
+    runner.queue_result(
+        returncode=0,
+        stdout="100644 blob 0123456789abcdef0123456789abcdef01234567\tpyproject.toml\0",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await git_show_text(
+            runner,
+            worktree_path=tmp_path,
+            refspec="HEAD:pyproject.toml",
+        )
+
+    message = str(excinfo.value)
+    assert "git cat-file -e failed" in message
+    assert "HEAD:pyproject.toml" in message
+    assert "object file is corrupt" in message
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "HEAD:pyproject.toml"],
+        ["ls-tree", "-z", "HEAD", "--", "pyproject.toml"],
     ]
 
 
@@ -169,6 +198,7 @@ async def test_git_show_text_returns_none_for_missing_index_path(
 ) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=128, stderr="fatal: path 'pyproject.toml' is not in the index")
+    runner.queue_result(returncode=0)
 
     assert (
         await git_show_text(
@@ -180,6 +210,7 @@ async def test_git_show_text_returns_none_for_missing_index_path(
     )
     assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
         ["cat-file", "-e", ":pyproject.toml"],
+        ["ls-files", "--stage", "-z", "--", "pyproject.toml"],
     ]
 
 

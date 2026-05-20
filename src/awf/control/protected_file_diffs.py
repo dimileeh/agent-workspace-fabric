@@ -130,23 +130,48 @@ async def _git_refspec_missing_path_is_recoverable(
     refspec: str,
 ) -> bool:
     base_ref, separator, path = refspec.partition(":")
-    if not separator:
+    if not separator or not path:
         return False
     if not base_ref:
-        return bool(path)
+        result = await runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "ls-files",
+                "--stage",
+                "-z",
+                "--",
+                path,
+            ]
+        )
+        return result.ok and not _git_z_listing_contains_path(result.stdout, path)
+
     result = await runner.run(
         [
             "git",
             *git_safe_directory_config_args(worktree_path),
             "-C",
             str(worktree_path),
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            f"{base_ref}^{{commit}}",
+            "ls-tree",
+            "-z",
+            base_ref,
+            "--",
+            path,
         ]
     )
-    return result.ok
+    return result.ok and not _git_z_listing_contains_path(result.stdout, path)
+
+
+def _git_z_listing_contains_path(stdout: str, path: str) -> bool:
+    for record in stdout.split("\0"):
+        if not record:
+            continue
+        _metadata, separator, record_path = record.partition("\t")
+        if not separator or record_path == path:
+            return True
+    return False
 
 
 def _git_error_details(result: CommandResult) -> str:

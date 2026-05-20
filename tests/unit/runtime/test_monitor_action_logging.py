@@ -1057,6 +1057,7 @@ class TestMonitorDirtyWorktreeSalvage:
             ),
         )  # dirty check after first repair
         cmd.queue_result(returncode=128, stderr="path missing")  # git show protected workflow
+        cmd.queue_result(returncode=0)  # ls-tree confirms protected workflow is absent
         adapter.queue(stdout="removed workflow edit; fixed test instead")
         cmd.queue_result(
             returncode=0,

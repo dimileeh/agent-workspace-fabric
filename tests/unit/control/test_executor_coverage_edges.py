@@ -3791,8 +3791,10 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_rename_source
         returncode=0,
         stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
     )
+    runner.queue_result(returncode=0)  # cat-file base:.github/workflows/ci.yml
     runner.queue_result(returncode=0, stdout=workflow_text)
     runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    runner.queue_result(returncode=0)  # ls-tree confirms renamed source is absent from HEAD
     executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
@@ -3915,8 +3917,10 @@ async def test_committed_quality_gate_guard_blocks_protected_rename_source(
         returncode=0,
         stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
     )
+    runner.queue_result(returncode=0)  # cat-file base:.github/workflows/ci.yml
     runner.queue_result(returncode=0, stdout=workflow_text)
     runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    runner.queue_result(returncode=0)  # ls-tree confirms renamed source is absent from HEAD
     executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
@@ -4101,6 +4105,7 @@ async def test_staged_protected_file_diffs_treat_deleted_index_path_as_absent(
     runner.queue_result(returncode=0)  # cat-file base-sha:pyproject.toml
     runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
     runner.queue_result(returncode=128, stderr="fatal: path 'pyproject.toml' is not in the index")
+    runner.queue_result(returncode=0)  # ls-files confirms deleted index path is absent
     executor = _executor_with_runner(runner, tmp_path)
 
     diffs = await executor._protected_file_diffs_for_staged_paths(
@@ -4115,6 +4120,7 @@ async def test_staged_protected_file_diffs_treat_deleted_index_path_as_absent(
         ["cat-file", "-e", "base-sha:pyproject.toml"],
         ["show", "base-sha:pyproject.toml"],
         ["cat-file", "-e", ":pyproject.toml"],
+        ["ls-files", "--stage", "-z", "--", "pyproject.toml"],
     ]
 
 
