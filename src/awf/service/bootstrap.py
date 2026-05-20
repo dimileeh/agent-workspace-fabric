@@ -18,7 +18,11 @@ from awf.service.config import (
     local_service_environ,
     resolve_local_service_compose_env_file,
 )
-from awf.service.environment import env_lookup, non_empty_env_value
+from awf.service.environment import (
+    cleared_docker_cli_client_keys,
+    env_lookup,
+    non_empty_env_value,
+)
 from awf.service.status import collect_service_status
 
 DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
@@ -346,7 +350,7 @@ def _docker_cli_environ(
     docker_host = non_empty_env_value(resolved, "AWF_DOCKER_HOST") or non_empty_env_value(
         resolved, "DOCKER_HOST"
     )
-    scrubbed_keys = {"AWF_DOCKER_HOST"}
+    scrubbed_keys = {"AWF_DOCKER_HOST", *cleared_docker_cli_client_keys(environ)}
     caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
     docker_host_found, docker_host_value = env_lookup(resolved, "DOCKER_HOST")
     clears_docker_host = (

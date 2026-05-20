@@ -1604,6 +1604,40 @@ def test_trusted_service_compose_env_file_rejects_unrelated_local_service_file(
 
 
 @pytest.mark.unit
+def test_service_runtime_env_resolution_rejects_unrelated_local_service_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The live runtime path must use the verified AWF asset-root guard."""
+    from awf.cli import main as cli_main
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
+
+    asset_root = tmp_path / "asset-root"
+    asset_compose_file = asset_root / LOCAL_SERVICE_COMPOSE_FILE
+    asset_env_file = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    asset_env_file.parent.mkdir(parents=True)
+    asset_compose_file.write_text("services: {}\n", encoding="utf-8")
+    asset_env_file.write_text("AWF_API_TOKEN=asset\n", encoding="utf-8")
+
+    unrelated_root = tmp_path / "unrelated"
+    unrelated_compose_file = unrelated_root / LOCAL_SERVICE_COMPOSE_FILE
+    unrelated_env_file = unrelated_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_compose_file.write_text("services: {}\n", encoding="utf-8")
+    unrelated_env_file.write_text("AWF_API_TOKEN=unrelated\n", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
+
+    active_env_file, compose_env_file = cli_main._resolve_service_runtime_env_files(  # noqa: SLF001
+        unrelated_compose_file,
+        unrelated_env_file,
+    )
+
+    assert active_env_file == unrelated_env_file
+    assert compose_env_file is None
+
+
+@pytest.mark.unit
 def test_service_env_resolution_ignores_current_compose_env_without_project_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

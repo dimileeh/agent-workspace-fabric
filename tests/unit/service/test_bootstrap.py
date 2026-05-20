@@ -750,6 +750,54 @@ def test_bootstrap_blank_docker_host_clears_stale_caller_env(
 
 
 @pytest.mark.unit
+def test_bootstrap_scrubs_explicitly_cleared_docker_cli_client_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service_env = {"DOCKER_CONFIG": ""}
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "caller-docker-config"))
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda **_kwargs: dict(service_env))
+    calls: list[dict[str, object]] = []
+    collected_provider_environ: dict[str, str] | None = None
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(
+        settings: ServiceSettings,
+        *,
+        strict_providers: Iterable[str] | None = None,
+        provider_environ: Mapping[str, str] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal collected_provider_environ
+        _ = settings, strict_providers
+        collected_provider_environ = dict(provider_environ or {})
+        return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert collected_provider_environ == {}
+    assert calls
+    assert all("DOCKER_CONFIG" not in call["env"] for call in calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_passes_explicit_empty_service_environment_to_docker_commands(
     tmp_path: Path,
 ) -> None:
