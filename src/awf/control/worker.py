@@ -1636,6 +1636,14 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
+            if candidate.status == WorkspaceStatus.running and (
+                await self._has_active_preserved_validation_recovery(
+                    session,
+                    candidate.workspace_id,
+                )
+            ):
+                self._dispatch_preserved_active_validation(candidate.workspace_id)
+                return True
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
@@ -2047,10 +2055,6 @@ class ControlWorker:
                 ws,
                 claim_cutoff=datetime.now(UTC),
             )
-            ws.execution_claimed_by = None
-            ws.execution_claim_expires_at = None
-            ws.subphase = "runtime_preserved_validation_requested"
-            await repo.advance_workspace_version(ws)
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
@@ -2086,6 +2090,18 @@ class ControlWorker:
             payload_with_operation = {**payload, "operation_id": operation.id}
             if operation.payload != payload_with_operation:
                 operation.payload = payload_with_operation
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.subphase = "runtime_preserved_validation_requested"
+            if candidate.status == WorkspaceStatus.running:
+                await repo.advance_workspace_version(ws)
+            else:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.running,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    payload=payload_with_operation,
+                )
             await repo.add_event(
                 ws,
                 event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
@@ -2575,6 +2591,26 @@ class ControlWorker:
             .limit(1)
         )
         return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _has_active_preserved_validation_recovery(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+    ) -> bool:
+        repo = OperationRepository(session)
+        for status in (OperationStatus.pending, OperationStatus.running):
+            operations = await repo.list_for_workspace(
+                workspace_id,
+                status=status,
+                operation_type=OperationType.validate,
+                limit=100,
+            )
+            if any(
+                _is_active_execution_salvage_validation_payload(operation.payload)
+                for operation in operations
+            ):
+                return True
+        return False
 
     async def _latest_operator_refresh_requested_at(
         self,
@@ -4348,6 +4384,15 @@ def _active_execution_salvage_payload(
     if extra:
         payload.update(dict(extra))
     return payload
+
+
+def _is_active_execution_salvage_validation_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
+        and payload.get("recovery_mode") == "validate_only"
+        and payload.get("reason_code") == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+    )
 
 
 def _preserved_active_event_reference(event: WorkspaceEvent) -> dict[str, Any]:

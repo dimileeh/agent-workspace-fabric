@@ -42,8 +42,11 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             WorkspaceStatus.cancelled,
         }
     ),
+    # Worker-restart salvage can rewind an abandoned active phase so the
+    # executor can reclaim validate-only recovery through its running path.
     WorkspaceStatus.validating: frozenset(
         {
+            WorkspaceStatus.running,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.completed,
@@ -53,6 +56,7 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
     ),
     WorkspaceStatus.pushing: frozenset(
         {
+            WorkspaceStatus.running,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
