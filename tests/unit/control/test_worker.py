@@ -7318,6 +7318,91 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert attach_calls == [workspace_id]
 
     @pytest.mark.unit
+    async def test_preserved_active_recovery_defers_pr_number_write_to_locked_attach(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pr-handoff-deferred-number",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pr_handoff_deferred_number",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/276/files"
+            ws.pr_number = None
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+
+        workspace_updates: list[str] = []
+
+        def _capture_workspace_update(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if normalized.lstrip().startswith("UPDATE") and "WORKSPACES" in normalized:
+                workspace_updates.append(statement)
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        attach_calls: list[str] = []
+
+        async def _record_attach(
+            candidate: _ActiveExecutionCandidate,
+            **_kwargs: object,
+        ) -> None:
+            attach_calls.append(candidate.workspace_id)
+
+        worker._attach_preserved_active_pr_monitor = _record_attach  # type: ignore[method-assign]
+
+        engine = session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_workspace_update)
+        try:
+            recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+                _ActiveExecutionCandidate(
+                    workspace_id=workspace_id,
+                    status=WorkspaceStatus.pushing,
+                    repo_url=str(origin_repo),
+                    compose_project_name="awf_preserved_pr_handoff_deferred_number",
+                    pr_url="https://github.com/example/repo/pull/276/files",
+                )
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture_workspace_update)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+
+        assert recovered is True
+        assert attach_calls == [workspace_id]
+        assert workspace_updates == []
+        assert ws.pr_number is None
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "workspace_status",
         [WorkspaceStatus.running, WorkspaceStatus.pushing],

@@ -1766,9 +1766,12 @@ class ControlWorker:
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
                 return True
 
-            if ws.pr_url and ws.pr_number is None:
-                ws.pr_number = _extract_pr_number(ws.pr_url)
-            attach_existing_pr_monitor = bool(ws.pr_url and ws.pr_number is not None)
+            extracted_pr_number = (
+                _extract_pr_number(ws.pr_url)
+                if ws.pr_url and ws.pr_number is None
+                else ws.pr_number
+            )
+            attach_existing_pr_monitor = bool(ws.pr_url and extracted_pr_number is not None)
             branch_recovery_context: (
                 tuple[
                     str,
