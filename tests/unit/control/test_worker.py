@@ -6701,21 +6701,24 @@ class TestRunOnceStaleActiveExecutionRecovery:
         ]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("status", [WorkspaceStatus.validating, WorkspaceStatus.pushing])
     async def test_preserved_active_rewound_validation_salvage_waits_without_duplicate_when_slots_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
         tmp_path: Path,
+        status: WorkspaceStatus,
     ) -> None:
+        compose_project_name = f"awf_preserved_clean_commit_wait_for_slot_{status.value}"
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
-            "preserved-clean-commit-wait-for-slot",
-            WorkspaceStatus.validating,
-            compose_project_name="awf_preserved_clean_commit_wait_for_slot",
+            f"preserved-clean-commit-wait-for-slot-{status.value}",
+            status,
+            compose_project_name=compose_project_name,
             create_task_attempt=True,
         )
-        work_root = tmp_path / "awf-work-wait-for-slot"
+        work_root = tmp_path / f"awf-work-wait-for-slot-{status.value}"
         branch_name = f"awf/{workspace_id}"
         _worktree, base_commit, head_sha = _seed_workspace_worktree(
             worktrees_root=work_root / "worktrees",
@@ -6738,9 +6741,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             config=ProvisionerConfig(node_id="test-node-01"),
         )
         cleaner = _RecordingRuntimeCleaner()
-        inspector = _RecordingRuntimeInspector(
-            {"awf_preserved_clean_commit_wait_for_slot": _live_agent_snapshot()}
-        )
+        inspector = _RecordingRuntimeInspector({compose_project_name: _live_agent_snapshot()})
         no_slot_executor = _RecordingExecutor()
         no_slot_worker = ControlWorker(
             session_factory=session_factory,
@@ -6781,6 +6782,31 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
             == 1
         )
+        assert no_slot_executor.calls == []
+
+        await no_slot_worker.run_once()
+
+        async with session_factory() as s:
+            saturated_salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+            saturated_preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            saturated_operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        saturated_validate_ops = [
+            operation
+            for operation in saturated_operations
+            if operation.type == OperationType.validate.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+        ]
+        assert len(saturated_salvage_events) == 1
+        assert len(saturated_preserved_events) == 1
+        assert len(saturated_validate_ops) == 1
         assert no_slot_executor.calls == []
 
         executor = _BlockingExecutor()

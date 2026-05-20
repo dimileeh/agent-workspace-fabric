@@ -225,6 +225,25 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
 )
 
 
+def _salvage_workspace_status_values(
+    workspace_status: WorkspaceStatus,
+    *,
+    event_type: str,
+    reason_code: str,
+) -> tuple[str, ...]:
+    if (
+        workspace_status == WorkspaceStatus.running
+        and event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE
+        and reason_code == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+    ):
+        return (
+            WorkspaceStatus.running.value,
+            WorkspaceStatus.validating.value,
+            WorkspaceStatus.pushing.value,
+        )
+    return (workspace_status.value,)
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     poll_interval_seconds: float = 1.0
@@ -1692,12 +1711,15 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
-            if candidate.status == WorkspaceStatus.running and (
-                await self._has_active_preserved_validation_recovery(
-                    session,
-                    candidate.workspace_id,
+            has_active_validation_recovery = False
+            if candidate.status == WorkspaceStatus.running:
+                has_active_validation_recovery = await (
+                    self._has_active_preserved_validation_recovery(
+                        session,
+                        candidate.workspace_id,
+                    )
                 )
-            ):
+            if has_active_validation_recovery:
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
                 _log.info(
                     "worker.preserved_active_validation_redispatch",
@@ -1720,7 +1742,18 @@ class ControlWorker:
                 event_floor=event_floor,
             )
             if preserved_event is None:
-                return False
+                return (
+                    event_floor is not None
+                    and has_active_validation_recovery
+                    and await self._has_current_salvage_event(
+                        session,
+                        candidate.workspace_id,
+                        event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                        event_floor=event_floor,
+                        workspace_status=candidate.status,
+                    )
+                )
 
             preservation_expired = self._active_execution_preservation_is_expired(
                 preserved_event.occurred_at
@@ -2885,6 +2918,11 @@ class ControlWorker:
         event_floor: datetime,
         workspace_status: WorkspaceStatus,
     ) -> bool:
+        workspace_status_values = _salvage_workspace_status_values(
+            workspace_status,
+            event_type=event_type,
+            reason_code=reason_code,
+        )
         stmt = (
             select(WorkspaceEvent.id)
             .where(
@@ -2892,7 +2930,7 @@ class ControlWorker:
                 WorkspaceEvent.event_type == event_type,
                 WorkspaceEvent.reason_code == reason_code,
                 WorkspaceEvent.occurred_at >= event_floor,
-                WorkspaceEvent.payload["workspace_status"].as_string() == workspace_status.value,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(workspace_status_values),
             )
             .limit(1)
         )
