@@ -40,6 +40,18 @@ _COMMENT_NOTIFY_ACTION_USES: Final[frozenset[str]] = frozenset(
         "peter-evans/create-or-update-comment",
     }
 )
+_COMMENT_NOTIFY_ACTION_ALLOWED_WITH_KEYS: Final[dict[str, frozenset[str]]] = {
+    "peter-evans/create-or-update-comment": frozenset(
+        {
+            "append-separator",
+            "body",
+            "comment-id",
+            "edit-mode",
+            "issue-number",
+            "reactions",
+        }
+    )
+}
 _COMMENT_NOTIFY_CAPABLE_ACTION_USES: Final[frozenset[str]] = frozenset(
     {
         "actions/github-script",
@@ -2057,8 +2069,35 @@ def _is_comment_or_notify_capable_step_uses(step: Mapping[str, Any], uses: str) 
     if not _is_pinned_workflow_uses_ref(ref):
         return False
     if normalized_action in _COMMENT_NOTIFY_ACTION_USES:
-        return True
+        return _comment_notify_action_with_inputs_are_safe(
+            normalized_action,
+            step.get("with"),
+        )
     return normalized_action in _COMMENT_NOTIFY_CAPABLE_ACTION_USES and "with" not in step
+
+
+def _comment_notify_action_with_inputs_are_safe(action: str, inputs: object) -> bool:
+    if inputs is None:
+        return True
+    if not isinstance(inputs, Mapping):
+        return False
+    allowed_keys = _COMMENT_NOTIFY_ACTION_ALLOWED_WITH_KEYS.get(action, frozenset())
+    for key, value in inputs.items():
+        if not isinstance(key, str):
+            return False
+        if key.lower() not in allowed_keys:
+            return False
+        if not _comment_notify_action_with_value_is_safe(value):
+            return False
+    return True
+
+
+def _comment_notify_action_with_value_is_safe(value: object) -> bool:
+    if isinstance(value, str):
+        return not _has_unsafe_github_actions_expression((value,))
+    if value is None:
+        return True
+    return isinstance(value, bool | int | float)
 
 
 def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:

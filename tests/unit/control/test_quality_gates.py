@@ -3151,6 +3151,158 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_comment_action_step_with_safe_body_expression_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          body: Tests passed on ${{ github.sha }} for PR ${{ github.event.pull_request.number }}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "with_inputs",
+    [
+        "          body: ${{ secrets.AWF_TOKEN }}",
+        "          body: ${{ env.API_KEY }}",
+        "          body: ${{ github.event.pull_request.title }}",
+    ],
+)
+def test_added_comment_action_step_blocks_unsafe_with_expression(
+    with_inputs: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+{with_inputs}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post PR comment"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "with_inputs",
+    [
+        "          token: custom-token\n          body: Tests completed",
+        "          repository: other/repo\n          body: Tests completed",
+        "          body-path: ./coverage.xml",
+    ],
+)
+def test_added_comment_action_step_blocks_privileged_with_key(
+    with_inputs: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+{with_inputs}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post PR comment"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_added_informational_job_with_comment_action_uses_is_allowed() -> None:
     old_text = """
 name: CI
