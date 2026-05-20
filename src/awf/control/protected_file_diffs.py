@@ -13,6 +13,69 @@ from awf.control.quality_gates import (
 )
 
 
+def changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
+    """Extract all changed paths from ``git diff --name-status -z`` output."""
+    if not diff_stdout:
+        return ()
+    if "\0" not in diff_stdout:
+        raise ValueError("expected NUL-delimited output from `git diff --name-status -z`")
+
+    fields = diff_stdout.split("\0")
+    if fields[-1] != "":
+        raise ValueError("truncated `--name-status -z` output: missing terminating NUL")
+    fields = fields[:-1]
+
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status:
+            raise ValueError("malformed `--name-status -z` output: empty status field")
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(fields):
+            raise ValueError(f"truncated `--name-status -z` record for status {status!r}")
+        for _ in range(path_count):
+            path = fields[index]
+            index += 1
+            if not path:
+                raise ValueError(f"malformed `--name-status -z` record for status {status!r}")
+            paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
+async def committed_changed_paths_since(
+    runner: AsyncCommandRunner,
+    *,
+    worktree_path: Path,
+    base_ref: str,
+) -> tuple[str, ...]:
+    """Return committed paths changed since `base_ref`, including rename sources."""
+    result = await runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "diff",
+            "--name-status",
+            "-z",
+            f"{base_ref}..HEAD",
+            "--",
+        ]
+    )
+    if not result.ok:
+        raise RuntimeError(
+            f"git diff --name-status -z failed while checking committed paths: {result.stderr}"
+        )
+    try:
+        return changed_paths_from_name_status_z(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"git diff --name-status -z produced malformed committed-path output: {exc}"
+        ) from exc
+
+
 async def git_show_text(
     runner: AsyncCommandRunner,
     *,

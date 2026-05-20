@@ -86,8 +86,12 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
-    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # committed base..HEAD diff
+def _queue_pre_push_checks(
+    fake: FakeCommandRunner, *, head: str = "deadbeef01", include_plan_only_diff: bool = False
+) -> None:
+    if include_plan_only_diff:
+        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
+    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
     fake.queue_result(returncode=0, stdout="ab commit\n")  # pre-push log
@@ -2853,7 +2857,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_checks(fake)
+        _queue_pre_push_checks(fake, include_plan_only_diff=True)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
 
@@ -3071,6 +3075,7 @@ class TestPrMonitorFactoryPath:
             await session.commit()
 
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit

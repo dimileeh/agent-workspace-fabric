@@ -53,6 +53,7 @@ from awf.common.git_identity import git_identity_config_args, git_safe_directory
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.control.protected_file_diffs import (
+    committed_changed_paths_since,
     git_show_text,
     protected_file_diffs_for_committed_paths,
 )
@@ -5345,6 +5346,9 @@ class WorkspaceExecutor:
             )
         return diffs
 
+    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
+        return await git_show_text(self._runner, worktree_path=worktree_path, refspec=refspec)
+
     async def _verify_recovered_post_agent_commit(
         self,
         *,
@@ -5506,8 +5510,11 @@ class WorkspaceExecutor:
         expected_status: WorkspaceStatus,
     ) -> bool:
         changed_paths = sorted(
-            path.as_posix()
-            for path in await self._committed_paths_since(worktree_path, base_commit)
+            await committed_changed_paths_since(
+                self._runner,
+                worktree_path=worktree_path,
+                base_ref=base_commit,
+            )
         )
         if not changed_paths:
             return False

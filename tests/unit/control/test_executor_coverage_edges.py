@@ -3879,6 +3879,39 @@ async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
 
 
 @pytest.mark.unit
+async def test_committed_quality_gate_guard_blocks_protected_rename_source(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    runner.queue_result(
+        returncode=0,
+        stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
+    )
+    runner.queue_result(returncode=0, stdout=workflow_text)
+    runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    blocked = await executor._fail_if_protected_quality_gate_committed_output(
+        workspace_id="ws_rename_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=["src/**"],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    assert blocked is True
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert ".github/workflows/ci.yml" in kwargs["message"]
+    assert "--name-status" in runner.calls[0].args
+    assert "-z" in runner.calls[0].args
+
+
+@pytest.mark.unit
 async def test_recovered_post_agent_commit_verification_exceptions_mark_failed(
     tmp_path: Path,
 ) -> None:

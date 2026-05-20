@@ -171,7 +171,7 @@ def _queue_push_and_pr(
     incident to capture worktree state when ``gh pr create`` rejects
     with "No commits between development and awf/ws_...". Every test
     that pushes must account for these reads."""
-    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # committed base..HEAD diff
+    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
@@ -626,7 +626,6 @@ dependencies = [
         fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
         fake.queue_result(returncode=0, stdout=old_text)  # git show HEAD:pyproject.toml
         fake.queue_result(returncode=0, stdout=new_text)  # git show :pyproject.toml
-        fake.queue_result(returncode=0, stdout="diff --git a/pyproject.toml b/pyproject.toml\n")
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
@@ -686,7 +685,7 @@ dependencies = [
         fake.queue_result(returncode=0)  # validation passes
         fake.queue_result(
             returncode=0,
-            stdout=".awf/workspace.yml\nsrc/fix.py\n",
+            stdout="M\0.awf/workspace.yml\0M\0src/fix.py\0",
         )  # cumulative base..HEAD diff
         fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # legacy abbrev-ref HEAD
         fake.queue_result(returncode=0, stdout="abc1234 work\n")  # legacy log ahead-of-base
@@ -706,7 +705,8 @@ dependencies = [
         assert any(
             args[:1] == ["git"]
             and "diff" in args
-            and "--name-only" in args
+            and "--name-status" in args
+            and "-z" in args
             and f"{'a' * 40}..HEAD" in args
             for args in call_args
         )
