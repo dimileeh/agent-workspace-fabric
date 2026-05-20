@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.environment import (
+    cleared_docker_cli_client_keys,
     compose_cli_environ,
     compose_interpolation_environ,
     docker_cli_client_environ,
@@ -216,8 +217,7 @@ def _docker_cli_environ(
     )
     compose_cli_env = compose_cli_environ(environ)
     docker_cli_env = docker_cli_client_environ(environ)
-    cleared_docker_cli_keys = {key for key, value in docker_cli_env.items() if not value}
-    docker_cli_env = {key: value for key, value in docker_cli_env.items() if value}
+    cleared_docker_cli_keys = cleared_docker_cli_client_keys(environ)
     if (
         not docker_host
         and not compose_env

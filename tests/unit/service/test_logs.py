@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from awf.service.environment import cleared_docker_cli_client_keys, docker_cli_client_environ
 from awf.service.logs import (
     DEFAULT_LOG_TAIL,
     LOCAL_SERVICE_COMPOSE_FILE,
@@ -38,6 +39,19 @@ def _write_compose_file(tmp_path: Path, contents: str) -> Path:
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(contents, encoding="utf-8")
     return compose_file
+
+
+@pytest.mark.unit
+def test_docker_cli_client_environ_reports_cleared_keys_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not encode Docker CLI scrub operations as empty subprocess env values."""
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+
+    service_environ = {"DOCKER_TLS_VERIFY": ""}
+
+    assert docker_cli_client_environ(service_environ) == {}
+    assert cleared_docker_cli_client_keys(service_environ) == frozenset({"DOCKER_TLS_VERIFY"})
 
 
 @pytest.mark.unit

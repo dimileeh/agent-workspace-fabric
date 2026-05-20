@@ -60,13 +60,21 @@ def docker_cli_client_environ(environ: Mapping[str, str]) -> dict[str, str]:
         found, value = env_lookup(environ, key)
         if found and value:
             resolved[key] = value
+    return resolved
+
+
+def cleared_docker_cli_client_keys(environ: Mapping[str, str]) -> frozenset[str]:
+    """Return Docker CLI keys explicitly cleared by the service environment."""
+
+    cleared_keys: set[str] = set()
+    for key in _DOCKER_CLI_CLIENT_ENV_KEYS:
+        found, value = env_lookup(environ, key)
+        if not found or value:
             continue
         caller_found, caller_value = env_lookup(os.environ, key)
-        # Service env explicitly cleared the key; return an empty scrub marker so
-        # callers that start from dict(os.environ) can delete the caller value.
-        if found and caller_found and caller_value:
-            resolved[key] = ""
-    return resolved
+        if caller_found and caller_value:
+            cleared_keys.add(key)
+    return frozenset(cleared_keys)
 
 
 def compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:

@@ -2356,6 +2356,69 @@ def test_merge_env_seed_keeps_first_key_comment_when_seed_has_header() -> None:
 
 
 @pytest.mark.unit
+def test_merge_env_seed_preserves_overlay_header_when_seed_starts_with_blank_line() -> None:
+    """A blank-only seed preamble should not suppress the overlay file header."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        b"\nAWF_API_TOKEN=compose-example\n",
+        (
+            "\n".join(
+                [
+                    "# Existing root .env migrated by awf init.",
+                    "# Operators may keep local service overrides here.",
+                    "AWF_API_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Existing root .env migrated by awf init.",
+                "# Operators may keep local service overrides here.",
+                "",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_merge_env_seed_matches_overlay_keys_case_insensitively() -> None:
+    """Lowercase root keys should override template keys without becoming duplicates."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        b"awf_api_token=migrated-token\n",
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("seed_text", "overlay_text"),
     (

@@ -1046,6 +1046,33 @@ def _env_assignment_key(line: str) -> str | None:
     return match.group("key")
 
 
+def _env_assignment_key_identity(key: str) -> str:
+    """Return the canonical key identity used for seed/overlay matching."""
+
+    return key.upper()
+
+
+def _env_assignment_line_with_key(line: str, key: str) -> str:
+    """Return an env assignment line with the key spelling replaced."""
+
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:
+        return line
+    start, end = match.span("key")
+    return f"{line[:start]}{key}{line[end:]}"
+
+
+def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
+    """Return whether the seed owns the merged file header."""
+
+    for line in lines:
+        if _env_assignment_key(line) is not None:
+            return False
+        if line.strip():
+            return True
+    return False
+
+
 def _env_value_has_same_line_closing_quote(value: str, quote: str) -> bool:
     """Return whether a quoted dotenv value closes on its assignment line."""
 
@@ -1184,20 +1211,20 @@ def _merge_env_seed_contents_with_overlay_keys(
     for line in overlay_lines:
         key = _env_assignment_key(line)
         if key is not None:
-            overlay_assignments[key] = line
+            overlay_assignments[_env_assignment_key_identity(key)] = line
 
     seed_keys: set[str] = set()
     for line in seed_lines:
         key = _env_assignment_key(line)
         if key is not None:
-            seed_keys.add(key)
-    seed_has_leading_context = bool(seed_lines and _env_assignment_key(seed_lines[0]) is None)
+            seed_keys.add(_env_assignment_key_identity(key))
+    seed_has_leading_context = _env_seed_has_meaningful_leading_context(seed_lines)
 
     overlay_last_assignment_index: dict[str, int] = {}
     for index, line in enumerate(overlay_lines):
         key = _env_assignment_key(line)
         if key is not None:
-            overlay_last_assignment_index[key] = index
+            overlay_last_assignment_index[_env_assignment_key_identity(key)] = index
 
     seed_leading_context: dict[str, list[str]] = {}
     seed_trailing_context: dict[str, list[str]] = {}
@@ -1213,38 +1240,39 @@ def _merge_env_seed_contents_with_overlay_keys(
         if key is None:
             pending_context.append(line)
             continue
+        key_identity = _env_assignment_key_identity(key)
         first_overlay_assignment = last_assignment_key is None
         if first_overlay_assignment and pending_context:
             file_header_context, pending_context = _split_env_file_header_context(
                 pending_context,
                 key,
             )
-        context = [*duplicate_context.pop(key, []), *pending_context]
+        context = [*duplicate_context.pop(key_identity, []), *pending_context]
         context_has_key_specific_comment = _env_context_has_key_specific_comment(context, key)
-        if overlay_last_assignment_index.get(key) == index:
-            if key in seed_keys:
+        if overlay_last_assignment_index.get(key_identity) == index:
+            if key_identity in seed_keys:
                 if (
                     first_overlay_assignment
                     and seed_has_leading_context
                     and not context_has_key_specific_comment
                 ):
                     context = []
-                seed_leading_context[key] = context
+                seed_leading_context[key_identity] = context
             else:
                 overlay_only_lines.extend(context)
                 overlay_only_lines.append(line)
                 overlay_only_keys.append(key)
         else:
             if (
-                key in seed_keys
-                or key in seen_overlay_assignment_keys
+                key_identity in seed_keys
+                or key_identity in seen_overlay_assignment_keys
                 or _env_context_looks_like_section_header(context)
                 or _env_context_is_single_adjacent_comment(context)
             ):
-                duplicate_context.setdefault(key, []).extend(context)
+                duplicate_context.setdefault(key_identity, []).extend(context)
         pending_context = []
-        seen_overlay_assignment_keys.add(key)
-        last_assignment_key = key
+        seen_overlay_assignment_keys.add(key_identity)
+        last_assignment_key = key_identity
     if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
         seed_trailing_context[last_assignment_key] = pending_context
     elif pending_context:
@@ -1261,13 +1289,24 @@ def _merge_env_seed_contents_with_overlay_keys(
         if key is None:
             merged_lines.append(line)
             continue
-        if key in seed_leading_context and key not in emitted_seed_leading_context:
-            merged_lines.extend(seed_leading_context[key])
-            emitted_seed_leading_context.add(key)
-        merged_lines.append(overlay_assignments.get(key, line))
-        if key in seed_trailing_context and key not in emitted_seed_trailing_context:
-            merged_lines.extend(seed_trailing_context[key])
-            emitted_seed_trailing_context.add(key)
+        key_identity = _env_assignment_key_identity(key)
+        if (
+            key_identity in seed_leading_context
+            and key_identity not in emitted_seed_leading_context
+        ):
+            merged_lines.extend(seed_leading_context[key_identity])
+            emitted_seed_leading_context.add(key_identity)
+        overlay_assignment = overlay_assignments.get(key_identity)
+        if overlay_assignment is None:
+            merged_lines.append(line)
+        else:
+            merged_lines.append(_env_assignment_line_with_key(overlay_assignment, key))
+        if (
+            key_identity in seed_trailing_context
+            and key_identity not in emitted_seed_trailing_context
+        ):
+            merged_lines.extend(seed_trailing_context[key_identity])
+            emitted_seed_trailing_context.add(key_identity)
 
     if overlay_only_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
         merged_lines[-1] = f"{merged_lines[-1]}\n"
