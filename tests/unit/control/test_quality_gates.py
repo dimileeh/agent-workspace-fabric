@@ -2040,8 +2040,8 @@ jobs:
     "job_field",
     [
         "permissions:\n      contents: read",
-        "needs: tests",
-        "if: ${{ always() }}",
+        "permissions:\n      contents: write",
+        "permissions: write-all",
         "environment: production",
     ],
 )
@@ -2612,6 +2612,134 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_informational_step_with_github_script_comment_action_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: actions/github-script@v7
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_added_github_script_step_without_comment_label_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - uses: actions/github-script@v7
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.actions/github-script@v7"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+def test_added_github_script_step_with_script_is_blocked() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await exec.exec("uv", ["run", "pytest"]);
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Post PR comment"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
 def test_added_informational_job_with_comment_action_uses_is_allowed() -> None:
     old_text = """
 name: CI
@@ -2634,6 +2762,53 @@ jobs:
         run: uv run pytest
   notify-comment:
     name: Notify reviewers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/create-or-update-comment@v4
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_added_informational_job_with_needs_if_and_comment_permissions_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  notify-comment:
+    name: Notify reviewers
+    needs: [tests]
+    if: ${{ always() }}
+    permissions:
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - uses: peter-evans/create-or-update-comment@v4

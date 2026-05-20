@@ -55,7 +55,13 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "summary",
     "report",
 )
-_INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
+_INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
+    {"if", "name", "needs", "permissions", "runs-on", "steps"}
+)
+_INFORMATIONAL_JOB_COMMENT_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset(
+    {"issues", "pull-requests"}
+)
+_INFORMATIONAL_JOB_READ_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset({"contents"})
 _INFORMATIONAL_STEP_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
     {"continue-on-error", "id", "if", "name", "run", "uses"}
 )
@@ -1455,6 +1461,8 @@ def _allows_comment_continue_on_error(step: Mapping[str, Any]) -> bool:
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
     if any(key not in _INFORMATIONAL_JOB_ALLOWED_KEYS for key in job):
         return False
+    if not _informational_job_permissions_are_safe(job.get("permissions")):
+        return False
     label_parts = [job_id]
     name = _string_value(job.get("name"))
     if name:
@@ -1468,13 +1476,40 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
     return bool(steps) and all(_is_informational_step(step) for step in steps)
 
 
+def _informational_job_permissions_are_safe(permissions: object) -> bool:
+    if permissions is None:
+        return True
+    if not isinstance(permissions, Mapping):
+        return False
+
+    has_comment_write_scope = False
+    for scope, level in permissions.items():
+        if not isinstance(scope, str) or not isinstance(level, str):
+            return False
+        normalized_scope = scope.lower()
+        normalized_level = level.lower()
+        if normalized_scope in _INFORMATIONAL_JOB_COMMENT_PERMISSION_SCOPES:
+            if normalized_level not in {"none", "read", "write"}:
+                return False
+            has_comment_write_scope = has_comment_write_scope or normalized_level == "write"
+        elif normalized_scope in _INFORMATIONAL_JOB_READ_PERMISSION_SCOPES:
+            if normalized_level not in {"none", "read"}:
+                return False
+        else:
+            return False
+    return has_comment_write_scope
+
+
 def _is_informational_step(step: Mapping[str, Any]) -> bool:
     if any(key not in _INFORMATIONAL_STEP_ALLOWED_KEYS for key in step):
         return False
     uses = _string_value(step.get("uses"))
-    if uses is not None and not _is_comment_or_notify_uses(uses):
-        return False
-    if uses is None and not _is_comment_or_notify_step(step):
+    if uses is not None:
+        if not _is_comment_or_notify_step(step):
+            return False
+        if not _is_comment_or_notify_capable_step_uses(step, uses):
+            return False
+    elif not _is_comment_or_notify_step(step):
         label = _step_label(step).lower()
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
             return False
@@ -1804,14 +1839,6 @@ def _script_stem(command: str) -> str:
         if command.endswith(suffix):
             return command[: -len(suffix)]
     return command
-
-
-def _is_comment_or_notify_uses(uses: str) -> bool:
-    parts = _uses_action_and_ref(uses)
-    if parts is None:
-        return False
-    action, ref = parts
-    return action.lower() in _COMMENT_NOTIFY_ACTION_USES and _is_pinned_workflow_uses_ref(ref)
 
 
 def _is_comment_or_notify_capable_step_uses(step: Mapping[str, Any], uses: str) -> bool:
