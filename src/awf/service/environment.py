@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,10 @@ _DOCKER_CLI_CLIENT_ENV_KEYS = (
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)|"
     r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
+_COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[tuple[str, str, int], tuple[str, ...]] = (
+    OrderedDict()
 )
 
 
@@ -123,27 +128,49 @@ def compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
 
     compose_file = compose_file.expanduser().resolve()
     try:
-        contents = compose_file.read_text(encoding="utf-8")
+        contents_bytes = compose_file.read_bytes()
     except OSError:
         return ()
-    return _cached_compose_interpolation_keys(str(compose_file), contents)
+    try:
+        contents = contents_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+    contents_digest = sha256(contents_bytes).hexdigest()
+    return _cached_compose_interpolation_keys(
+        str(compose_file),
+        contents_digest,
+        len(contents_bytes),
+        contents,
+    )
 
 
-@lru_cache(maxsize=32)
 def _cached_compose_interpolation_keys(
     _compose_file: str,
+    contents_digest: str,
+    contents_size: int,
     contents: str,
 ) -> tuple[str, ...]:
     """Return cached Compose interpolation keys for one file version."""
 
+    cache_key = (_compose_file, contents_digest, contents_size)
+    cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
+    if cached is not None:
+        _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
+        return cached
+
     try:
         payload: object = yaml.safe_load(contents)
     except yaml.YAMLError:
-        return ()
+        keys: tuple[str, ...] = ()
+    else:
+        collected_keys: set[str] = set()
+        _collect_compose_interpolation_keys(payload, collected_keys)
+        keys = tuple(sorted(collected_keys))
 
-    keys: set[str] = set()
-    _collect_compose_interpolation_keys(payload, keys)
-    return tuple(sorted(keys))
+    _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
+    if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
+        _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
+    return keys
 
 
 def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:

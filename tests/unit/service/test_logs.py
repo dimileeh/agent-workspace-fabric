@@ -790,6 +790,32 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_cache_key_does_not_retain_compose_contents(tmp_path: Path) -> None:
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHE_TOKEN:?set AWF_CACHE_TOKEN}"
+""",
+    )
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+    try:
+        assert service_environment.compose_interpolation_keys(compose_file) == ("AWF_CACHE_TOKEN",)
+
+        cache_keys = list(service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE)  # noqa: SLF001
+        assert len(cache_keys) == 1
+        assert all("AWF_CACHE_TOKEN" not in str(cache_key) for cache_key in cache_keys)
+        assert all("services:" not in str(cache_key) for cache_key in cache_keys)
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_service_logs_reloads_compose_interpolation_keys_when_file_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

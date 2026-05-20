@@ -2281,6 +2281,28 @@ def test_merge_env_seed_contents_rejects_multiline_dotenv_values(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("seed_contents", "overlay_contents"),
+    (
+        (b"AWF_API_TOKEN=compose\nINVALID=\xff\n", b"AWF_API_TOKEN=root\n"),
+        (b"AWF_API_TOKEN=compose\n", b"AWF_API_TOKEN=root\nINVALID=\xff\n"),
+    ),
+)
+def test_merge_env_seed_contents_rejects_non_utf8_dotenv_contents(
+    seed_contents: bytes,
+    overlay_contents: bytes,
+) -> None:
+    """Expose undecodable dotenv inputs instead of silently skipping overlays."""
+    from awf.cli import main as cli_main
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        cli_main._merge_env_seed_contents(  # noqa: SLF001
+            seed_contents,
+            overlay_contents,
+        )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_contents_preserves_context_between_duplicate_overlay_keys() -> None:
     """Keep comments between duplicate overlay assignments with the final value."""
     from awf.cli import main as cli_main
@@ -2376,6 +2398,45 @@ def test_merge_env_seed_contents_preserves_context_before_first_duplicate_overla
 
 
 @pytest.mark.unit
+def test_merge_env_seed_contents_preserves_context_before_duplicate_overlay_only_key() -> None:
+    """Keep comments before the first overlay-only duplicate with the final value."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        b"AWF_API_TOKEN=compose-example\n",
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=migrated-token",
+                    "# Operator endpoint settings",
+                    "# Migrated from the root env file",
+                    "AWF_EXTRA_ENDPOINT=https://first.example.test",
+                    "",
+                    "# Operator final endpoint context",
+                    "AWF_EXTRA_ENDPOINT=https://final.example.test",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ("AWF_EXTRA_ENDPOINT",)
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "# Operator endpoint settings",
+                "# Migrated from the root env file",
+                "",
+                "# Operator final endpoint context",
+                "AWF_EXTRA_ENDPOINT=https://final.example.test",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2410,6 +2471,38 @@ def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
     assert not (compose / ".env").exists()
     assert "root-token-line-one" not in result.output
     assert "root-token-line-two" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_marks_non_utf8_env_overlay_merge_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Expose invalid UTF-8 overlays instead of writing a template-only env file."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose / ".env.example").write_text("AWF_API_TOKEN=compose\n", encoding="utf-8")
+    (tmp_path / ".env").write_bytes(b"AWF_API_TOKEN=root\nINVALID=\xff\n")
+    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "BOOTSTRAP_LOCAL_CHECKS_FAILED"
+    assert payload["env_action"] == "write_failed"
+    assert payload["env_error"] == {
+        "operation": "merge_overlay",
+        "path": ".env",
+        "env_file": "docker/compose/.env",
+        "env_example": "docker/compose/.env.example",
+        "message": "env seeding merge requires UTF-8 dotenv files",
+    }
+    assert not (compose / ".env").exists()
+    assert "root" not in result.output
 
 
 @pytest.mark.unit

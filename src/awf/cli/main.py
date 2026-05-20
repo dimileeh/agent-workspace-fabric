@@ -1120,6 +1120,12 @@ def _env_context_looks_like_file_header(lines: list[str]) -> bool:
     return comment_count > 1
 
 
+def _env_context_looks_like_section_header(lines: list[str]) -> bool:
+    """Return whether non-assignment lines look like reusable section documentation."""
+
+    return sum(1 for line in lines if line.strip().startswith("#")) > 1
+
+
 def _merge_env_seed_contents_with_overlay_keys(
     seed_contents: bytes,
     overlay_contents: bytes,
@@ -1129,8 +1135,8 @@ def _merge_env_seed_contents_with_overlay_keys(
     try:
         seed_text = seed_contents.decode("utf-8")
         overlay_text = overlay_contents.decode("utf-8")
-    except UnicodeDecodeError:
-        return seed_contents, ()
+    except UnicodeDecodeError as exc:
+        raise _EnvSeedMergeError("env seeding merge requires UTF-8 dotenv files") from exc
 
     # This merge is deliberately line-oriented to preserve comments and ordering.
     # Multi-line dotenv values are unsupported in seed and overlay files; keep
@@ -1196,10 +1202,12 @@ def _merge_env_seed_contents_with_overlay_keys(
                 overlay_only_lines.append(line)
                 overlay_only_keys.append(key)
         else:
-            if key in seed_keys:
+            if (
+                key in seed_keys
+                or key in seen_overlay_assignment_keys
+                or _env_context_looks_like_section_header(context)
+            ):
                 duplicate_context.setdefault(key, []).extend(context)
-            elif key in seen_overlay_assignment_keys:
-                duplicate_context.setdefault(key, []).extend(pending_context)
         pending_context = []
         seen_overlay_assignment_keys.add(key)
         last_assignment_key = key
