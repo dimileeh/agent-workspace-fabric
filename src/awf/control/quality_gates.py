@@ -1641,12 +1641,12 @@ def _informational_shell_tokens_are_safe(tokens: Sequence[str]) -> bool:
         if token in _INFORMATIONAL_RUN_BLOCKED_OPERATORS:
             return False
         if token in _INFORMATIONAL_RUN_SEPARATORS:
-            if not _informational_shell_command_is_safe(command_tokens):
+            if not command_tokens or not _informational_shell_command_is_safe(command_tokens):
                 return False
             command_tokens = []
             continue
         command_tokens.append(token)
-    return _informational_shell_command_is_safe(command_tokens)
+    return bool(command_tokens) and _informational_shell_command_is_safe(command_tokens)
 
 
 def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:

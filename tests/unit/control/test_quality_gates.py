@@ -1590,6 +1590,58 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "new_run",
+    [
+        "&& echo ok",
+        "; echo ok",
+        "echo ok &&",
+        "echo ok;",
+        "echo ok && && printf done",
+        "echo ok; ; printf done",
+    ],
+)
+def test_workflow_informational_step_empty_shell_segment_is_blocked(new_run: str) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary report
+        run: echo pending
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary report
+        run: '{new_run}'
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Summary report.run"
+    assert "workflow run command changed outside informational step" in violation.reason
+
+
+@pytest.mark.unit
 def test_workflow_informational_step_allows_cov_shell_variable_update() -> None:
     old_text = """
 name: CI
@@ -4482,6 +4534,12 @@ jobs:
         ("", True),
         ("FOO=bar", True),
         ("echo ok && printf done", True),
+        ("&& echo ok", False),
+        ("; echo ok", False),
+        ("echo ok &&", False),
+        ("echo ok;", False),
+        ("echo ok && && printf done", False),
+        ("echo ok; ; printf done", False),
         ("echo ok && curl https://example.test", False),
         ("echo ${TOKEN}", False),
         ("printf %s $PASSWORD", False),
