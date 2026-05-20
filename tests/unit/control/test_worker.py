@@ -1558,32 +1558,10 @@ class TestRunOnce:
         )
 
         async with session_factory() as s:
-            allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
-
-            class _NullNodeReservationRepository:
-                async def active_latest_by_workspace_ids(
-                    self,
-                    workspace_ids: tuple[str, ...],
-                ) -> dict[str, SimpleNamespace]:
-                    assert workspace_ids == (active_id,)
-                    return {
-                        active_id: SimpleNamespace(
-                            workspace_id=active_id,
-                            node_id=None,
-                            steady_cpu=3.0,
-                            steady_memory_gb=8.0,
-                            peak_cpu=6.0,
-                            peak_memory_gb=16.0,
-                            disk_mb=None,
-                            dind_slots=1,
-                        )
-                    }
-
-            await worker_module._add_mismatched_node_active_workspace_reservations(  # noqa: SLF001
+            allocated = await worker_module._allocated_totals_for_capacity_gate(  # noqa: SLF001
                 s,
-                reservation_repo=_NullNodeReservationRepository(),  # type: ignore[arg-type]
-                allocated=allocated,
-                node_id="worker-node-a",
+                reservation_repo=ResourceReservationRepository(s),
+                config=WorkerConfig(node_id="worker-node-a"),
             )
 
         assert allocated.workspace_count == 0
@@ -1592,7 +1570,79 @@ class TestRunOnce:
         assert allocated.dind_slots == 0
 
     @pytest.mark.unit
-    async def test_capacity_gate_active_reservation_presence_uses_deduplicated_joins(
+    async def test_capacity_gate_uses_scheduler_allocation_scope_and_unreserved_defaults(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        unreserved_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "unreserved-scheduler-scope-capacity-holder",
+        )
+        async with session_factory() as s:
+            unreserved = await WorkspaceRepository(s).get(unreserved_id)
+            assert unreserved is not None
+            unreserved.node_id = "worker-node-a"
+            await s.commit()
+
+        class _SchedulerScopeReservationRepository:
+            def __init__(self) -> None:
+                self.calls: list[tuple[tuple[str, ...], str]] = []
+
+            async def active_latest_totals_for_scheduler_allocation_scope(
+                self,
+                *,
+                statuses: tuple[str, ...],
+                node_id: str,
+            ) -> dict[str, float | int]:
+                self.calls.append((statuses, node_id))
+                return {
+                    "workspace_count": 2,
+                    "steady_cpu": 3.0,
+                    "steady_memory_gb": 8.0,
+                    "peak_cpu": 6.0,
+                    "peak_memory_gb": 16.0,
+                    "disk_mb": 256,
+                    "dind_slots": 1,
+                }
+
+            async def active_latest_totals(self, **_kwargs: object) -> dict[str, float | int]:
+                raise AssertionError("capacity gate must use scheduler allocation scope")
+
+            async def active_latest_by_workspace_ids(
+                self,
+                _workspace_ids: object,
+            ) -> dict[str, object]:
+                raise AssertionError("capacity gate must not fetch mismatched reservations")
+
+        reservation_repo = _SchedulerScopeReservationRepository()
+        async with session_factory() as s:
+            allocated = await worker_module._allocated_totals_for_capacity_gate(  # noqa: SLF001
+                s,
+                reservation_repo=reservation_repo,  # type: ignore[arg-type]
+                config=WorkerConfig(
+                    node_id="worker-node-a",
+                    workspace_steady_cpu=4.0,
+                    workspace_steady_memory_gb=5.0,
+                    workspace_peak_cpu=6.0,
+                    workspace_peak_memory_gb=7.0,
+                ),
+            )
+
+        assert reservation_repo.calls == [
+            (repositories_module.ALLOCATED_RESOURCE_RESERVATION_STATUSES, "worker-node-a")
+        ]
+        assert allocated.workspace_count == 3
+        assert allocated.steady_cpu == 7.0
+        assert allocated.steady_memory_gb == 13.0
+        assert allocated.peak_cpu == 12.0
+        assert allocated.peak_memory_gb == 23.0
+        assert allocated.disk_mb == 256
+        assert allocated.dind_slots == 1
+
+    @pytest.mark.unit
+    async def test_capacity_gate_unreserved_defaults_use_deduplicated_join(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1645,14 +1695,7 @@ class TestRunOnce:
         event.listen(engine.sync_engine, "before_cursor_execute", _capture_select)
         try:
             async with session_factory() as s:
-                mismatched_allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
                 unreserved_allocated = worker_module._AllocatedReservationTotals()  # noqa: SLF001
-                await worker_module._add_mismatched_node_active_workspace_reservations(  # noqa: SLF001
-                    s,
-                    reservation_repo=ResourceReservationRepository(s),
-                    allocated=mismatched_allocated,
-                    node_id="worker-node-a",
-                )
                 await worker_module._add_unreserved_active_workspace_defaults(  # noqa: SLF001
                     s,
                     allocated=unreserved_allocated,
@@ -1662,17 +1705,11 @@ class TestRunOnce:
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", _capture_select)
 
-        assert mismatched_allocated.workspace_count == 1
         assert unreserved_allocated.workspace_count == 1
-        mismatched_select = next(
-            statement for statement in statements if "workspaces.node_id" in statement
-        )
         unreserved_select = next(
             statement for statement in statements if "workspaces.resolved_profile" in statement
         )
-        assert " exists " not in mismatched_select
         assert " exists " not in unreserved_select
-        assert " join (select distinct resource_reservations.workspace_id" in mismatched_select
         assert (
             "left outer join (select distinct resource_reservations.workspace_id"
             in unreserved_select

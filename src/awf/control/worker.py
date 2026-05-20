@@ -3237,9 +3237,10 @@ def _capacity_deferred_decision_matches(
         or decision.reason_code != reason_code
     ):
         return False
-    return _capacity_blocker_signatures_from_summary(
-        decision.resource_summary
-    ) == _capacity_blocker_signatures(blockers)
+    stored_signatures = _capacity_blocker_signatures_from_summary(decision.resource_summary)
+    if stored_signatures is None:
+        return False
+    return stored_signatures == _capacity_blocker_signatures(blockers)
 
 
 def _capacity_previous_resource_summary(
@@ -3287,16 +3288,10 @@ async def _allocated_totals_for_capacity_gate(
 ) -> _AllocatedReservationTotals:
     node_id = config.node_id or "local"
     allocated = _allocated_totals_from_repository(
-        await reservation_repo.active_latest_totals(
+        await reservation_repo.active_latest_totals_for_scheduler_allocation_scope(
             statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
             node_id=node_id,
         )
-    )
-    await _add_mismatched_node_active_workspace_reservations(
-        session,
-        reservation_repo=reservation_repo,
-        allocated=allocated,
-        node_id=node_id,
     )
     await _add_unreserved_active_workspace_defaults(
         session,
@@ -3314,41 +3309,6 @@ def _active_reservation_workspace_ids_subquery() -> Any:
         .distinct()
         .subquery()
     )
-
-
-async def _add_mismatched_node_active_workspace_reservations(
-    session: AsyncSession,
-    *,
-    reservation_repo: ResourceReservationRepository,
-    allocated: _AllocatedReservationTotals,
-    node_id: str,
-) -> None:
-    """Count local workspaces whose latest reservation still names a prior node."""
-    active_reservation_workspace_ids = _active_reservation_workspace_ids_subquery()
-    result = await session.execute(
-        select(Workspace.id, Workspace.node_id)
-        .join(
-            active_reservation_workspace_ids,
-            active_reservation_workspace_ids.c.workspace_id == Workspace.id,
-        )
-        .where(
-            Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
-            or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
-        )
-    )
-    workspace_nodes_by_id = dict(result.tuples().all())
-    workspace_ids = tuple(workspace_nodes_by_id)
-    if not workspace_ids:
-        return
-
-    reservations = await reservation_repo.active_latest_by_workspace_ids(workspace_ids)
-    for workspace_id in workspace_ids:
-        reservation = reservations.get(workspace_id)
-        if reservation is None or reservation.node_id == node_id:
-            continue
-        if workspace_nodes_by_id[workspace_id] is None:
-            continue
-        allocated.add(_reservation_demand_from_reservation(reservation))
 
 
 async def _add_unreserved_active_workspace_defaults(
