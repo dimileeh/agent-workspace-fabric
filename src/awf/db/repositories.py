@@ -1370,6 +1370,10 @@ def _active_latest_resource_reservation_totals_stmt(
                     latest_active_reservations.c.workspace_node_id.is_(None),
                     latest_active_reservations.c.node_id == metrics_allocation_node_id,
                 ),
+                and_(
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                    latest_active_reservations.c.node_id.is_(None),
+                ),
             )
         )
     return stmt
