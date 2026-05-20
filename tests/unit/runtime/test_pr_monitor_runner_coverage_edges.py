@@ -120,6 +120,7 @@ def _status_for_helpers(
     *,
     threads: tuple[ReviewThread, ...] = (),
     reviews: tuple[ReviewComment, ...] = (),
+    blocking_reviews: tuple[ReviewComment, ...] | None = None,
     checks: tuple[CheckTiming, ...] = (),
 ) -> PRStatus:
     return PRStatus(
@@ -129,6 +130,11 @@ def _status_for_helpers(
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=threads,
         unresolved_review_comments=reviews,
+        blocking_reviews=(
+            tuple(review for review in reviews if review.blocks_merge)
+            if blocking_reviews is None
+            else blocking_reviews
+        ),
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
@@ -5829,7 +5835,7 @@ def test_notify_human_reason_and_merge_rejection_detail() -> None:
 
     assert (
         _notify_human_reason(status, MonitorState())
-        == "an external merge-blocking review policy comment remains unresolved"
+        == "a merge-blocking changes-requested review remains unresolved"
     )
     blocked = _status_for_helpers()
     blocked = PRStatus(
@@ -5867,6 +5873,7 @@ def test_protected_manual_ready_handoff_rejects_blocking_review_comments() -> No
         check_state=base.check_state,
         unresolved_inline_threads=base.unresolved_inline_threads,
         unresolved_review_comments=base.unresolved_review_comments,
+        blocking_reviews=base.blocking_reviews,
         base_behind_count=base.base_behind_count,
         merge_state_status=MergeStateStatus.BLOCKED,
     )
