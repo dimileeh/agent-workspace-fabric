@@ -59,7 +59,7 @@ _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "run
 _INFORMATIONAL_RUN_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"echo", "printf"})
 _INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
 _INFORMATIONAL_RUN_BLOCKED_OPERATORS: Final[frozenset[str]] = frozenset(
-    {"|", "|&", "||", "&", "<", ">", "<<", ">>", "<>", ">|", "<<<"}
+    {"|", "|&", "||", "&", "<", ">", "<<", ">>", "<>", ">|", "<<<", "&>", "&>>", ">&", "<&"}
 )
 _VALIDATION_RUN_APPEND_BLOCKED_OPERATORS: Final[frozenset[str]] = (
     _INFORMATIONAL_RUN_BLOCKED_OPERATORS | frozenset({";"})
