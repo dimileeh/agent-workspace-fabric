@@ -103,6 +103,7 @@ class TestMonitorActionLogging:
         assert entry["merge_state"] == "CLEAN"
         assert entry["unresolved_threads"] == 0
         assert entry["unresolved_reviews"] == 0
+        assert entry["blocking_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
         async with factory() as s:
             operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
@@ -188,6 +189,7 @@ class TestMonitorActionLogging:
         assert '"event": "monitor.start"' in log_text
         assert '"event": "monitor.action"' in log_text
         assert '"action": "Merge"' in log_text
+        assert '"blocking_reviews": 0' in log_text
 
     @pytest.mark.unit
     async def test_pre_merge_settle_emits_started_and_completed_logs(
@@ -935,11 +937,14 @@ class TestMonitorActionLogging:
         assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
         assert len(adapter.calls) == 1
         assert "Trigger review before merging" in adapter.calls[0]
-        assert any(
-            r.get("event") == "monitor.pre_merge_recheck_changed_action"
-            and r.get("fresh_action") == "AddressComments"
+        changed_action = next(
+            r
             for r in captured
+            if r.get("event") == "monitor.pre_merge_recheck_changed_action"
+            and r.get("fresh_action") == "AddressComments"
         )
+        assert changed_action["unresolved_reviews"] == 1
+        assert changed_action["blocking_reviews"] == 0
 
 
 class TestMonitorDirtyWorktreeSalvage:

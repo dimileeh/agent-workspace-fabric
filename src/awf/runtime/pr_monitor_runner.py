@@ -1385,6 +1385,7 @@ class PullRequestMonitorRunner:
             merge_state=(status.merge_state_status.value if status.merge_state_status else None),
             unresolved_threads=len(status.unresolved_inline_threads),
             unresolved_reviews=len(status.unresolved_review_comments),
+            blocking_reviews=len(status.blocking_reviews),
         )
         await self._write_monitor_log(
             monitor_log,
@@ -1401,6 +1402,7 @@ class PullRequestMonitorRunner:
                 ),
                 "unresolved_threads": len(status.unresolved_inline_threads),
                 "unresolved_reviews": len(status.unresolved_review_comments),
+                "blocking_reviews": len(status.blocking_reviews),
             },
         )
 
@@ -2465,6 +2467,7 @@ class PullRequestMonitorRunner:
                                 head_sha=checked_status.head_sha[:10],
                                 unresolved_threads=len(checked_status.unresolved_inline_threads),
                                 unresolved_reviews=len(checked_status.unresolved_review_comments),
+                                blocking_reviews=len(checked_status.blocking_reviews),
                                 check_state=checked_status.check_state.value,
                                 merge_state=(
                                     checked_status.merge_state_status.value
@@ -6727,16 +6730,16 @@ def _stale_pending_check_warning_key(
 
 
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
-    if any(c.blocks_merge for c in status.unresolved_review_comments):
-        return "an external merge-blocking review policy comment remains unresolved"
+    if status.blocking_reviews:
+        return "a merge-blocking changes-requested review remains unresolved"
+    _, human_deferred = _collect_defer_items(status, state)
+    if human_deferred:
+        return "human review feedback was deferred by the agent and remains unresolved"
     if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
         return (
             f"GitHub reports merge state {status.merge_state_status.value}; "
             "required protection or review hooks need a human"
         )
-    _, human_deferred = _collect_defer_items(status, state)
-    if human_deferred:
-        return "human review feedback was deferred by the agent and remains unresolved"
     return None
 
 
@@ -7159,7 +7162,7 @@ def _is_protected_manual_ready_handoff(status: PRStatus, state: MonitorState) ->
         MergeStateStatus.HAS_HOOKS,
     ):
         return False
-    if any(c.blocks_merge for c in status.unresolved_review_comments):
+    if status.blocking_reviews:
         return False
     _, human_deferred = _collect_defer_items(status, state)
     return not human_deferred
