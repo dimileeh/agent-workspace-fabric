@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -843,6 +844,64 @@ services:
     assert first_env["AWF_FIRST_TOKEN"] == "first-token"
     assert "AWF_SECOND_TOKEN" not in first_env
     assert second_env["AWF_SECOND_TOKEN"] == "second-token"
+    assert "AWF_FIRST_TOKEN" not in second_env
+
+
+@pytest.mark.unit
+def test_service_logs_reloads_compose_interpolation_keys_when_file_stat_metadata_matches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first_contents = """
+services:
+  api:
+    environment:
+      FIRST: "${AWF_FIRST_TOKEN:?set AWF_FIRST_TOKEN}"
+"""
+    second_contents = """
+services:
+  api:
+    environment:
+      THIRD: "${AWF_THIRD_TOKEN:?set AWF_THIRD_TOKEN}"
+"""
+    assert len(first_contents.encode()) == len(second_contents.encode())
+    compose_file = _write_compose_file(tmp_path, first_contents)
+    fixed_mtime_ns = 1_700_000_000_000_000_000
+    os.utime(compose_file, ns=(fixed_mtime_ns, fixed_mtime_ns))
+    subprocess_calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        subprocess_calls.append(kwargs)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("AWF_FIRST_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_THIRD_TOKEN", raising=False)
+    service_environ = {
+        "AWF_FIRST_TOKEN": "first-token",
+        "AWF_THIRD_TOKEN": "third-token",
+    }
+
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+    compose_file.write_text(second_contents, encoding="utf-8")
+    os.utime(compose_file, ns=(fixed_mtime_ns, fixed_mtime_ns))
+    run_service_logs(
+        services=[ServiceLogName.api],
+        compose_file=compose_file,
+        service_environ=service_environ,
+        run_subprocess=_run,
+    )
+
+    first_env = subprocess_calls[0]["env"]
+    second_env = subprocess_calls[1]["env"]
+    assert isinstance(first_env, dict)
+    assert isinstance(second_env, dict)
+    assert first_env["AWF_FIRST_TOKEN"] == "first-token"
+    assert "AWF_THIRD_TOKEN" not in first_env
+    assert second_env["AWF_THIRD_TOKEN"] == "third-token"
     assert "AWF_FIRST_TOKEN" not in second_env
 
 

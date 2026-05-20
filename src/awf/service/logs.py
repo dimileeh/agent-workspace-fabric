@@ -327,28 +327,22 @@ def _compose_interpolation_keys(compose_file: Path) -> tuple[str, ...]:
 
     compose_file = compose_file.expanduser().resolve()
     try:
-        stat = compose_file.stat()
+        contents = compose_file.read_text(encoding="utf-8")
     except OSError:
         return ()
-    return _cached_compose_interpolation_keys(
-        str(compose_file),
-        stat.st_mtime_ns,
-        stat.st_size,
-    )
+    return _cached_compose_interpolation_keys(str(compose_file), contents)
 
 
 @lru_cache(maxsize=32)
 def _cached_compose_interpolation_keys(
-    compose_file: str,
-    _mtime_ns: int,
-    _size: int,
+    _compose_file: str,
+    contents: str,
 ) -> tuple[str, ...]:
     """Return cached Compose interpolation keys for one file version."""
 
-    compose_path = Path(compose_file)
     try:
-        payload: object = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+        payload: object = yaml.safe_load(contents)
+    except yaml.YAMLError:
         return ()
 
     keys: set[str] = set()
