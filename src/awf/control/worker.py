@@ -1698,7 +1698,14 @@ class ControlWorker:
                     candidate.workspace_id,
                 )
             ):
-                self._dispatch_preserved_active_validation(candidate.workspace_id)
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                _log.info(
+                    "worker.preserved_active_validation_redispatch",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    dispatched=dispatched,
+                )
                 return True
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
@@ -2246,6 +2253,7 @@ class ControlWorker:
                         session,
                         workspace_id=ws.id,
                         replacement_operation_id=operation.id,
+                        preservation_event_id=preserved_event.id,
                     )
                 )
                 if cancelled_active_operations:
@@ -2280,6 +2288,7 @@ class ControlWorker:
         *,
         workspace_id: str,
         replacement_operation_id: str,
+        preservation_event_id: str,
     ) -> list[dict[str, object]]:
         operation_repo = OperationRepository(session)
         active_operations: list[Operation] = []
@@ -2302,7 +2311,10 @@ class ControlWorker:
             }:
                 continue
             payload = operation.payload if isinstance(operation.payload, Mapping) else {}
-            if payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE:
+            if (
+                payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
+                and _payload_preservation_event_id(payload) == preservation_event_id
+            ):
                 continue
 
             detail: dict[str, object] = {
@@ -2878,6 +2890,8 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspace_id: str,
+        *,
+        preservation_event_id: str | None = None,
     ) -> bool:
         recovery_mode = Operation.payload["recovery_mode"].as_string()
         stmt = (
@@ -2897,10 +2911,17 @@ class ControlWorker:
                 Operation.payload["reason_code"].as_string()
                 == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
             )
-            .limit(1)
-            .exists()
         )
-        return (await session.execute(select(stmt))).scalar_one()
+        if preservation_event_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Operation.payload["preservation_event_id"].as_string() == preservation_event_id,
+                    Operation.payload["preservation_event"]["id"].as_string()
+                    == preservation_event_id,
+                )
+            )
+        exists_stmt = stmt.limit(1).exists()
+        return bool((await session.execute(select(exists_stmt))).scalar_one())
 
     async def _latest_operator_refresh_requested_at(
         self,
@@ -3242,7 +3263,18 @@ class ControlWorker:
         )
 
     def _preserved_active_worktree_path(self, workspace_id: str) -> Path | None:
-        return self._provisioner.get_worktree_path(workspace_id)
+        try:
+            worktree_path = self._provisioner.get_worktree_path(workspace_id)
+        except AttributeError as exc:
+            _log.warning(
+                "worker.preserved_active_worktree_path_unavailable",
+                workspace_id=workspace_id,
+                reason_code="PRESERVED_ACTIVE_WORKTREE_ROOT_UNAVAILABLE",
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+            return None
+        return worktree_path if isinstance(worktree_path, Path) else None
 
     async def _run_preserved_active_git(
         self,
@@ -4729,6 +4761,7 @@ def _active_execution_salvage_payload(
         "worker_id": worker_id,
         "previous_claim": previous_claim,
         "claim_cleanup": claim_cleanup,
+        "preservation_event_id": preserved_event.id,
         "preservation_event": _preserved_active_event_reference(preserved_event),
     }
     if classification is not None:
@@ -4748,6 +4781,18 @@ def _is_active_execution_salvage_validation_payload(payload: object) -> bool:
         and payload.get("recovery_mode") == "validate_only"
         and payload.get("reason_code") == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
     )
+
+
+def _payload_preservation_event_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("preservation_event_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    event = payload.get("preservation_event")
+    if isinstance(event, Mapping):
+        event_id = event.get("id")
+        if isinstance(event_id, str) and event_id.strip():
+            return event_id.strip()
+    return None
 
 
 def _preserved_active_event_reference(event: WorkspaceEvent) -> dict[str, Any]:
