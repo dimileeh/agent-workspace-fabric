@@ -687,6 +687,14 @@ class TestToolRegistration:
         assert effort_schema["maxLength"] == 64
         assert effort_schema["minLength"] == 1
 
+        create_props = tools["awf_create_workspace"].inputSchema["properties"]
+        create_model_schema = _optional_string_schema(create_props["model"])
+        create_effort_schema = _optional_string_schema(create_props["effort"])
+        assert create_model_schema["maxLength"] == 128
+        assert create_model_schema["minLength"] == 1
+        assert create_effort_schema["maxLength"] == 64
+        assert create_effort_schema["minLength"] == 1
+
         merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
         repo_url_schema = _optional_string_schema(merge_props["repo_url"])
         assert repo_url_schema["maxLength"] == 512
@@ -1283,6 +1291,7 @@ class TestCreateWorkspace:
                 "task_kind": "refactor_task",
                 "agent": "claude_code",
                 "model": "claude-opus-4-7",
+                "effort": "xhigh",
                 "task_external_id": "AIRA-42",
                 "profile_ref": "python",
                 "profile": {
@@ -1328,6 +1337,7 @@ class TestCreateWorkspace:
         assert ws.task_kind == "refactor_task"
         assert ws.agent == "claude_code"
         assert ws.task_policy["agent_model"] == "claude-opus-4-7"
+        assert ws.task_policy["agent_effort"] == "xhigh"
         assert ws.task_policy["provider_readiness_preflight"]["provider"] == "claude_code"
         assert ws.profile_ref == "python"
         assert ws.requested_profile is not None

@@ -133,6 +133,7 @@ class WorkspaceTask(BaseModel):
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
+    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
     task_class: TaskClass | None = None
     priority: int = Field(default=0, ge=0, le=100)

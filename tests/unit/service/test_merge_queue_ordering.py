@@ -10,7 +10,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.merge_queue as merge_queue
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -79,6 +84,7 @@ async def _seed_candidate(
     base_branch: str = "development",
     canonical: bool = True,
     owned_paths: list[str] | None = None,
+    task_kind: str = "feature_branch_pr",
 ) -> tuple[str, str, str]:
     declared_owned_paths = ["src/shared/**"] if owned_paths is None else owned_paths
     workspace_repo = WorkspaceRepository(session)
@@ -88,6 +94,7 @@ async def _seed_candidate(
         task_title=title,
         task_prompt=f"Implement {title}.",
         task_external_id=f"QUEUE-{pr_number}",
+        task_kind=task_kind,
         owned_paths=declared_owned_paths,
         auto_merge=True,
         agent=AgentRuntime.codex.value,
@@ -224,6 +231,7 @@ async def test_missing_owned_paths_conservatively_block_later_candidate(
     assert blockers[0].candidate_id == older_candidate_id
     assert blockers[0].workspace_id == older_workspace_id
     assert blockers[0].blocker_state == "merge_eligible"
+    assert blockers[0].reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
 
 
 @pytest.mark.unit
@@ -475,6 +483,7 @@ def _candidate(
     stale: bool = False,
     repo_url: str = "git@github.com:example/service.git",
     base_branch: str = "development",
+    task_kind: str = "feature_branch_pr",
     operations: list[Operation] | None = None,
     owned_paths: list[str] | None = None,
 ) -> MergeCandidate:
@@ -493,6 +502,7 @@ def _candidate(
         task_prompt="Merge me",
         agent=AgentRuntime.codex.value,
         auto_merge=auto_merge,
+        task_kind=task_kind,
         owned_paths=declared_owned_paths,
     )
     workspace.operations = operations or []
