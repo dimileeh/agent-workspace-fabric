@@ -66,6 +66,9 @@ _GITHUB_SCRIPT_COMMENT_ALLOWED_REST_METHODS: Final[frozenset[tuple[str, str]]] =
         ("pulls", "createReviewComment"),
     }
 )
+_GITHUB_SCRIPT_COMMENT_ALLOWED_WITH_KEYS: Final[frozenset[str]] = frozenset(
+    {"debug", "result-encoding", "retries", "retry-exempt-status-codes", "script"}
+)
 _GITHUB_SCRIPT_REST_METHOD_RE: Final = re.compile(
     r"\bgithub\.rest\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
@@ -2303,13 +2306,17 @@ def _github_script_comment_notify_inputs_are_safe(inputs: object) -> bool:
     for key, value in inputs.items():
         if not isinstance(key, str):
             return False
-        if key.lower() != "script":
+        normalized_key = key.lower()
+        if normalized_key not in _GITHUB_SCRIPT_COMMENT_ALLOWED_WITH_KEYS:
             return False
-        if not isinstance(value, str):
+        if normalized_key == "script":
+            if not isinstance(value, str):
+                return False
+            if _has_unsafe_github_actions_expression((value,)):
+                return False
+            script = value
+        elif not _comment_notify_action_with_value_is_safe(value):
             return False
-        if _has_unsafe_github_actions_expression((value,)):
-            return False
-        script = value
     return isinstance(script, str) and _github_script_comment_notify_script_is_safe(script)
 
 
