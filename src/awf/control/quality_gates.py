@@ -1571,15 +1571,7 @@ def _is_comment_or_notify_step(step: Mapping[str, Any]) -> bool:
 
 
 def _allows_comment_continue_on_error(step: Mapping[str, Any]) -> bool:
-    if not _is_comment_or_notify_step(step):
-        return False
-
-    run = _string_value(step.get("run"))
-    if run is not None and (not _is_informational_run_command(run) or _is_validation_command(run)):
-        return False
-
-    uses = _string_value(step.get("uses"))
-    return uses is None or _is_comment_or_notify_capable_step_uses(step, uses)
+    return _is_comment_or_notify_step(step) and _is_informational_step(step)
 
 
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
