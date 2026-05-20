@@ -143,7 +143,7 @@ async def _git_refspec_missing_path_is_recoverable(
                 "--stage",
                 "-z",
                 "--",
-                path,
+                _git_literal_pathspec(path),
             ]
         )
         return result.ok and not _git_z_listing_contains_path(result.stdout, path)
@@ -158,10 +158,14 @@ async def _git_refspec_missing_path_is_recoverable(
             "-z",
             base_ref,
             "--",
-            path,
+            _git_literal_pathspec(path),
         ]
     )
     return result.ok and not _git_z_listing_contains_path(result.stdout, path)
+
+
+def _git_literal_pathspec(path: str) -> str:
+    return f":(literal){path}"
 
 
 def _git_z_listing_contains_path(stdout: str, path: str) -> bool:

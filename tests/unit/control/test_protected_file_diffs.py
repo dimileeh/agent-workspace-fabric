@@ -158,7 +158,7 @@ async def test_git_show_text_returns_none_for_missing_path(
     )
     assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
         ["cat-file", "-e", "HEAD:.github/workflows/ci.yml"],
-        ["ls-tree", "-z", "HEAD", "--", ".github/workflows/ci.yml"],
+        ["ls-tree", "-z", "HEAD", "--", ":(literal).github/workflows/ci.yml"],
     ]
 
 
@@ -187,7 +187,7 @@ async def test_git_show_text_raises_when_failed_ref_path_still_exists(
     assert "object file is corrupt" in message
     assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
         ["cat-file", "-e", "HEAD:pyproject.toml"],
-        ["ls-tree", "-z", "HEAD", "--", "pyproject.toml"],
+        ["ls-tree", "-z", "HEAD", "--", ":(literal)pyproject.toml"],
     ]
 
 
@@ -210,7 +210,57 @@ async def test_git_show_text_returns_none_for_missing_index_path(
     )
     assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
         ["cat-file", "-e", ":pyproject.toml"],
-        ["ls-files", "--stage", "-z", "--", "pyproject.toml"],
+        ["ls-files", "--stage", "-z", "--", ":(literal)pyproject.toml"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_git_show_text_tree_probe_uses_literal_pathspec_for_metacharacter_path(
+    tmp_path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: path missing")
+    runner.queue_result(returncode=0)
+    path = ".github/workflows/[ci]*.yml"
+
+    assert (
+        await git_show_text(
+            runner,
+            worktree_path=tmp_path,
+            refspec=f"HEAD:{path}",
+        )
+        is None
+    )
+
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", f"HEAD:{path}"],
+        ["ls-tree", "-z", "HEAD", "--", f":(literal){path}"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_git_show_text_index_probe_uses_literal_pathspec_for_metacharacter_path(
+    tmp_path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: path missing")
+    runner.queue_result(returncode=0)
+    path = "pyproject[old]?.toml"
+
+    assert (
+        await git_show_text(
+            runner,
+            worktree_path=tmp_path,
+            refspec=f":{path}",
+        )
+        is None
+    )
+
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", f":{path}"],
+        ["ls-files", "--stage", "-z", "--", f":(literal){path}"],
     ]
 
 
