@@ -2378,6 +2378,7 @@ class ControlWorker:
             if operation.type not in {
                 OperationType.validate.value,
                 OperationType.push.value,
+                OperationType.rebase.value,
             }:
                 continue
             payload = operation.payload if isinstance(operation.payload, Mapping) else {}

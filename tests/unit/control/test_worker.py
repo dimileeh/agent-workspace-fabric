@@ -7856,6 +7856,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         ("status", "operation_type", "operation_status"),
         [
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
+            (WorkspaceStatus.validating, OperationType.rebase, OperationStatus.running),
             (WorkspaceStatus.pushing, OperationType.push, OperationStatus.running),
         ],
     )
@@ -7891,14 +7892,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
                     "decision": "preserve_runtime",
                 },
             )
+            operation_payload = {
+                "source": "workspace_executor",
+                "workspace_status": status.value,
+            }
+            if operation_type == OperationType.rebase:
+                operation_payload["source"] = "pr_monitor"
+                operation_payload["recovery_mode"] = "rebase_only"
             original_operation = await OperationRepository(s).create(
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 status=operation_status,
-                payload={
-                    "source": "workspace_executor",
-                    "workspace_status": status.value,
-                },
+                payload=operation_payload,
             )
             await s.commit()
             attempt_id = attempt.id
@@ -7971,8 +7976,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         [
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.running),
+            (WorkspaceStatus.validating, OperationType.rebase, OperationStatus.running),
             (WorkspaceStatus.pushing, OperationType.push, OperationStatus.pending),
             (WorkspaceStatus.pushing, OperationType.push, OperationStatus.running),
+            (WorkspaceStatus.pushing, OperationType.rebase, OperationStatus.pending),
         ],
     )
     async def test_preserved_active_operator_required_cancels_superseded_active_operation(
@@ -8009,14 +8016,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
                     "decision": "preserve_runtime",
                 },
             )
+            operation_payload = {
+                "source": "workspace_executor",
+                "workspace_status": status.value,
+            }
+            if operation_type == OperationType.rebase:
+                operation_payload["source"] = "operator_api"
+                operation_payload["recovery_mode"] = "rebase_only"
             original_operation = await OperationRepository(s).create(
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 status=operation_status,
-                payload={
-                    "source": "workspace_executor",
-                    "workspace_status": status.value,
-                },
+                payload=operation_payload,
             )
             await s.commit()
             attempt_id = attempt.id
@@ -8067,10 +8078,15 @@ class TestRunOnceStaleActiveExecutionRecovery:
             and operation.payload is not None
             and operation.payload.get("source") == "worker_restart"
         ]
+        active_execution_operation_types = {
+            OperationType.validate.value,
+            OperationType.push.value,
+            OperationType.rebase.value,
+        }
         active_execution_ops = [
             operation
             for operation in operations
-            if operation.type in {OperationType.validate.value, OperationType.push.value}
+            if operation.type in active_execution_operation_types
             and operation.status in {OperationStatus.pending.value, OperationStatus.running.value}
         ]
         expected_cancelled_operations = [
@@ -9608,8 +9624,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         [
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.running),
+            (WorkspaceStatus.validating, OperationType.rebase, OperationStatus.running),
             (WorkspaceStatus.pushing, OperationType.push, OperationStatus.pending),
             (WorkspaceStatus.pushing, OperationType.push, OperationStatus.running),
+            (WorkspaceStatus.pushing, OperationType.rebase, OperationStatus.pending),
         ],
     )
     async def test_preserved_active_without_usable_work_cancels_superseded_active_operation(
@@ -9630,14 +9648,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
             create_task_attempt=True,
         )
         async with session_factory() as s:
+            operation_payload = {
+                "source": "workspace_executor",
+                "workspace_status": status.value,
+            }
+            if operation_type == OperationType.rebase:
+                operation_payload["source"] = "pr_monitor"
+                operation_payload["recovery_mode"] = "rebase_only"
             original_operation = await OperationRepository(s).create(
                 workspace_id=workspace_id,
                 operation_type=operation_type,
                 status=operation_status,
-                payload={
-                    "source": "workspace_executor",
-                    "workspace_status": status.value,
-                },
+                payload=operation_payload,
             )
             original_operation_id = original_operation.id
             await s.commit()
@@ -9686,10 +9708,15 @@ class TestRunOnceStaleActiveExecutionRecovery:
             and operation.payload is not None
             and operation.payload.get("source") == "worker_restart"
         ]
+        active_execution_operation_types = {
+            OperationType.validate.value,
+            OperationType.push.value,
+            OperationType.rebase.value,
+        }
         active_execution_ops = [
             operation
             for operation in operations
-            if operation.type in {OperationType.validate.value, OperationType.push.value}
+            if operation.type in active_execution_operation_types
             and operation.status in {OperationStatus.pending.value, OperationStatus.running.value}
         ]
 
