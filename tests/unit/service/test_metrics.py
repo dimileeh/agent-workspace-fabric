@@ -934,6 +934,84 @@ async def test_capacity_queue_summary_skips_scheduler_allocation_when_unconstrai
 
 
 @pytest.mark.unit
+async def test_resource_saturation_reuses_allocation_auxiliary_counts_for_capacity_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=100.0,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    unreserved_calls: list[tuple[tuple[str, ...] | None, str | None]] = []
+    defaulted_dind_calls: list[tuple[tuple[str, ...] | None, str | None]] = []
+
+    def status_values(statuses: Any) -> tuple[str, ...] | None:
+        if statuses is None:
+            return None
+        return tuple(
+            status.value if isinstance(status, WorkspaceStatus) else str(status)
+            for status in statuses
+        )
+
+    async def record_unreserved_count(
+        session: AsyncSession,
+        *,
+        statuses: Any,
+        node_id: str | None,
+    ) -> int:
+        del session
+        unreserved_calls.append((status_values(statuses), node_id))
+        return 0
+
+    async def record_defaulted_dind_slots(
+        session: AsyncSession,
+        *,
+        statuses: Any = None,
+        node_id: str | None = None,
+    ) -> int:
+        del session
+        defaulted_dind_calls.append((status_values(statuses), node_id))
+        return 0
+
+    monkeypatch.setattr(
+        metrics,
+        "_unreserved_workspace_count_for_session",
+        record_unreserved_count,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_defaulted_dind_slots_for_session",
+        record_defaulted_dind_slots,
+    )
+
+    await metrics.summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    allocated_statuses = metrics.ALLOCATED_RESOURCE_RESERVATION_STATUSES
+    assert unreserved_calls.count((allocated_statuses, "node-a")) == 1
+    assert defaulted_dind_calls.count((allocated_statuses, "node-a")) == 1
+
+
+@pytest.mark.unit
 async def test_capacity_queue_uses_scheduler_allocation_scope_for_migrating_reservation(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

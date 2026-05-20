@@ -282,6 +282,12 @@ class CapacityQueueSummary:
 
 
 @dataclass(frozen=True)
+class _AllocatedResourceAuxiliaryCounts:
+    unreserved_workspace_count: int
+    defaulted_dind_slots: int
+
+
+@dataclass(frozen=True)
 class _CapacityQueueWorkspace:
     id: str
     agent: str
@@ -730,6 +736,8 @@ async def summarize_resource_saturation_for_session(
     """Build the resource saturation payload for local console capacity views."""
 
     generated_at = _to_utc(now or datetime.now(UTC))
+    # Status counts are scoped to the local node so workspace_counts,
+    # reserved_resources, and concurrency metrics describe this node's workload.
     node_id = _local_capacity_node_id(settings)
     status_counts = await _count_current_by_status(session, node_id=node_id)
     workspace_counts = _workspace_saturation_counts(status_counts)
@@ -749,10 +757,15 @@ async def summarize_resource_saturation_for_session(
         node_id=node_id,
         resource_defaults=resource_defaults,
     )
+    allocation_auxiliary_counts = await _allocated_resource_auxiliary_counts_for_session(
+        session,
+        node_id=node_id,
+    )
     allocated_resources = await _allocated_resources_for_session(
         session,
         node_id=node_id,
         resource_defaults=resource_defaults,
+        auxiliary_counts=allocation_auxiliary_counts,
     )
     concurrency = _resource_concurrency(status_counts, worker=worker)
     resolved_disk_check = disk_check
@@ -783,6 +796,7 @@ async def summarize_resource_saturation_for_session(
         node_id=node_id,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
+        allocation_auxiliary_counts=allocation_auxiliary_counts,
         now=generated_at,
     )
     admission = _resource_admission_summary(
@@ -1296,27 +1310,24 @@ async def _allocated_resources_for_session(
     *,
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
+    auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
 ) -> ReservedResources:
     persisted = await _active_latest_totals_for_metrics_allocation_scope(
         session,
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
         node_id=node_id,
     )
-    unreserved_workspace_count = await _unreserved_workspace_count_for_session(
-        session,
-        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
-        node_id=node_id,
-    )
-    defaulted_dind_slots = await _defaulted_dind_slots_for_session(
-        session,
-        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
-        node_id=node_id,
-    )
+    counts = auxiliary_counts
+    if counts is None:
+        counts = await _allocated_resource_auxiliary_counts_for_session(
+            session,
+            node_id=node_id,
+        )
     return _reserved_resources_from_totals(
         persisted,
-        int(persisted["workspace_count"]) + unreserved_workspace_count,
+        int(persisted["workspace_count"]) + counts.unreserved_workspace_count,
         resource_defaults=resource_defaults,
-        defaulted_dind_slots=defaulted_dind_slots,
+        defaulted_dind_slots=counts.defaulted_dind_slots,
     )
 
 
@@ -1325,27 +1336,43 @@ async def _scheduler_allocated_resources_for_session(
     *,
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
+    auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
 ) -> ReservedResources:
     persisted = await _active_latest_totals_for_scheduler_allocation_scope(
         session,
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
         node_id=node_id,
     )
-    unreserved_workspace_count = await _unreserved_workspace_count_for_session(
-        session,
-        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
-        node_id=node_id,
-    )
-    defaulted_dind_slots = await _defaulted_dind_slots_for_session(
-        session,
-        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
-        node_id=node_id,
-    )
+    counts = auxiliary_counts
+    if counts is None:
+        counts = await _allocated_resource_auxiliary_counts_for_session(
+            session,
+            node_id=node_id,
+        )
     return _reserved_resources_from_totals(
         persisted,
-        int(persisted["workspace_count"]) + unreserved_workspace_count,
+        int(persisted["workspace_count"]) + counts.unreserved_workspace_count,
         resource_defaults=resource_defaults,
-        defaulted_dind_slots=defaulted_dind_slots,
+        defaulted_dind_slots=counts.defaulted_dind_slots,
+    )
+
+
+async def _allocated_resource_auxiliary_counts_for_session(
+    session: AsyncSession,
+    *,
+    node_id: str,
+) -> _AllocatedResourceAuxiliaryCounts:
+    return _AllocatedResourceAuxiliaryCounts(
+        unreserved_workspace_count=await _unreserved_workspace_count_for_session(
+            session,
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        ),
+        defaulted_dind_slots=await _defaulted_dind_slots_for_session(
+            session,
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        ),
     )
 
 
@@ -1497,6 +1524,7 @@ async def _capacity_queue_summary(
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
     now: datetime,
+    allocation_auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
 ) -> CapacityQueueSummary:
     requested_filter = and_(
         Workspace.status == WorkspaceStatus.requested.value,
@@ -1550,6 +1578,7 @@ async def _capacity_queue_summary(
             session,
             node_id=node_id,
             resource_defaults=resource_defaults,
+            auxiliary_counts=allocation_auxiliary_counts,
         )
     else:
         allocated_for_gate = ReservedResources(
