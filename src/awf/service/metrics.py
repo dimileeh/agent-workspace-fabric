@@ -1294,7 +1294,7 @@ async def _allocated_resources_for_session(
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await _active_latest_totals_for_scheduler_allocation_scope(
+    persisted = await _active_latest_totals_for_metrics_allocation_scope(
         session,
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
         node_id=node_id,
@@ -1341,6 +1341,21 @@ async def _active_latest_totals_for_scheduler_allocation_scope(
 
     repo = ResourceReservationRepository(session)
     return await repo.active_latest_totals_for_scheduler_allocation_scope(
+        statuses=statuses,
+        node_id=node_id,
+    )
+
+
+async def _active_latest_totals_for_metrics_allocation_scope(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str],
+    node_id: str,
+) -> dict[str, float | int]:
+    """Sum latest active reservations in the local metrics allocation lane."""
+
+    repo = ResourceReservationRepository(session)
+    return await repo.active_latest_totals_for_metrics_allocation_scope(
         statuses=statuses,
         node_id=node_id,
     )

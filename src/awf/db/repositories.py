@@ -1233,6 +1233,20 @@ class ResourceReservationRepository:
             return empty_resource_reservation_totals()
         return await _fetch_resource_reservation_totals(self._session, stmt)
 
+    async def active_latest_totals_for_metrics_allocation_scope(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            metrics_allocation_node_id=node_id,
+        )
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
 
 def empty_resource_reservation_totals() -> dict[str, float | int]:
     return {
@@ -1265,6 +1279,7 @@ def _active_latest_resource_reservation_totals_stmt(
     reservation_node_id: str | None = None,
     workspace_node_id: str | None = None,
     scheduler_allocation_node_id: str | None = None,
+    metrics_allocation_node_id: str | None = None,
 ) -> Select[tuple[Any, ...]] | None:
     status_filter = _active_resource_reservation_status_filter(statuses)
     if status_filter is None:
@@ -1330,6 +1345,16 @@ def _active_latest_resource_reservation_totals_stmt(
                 and_(
                     latest_active_reservations.c.node_id.is_(None),
                     latest_active_reservations.c.workspace_node_id.is_(None),
+                ),
+            )
+        )
+    if metrics_allocation_node_id is not None:
+        stmt = stmt.where(
+            or_(
+                latest_active_reservations.c.workspace_node_id == metrics_allocation_node_id,
+                and_(
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                    latest_active_reservations.c.node_id == metrics_allocation_node_id,
                 ),
             )
         )
