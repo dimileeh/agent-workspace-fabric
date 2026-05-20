@@ -2686,9 +2686,9 @@ class WorkspaceRepository:
     ) -> Workspace:
         """Create a fresh requested workspace from another workspace's request contract.
 
-        Runtime and PR-monitor fields stay on the source. Pass
-        ``remote_push_branch`` only for replacement flows that must preserve an
-        existing external target branch.
+        Runtime, PR-monitor, and resolved profile fields stay on the source.
+        Pass ``remote_push_branch`` only for replacement flows that must
+        preserve an existing external target branch.
         """
         return await self.create(
             repo_url=source.repo_url,
@@ -2707,7 +2707,7 @@ class WorkspaceRepository:
             env_profile=source.env_profile,
             profile_ref=source.profile_ref,
             requested_profile=deepcopy(source.requested_profile),
-            resolved_profile=deepcopy(source.resolved_profile),
+            resolved_profile=None,
             test_commands=list(source.test_commands),
             requires_database=source.requires_database,
             idempotency_key=idempotency_key,

@@ -1706,7 +1706,8 @@ class ControlWorker:
                     reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
                     dispatched=dispatched,
                 )
-                return True
+                if dispatched or candidate.workspace_id in self._execution_tasks:
+                    return True
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
@@ -1764,7 +1765,13 @@ class ControlWorker:
                 workspace_status=candidate.status,
             ):
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
-                return dispatched or self._executor is not None
+                if dispatched or candidate.workspace_id in self._execution_tasks:
+                    return True
+                if self._executor is None:
+                    return False
+                if self._available_execution_slots() <= 0:
+                    return not preservation_expired
+                return True
 
             extracted_pr_number = (
                 _extract_pr_number(ws.pr_url)
@@ -3395,11 +3402,13 @@ class ControlWorker:
                     event_type,
                     reason_code,
                 ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
-                    if (
-                        self._executor is None
-                        and event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE
-                    ):
-                        continue
+                    if event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE:
+                        can_dispatch_validation = self._executor is not None and (
+                            candidate.workspace_id in self._execution_tasks
+                            or self._available_execution_slots() > 0
+                        )
+                        if not can_dispatch_validation:
+                            continue
                     if await self._has_current_salvage_event(
                         session,
                         candidate.workspace_id,

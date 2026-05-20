@@ -187,7 +187,7 @@ class TestCreate:
         assert events[0].reason_code == "CREATED"
 
     @pytest.mark.unit
-    async def test_create_replacement_from_copies_request_fields(
+    async def test_create_replacement_from_copies_request_fields_and_requires_profile_reresolution(
         self,
         session: AsyncSession,
     ) -> None:
@@ -241,7 +241,7 @@ class TestCreate:
         assert replacement.env_profile == source.env_profile
         assert replacement.profile_ref == source.profile_ref
         assert replacement.requested_profile == {"profile": {"name": "requested"}}
-        assert replacement.resolved_profile == {"profile": {"name": "resolved"}}
+        assert replacement.resolved_profile is None
         assert replacement.test_commands == ["uv run pytest"]
         assert replacement.requires_database is True
         assert replacement.task_kind == "sync_release_pr"
@@ -255,7 +255,6 @@ class TestCreate:
         assert replacement.task_policy is not source.task_policy
         assert replacement.task_policy["provider"] is not source.task_policy["provider"]
         assert replacement.requested_profile is not source.requested_profile
-        assert replacement.resolved_profile is not source.resolved_profile
 
 
 class TestRelationshipLoading:
