@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -14,6 +15,7 @@ from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
     ServiceSettings,
     local_service_environ,
+    resolve_local_service_compose_env_file,
 )
 from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
@@ -194,18 +196,19 @@ async def run_service_bootstrap(
     if provider_environ is not None:
         service_env.update(provider_environ)
 
+    subprocess_env = {**os.environ, **service_env}
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,
         compose_file=compose_file,
-        environ=service_env,
+        environ=subprocess_env,
     ):
         completed.append(
             await asyncio.to_thread(
                 _run_stage,
                 stage,
                 run_subprocess=runner,
-                environ=service_env,
+                environ=subprocess_env,
             )
         )
 
@@ -362,15 +365,13 @@ def _resolve_user_path(path: Path) -> Path:
 
 
 def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
-    if LOCAL_SERVICE_COMPOSE_ENV_FILE.is_absolute():
-        return LOCAL_SERVICE_COMPOSE_ENV_FILE if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists() else None
     if asset_root is not None:
         candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
-        if candidate.exists():
-            return candidate
-    if LOCAL_SERVICE_COMPOSE_ENV_FILE.exists():
-        return LOCAL_SERVICE_COMPOSE_ENV_FILE.resolve()
-    return None
+        return candidate if candidate.exists() else None
+
+    return resolve_local_service_compose_env_file(
+        LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    )
 
 
 def _bootstrap_assets_not_found_error(compose_file: Path) -> ServiceBootstrapError:
@@ -398,6 +399,14 @@ def _compose_command(
     return tuple(args)
 
 
+def _bootstrap_subprocess_env(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Return ``environ`` as a dict, or ``None`` when it adds nothing beyond current env."""
+    env_dict = dict(environ)
+    if env_dict == dict(os.environ):
+        return None
+    return env_dict
+
+
 def _run_stage(
     stage: _BootstrapStage,
     *,
@@ -411,7 +420,7 @@ def _run_stage(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=dict(environ),
+                env=_bootstrap_subprocess_env(environ),
             ),
         )
     except FileNotFoundError as exc:

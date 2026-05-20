@@ -95,7 +95,7 @@ services:
       POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
       POSTGRES_DB: awf
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - awf-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -134,7 +134,7 @@ services:
       - *awf-opencode-auth
       - *awf-ollama-auth
     ports:
-      - "8000:8000"
+      - "${AWF_API_HOST_PORT:-8000}:8000"
     command: sh -c "awf serve --host 0.0.0.0 --port 8000"
 
   worker:

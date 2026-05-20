@@ -3631,7 +3631,7 @@ async def test_execute_sync_base_transient_exhaustion_records_terminal_reason(
 
 
 @pytest.mark.unit
-async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event(
+async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event_and_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3668,6 +3668,7 @@ async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
+        task_policy = workspace.task_policy
         events = [
             event
             for event in workspace.events
@@ -3682,6 +3683,171 @@ async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event
     assert events[0].payload["source"] == "pr_monitor"
     assert events[0].payload["failure_count"] == 1
     assert events[0].payload["last_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    recovery_state = task_policy["provider_recovery_state"]
+    assert recovery_state["action"] == "retry"
+    assert recovery_state["decision_reason_code"] == "PROVIDER_MODEL_CIRCUIT_OPEN"
+    assert recovery_state["source_provider"] == "openai"
+    assert recovery_state["source_model"] == "gpt-5.3-codex"
+    assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert isinstance(recovery_state["not_before"], str)
+
+
+@pytest.mark.unit
+async def test_provider_circuit_breaker_suppression_with_no_cooldown_uses_dedup_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.3-codex",
+    )
+    async with factory() as session:
+        repo = ProviderModelCircuitBreakerRepository(session)
+        breaker = await repo.record_failure(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:openai:gpt-5.3-codex",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=datetime.now(UTC),
+            failure_threshold=1,
+            cooldown_seconds=900,
+        )
+        breaker.cooldown_until = None
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    first_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+    first_policy, _, _, _ = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    second_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    source_policy, _, _, _ = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    recovery_state = source_policy["provider_recovery_state"]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        cooldown_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert first_suppressed is True
+    assert second_suppressed is True
+    assert (
+        first_policy["provider_recovery_state"]["not_before"]
+        == source_policy["provider_recovery_state"]["not_before"]
+    )
+    assert recovery_state["action"] == "retry"
+    assert recovery_state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert isinstance(recovery_state["not_before"], str)
+    assert len(cooldown_events) == 1
+
+
+@pytest.mark.unit
+async def test_provider_recovery_suppresses_cli_refreshes_stale_task_policy_from_live_breaker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Validate stale monitor cooldown state is refreshed from updated breaker state."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.3-codex",
+    )
+    async with factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:openai:gpt-5.3-codex",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=datetime.now(UTC),
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    first_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+    assert first_suppressed is True
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        provider_recovery_state = workspace.task_policy["provider_recovery_state"]
+        stale_not_before = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+        workspace.task_policy = {
+            **workspace.task_policy,
+            "provider_recovery_state": {
+                **provider_recovery_state,
+                "not_before": stale_not_before,
+            },
+        }
+
+        breaker_repo = ProviderModelCircuitBreakerRepository(session)
+        await breaker_repo.record_failure(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:openai:gpt-5.3-codex",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=datetime.now(UTC),
+            failure_threshold=1,
+            cooldown_seconds=1200,
+        )
+        await session.commit()
+
+    second_suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    source_policy, _, _, _ = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    recovery_state = source_policy["provider_recovery_state"]
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        cooldown_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert second_suppressed is True
+    assert recovery_state["not_before"] != stale_not_before
+    assert datetime.fromisoformat(recovery_state["not_before"]) > datetime.fromisoformat(
+        stale_not_before
+    )
+    assert len(cooldown_events) == 1
 
 
 @pytest.mark.unit

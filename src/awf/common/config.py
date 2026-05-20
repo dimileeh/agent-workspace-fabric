@@ -10,6 +10,9 @@ rather than mutating a global object.
 
 from __future__ import annotations
 
+import threading
+import weakref
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -239,6 +242,12 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    def __init__(self, **values: Any) -> None:
+        """Initialize settings while remembering direct constructor overrides."""
+        init_fields = _settings_constructor_fields_from_values(type(self), values)
+        super().__init__(**values)
+        _record_settings_constructor_fields(self, init_fields)
+
     # Identity
     service_name: str = Field(default="awf", description="Service identifier used in logs/metrics.")
     env: RuntimeEnv = Field(default="local", description="Runtime environment.")
@@ -467,6 +476,88 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+
+def _settings_constructor_fields_from_values(
+    settings_type: type[Settings],
+    values: Mapping[str, Any],
+) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, field in settings_type.model_fields.items()
+        if name in values
+        or _settings_alias_is_present(field.alias, values)
+        or _settings_alias_is_present(field.validation_alias, values)
+    )
+
+
+def _settings_alias_is_present(alias: Any, values: Mapping[str, Any]) -> bool:
+    if alias is None:
+        return False
+    if isinstance(alias, str):
+        return alias in values
+
+    choices = getattr(alias, "choices", None)
+    if isinstance(choices, (list, tuple)):
+        return any(_settings_alias_is_present(choice, values) for choice in choices)
+
+    path = getattr(alias, "path", None)
+    if isinstance(path, (list, tuple)) and path:
+        first = path[0]
+        return isinstance(first, str) and first in values
+
+    return False
+
+
+class _SettingsIdentityRef(weakref.ref[Settings]):
+    """Weak reference that keys settings by object identity, not model value."""
+
+    __slots__ = ("_hash",)
+
+    _hash: int
+
+    def __new__(
+        cls,
+        settings: Settings,
+        callback: Callable[[weakref.ReferenceType[Settings]], object] | None = None,
+    ) -> _SettingsIdentityRef:
+        reference = super().__new__(cls, settings, callback)
+        reference._hash = id(settings)
+        return reference
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _SettingsIdentityRef):
+            return False
+        if self is other:
+            return True
+        settings = self()
+        return settings is not None and settings is other()
+
+
+_SETTINGS_INIT_FIELDS_BY_SETTINGS: dict[_SettingsIdentityRef, frozenset[str]] = {}
+_SETTINGS_INIT_FIELDS_LOCK = threading.RLock()
+
+
+def _discard_settings_constructor_fields(reference: weakref.ReferenceType[Settings]) -> None:
+    if isinstance(reference, _SettingsIdentityRef):
+        with _SETTINGS_INIT_FIELDS_LOCK:
+            _SETTINGS_INIT_FIELDS_BY_SETTINGS.pop(reference, None)
+
+
+def _record_settings_constructor_fields(settings: Settings, fields: frozenset[str]) -> None:
+    reference = _SettingsIdentityRef(settings, _discard_settings_constructor_fields)
+    with _SETTINGS_INIT_FIELDS_LOCK:
+        _SETTINGS_INIT_FIELDS_BY_SETTINGS[reference] = fields
+
+
+def settings_constructor_fields(settings: Settings) -> frozenset[str]:
+    """Return fields passed directly to ``Settings(...)`` construction."""
+
+    with _SETTINGS_INIT_FIELDS_LOCK:
+        return _SETTINGS_INIT_FIELDS_BY_SETTINGS.get(_SettingsIdentityRef(settings), frozenset())
 
 
 def validate_production_settings(
