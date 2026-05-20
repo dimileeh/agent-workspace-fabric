@@ -747,7 +747,7 @@ def _candidate_blocks_target(
     candidate_paths = _candidate_owned_paths(candidate)
     target_paths = _candidate_owned_paths(target)
     if not candidate_paths or not target_paths:
-        return True
+        return False
     return any(
         owned_paths_overlap(candidate_path, target_path)
         for candidate_path in candidate_paths
