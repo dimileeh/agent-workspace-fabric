@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import inspect
 import json
 import os
 from datetime import UTC, datetime
@@ -9,8 +11,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import Field
 
 import awf.common.config as common_config
+import awf.service.config as service_config
 from awf.common.config import (
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
@@ -20,6 +24,8 @@ from awf.common.config import (
     validate_production_settings,
 )
 from awf.service.config import (
+    DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+    DEFAULT_LOCAL_SERVICE_DATABASE_URL,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
     _redact_database_url,
     _resolve_service_work_dir,
@@ -30,6 +36,23 @@ from awf.service.config import (
 
 _NON_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:prod-pass@db.internal:5432/awf"
 _STRONG_PRODUCTION_API_TOKEN = "prod-token-for-awf-operator-apis-32"
+
+
+def _write_awf_source_root(checkout: Path) -> Path:
+    fake_module = checkout / "src" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True, exist_ok=True)
+    fake_module.write_text("# source module placeholder\n", encoding="utf-8")
+    (checkout / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
+    compose_file = checkout / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True, exist_ok=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    return fake_module
+
+
+def _write_awf_source_checkout(tmp_path: Path) -> tuple[Path, Path]:
+    checkout = tmp_path / "checkout"
+    return checkout, _write_awf_source_root(checkout)
 
 
 def _diagnostic_codes(error: ProductionSettingsError) -> set[str]:
@@ -52,6 +75,714 @@ def _diagnostic_text(error: ProductionSettingsError) -> str:
         )
         for diagnostic in error.diagnostics
     )
+
+
+@pytest.mark.unit
+def test_local_service_environ_preserves_host_port_overrides(tmp_path: Path) -> None:
+    env_file = tmp_path / "docker" / "compose" / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        "AWF_POSTGRES_HOST_PORT=15433\nAWF_API_HOST_PORT=9100\n",
+        encoding="utf-8",
+    )
+    environ = local_service_environ({}, env_file=env_file)
+
+    assert environ["AWF_POSTGRES_HOST_PORT"] == "15433"
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
+@pytest.mark.unit
+def test_service_settings_default_database_url_uses_postgres_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+def test_service_settings_rejects_invalid_postgres_host_port(host_port: str) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_POSTGRES_HOST_PORT": host_port},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_POSTGRES_HOST_PORT" in message
+    assert repr(host_port) in message
+    assert "integer between 1 and 65535" in message
+
+
+@pytest.mark.unit
+def test_service_settings_default_database_url_uses_compose_env_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_service_settings_uses_checkout_root_compose_env_from_subdirectory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    nested = checkout / "src" / "awf"
+    (checkout / ".git").mkdir()
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_settings_constructor_fields_are_not_pydantic_private_dual_storage() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://awf:pw@db.internal:5432/awf",
+        api_base_url="http://127.0.0.1:9300",
+    )
+
+    assert service_config._settings_init_fields(settings) == frozenset(  # noqa: SLF001
+        {"database_url", "api_base_url"}
+    )
+    assert "_awf_init_fields" not in settings.__dict__
+    assert "_awf_init_fields" not in (getattr(settings, "__pydantic_private__", {}) or {})
+
+
+@pytest.mark.unit
+def test_untracked_settings_constructor_fields_do_not_suppress_port_derivation() -> None:
+    settings = Settings.model_construct(
+        database_url="postgresql+asyncpg://awf:pw@db.internal:5432/awf",
+        api_base_url="http://127.0.0.1:9300",
+    )
+
+    assert service_config._settings_init_fields(settings) == frozenset()  # noqa: SLF001
+
+    service_settings = resolve_service_settings(
+        settings,
+        environ={
+            "AWF_POSTGRES_HOST_PORT": "15433",
+            "AWF_API_HOST_PORT": "9100",
+        },
+    )
+
+    assert service_settings.database_url == ("postgresql+asyncpg://awf:awf_dev@localhost:15433/awf")
+    assert service_settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_settings_constructor_fields_are_tracked_per_equal_settings_instance() -> None:
+    default_settings = Settings(_env_file=None)
+    explicit_default_settings = Settings(
+        _env_file=None,
+        api_base_url="http://localhost:8000",
+    )
+
+    assert default_settings == explicit_default_settings
+    assert service_config._settings_init_fields(default_settings) == frozenset()  # noqa: SLF001
+    assert service_config._settings_init_fields(explicit_default_settings) == frozenset(  # noqa: SLF001
+        {"api_base_url"}
+    )
+
+
+@pytest.mark.unit
+def test_settings_constructor_fields_track_pydantic_alias_input() -> None:
+    class AliasSettings(Settings):
+        api_base_url: str = Field(
+            default=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+            alias="apiBaseUrl",
+        )
+
+    settings = AliasSettings(
+        _env_file=None,
+        apiBaseUrl=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+    )
+
+    assert service_config._settings_init_fields(settings) == frozenset({"api_base_url"})  # noqa: SLF001
+
+    service_settings = resolve_service_settings(
+        settings,
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert service_settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+
+
+@pytest.mark.unit
+def test_settings_constructor_field_tracking_lock_is_reentrant() -> None:
+    lock = common_config._SETTINGS_INIT_FIELDS_LOCK  # noqa: SLF001
+
+    lock.acquire()
+    try:
+        acquired_recursively = lock.acquire(blocking=False)
+        assert acquired_recursively is True
+        lock.release()
+    finally:
+        lock.release()
+
+
+@pytest.mark.unit
+def test_settings_constructor_field_tracking_uses_lock_for_all_dict_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.entries = 0
+
+        def __enter__(self) -> RecordingLock:
+            self.entries += 1
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    lock = RecordingLock()
+    monkeypatch.setattr(common_config, "_SETTINGS_INIT_FIELDS_LOCK", lock, raising=False)
+
+    settings = Settings(_env_file=None, api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    after_record = lock.entries
+    assert after_record >= 1
+
+    assert service_config._settings_init_fields(settings) == frozenset({"api_base_url"})  # noqa: SLF001
+    after_lookup = lock.entries
+    assert after_lookup > after_record
+
+    settings_ref = common_config._SettingsIdentityRef(settings)  # noqa: SLF001
+    del settings
+    gc.collect()
+
+    assert settings_ref() is None
+    assert lock.entries > after_lookup
+
+
+@pytest.mark.unit
+def test_dead_settings_identity_refs_do_not_compare_equal() -> None:
+    default_settings = Settings(_env_file=None)
+    explicit_default_settings = Settings(
+        _env_file=None,
+        api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+    )
+    default_ref = common_config._SettingsIdentityRef(default_settings)  # noqa: SLF001
+    explicit_default_ref = common_config._SettingsIdentityRef(  # noqa: SLF001
+        explicit_default_settings
+    )
+
+    assert default_settings == explicit_default_settings
+    assert default_ref == common_config._SettingsIdentityRef(default_settings)  # noqa: SLF001
+
+    del default_settings
+    del explicit_default_settings
+    gc.collect()
+
+    assert default_ref() is None
+    assert explicit_default_ref() is None
+    refs_compare_equal = default_ref == explicit_default_ref
+    assert refs_compare_equal is False
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_does_not_expose_asset_root_override() -> None:
+    signature = inspect.signature(service_config.resolve_local_service_compose_env_file)
+
+    assert "asset_root" not in signature.parameters
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_accepts_current_directory_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_module = tmp_path / "install" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text("AWF_HOST_WORK_DIR=/tmp/awf-service-state\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_ignores_unmarked_module_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    fake_module = (
+        install_root
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "awf"
+        / "service"
+        / "config.py"
+    )
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    unrelated_env_file = install_root / "docker" / "compose" / ".env"
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "cwd" / "nested"
+    isolated_cwd.mkdir(parents=True)
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() is None
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_ignores_pyproject_only_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_module = tmp_path / "install" / "awf" / "service" / "config.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("# installed module placeholder\n", encoding="utf-8")
+    parent_project = tmp_path / "home"
+    parent_project.mkdir()
+    (parent_project / "pyproject.toml").write_text("[project]\nname = 'other'\n", encoding="utf-8")
+    unrelated_env_file = parent_project / "docker" / "compose" / ".env"
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    nested_cwd = parent_project / "child" / "nested"
+    nested_cwd.mkdir(parents=True)
+    monkeypatch.chdir(nested_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() is None
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_accepts_awf_project_root_from_module_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "outside"
+    isolated_cwd.mkdir()
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
+
+
+@pytest.mark.unit
+def test_default_compose_env_lookup_ignores_unrelated_git_root_before_module_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    unrelated_repo = tmp_path / "unrelated"
+    nested_cwd = unrelated_repo / "src" / "app"
+    nested_cwd.mkdir(parents=True)
+    (unrelated_repo / ".git").mkdir()
+    unrelated_env_file = unrelated_repo / "docker" / "compose" / ".env"
+    unrelated_env_file.parent.mkdir(parents=True)
+    unrelated_env_file.write_text("AWF_POSTGRES_HOST_PORT=25433\n", encoding="utf-8")
+    monkeypatch.chdir(nested_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() == compose_env_file
+
+
+@pytest.mark.unit
+def test_module_path_sourced_default_database_url_uses_compose_postgres_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    (checkout / ".env").write_text(
+        f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n",
+        encoding="utf-8",
+    )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "outside"
+    isolated_cwd.mkdir()
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_service_settings_default_env_file_database_url_uses_postgres_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.setenv("AWF_POSTGRES_HOST_PORT", "15433")
+
+    settings = resolve_service_settings(Settings())
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_service_settings_exported_default_database_url_uses_postgres_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.setenv("AWF_POSTGRES_HOST_PORT", "15433")
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_service_settings_host_default_database_url_ignores_compose_env_postgres_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+
+
+@pytest.mark.unit
+def test_service_settings_sourced_env_default_database_url_uses_compose_env_postgres_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
+    env_file.write_text(f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n")
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+
+
+@pytest.mark.unit
+def test_project_dotenv_value_continues_past_env_without_requested_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    nested = checkout / "src" / "module"
+    nested.mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    (checkout / ".env").write_text(
+        f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}\n",
+        encoding="utf-8",
+    )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    (nested / ".env").write_text("AWF_API_TOKEN=local-token\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+    read_env_files: list[Path] = []
+    real_dotenv_values = service_config.dotenv_values
+
+    def recording_dotenv_values(env_file: Path) -> dict[str, str | None]:
+        read_env_files.append(env_file)
+        return real_dotenv_values(env_file)
+
+    monkeypatch.setattr(service_config, "dotenv_values", recording_dotenv_values)
+
+    assert (
+        service_config._project_dotenv_value("AWF_DATABASE_URL")  # noqa: SLF001
+        == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    )
+    assert read_env_files == [nested / ".env", checkout / ".env"]
+
+
+@pytest.mark.unit
+def test_resolve_service_settings_reuses_project_dotenv_candidates_for_default_url_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    (checkout / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={DEFAULT_LOCAL_SERVICE_DATABASE_URL}",
+                f"AWF_API_BASE_URL={DEFAULT_LOCAL_SERVICE_API_BASE_URL}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text(
+        "AWF_POSTGRES_HOST_PORT=15433\nAWF_API_HOST_PORT=9100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_SERVICE_DATABASE_URL)
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_POSTGRES_HOST_PORT", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    candidate_calls = 0
+    real_project_dotenv_candidates = service_config._project_dotenv_candidates  # noqa: SLF001
+
+    def recording_project_dotenv_candidates() -> tuple[Path, ...]:
+        nonlocal candidate_calls
+        candidate_calls += 1
+        return real_project_dotenv_candidates()
+
+    monkeypatch.setattr(
+        service_config,
+        "_project_dotenv_candidates",
+        recording_project_dotenv_candidates,
+    )
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:15433/awf"
+    assert settings.api_base_url == "http://localhost:9100"
+    assert candidate_calls == 1
+
+
+@pytest.mark.unit
+def test_database_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
+    assert service_config._database_url_env_is_explicit({}, {}) is False  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_api_base_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
+    assert service_config._api_base_url_env_is_explicit({}, {}) is False  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_database_url_ignores_postgres_host_port_override() -> None:
+    explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, database_url=explicit_url),
+        environ={"AWF_DATABASE_URL": explicit_url, "AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_base_database_url_ignores_custom_environ_host_port() -> None:
+    explicit_url = "postgresql+asyncpg://awf:pw@db.internal:5432/awf"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, database_url=explicit_url),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_default_database_url_ignores_postgres_host_port_override() -> (
+    None
+):
+    settings = resolve_service_settings(
+        Settings(_env_file=None, database_url=DEFAULT_LOCAL_SERVICE_DATABASE_URL),
+        environ={"AWF_POSTGRES_HOST_PORT": "15433"},
+    )
+
+    assert settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+
+
+@pytest.mark.unit
+def test_service_settings_default_api_base_url_uses_api_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_default_api_base_url_uses_compose_env_api_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_default_env_file_api_base_url_uses_compose_env_api_host_port_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
+    env_file.write_text("AWF_API_BASE_URL=http://localhost:8000\n", encoding="utf-8")
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings())
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_sourced_env_default_api_base_url_uses_compose_env_api_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    env_file = checkout / ".env"
+    env_file.write_text(f"AWF_API_BASE_URL={DEFAULT_LOCAL_SERVICE_API_BASE_URL}\n")
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_module_path_sourced_default_api_base_url_uses_compose_api_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    (checkout / ".env").write_text(
+        f"AWF_API_BASE_URL={DEFAULT_LOCAL_SERVICE_API_BASE_URL}\n",
+        encoding="utf-8",
+    )
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "outside"
+    isolated_cwd.mkdir()
+    monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+def test_service_settings_host_default_api_base_url_ignores_compose_env_api_host_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
+    compose_env_file.write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("AWF_API_BASE_URL", DEFAULT_LOCAL_SERVICE_API_BASE_URL)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_api_base_url_ignores_api_host_port_override() -> None:
+    explicit_url = "http://127.0.0.1:9300"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, api_base_url=explicit_url),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == explicit_url
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_default_api_base_url_ignores_api_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None, api_base_url=DEFAULT_LOCAL_SERVICE_API_BASE_URL),
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+
+
+@pytest.mark.unit
+def test_service_settings_ignores_ambient_api_base_url_for_custom_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_API_BASE_URL", "http://host-shell.example:9300")
+    base = Settings(_env_file=None)
+
+    settings = resolve_service_settings(
+        base,
+        environ={"AWF_API_HOST_PORT": "9100"},
+    )
+
+    assert settings.api_base_url == "http://localhost:9100"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+def test_service_settings_rejects_invalid_api_host_port(host_port: str) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_API_HOST_PORT": host_port},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_API_HOST_PORT" in message
+    assert repr(host_port) in message
+    assert "integer between 1 and 65535" in message
 
 
 @pytest.mark.unit
@@ -436,10 +1167,10 @@ def test_local_service_work_dir_resolves_from_compose_env_file(
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("AWF_WORK_DIR", raising=False)
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
@@ -455,10 +1186,10 @@ def test_project_default_awf_work_dir_does_not_hide_compose_host_work_dir(
     tmp_path: Path,
 ) -> None:
     host_work_dir = tmp_path / "compose-service-state"
-    compose_env_file = tmp_path / "docker" / "compose" / ".env"
-    compose_env_file.parent.mkdir(parents=True)
+    checkout, _ = _write_awf_source_checkout(tmp_path)
+    compose_env_file = checkout / "docker" / "compose" / ".env"
     compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AWF_WORK_DIR", ".awf")
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
