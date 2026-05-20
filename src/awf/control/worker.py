@@ -3500,6 +3500,7 @@ async def _requested_capacity_queue_signature(
                 Workspace.task_class,
                 Workspace.agent,
                 Workspace.task_policy,
+                Workspace.resolved_profile,
             )
             .where(Workspace.status == WorkspaceStatus.requested.value)
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
@@ -3517,6 +3518,7 @@ async def _requested_capacity_queue_signature(
             task_class,
             agent,
             task_policy,
+            resolved_profile,
         ) in await session.execute(stmt):
             workspace_id = str(workspace_id_value)
             count += 1
@@ -3537,6 +3539,7 @@ async def _requested_capacity_queue_signature(
                     task_class=task_class,
                     agent=agent,
                     task_policy=task_policy,
+                    resolved_profile=resolved_profile,
                 ).encode("utf-8")
             )
             digest.update(b"\0")
@@ -3565,6 +3568,7 @@ async def _requested_capacity_queue_signature(
                                     Workspace.task_class,
                                     Workspace.agent,
                                     sql_cast(Workspace.task_policy, JSONB),
+                                    sql_cast(Workspace.resolved_profile, JSONB),
                                 ),
                                 String(),
                             )
@@ -3597,12 +3601,14 @@ def _requested_capacity_queue_digest_payload(
     task_class: str | None,
     agent: str | None,
     task_policy: Mapping[str, Any] | None,
+    resolved_profile: object,
 ) -> str:
     return json.dumps(
         {
             "agent": agent,
             "created_at": _json_datetime(created_at),
             "id": workspace_id,
+            "resolved_profile": resolved_profile,
             "task_class": task_class,
             "task_policy": dict(task_policy or {}),
         },

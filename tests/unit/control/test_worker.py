@@ -1041,6 +1041,73 @@ class TestRunOnce:
         assert before != after
 
     @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_changes_when_resolved_profile_changes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        queued_at = datetime(2026, 1, 1, tzinfo=UTC)
+        mutable_updated_at = datetime(2026, 1, 2, tzinfo=UTC)
+        anchor_updated_at = datetime(2026, 1, 5, tzinfo=UTC)
+
+        anchor_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-profile-anchor",
+            created_at=queued_at,
+        )
+        mutable_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-profile-mutable",
+            created_at=queued_at,
+        )
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == anchor_id)
+                .values(updated_at=anchor_updated_at)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == mutable_id)
+                .values(
+                    resolved_profile={"docker": {"mode": "host"}},
+                    updated_at=mutable_updated_at,
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            before = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == mutable_id)
+                .values(
+                    resolved_profile={"docker": {"mode": "dind"}},
+                    updated_at=mutable_updated_at,
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            after = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        assert before[:4] == after[:4]
+        assert before[0] == after[0] == 2
+        assert before[1] == after[1] == anchor_updated_at
+        assert before[2] == after[2] == queued_at
+        assert before != after
+
+    @pytest.mark.unit
     async def test_requested_capacity_queue_signature_sqlite_reads_queue_once(
         self,
     ) -> None:
@@ -1056,6 +1123,7 @@ class TestRunOnce:
                 "docs_task",
                 "codex",
                 {"scheduler": {"base_priority": 10}},
+                {"docker": {"mode": "host"}},
             ),
             (
                 "ws_zulu",
@@ -1064,6 +1132,7 @@ class TestRunOnce:
                 "test_task",
                 "gemini",
                 {"scheduler": {"base_priority": 20}},
+                {"docker": {"mode": "dind"}},
             ),
         ]
 
@@ -1100,7 +1169,15 @@ class TestRunOnce:
         )
 
         digest = hashlib.sha256()
-        for workspace_id, _updated_at, created_at, task_class, agent, task_policy in rows:
+        for (
+            workspace_id,
+            _updated_at,
+            created_at,
+            task_class,
+            agent,
+            task_policy,
+            resolved_profile,
+        ) in rows:
             digest.update(
                 worker_module._requested_capacity_queue_digest_payload(  # noqa: SLF001
                     workspace_id=workspace_id,
@@ -1108,6 +1185,7 @@ class TestRunOnce:
                     task_class=task_class,
                     agent=agent,
                     task_policy=task_policy,
+                    resolved_profile=resolved_profile,
                 ).encode("utf-8")
             )
             digest.update(b"\0")
