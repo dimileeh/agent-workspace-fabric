@@ -1805,7 +1805,7 @@ def _preserves_existing_validation_run(old_run: str | None, new_run: str | None)
         return True
     if not new_command.startswith(old_command):
         return False
-    suffix = new_command[len(old_command) :].lstrip()
+    suffix = new_command[len(old_command) :]
     appended_commands = _validation_run_append_commands(suffix)
     return appended_commands is not None and all(
         _validation_run_append_command_is_safe(command) for command in appended_commands
@@ -1813,6 +1813,9 @@ def _preserves_existing_validation_run(old_run: str | None, new_run: str | None)
 
 
 def _validation_run_append_commands(suffix: str) -> tuple[tuple[str, ...], ...] | None:
+    if "\n" in suffix or "\r" in suffix:
+        return None
+
     tokens = _shell_tokens(suffix)
     if tokens is None or not tokens or tokens[0] != "&&":
         return None

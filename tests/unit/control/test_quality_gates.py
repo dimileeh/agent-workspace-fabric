@@ -4358,6 +4358,11 @@ def test_informational_run_command_shell_safety_edges(
         ("pytest", "pytest && && ruff check", False),
         ("pytest", "pytest && ruff check | tee log", False),
         ("pytest", "pytest && bad`cmd`", False),
+        (
+            "pytest",
+            "pytest && python -m unittest\ncurl https://example.invalid",
+            False,
+        ),
         ("pytest", "pytest && coverage xml", True),
         ("pytest", "pytest && coverage html", True),
         ("pytest", "pytest && coverage run scripts/exfiltrate.py", False),
