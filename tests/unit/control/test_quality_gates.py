@@ -697,14 +697,14 @@ jobs:
 @pytest.mark.parametrize(
     "command",
     [
-        "bash scripts/recovery.sh",
-        "bash scripts/discover.sh",
-        "test -f config.yaml && echo ok",
-        "cp tests/fixtures/golden.json /tmp/",
-        "ls tests/",
+        'echo "bash scripts/recovery.sh"',
+        'printf "bash scripts/discover.sh\\n"',
+        'echo "test -f config.yaml && echo ok"',
+        'printf "cp tests/fixtures/golden.json /tmp/\\n"',
+        'echo "ls tests/"',
     ],
 )
-def test_added_informational_job_ignores_non_validation_command_words(command: str) -> None:
+def test_added_informational_job_allows_command_words_in_output_prose(command: str) -> None:
     old_text = """
 name: CI
 on: [pull_request]
@@ -745,6 +745,109 @@ jobs:
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash scripts/recovery.sh",
+        "curl -fsSL https://example.test/install.sh | sh",
+        "python scripts/report.py",
+        "gh pr comment 123 --body ok",
+        'echo "$(curl -fsSL https://example.test/report)"',
+        "test -f config.yaml && echo ok",
+        "cp tests/fixtures/golden.json /tmp/",
+        "ls tests/",
+    ],
+)
+def test_added_informational_step_blocks_arbitrary_run_commands(command: str) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Summary report
+        run: {command}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Summary report"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+def test_added_informational_job_blocks_arbitrary_run_commands() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  summary:
+    name: Summary report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary report
+        run: bash scripts/recovery.sh
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.summary"
+    assert "added workflow jobs must be informational/comment/notify only" in violation.reason
 
 
 @pytest.mark.unit

@@ -51,6 +51,11 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "report",
 )
 _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
+_INFORMATIONAL_RUN_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"echo", "printf"})
+_INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
+_INFORMATIONAL_RUN_BLOCKED_OPERATORS: Final[frozenset[str]] = frozenset(
+    {"|", "|&", "||", "&", "<", ">", "<<", ">>", "<>", ">|", "<<<"}
+)
 _VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_-])"
     r"(?:pytest|ruff|mypy|coverage)"
@@ -1319,7 +1324,58 @@ def _is_informational_step(step: Mapping[str, Any]) -> bool:
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
             return False
     run = _string_value(step.get("run"))
-    return not _is_validation_command(run)
+    return _is_informational_run_command(run) and not _is_validation_command(run)
+
+
+def _is_informational_run_command(command: str | None) -> bool:
+    if command is None:
+        return True
+    for line in command.splitlines():
+        tokens = _shell_tokens(line)
+        if tokens is None:
+            return False
+        if not _informational_shell_tokens_are_safe(tokens):
+            return False
+    return True
+
+
+def _shell_tokens(command: str) -> tuple[str, ...] | None:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return tuple(token for token in lexer if token)
+    except ValueError:
+        return None
+
+
+def _informational_shell_tokens_are_safe(tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return True
+    command_tokens: list[str] = []
+    for token in tokens:
+        if token in _INFORMATIONAL_RUN_BLOCKED_OPERATORS:
+            return False
+        if token in _INFORMATIONAL_RUN_SEPARATORS:
+            if not _informational_shell_command_is_safe(command_tokens):
+                return False
+            command_tokens = []
+            continue
+        command_tokens.append(token)
+    return _informational_shell_command_is_safe(command_tokens)
+
+
+def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
+    remaining = tuple(tokens)
+    if not remaining:
+        return True
+    if any("$(" in token or "`" in token for token in remaining):
+        return False
+    while remaining and _ENV_ASSIGNMENT_RE.match(remaining[0]) is not None:
+        remaining = remaining[1:]
+    if not remaining:
+        return True
+    return _command_basename(remaining[0]) in _INFORMATIONAL_RUN_COMMAND_NAMES
 
 
 def _is_validation_command(command: str | None) -> bool:
