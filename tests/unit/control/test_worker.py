@@ -6869,17 +6869,23 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert attach_calls == [workspace_id]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "workspace_status",
+        [WorkspaceStatus.running, WorkspaceStatus.pushing],
+    )
     async def test_preserved_active_pushed_branch_open_pr_attaches_one_monitor_after_restart(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        workspace_status: WorkspaceStatus,
     ) -> None:
+        compose_project_name = f"awf_preserved_pushed_branch_pr_{workspace_status.value}"
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
-            "preserved-pushed-branch-pr",
-            WorkspaceStatus.pushing,
-            compose_project_name="awf_preserved_pushed_branch_pr",
+            f"preserved-pushed-branch-pr-{workspace_status.value}",
+            workspace_status,
+            compose_project_name=compose_project_name,
             create_task_attempt=True,
         )
         branch_name = f"awf/{workspace_id}"
@@ -6903,7 +6909,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
             runtime_inspector=_RecordingRuntimeInspector(
-                {"awf_preserved_pushed_branch_pr": _live_agent_snapshot()}
+                {compose_project_name: _live_agent_snapshot()}
             ),
             runtime_cleaner=cleaner,
             open_pr_resolver=resolver,

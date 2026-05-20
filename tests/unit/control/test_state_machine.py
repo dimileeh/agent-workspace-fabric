@@ -38,6 +38,7 @@ class TestValidTransitions:
             (WorkspaceStatus.ready, WorkspaceStatus.cancelled),
             (WorkspaceStatus.ready, WorkspaceStatus.destroying),
             (WorkspaceStatus.running, WorkspaceStatus.validating),
+            (WorkspaceStatus.running, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.running, WorkspaceStatus.failed),
             (WorkspaceStatus.running, WorkspaceStatus.cancelled),
             # Worker-restart salvage can rewind an abandoned active phase so

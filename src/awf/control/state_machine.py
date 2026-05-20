@@ -38,6 +38,9 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
     WorkspaceStatus.running: frozenset(
         {
             WorkspaceStatus.validating,
+            # Worker-restart salvage can attach an already-open PR monitor for
+            # preserved active work that reached PR handoff before restart.
+            WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
