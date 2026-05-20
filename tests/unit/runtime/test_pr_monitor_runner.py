@@ -279,6 +279,43 @@ async def test_git_show_text_marks_worktree_safe_directory(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: path 'pyproject.toml' does not exist in 'HEAD'",
+        "fatal: Path '.github/workflows/ci.yml' exists on disk, but not in 'HEAD'",
+    ],
+)
+async def test_git_show_text_returns_none_for_missing_path(
+    tmp_path: Path,
+    stderr: str,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr=stderr)
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+
+    show_text = await runner._git_show_text(worktree_path=worktree, refspec="HEAD:pyproject.toml")
+
+    assert show_text is None
+
+
+@pytest.mark.unit
+async def test_git_show_text_raises_for_unexpected_git_failure(tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await runner._git_show_text(worktree_path=worktree, refspec="bad-ref:pyproject.toml")
+
+    message = str(exc_info.value)
+    assert "bad-ref:pyproject.toml" in message
+    assert "bad revision" in message
+
+
+@pytest.mark.unit
 async def test_changed_paths_between_ref_and_head_includes_rename_sources(
     tmp_path: Path,
 ) -> None:

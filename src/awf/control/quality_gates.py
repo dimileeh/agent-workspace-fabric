@@ -53,7 +53,7 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
 _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
 _VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_-])"
-    r"(?:pytest|ruff|mypy|coverage|cov)"
+    r"(?:pytest|ruff|mypy|coverage)"
     r"(?![A-Za-z0-9_-])"
 )
 _BROAD_VALIDATION_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
@@ -678,7 +678,7 @@ def _dependency_name(requirement: str) -> str | None:
     match = re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)
     if match is None:
         return None
-    return match.group(1).replace("_", "-").lower()
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
 
 
 def _pyproject_unknown_change_violations(

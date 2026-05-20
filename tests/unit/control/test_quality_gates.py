@@ -177,6 +177,40 @@ dev = [
 
 
 @pytest.mark.unit
+def test_pyproject_dependency_pep503_normalization_prevents_removed_violation() -> None:
+    old_text = """
+[project]
+name = "demo"
+dependencies = [
+    "zope.interface>=6.0.0",
+]
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+dependencies = [
+    "zope-interface>=6.0.0",
+]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "project.dependencies"
+    assert violations[0].reason == "dependency changed: zope-interface"
+
+
+@pytest.mark.unit
 def test_pyproject_duplicate_dependency_entry_deletion_is_blocked() -> None:
     old_text = """
 [project]
@@ -565,6 +599,46 @@ jobs:
     assert len(violations) == 1
     assert violations[0].section == "jobs.tests.steps.Post coverage comment.run"
     assert "introducing validation command is blocked" in violations[0].reason
+
+
+@pytest.mark.unit
+def test_workflow_informational_step_allows_cov_shell_variable_update() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary report
+        run: echo pending
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary report
+        run: |
+          COV=85
+          echo "$COV"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
 
 
 @pytest.mark.unit
