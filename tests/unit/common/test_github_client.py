@@ -24,6 +24,7 @@ from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
     fetch_pull_request_adoption_metadata,
+    list_open_pull_requests_for_branch,
     parse_github_pull_request_url,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
@@ -361,6 +362,35 @@ class TestFetchPullRequestAdoptionMetadata:
 
         assert excinfo.value.reason_code == "PR_METADATA_INVALID"
         assert expected_field in excinfo.value.message
+
+
+class TestListOpenPullRequestsForBranch:
+    @pytest.mark.unit
+    async def test_non_string_url_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": None,
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                    }
+                ]
+            ),
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "url" in excinfo.value.message
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────

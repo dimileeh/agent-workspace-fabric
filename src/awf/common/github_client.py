@@ -672,14 +672,17 @@ def _parse_branch_open_pull_request(
         )
     try:
         number = int(payload["number"])
-        url = str(payload["url"])
+        raw_url = payload["url"]
+        if not isinstance(raw_url, str):
+            raise TypeError("url")
+        url = raw_url.strip()
     except (KeyError, TypeError, ValueError) as exc:
         raise PullRequestMetadataError(
             reason_code="OPEN_PR_LOOKUP_INVALID",
             message=f"gh pr list payload missing required field: {exc}",
             detail={"repo_slug": repo.slug(), "branch_name": branch_name},
         ) from exc
-    if number <= 0 or not url.strip():
+    if number <= 0 or not url:
         raise PullRequestMetadataError(
             reason_code="OPEN_PR_LOOKUP_INVALID",
             message="gh pr list payload has invalid number or URL.",
