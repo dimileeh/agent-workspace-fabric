@@ -1066,6 +1066,21 @@ class TestRunOnce:
             peak_memory_gb=0.0,
         )
         assert await worker.run_once() == 0
+        third_active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "newer-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            third_active_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=1.0,
+            peak_memory_gb=0.0,
+        )
+        assert await worker.run_once() == 0
 
         async with session_factory() as s:
             decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
@@ -1073,11 +1088,16 @@ class TestRunOnce:
         deferred_decisions = [
             decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
         ]
-        assert len(deferred_decisions) == 2
+        assert len(deferred_decisions) == 3
         latest_blockers = deferred_decisions[0].resource_summary["blockers"]
-        previous_blockers = deferred_decisions[1].resource_summary["blockers"]
-        assert latest_blockers[0]["allocated"] == 7.0
-        assert previous_blockers[0]["allocated"] == 6.0
+        prior_blockers = deferred_decisions[1].resource_summary["blockers"]
+        initial_blockers = deferred_decisions[2].resource_summary["blockers"]
+        assert latest_blockers[0]["allocated"] == 8.0
+        assert prior_blockers[0]["allocated"] == 7.0
+        assert initial_blockers[0]["allocated"] == 6.0
+        latest_previous = deferred_decisions[0].resource_summary["previous"]
+        assert latest_previous["blockers"][0]["allocated"] == 7.0
+        assert "previous" not in latest_previous
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_ignores_allocated_capacity_on_other_nodes(

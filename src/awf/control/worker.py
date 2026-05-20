@@ -3065,7 +3065,9 @@ async def _record_capacity_queue_decision(
         blockers=blockers,
     )
     if latest_decision is not None:
-        resource_summary["previous"] = dict(latest_decision.resource_summary)
+        resource_summary["previous"] = _capacity_previous_resource_summary(
+            latest_decision.resource_summary
+        )
     await queue_repo.create(
         workspace_id=workspace.id,
         task_id=attempt.task_id,
@@ -3103,6 +3105,14 @@ def _capacity_deferred_decision_matches(
     return _capacity_blocker_signatures_from_summary(
         decision.resource_summary
     ) == _capacity_blocker_signatures(blockers)
+
+
+def _capacity_previous_resource_summary(
+    resource_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    previous = dict(resource_summary)
+    previous.pop("previous", None)
+    return previous
 
 
 def _capacity_blocker_signatures(
