@@ -1082,13 +1082,12 @@ def _env_assignment_key_identity(key: str) -> str:
 
 
 def _env_assignment_line_with_key(line: str, key: str) -> str:
-    """Return an env assignment line with the key spelling replaced."""
+    """Return a Compose env assignment line with the key spelling replaced."""
 
     match = _ENV_ASSIGNMENT_RE.match(line)
     if match is None:
         return line
-    start, end = match.span("key")
-    return f"{line[:start]}{key}{line[end:]}"
+    return f"{key}{line[match.end('key') :]}"
 
 
 def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
@@ -1256,7 +1255,9 @@ def _merge_env_seed_contents_with_overlay_keys(
         key = _env_assignment_key(line)
         if key is not None:
             normalized_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
-            overlay_assignments[_env_assignment_key_identity(key)] = normalized_line
+            overlay_assignments[_env_assignment_key_identity(key)] = _env_assignment_line_with_key(
+                normalized_line, key
+            )
 
     seed_keys: set[str] = set()
     for line in seed_lines:
@@ -1305,7 +1306,7 @@ def _merge_env_seed_contents_with_overlay_keys(
                 seed_leading_context[key_identity] = context
             else:
                 overlay_only_lines.extend(context)
-                overlay_only_lines.append(line)
+                overlay_only_lines.append(_env_assignment_line_with_key(line, key))
                 overlay_only_keys.append(key)
         else:
             if (

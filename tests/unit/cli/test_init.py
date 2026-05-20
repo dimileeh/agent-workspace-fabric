@@ -2562,6 +2562,49 @@ def test_merge_env_seed_matches_overlay_keys_case_insensitively() -> None:
 
 
 @pytest.mark.unit
+def test_merge_env_seed_strips_export_prefix_from_overlay_assignments() -> None:
+    """Write shell-compatible root env assignments as Compose env assignments."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=compose-example",
+                    "AWF_COMPOSE_ONLY=compose-default",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Existing token override",
+                    "export awf_api_token=migrated-token",
+                    "# Operator root-only key",
+                    "export AWF_ROOT_ONLY=root-value",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ("AWF_ROOT_ONLY",)
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Existing token override",
+                "AWF_API_TOKEN=migrated-token",
+                "AWF_COMPOSE_ONLY=compose-default",
+                "# Operator root-only key",
+                "AWF_ROOT_ONLY=root-value",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_normalizes_overlay_assignment_without_trailing_newline() -> None:
     """A root overlay EOF assignment must not absorb the following seed line."""
     from awf.cli import main as cli_main
