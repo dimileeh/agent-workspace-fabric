@@ -21,7 +21,6 @@ from awf.db.models import Operation, ResourceReservation, Workspace, WorkspaceEv
 from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     ProviderModelCircuitBreakerRepository,
-    ResourceReservationRepository,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -1230,7 +1229,7 @@ async def _reserved_resources_for_session(
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await ResourceReservationRepository(session).active_latest_totals(node_id=node_id)
+    persisted = await _active_latest_totals_for_workspace_scope(session, node_id=node_id)
     defaulted_dind_slots = await _defaulted_dind_slots_for_session(session, node_id=node_id)
     return _reserved_resources_from_totals(
         persisted,
@@ -1247,7 +1246,8 @@ async def _allocated_resources_for_session(
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await ResourceReservationRepository(session).active_latest_totals(
+    persisted = await _active_latest_totals_for_workspace_scope(
+        session,
         statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
         node_id=node_id,
     )
@@ -1262,6 +1262,94 @@ async def _allocated_resources_for_session(
         resource_defaults=resource_defaults,
         defaulted_dind_slots=defaulted_dind_slots,
     )
+
+
+async def _active_latest_totals_for_workspace_scope(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+    node_id: str | None = None,
+) -> dict[str, float | int]:
+    """Sum latest active reservations for workspaces routed to this metrics scope."""
+
+    if statuses is None:
+        status_filter = ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
+    else:
+        status_values = tuple(
+            status.value if isinstance(status, WorkspaceStatus) else str(status)
+            for status in statuses
+        )
+        if not status_values:
+            return _empty_resource_reservation_totals()
+        status_filter = Workspace.status.in_(status_values)
+
+    latest_active_reservations = (
+        select(
+            ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.steady_cpu.label("steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            ResourceReservation.disk_mb.label("disk_mb"),
+            ResourceReservation.dind_slots.label("dind_slots"),
+            func.row_number()
+            .over(
+                partition_by=ResourceReservation.workspace_id,
+                order_by=(
+                    ResourceReservation.reserved_at.desc(),
+                    ResourceReservation.id.desc(),
+                ),
+            )
+            .label("reservation_rank"),
+        )
+        .where(ResourceReservation.released_at.is_(None))
+        .subquery()
+    )
+    stmt = (
+        select(
+            func.count(latest_active_reservations.c.workspace_id),
+            func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.steady_memory_gb), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.peak_memory_gb), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
+            func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
+        )
+        .select_from(Workspace)
+        .join(
+            latest_active_reservations,
+            and_(
+                latest_active_reservations.c.workspace_id == Workspace.id,
+                latest_active_reservations.c.reservation_rank == 1,
+            ),
+        )
+        .where(status_filter)
+    )
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
+
+    row = (await session.execute(stmt)).one()
+    return {
+        "workspace_count": int(row[0] or 0),
+        "steady_cpu": float(row[1] or 0.0),
+        "steady_memory_gb": float(row[2] or 0.0),
+        "peak_cpu": float(row[3] or 0.0),
+        "peak_memory_gb": float(row[4] or 0.0),
+        "disk_mb": int(row[5] or 0),
+        "dind_slots": int(row[6] or 0),
+    }
+
+
+def _empty_resource_reservation_totals() -> dict[str, float | int]:
+    return {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
 
 
 def _reserved_resources_from_totals(
@@ -1354,7 +1442,8 @@ async def _capacity_queue_summary(
     )
     queued_count = await session.scalar(select(func.count(Workspace.id)).where(requested_filter))
     requested_count = int(queued_count or 0)
-    planned_totals = await ResourceReservationRepository(session).active_latest_totals(
+    planned_totals = await _active_latest_totals_for_workspace_scope(
+        session,
         statuses=(WorkspaceStatus.requested,),
         node_id=node_id,
     )
