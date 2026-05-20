@@ -1870,6 +1870,10 @@ jobs:
         'echo "${VAR:0:4}"',
         'printf "%s\\n" "$AWF_API_TOKEN"',
         'echo "token=$GH_TOKEN"',
+        'echo "${{ secrets.GITHUB_TOKEN }}"',
+        "echo ${{ secrets.GITHUB_TOKEN }}",
+        'printf "%s\\n" "${{ env.GH_TOKEN }}"',
+        'echo "${{ github.token }}"',
     ],
 )
 def test_added_informational_step_blocks_secret_bearing_expansions(
@@ -4065,6 +4069,12 @@ jobs:
         ("echo ${TOKEN}", False),
         ("printf %s $PASSWORD", False),
         ("printf %s $PATH", True),
+        ('echo "${{ github.sha }}"', True),
+        ('printf "%s\\n" "${{ steps.test.outcome }}"', True),
+        ('echo "${{ secrets.GITHUB_TOKEN }}"', False),
+        ("echo ${{ secrets.GITHUB_TOKEN }}", False),
+        ('echo "${{ github.token }}"', False),
+        ('echo "${{ github.event.pull_request.title }}"', False),
         ("echo `date`", False),
         ("echo $(date)", False),
         ("echo ok | tee log", False),

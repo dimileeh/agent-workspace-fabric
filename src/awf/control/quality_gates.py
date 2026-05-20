@@ -103,6 +103,10 @@ _COMMAND_PREFIX_WORDS: Final[frozenset[str]] = frozenset({"command", "sudo", "ti
 _ENV_ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _BRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$\{(?!\{)")
 _UNBRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(r"\$\{\{\s*(?P<expression>.*?)\s*\}\}")
+_SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(
+    r"(?:github\.sha|steps\.[A-Za-z_][A-Za-z0-9_-]*\.outcome)"
+)
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
     re.IGNORECASE,
@@ -1606,12 +1610,27 @@ def _informational_shell_command_is_safe(tokens: Sequence[str]) -> bool:
 
 
 def _has_unsafe_informational_parameter_expansion(tokens: Sequence[str]) -> bool:
+    if _has_unsafe_github_actions_expression(tokens):
+        return True
     for token in tokens:
         if _BRACED_SHELL_PARAMETER_RE.search(token) is not None:
             return True
         for match in _UNBRACED_SHELL_PARAMETER_RE.finditer(token):
             if _SENSITIVE_ENV_NAME_RE.search(match.group(1)) is not None:
                 return True
+    return False
+
+
+def _has_unsafe_github_actions_expression(tokens: Sequence[str]) -> bool:
+    command_fragment = " ".join(tokens)
+    if "${{" not in command_fragment:
+        return False
+    if "${{" in _GITHUB_ACTIONS_EXPRESSION_RE.sub("", command_fragment):
+        return True
+    for match in _GITHUB_ACTIONS_EXPRESSION_RE.finditer(command_fragment):
+        expression = " ".join(match.group("expression").split())
+        if _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE.fullmatch(expression) is None:
+            return True
     return False
 
 
