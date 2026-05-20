@@ -27,7 +27,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
@@ -313,7 +313,7 @@ class _OpenPullRequestSummary:
     pr_number: int
     head_ref: str | None
     head_sha: str | None
-    head_repo_slug: str | None
+    head_repo_slug: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -1663,7 +1663,10 @@ class ControlWorker:
                 return
             if not await self._has_operator_refresh_after_latest_preservation(candidate):
                 await self._record_preserved_active_execution_after_restart(candidate, snapshot)
-                await self._recover_preserved_active_execution(candidate)
+                await self._recover_preserved_active_execution(
+                    candidate,
+                    record_lineage_blocked_before_grace=False,
+                )
                 return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             if not await self._record_stale_active_execution_detected(
@@ -1676,6 +1679,8 @@ class ControlWorker:
     async def _recover_preserved_active_execution(
         self,
         candidate: _ActiveExecutionCandidate,
+        *,
+        record_lineage_blocked_before_grace: bool = True,
     ) -> bool:
         if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
             return False
@@ -1829,6 +1834,16 @@ class ControlWorker:
             else None
         )
         if failed_branch_lookup is not None:
+            if not preservation_expired:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    branch_pr_lookup=failed_branch_lookup.payload,
+                )
+                return True
             await self._record_preserved_active_operator_required(
                 candidate,
                 preserved_event=preserved_event,
@@ -1844,12 +1859,22 @@ class ControlWorker:
                 "missing_task_attempt_lineage" if attempt_id is None else "missing_task_lineage"
             )
             if preservation_expired:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    preservation_expired=True,
+                )
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
                     preserved_event=preserved_event,
                     reason=missing_lineage_reason,
                 )
                 return False
+            if not record_lineage_blocked_before_grace:
+                return True
             await self._record_preserved_active_salvage_blocked(
                 candidate,
                 preserved_event=preserved_event,
@@ -2581,6 +2606,8 @@ class ControlWorker:
         reason: str,
         attempt_id: str | None,
         task_id: str | None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
+        preservation_expired: bool = False,
     ) -> None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -2609,6 +2636,13 @@ class ControlWorker:
                 ws.execution_claim_expires_at = None
             ws.subphase = _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE
             await repo.advance_workspace_version(ws)
+            extra: dict[str, Any] = {
+                "blocked_reason": reason,
+                "source_workspace_id": ws.id,
+                "preservation_expired": preservation_expired,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
@@ -2619,11 +2653,7 @@ class ControlWorker:
                 task_id=task_id,
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
-                extra={
-                    "blocked_reason": reason,
-                    "source_workspace_id": ws.id,
-                    "preservation_expired": False,
-                },
+                extra=extra,
             )
             await repo.add_event(
                 ws,
@@ -2832,8 +2862,10 @@ class ControlWorker:
         session: AsyncSession,
         workspace_id: str,
     ) -> bool:
+        recovery_mode = Operation.payload["recovery_mode"].as_string()
         stmt = (
-            select(Operation.payload)
+            select(literal(1))
+            .select_from(Operation)
             .where(
                 Operation.workspace_id == workspace_id,
                 Operation.type == OperationType.validate.value,
@@ -2843,14 +2875,15 @@ class ControlWorker:
                         OperationStatus.running.value,
                     )
                 ),
+                Operation.payload["source"].as_string() == _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                recovery_mode.in_(("validate_only", "rebase_only")),
+                Operation.payload["reason_code"].as_string()
+                == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
             )
-            .order_by(Operation.created_at.asc(), Operation.id.asc())
-            .limit(100)
+            .limit(1)
+            .exists()
         )
-        return any(
-            _is_active_execution_salvage_validation_payload(payload)
-            for payload in (await session.execute(stmt)).scalars()
-        )
+        return (await session.execute(select(stmt))).scalar_one()
 
     async def _latest_operator_refresh_requested_at(
         self,
@@ -3073,6 +3106,15 @@ class ControlWorker:
                 state="ambiguous",
                 reason="detached_head",
                 worktree_path=str(worktree_path),
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+        if expected_branch_name is None:
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="missing_branch_name",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
                 expected_branch_name=expected_branch_name,
                 base_commit=base_commit,
             )
