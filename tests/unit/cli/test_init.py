@@ -2621,6 +2621,22 @@ def test_merge_env_seed_normalizes_overlay_assignment_without_trailing_newline()
 
 
 @pytest.mark.unit
+def test_merge_env_seed_normalizes_overlay_only_assignment_without_trailing_newline() -> None:
+    """A root-only overlay EOF assignment should keep the merged env newline."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        b"AWF_API_TOKEN=compose-example\n",
+        b"AWF_ROOT_ONLY=root-value",
+    )
+
+    assert overlay_only_keys == ("AWF_ROOT_ONLY",)
+    assert merged_contents.decode("utf-8") == (
+        "AWF_API_TOKEN=compose-example\nAWF_ROOT_ONLY=root-value\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_appends_trailing_shared_overlay_context_after_seed_lines() -> None:
     """Overlay EOF comments for shared keys belong at the merged file tail."""
     from awf.cli import main as cli_main

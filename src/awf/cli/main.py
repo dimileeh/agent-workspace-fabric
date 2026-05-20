@@ -1312,7 +1312,8 @@ def _merge_env_seed_contents_with_overlay_keys(
                 seed_leading_context[key_identity] = context
             else:
                 overlay_only_lines.extend(context)
-                overlay_only_lines.append(_env_assignment_line_with_key(line, key))
+                normalized_only_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
+                overlay_only_lines.append(_env_assignment_line_with_key(normalized_only_line, key))
                 overlay_only_keys.append(key)
         else:
             if (

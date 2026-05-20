@@ -987,6 +987,90 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_compose_interpolation_cache_allows_cached_read_during_slow_miss(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import environment as service_environment
+
+    cached_compose_file = tmp_path / "cached-compose.yml"
+    cached_compose_file.write_text(
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_CACHED_TOKEN:?set AWF_CACHED_TOKEN}"
+""",
+        encoding="utf-8",
+    )
+    miss_compose_file = tmp_path / "miss-compose.yml"
+    miss_compose_file.write_text(
+        """
+services:
+  api:
+    environment:
+      TOKEN: "${AWF_MISS_TOKEN:?set AWF_MISS_TOKEN}"
+""",
+        encoding="utf-8",
+    )
+    original_safe_load = service_environment.yaml.safe_load
+    parse_started = threading.Event()
+    release_parse = threading.Event()
+    cached_read_finished = threading.Event()
+    errors: list[BaseException] = []
+    cached_results: list[tuple[str, ...]] = []
+    miss_results: list[tuple[str, ...]] = []
+
+    def _safe_load(payload: str) -> object:
+        if "AWF_MISS_TOKEN" in payload:
+            parse_started.set()
+            if not release_parse.wait(timeout=2):
+                raise AssertionError("slow compose parse was not released")
+        return original_safe_load(payload)
+
+    def _miss_worker() -> None:
+        try:
+            miss_results.append(service_environment.compose_interpolation_keys(miss_compose_file))
+        except BaseException as exc:  # pragma: no cover - re-raised by the main thread
+            errors.append(exc)
+
+    def _cached_read_worker() -> None:
+        try:
+            cached_results.append(
+                service_environment.compose_interpolation_keys(cached_compose_file)
+            )
+            cached_read_finished.set()
+        except BaseException as exc:  # pragma: no cover - re-raised by the main thread
+            errors.append(exc)
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    try:
+        assert service_environment.compose_interpolation_keys(cached_compose_file) == (
+            "AWF_CACHED_TOKEN",
+        )
+        monkeypatch.setattr(service_environment.yaml, "safe_load", _safe_load)
+
+        miss_thread = threading.Thread(target=_miss_worker)
+        cached_read_thread = threading.Thread(target=_cached_read_worker)
+        try:
+            miss_thread.start()
+            assert parse_started.wait(timeout=2)
+            cached_read_thread.start()
+            assert cached_read_finished.wait(timeout=1)
+        finally:
+            release_parse.set()
+            miss_thread.join(timeout=2)
+            cached_read_thread.join(timeout=2)
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+
+    assert not miss_thread.is_alive()
+    assert not cached_read_thread.is_alive()
+    assert not errors
+    assert cached_results == [("AWF_CACHED_TOKEN",)]
+    assert miss_results == [("AWF_MISS_TOKEN",)]
+
+
+@pytest.mark.unit
 def test_service_logs_compose_interpolation_cache_serializes_concurrent_misses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -31,6 +31,7 @@ _COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[tuple[str, str, int], tuple[str, 
     OrderedDict()
 )
 _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK = threading.Lock()
+_COMPOSE_INTERPOLATION_KEYS_INFLIGHT: dict[tuple[str, str, int], threading.Event] = {}
 
 
 def env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
@@ -174,25 +175,50 @@ def _cached_compose_interpolation_keys(
     """Return cached Compose interpolation keys for one file version."""
 
     cache_key = (_compose_file, contents_digest, contents_size)
+    while True:
+        with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+            cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
+            if cached is not None:
+                _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
+                return cached
+            inflight = _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key] = inflight
+                break
+        inflight.wait()
+
+    parsed = False
+    try:
+        keys = _parse_compose_interpolation_keys(contents)
+        parsed = True
+    finally:
+        if not parsed:
+            with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
+                if _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key) is inflight:
+                    del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
+                inflight.set()
+
     with _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK:
-        cached = _COMPOSE_INTERPOLATION_KEYS_CACHE.get(cache_key)
-        if cached is not None:
-            _COMPOSE_INTERPOLATION_KEYS_CACHE.move_to_end(cache_key)
-            return cached
-
-        try:
-            payload: object = yaml.safe_load(contents)
-        except yaml.YAMLError:
-            keys: tuple[str, ...] = ()
-        else:
-            collected_keys: set[str] = set()
-            _collect_compose_interpolation_keys(payload, collected_keys)
-            keys = tuple(sorted(collected_keys))
-
         _COMPOSE_INTERPOLATION_KEYS_CACHE[cache_key] = keys
         if len(_COMPOSE_INTERPOLATION_KEYS_CACHE) > _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE:
             _COMPOSE_INTERPOLATION_KEYS_CACHE.popitem(last=False)
-        return keys
+        if _COMPOSE_INTERPOLATION_KEYS_INFLIGHT.get(cache_key) is inflight:
+            del _COMPOSE_INTERPOLATION_KEYS_INFLIGHT[cache_key]
+        inflight.set()
+    return keys
+
+
+def _parse_compose_interpolation_keys(contents: str) -> tuple[str, ...]:
+    """Parse Compose YAML contents and collect interpolation variable names."""
+
+    try:
+        payload: object = yaml.safe_load(contents)
+    except yaml.YAMLError:
+        return ()
+    collected_keys: set[str] = set()
+    _collect_compose_interpolation_keys(payload, collected_keys)
+    return tuple(sorted(collected_keys))
 
 
 def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
