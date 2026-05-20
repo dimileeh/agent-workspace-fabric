@@ -105,7 +105,14 @@ _BRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$\{(?!\{)")
 _UNBRACED_SHELL_PARAMETER_RE: Final = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(r"\$\{\{\s*(?P<expression>.*?)\s*\}\}")
 _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(
-    r"(?:github\.sha|steps\.[A-Za-z_][A-Za-z0-9_-]*\.outcome)"
+    r"(?:"
+    r"github\.(?:sha|run_id|run_number|run_attempt|event_name|repository|server_url|actor|"
+    r"triggering_actor|job|action)"
+    r"|github\.event\.pull_request\.(?:number|head\.sha|base\.ref)"
+    r"|steps\.[A-Za-z_][A-Za-z0-9_-]*\.(?:outcome|conclusion|outputs\.[A-Za-z_][A-Za-z0-9_-]*)"
+    r"|needs\.[A-Za-z_][A-Za-z0-9_-]*\.(?:result|outputs\.[A-Za-z_][A-Za-z0-9_-]*)"
+    r"|env\.[A-Za-z_][A-Za-z0-9_]*"
+    r")"
 )
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
@@ -1629,9 +1636,24 @@ def _has_unsafe_github_actions_expression(tokens: Sequence[str]) -> bool:
         return True
     for match in _GITHUB_ACTIONS_EXPRESSION_RE.finditer(command_fragment):
         expression = " ".join(match.group("expression").split())
-        if _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE.fullmatch(expression) is None:
+        if not _is_safe_informational_github_actions_expression(expression):
             return True
     return False
+
+
+def _is_safe_informational_github_actions_expression(expression: str) -> bool:
+    if _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE.fullmatch(expression) is None:
+        return False
+    if expression.startswith("env."):
+        return not _is_sensitive_informational_expression_name(expression.removeprefix("env."))
+    if ".outputs." in expression:
+        output_name = expression.rsplit(".outputs.", maxsplit=1)[1]
+        return not _is_sensitive_informational_expression_name(output_name)
+    return True
+
+
+def _is_sensitive_informational_expression_name(name: str) -> bool:
+    return _SENSITIVE_ENV_NAME_RE.search(name.replace("-", "_")) is not None
 
 
 def _is_validation_command(command: str | None) -> bool:

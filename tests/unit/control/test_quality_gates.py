@@ -1874,9 +1874,63 @@ jobs:
         "echo ${{ secrets.GITHUB_TOKEN }}",
         'printf "%s\\n" "${{ env.GH_TOKEN }}"',
         'echo "${{ github.token }}"',
+        'echo "${{ steps.test.outputs.gh_token }}"',
+        'echo "${{ needs.validation.outputs.secret }}"',
     ],
 )
 def test_added_informational_step_blocks_secret_bearing_expansions(
+    command: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Summary report
+        run: {command}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.Summary report"
+    assert "added workflow steps must be informational/comment/notify only" in violation.reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "${{ github.event.pull_request.title }}"',
+        'echo "${{ github.event.pull_request.head.ref }}"',
+    ],
+)
+def test_added_informational_step_blocks_untrusted_github_event_expressions(
     command: str,
 ) -> None:
     old_text = """
@@ -2069,7 +2123,13 @@ jobs:
     "command",
     [
         'echo "Tests passed on ${{ github.sha }}"',
+        'echo "Run ${{ github.run_id }} passed for PR ${{ github.event.pull_request.number }}"',
         'printf "%s\\n" "${{ steps.test.outcome }}"',
+        'printf "%s\\n" "${{ steps.test.conclusion }}"',
+        'printf "%s\\n" "${{ steps.test.outputs.result }}"',
+        'printf "%s\\n" "${{ needs.validation.result }}"',
+        'printf "%s\\n" "${{ needs.validation.outputs.summary }}"',
+        'printf "%s\\n" "${{ env.CI_SUMMARY }}"',
     ],
 )
 def test_added_informational_step_allows_github_actions_expression_echo(
