@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
@@ -160,6 +161,7 @@ _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE = "workspace.active_execution_salva
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
 _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {
         TaskKind.monitor_release_pr.value,
@@ -1757,7 +1759,9 @@ class ControlWorker:
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
                 return True
 
-            attach_existing_pr_monitor = bool(ws.pr_url)
+            if ws.pr_url and ws.pr_number is None:
+                ws.pr_number = _extract_pr_number(ws.pr_url)
+            attach_existing_pr_monitor = bool(ws.pr_url and ws.pr_number is not None)
             branch_recovery_context: (
                 tuple[
                     str,
@@ -2100,13 +2104,15 @@ class ControlWorker:
             claim_cutoff = datetime.now(UTC)
             if not _execution_claim_is_stale(ws, claim_cutoff):
                 return
-            if open_pr is not None and not ws.pr_url:
+            if open_pr is not None and (not ws.pr_url or ws.pr_number is None):
                 ws.pr_url = open_pr.pr_url
                 ws.pr_number = open_pr.pr_number
                 ws.remote_push_branch = open_pr.head_ref or ws.remote_push_branch or ws.branch_name
                 if open_pr.head_sha:
                     ws.monitor_last_commit_sha = open_pr.head_sha
-            if not ws.pr_url:
+            if ws.pr_url and ws.pr_number is None:
+                ws.pr_number = _extract_pr_number(ws.pr_url)
+            if not ws.pr_url or ws.pr_number is None:
                 return
             if await self._has_current_salvage_event(
                 session,
@@ -4663,6 +4669,14 @@ def _expected_open_pr_head_repo_slug(repo_url: str) -> str | None:
         return RepoRef.from_url(repo_url).slug()
     except ValueError:
         return None
+
+
+def _extract_pr_number(pr_url: str) -> int | None:
+    match = _PR_NUMBER_RE.search(pr_url)
+    if match is None:
+        return None
+    pr_number = int(match.group(1))
+    return pr_number if pr_number > 0 else None
 
 
 def _metadata_value(metadata: object, *names: str) -> object:
