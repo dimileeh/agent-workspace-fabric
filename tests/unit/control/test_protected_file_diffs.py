@@ -47,6 +47,7 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
             "fatal: path '.github/workflows/ci.yml' does not exist "
             "(neither on disk nor in the index)"
         ),
+        "fatal: path missing",
     ],
 )
 async def test_git_show_text_returns_none_for_missing_path(

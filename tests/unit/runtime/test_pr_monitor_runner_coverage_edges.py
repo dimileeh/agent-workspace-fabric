@@ -173,10 +173,6 @@ def _queue_protected_workflow_diff(
 ) -> None:
     cmd.queue_result(returncode=0, stdout=old_text)
     cmd.queue_result(returncode=0, stdout=new_text)
-    cmd.queue_result(
-        returncode=0,
-        stdout="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n",
-    )
 
 
 class _FailingLogSink:
@@ -4289,7 +4285,7 @@ async def test_unpushed_commit_protected_scope_detects_rename_source(
 
     assert len(violations) == 1
     assert violations[0].path == ".github/workflows/ci.yml"
-    assert "could not read old and new workflow content" in violations[0].reason
+    assert "workflow file deleted outside declared owned_paths" in violations[0].reason
     assert _git_worktree_command(
         worktree,
         "show",
