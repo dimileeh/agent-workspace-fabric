@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -46,8 +47,28 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
 _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset({"name", "runs-on", "steps"})
 _VALIDATION_COMMAND_TOKEN_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_-])"
-    r"(?:pytest|ruff|mypy|coverage|cov|lint|build|deploy|publish|release)"
+    r"(?:pytest|ruff|mypy|coverage|cov)"
     r"(?![A-Za-z0-9_-])"
+)
+_BROAD_VALIDATION_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
+    {"build", "lint", "deploy", "publish", "release"}
+)
+_BROAD_VALIDATION_SCRIPT_STEMS: Final[frozenset[str]] = frozenset(
+    {"build", "lint", "deploy", "publish", "release"}
+)
+_SHELL_SEGMENT_SPLIT_RE: Final = re.compile(r"(?:&&|\|\||;|\n)")
+_COMMAND_PREFIX_WORDS: Final[frozenset[str]] = frozenset({"command", "sudo", "time"})
+_ENV_ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_PACKAGE_MANAGER_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
+    {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-c", "-w"}
+)
+_SCRIPT_SUFFIXES: Final[tuple[str, ...]] = (
+    ".bash",
+    ".fish",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".zsh",
 )
 _VALIDATION_TEST_COMMAND_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_./-])"
@@ -1139,7 +1160,7 @@ def _workflow_existing_step_violations(
                     reason="workflow validation command introduced; introducing validation command is blocked",
                 )
             )
-        elif not _is_comment_or_notify_step(new_step):
+        elif not (_is_comment_or_notify_step(new_step) or _is_informational_step(new_step)):
             violations.append(
                 _violation(
                     path=path,
@@ -1268,7 +1289,155 @@ def _is_validation_command(command: str | None) -> bool:
         or _VALIDATION_COMMAND_TOKEN_RE.search(normalized) is not None
         or _VALIDATION_TEST_COMMAND_RE.search(normalized) is not None
         or _VALIDATION_UNITTEST_COMMAND_RE.search(normalized) is not None
+        or _has_broad_validation_command_invocation(normalized)
     )
+
+
+def _has_broad_validation_command_invocation(command: str) -> bool:
+    for segment in _SHELL_SEGMENT_SPLIT_RE.split(command):
+        words = _shell_words(segment)
+        if _words_start_broad_validation_command(words):
+            return True
+    return False
+
+
+def _shell_words(segment: str) -> tuple[str, ...]:
+    stripped = segment.strip()
+    if not stripped:
+        return ()
+    try:
+        words = shlex.split(stripped, comments=False, posix=True)
+    except ValueError:
+        words = stripped.split()
+    return tuple(word for word in words if word)
+
+
+def _words_start_broad_validation_command(words: Sequence[str]) -> bool:
+    command_words = _strip_shell_command_prefixes(words)
+    if not command_words:
+        return False
+    command = command_words[0]
+    command_name = _command_basename(command)
+    if (
+        command_name in _BROAD_VALIDATION_COMMAND_NAMES
+        or _script_stem(command_name) in _BROAD_VALIDATION_SCRIPT_STEMS
+    ):
+        return True
+    if command_name in {"npm", "pnpm", "yarn", "bun"}:
+        return _package_manager_runs_broad_validation_command(command_words[1:])
+    if command_name == "make":
+        return any(
+            word in _BROAD_VALIDATION_COMMAND_NAMES
+            for word in command_words[1:]
+            if not word.startswith("-") and "=" not in word
+        )
+    if command_name.startswith("python") and _python_runs_broad_validation_module(
+        command_words[1:]
+    ):
+        return True
+    if command_name == "docker":
+        return _docker_runs_broad_validation_command(command_words[1:])
+    if command_name in {"bash", "fish", "sh", "zsh"} and len(command_words) > 1:
+        script_name = _command_basename(command_words[1])
+        return _script_stem(script_name) in _BROAD_VALIDATION_SCRIPT_STEMS
+    return _known_broad_validation_command_pair(command_name, command_words[1:])
+
+
+def _strip_shell_command_prefixes(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining:
+        command = _command_basename(remaining[0])
+        if remaining[0] in _COMMAND_PREFIX_WORDS or _ENV_ASSIGNMENT_RE.match(remaining[0]):
+            remaining = remaining[1:]
+            continue
+        if command == "env":
+            remaining = _strip_env_prefix(remaining[1:])
+            continue
+        if command in {"pipenv", "poetry", "uv"} and len(remaining) > 1 and remaining[1] == "run":
+            remaining = _strip_run_wrapper_options(remaining[2:])
+            continue
+        return remaining
+    return ()
+
+
+def _strip_env_prefix(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining and (
+        remaining[0].startswith("-") or _ENV_ASSIGNMENT_RE.match(remaining[0]) is not None
+    ):
+        remaining = remaining[1:]
+    return remaining
+
+
+def _strip_run_wrapper_options(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-"):
+        option = remaining[0]
+        remaining = remaining[1:]
+        if option in {"--directory", "--env-file", "--extra", "--group", "--index-url", "--python"}:
+            remaining = remaining[1:]
+    return remaining
+
+
+def _package_manager_runs_broad_validation_command(words: Sequence[str]) -> bool:
+    remaining = tuple(word for word in words if word != "--")
+    remaining = _strip_package_manager_options(remaining)
+    if not remaining:
+        return False
+    if remaining[0] in {"exec", "run"}:
+        remaining = _strip_package_manager_options(remaining[1:])
+    return bool(remaining) and remaining[0] in _BROAD_VALIDATION_COMMAND_NAMES
+
+
+def _strip_package_manager_options(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-"):
+        option = remaining[0]
+        option_name = option.split("=", 1)[0]
+        remaining = remaining[1:]
+        if "=" not in option and option_name in _PACKAGE_MANAGER_OPTIONS_WITH_VALUE and remaining:
+            remaining = remaining[1:]
+    return remaining
+
+
+def _python_runs_broad_validation_module(words: Sequence[str]) -> bool:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-") and remaining[0] != "-m":
+        remaining = remaining[1:]
+    if len(remaining) < 2 or remaining[0] != "-m":
+        return False
+    return remaining[1] in _BROAD_VALIDATION_COMMAND_NAMES
+
+
+def _docker_runs_broad_validation_command(words: Sequence[str]) -> bool:
+    if not words:
+        return False
+    if words[0] == "build":
+        return True
+    return len(words) > 1 and words[0] == "compose" and words[1] == "build"
+
+
+def _known_broad_validation_command_pair(command: str, args: Sequence[str]) -> bool:
+    if command == "gh":
+        return bool(args) and args[0] == "release"
+    if command == "gcloud":
+        return len(args) > 1 and args[0] == "run" and args[1] == "deploy"
+    if command in {"firebase", "netlify", "vercel", "wrangler"}:
+        return "deploy" in args
+    if command == "twine":
+        return "upload" in args
+    return False
+
+
+def _command_basename(command: str) -> str:
+    return command.rsplit("/", 1)[-1]
+
+
+def _script_stem(command: str) -> str:
+    for suffix in _SCRIPT_SUFFIXES:
+        if command.endswith(suffix):
+            return command[: -len(suffix)]
+    return command
 
 
 def _is_comment_or_notify_uses(uses: str) -> bool:

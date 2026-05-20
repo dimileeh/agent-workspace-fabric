@@ -5380,23 +5380,6 @@ class WorkspaceExecutor:
         details = (result.stderr or result.stdout or "<no output>").strip()
         raise RuntimeError(f"git show failed for {refspec!r} in {worktree_path}: {details}")
 
-    async def _git_diff_text(
-        self,
-        *,
-        worktree_path: Path,
-        args: Sequence[str],
-    ) -> str | None:
-        result = await self._runner.run(
-            [
-                "git",
-                *git_safe_directory_config_args(worktree_path),
-                "-C",
-                str(worktree_path),
-                *args,
-            ]
-        )
-        return result.stdout if result.ok else None
-
     async def _verify_recovered_post_agent_commit(
         self,
         *,
