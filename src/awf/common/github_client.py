@@ -423,6 +423,7 @@ class BranchOpenPullRequest:
     url: str
     number: int
     head_ref: str
+    head_repo_slug: str
     head_sha: str | None = None
 
 
@@ -430,7 +431,9 @@ _PR_ADOPTION_VIEW_JSON_FIELDS = (
     "number,headRefName,headRepository,isCrossRepository,baseRefName,"
     "headRefOid,baseRefOid,state,isDraft,author,url,title"
 )
-_BRANCH_OPEN_PR_LIST_JSON_FIELDS = "number,url,headRefName,headRefOid"
+_BRANCH_OPEN_PR_LIST_JSON_FIELDS = (
+    "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner"
+)
 
 
 def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
@@ -712,12 +715,97 @@ def _parse_branch_open_pull_request(
 
     head_ref = _optional_nonempty_str(payload.get("headRefName")) or branch_name
     head_sha = _optional_nonempty_str(payload.get("headRefOid"))
+    head_repo_slug = _head_repo_slug_from_branch_open_pr_payload(
+        payload,
+        repo=repo,
+        branch_name=branch_name,
+    )
     return BranchOpenPullRequest(
         url=url,
         number=number,
         head_ref=head_ref,
+        head_repo_slug=head_repo_slug,
         head_sha=head_sha,
     )
+
+
+def _head_repo_slug_from_branch_open_pr_payload(
+    payload: dict[str, Any],
+    *,
+    repo: RepoRef,
+    branch_name: str,
+) -> str:
+    head_repo = payload.get("headRepository")
+    if isinstance(head_repo, dict):
+        name_with_owner = _optional_nonempty_str(head_repo.get("nameWithOwner"))
+        if name_with_owner is not None:
+            return _parse_open_pr_head_repo_slug(
+                name_with_owner,
+                repo=repo,
+                branch_name=branch_name,
+                field_name="headRepository.nameWithOwner",
+            )
+
+        repo_name = _optional_nonempty_str(head_repo.get("name"))
+        owner_login = _head_repo_owner_login_from_branch_payload(payload, head_repo)
+        if repo_name is not None and owner_login is not None:
+            return _parse_open_pr_head_repo_slug(
+                f"{owner_login}/{repo_name}",
+                repo=repo,
+                branch_name=branch_name,
+                field_name="headRepositoryOwner.login/headRepository.name",
+            )
+
+    raise PullRequestMetadataError(
+        reason_code="OPEN_PR_LOOKUP_INVALID",
+        message="gh pr list payload missing required headRepository identity.",
+        detail={
+            "repo_slug": repo.slug(),
+            "branch_name": branch_name,
+            "field": "headRepository",
+        },
+    )
+
+
+def _head_repo_owner_login_from_branch_payload(
+    payload: dict[str, Any],
+    head_repo: dict[str, Any],
+) -> str | None:
+    owner = payload.get("headRepositoryOwner")
+    if isinstance(owner, dict):
+        login = _optional_nonempty_str(owner.get("login"))
+        if login is not None:
+            return login
+    elif isinstance(owner, str):
+        login = _optional_nonempty_str(owner)
+        if login is not None:
+            return login
+
+    nested_owner = head_repo.get("owner")
+    if isinstance(nested_owner, dict):
+        return _optional_nonempty_str(nested_owner.get("login"))
+    return None
+
+
+def _parse_open_pr_head_repo_slug(
+    value: str,
+    *,
+    repo: RepoRef,
+    branch_name: str,
+    field_name: str,
+) -> str:
+    try:
+        return RepoRef.from_url(value).slug()
+    except ValueError as exc:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"gh pr list payload has invalid {field_name}.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": branch_name,
+                "field": field_name,
+            },
+        ) from exc
 
 
 def _head_repo_slug_from_adoption_payload(

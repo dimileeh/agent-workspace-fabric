@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from awf.common.git_identity import git_safe_directory_config_args
-from awf.common.github_client import BranchOpenPullRequest
+from awf.common.github_client import BranchOpenPullRequest, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskKind, WorkspaceStatus
@@ -313,14 +313,18 @@ class _OpenPullRequestSummary:
     pr_number: int
     head_ref: str | None
     head_sha: str | None
+    head_repo_slug: str | None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "pr_url": self.pr_url,
             "pr_number": self.pr_number,
             "head_ref": self.head_ref,
             "head_sha": self.head_sha,
         }
+        if self.head_repo_slug is not None:
+            payload["head_repo_slug"] = self.head_repo_slug
+        return payload
 
 
 @dataclass(frozen=True)
@@ -2966,6 +2970,29 @@ class ControlWorker:
                 },
             )
 
+        expected_head_repo_slug = _expected_open_pr_head_repo_slug(repo_url)
+        if expected_head_repo_slug is not None and summaries:
+            head_repo_matches = [
+                summary
+                for summary in summaries
+                if summary.head_repo_slug is not None
+                and summary.head_repo_slug.lower() == expected_head_repo_slug.lower()
+            ]
+            if not head_repo_matches:
+                return _BranchOpenPRLookup(
+                    branch_name=lookup_branch,
+                    state="ambiguous",
+                    ambiguity_reason="open_pr_head_repo_mismatch",
+                    payload={
+                        "branch_name": lookup_branch,
+                        "expected_head_repo_slug": expected_head_repo_slug,
+                        "match_count": len(summaries),
+                        "matches": [summary.to_payload() for summary in summaries],
+                        "source": "open_pr_resolver",
+                    },
+                )
+            summaries = head_repo_matches
+
         if not summaries:
             return _BranchOpenPRLookup(
                 branch_name=lookup_branch,
@@ -4566,12 +4593,23 @@ def _open_pull_request_summary(
         raise ValueError("open PR lookup result has invalid pr_number")
     head_ref = _metadata_nonempty_str(metadata, "head_ref", "headRefName") or branch_name
     head_sha = _metadata_nonempty_str(metadata, "head_sha", "headRefOid")
+    head_repo_slug = _metadata_nonempty_str(
+        metadata, "head_repo_slug", "headRepositoryNameWithOwner"
+    )
     return _OpenPullRequestSummary(
         pr_url=pr_url,
         pr_number=pr_number,
         head_ref=head_ref,
         head_sha=head_sha,
+        head_repo_slug=head_repo_slug,
     )
+
+
+def _expected_open_pr_head_repo_slug(repo_url: str) -> str | None:
+    try:
+        return RepoRef.from_url(repo_url).slug()
+    except ValueError:
+        return None
 
 
 def _metadata_value(metadata: object, *names: str) -> object:

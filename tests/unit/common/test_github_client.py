@@ -367,6 +367,68 @@ class TestFetchPullRequestAdoptionMetadata:
 
 class TestListOpenPullRequestsForBranch:
     @pytest.mark.unit
+    async def test_returns_head_repository_identity_for_branch_matches(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                        "headRepository": {
+                            "name": "aira-web",
+                            "nameWithOwner": "dimileeh/aira-web",
+                        },
+                        "headRepositoryOwner": {"login": "dimileeh"},
+                    }
+                ]
+            ),
+        )
+
+        matches = await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="feature/head",
+            base_branch="development",
+        )
+
+        assert len(matches) == 1
+        assert matches[0].head_repo_slug == "dimileeh/aira-web"
+        json_fields = fake.calls[0].args[fake.calls[0].args.index("--json") + 1]
+        assert "headRepository" in json_fields
+        assert "headRepositoryOwner" in json_fields
+
+    @pytest.mark.unit
+    async def test_missing_head_repository_identity_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                    }
+                ]
+            ),
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "headRepository" in excinfo.value.message
+
+    @pytest.mark.unit
     async def test_non_string_url_is_invalid(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

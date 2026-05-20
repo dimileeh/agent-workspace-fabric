@@ -7059,6 +7059,58 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_pr_from_different_head_repo_is_ambiguous(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        branch_name = "awf/ws_branch"
+        resolver = _RecordingBranchOpenPRResolver(
+            {
+                branch_name: [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/272",
+                        number=272,
+                        head_ref=branch_name,
+                        head_sha="c" * 40,
+                        head_repo_slug="contributor/repo",
+                    )
+                ]
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="https://github.com/example/repo.git",
+            branch_name=branch_name,
+            base_branch="development",
+        )
+
+        assert lookup is not None
+        assert lookup.state == "ambiguous"
+        assert lookup.ambiguity_reason == "open_pr_head_repo_mismatch"
+        assert lookup.payload == {
+            "branch_name": branch_name,
+            "expected_head_repo_slug": "example/repo",
+            "match_count": 1,
+            "matches": [
+                {
+                    "pr_url": "https://github.com/example/repo/pull/272",
+                    "pr_number": 272,
+                    "head_ref": branch_name,
+                    "head_sha": "c" * 40,
+                    "head_repo_slug": "contributor/repo",
+                }
+            ],
+            "source": "open_pr_resolver",
+        }
+
+    @pytest.mark.unit
     async def test_preserved_active_pushed_branch_pr_lookup_failure_requires_operator_recovery(
         self,
         session_factory: async_sessionmaker[AsyncSession],
