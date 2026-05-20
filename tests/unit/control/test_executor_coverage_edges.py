@@ -3762,10 +3762,9 @@ async def test_record_git_object_recovery_event_persists_workspace_event(
 async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path(".awf/workspace.yml")}
-    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0.awf/workspace.yml\0")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3783,11 +3782,44 @@ async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
 
 
 @pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_blocks_protected_rename_source(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    workflow_text = "name: CI\non: [pull_request]\njobs: {}\n"
+    runner.queue_result(
+        returncode=0,
+        stdout="R100\0.github/workflows/ci.yml\0docs/ci.yml\0",
+    )
+    runner.queue_result(returncode=0, stdout=workflow_text)
+    runner.queue_result(returncode=128, stderr="path does not exist in HEAD")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_rename_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=["src/**"],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+    assert ".github/workflows/ci.yml" in kwargs["message"]
+    assert "--name-status" in runner.calls[0].args
+    assert "-z" in runner.calls[0].args
+
+
+@pytest.mark.unit
 async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3809,10 +3841,9 @@ async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
 async def test_verify_recovered_post_agent_commit_rejects_plan_only_recovery(
     tmp_path: Path,
 ) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("docs/awf-plans/ws_plan_only.md")}
-    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0docs/awf-plans/ws_plan_only.md\0")
+    executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3834,11 +3865,9 @@ async def test_verify_recovered_post_agent_commit_rejects_orphaned_history(
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0src/app.py\0")
     runner.queue_result(returncode=1, stderr="not an ancestor")
     executor = _executor_with_runner(runner, tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("src/app.py")}
-    )
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert not await executor._verify_recovered_post_agent_commit(
@@ -3860,11 +3889,9 @@ async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="M\0src/app.py\0")
     runner.queue_result(returncode=0)
     executor = _executor_with_runner(runner, tmp_path)
-    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
-        return_value={Path("src/app.py")}
-    )
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
     assert await executor._verify_recovered_post_agent_commit(

@@ -5356,8 +5356,11 @@ class WorkspaceExecutor:
         expected_status: WorkspaceStatus,
     ) -> bool:
         changed_paths = sorted(
-            path.as_posix()
-            for path in await self._committed_paths_since(worktree_path, base_commit)
+            await committed_changed_paths_since(
+                self._runner,
+                worktree_path=worktree_path,
+                base_ref=base_commit,
+            )
         )
         if not changed_paths:
             await self._mark_failed(
