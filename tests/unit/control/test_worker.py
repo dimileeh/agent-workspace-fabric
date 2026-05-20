@@ -6668,6 +6668,61 @@ class TestRunOnceStaleActiveExecutionRecovery:
             await worker.wait_for_execution_tasks()
 
     @pytest.mark.unit
+    async def test_preserved_active_validation_recovery_lookup_uses_single_active_query(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-active-recovery-single-query",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_active_recovery_single_query",
+        )
+        async with session_factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                },
+            )
+            await s.commit()
+
+        async def _list_for_workspace_should_not_be_needed(
+            self: OperationRepository,
+            workspace_id: str,
+            **kwargs: object,
+        ) -> list[object]:
+            del self, workspace_id, kwargs
+            raise AssertionError("active recovery lookup should use one IN-filtered query")
+
+        monkeypatch.setattr(
+            OperationRepository,
+            "list_for_workspace",
+            _list_for_workspace_should_not_be_needed,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({None: _live_agent_snapshot()}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        async with session_factory() as s:
+            assert await worker._has_active_preserved_validation_recovery(  # noqa: SLF001
+                s,
+                workspace_id,
+            )
+
+    @pytest.mark.unit
     async def test_preserved_active_pr_handoff_attaches_one_monitor_after_restart(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -7618,6 +7673,147 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert operator_events[0].payload["classification"]["state"] == "ambiguous"
         assert stale_events == []
         assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_missing_attempt_lineage_records_audit_before_grace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_missing_lineage_audit"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-missing-lineage-audit",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_salvage_blocked"
+        assert len(blocked_events) == 1
+        assert blocked_events[0].payload is not None
+        assert blocked_events[0].payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
+        assert blocked_events[0].payload["decision"] == "wait_for_preservation_grace"
+        assert blocked_events[0].payload["blocked_reason"] == "missing_task_attempt_lineage"
+        assert blocked_events[0].payload["attempt_id"] is None
+        assert blocked_events[0].payload["task_id"] is None
+        assert not_possible_events == []
+        assert stale_events == []
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_missing_lineage_audit_does_not_block_expired_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_missing_lineage_expired"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-missing-lineage-expired",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        await worker.run_once()
+        expired_at = datetime.now(UTC) - timedelta(minutes=30)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            running_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = expired_at - timedelta(minutes=1)
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            assert len(preserved_events) == 1
+            preserved_events[0].occurred_at = expired_at
+            await s.commit()
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert len(blocked_events) == 1
+        assert len(not_possible_events) == 1
+        assert not_possible_events[0].payload is not None
+        assert not_possible_events[0].payload["unrecoverable_reason"] == (
+            "missing_task_attempt_lineage"
+        )
+        assert len(stale_events) == 1
+        assert cleaner.calls
 
     @pytest.mark.unit
     async def test_stale_active_failure_still_applies_after_salvage_not_possible_for_orphan(

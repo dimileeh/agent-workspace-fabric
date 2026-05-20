@@ -155,8 +155,11 @@ _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_N
 _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE = (
     "workspace.active_execution_salvage_not_possible"
 )
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE = "workspace.active_execution_salvage_blocked"
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
 _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {
         TaskKind.monitor_release_pr.value,
@@ -1822,6 +1825,9 @@ class ControlWorker:
             else None
         )
         if attempt_id is None or task_id is None:
+            missing_lineage_reason = (
+                "missing_task_attempt_lineage" if attempt_id is None else "missing_task_lineage"
+            )
             if failed_branch_lookup is not None:
                 await self._record_preserved_active_operator_required(
                     candidate,
@@ -1837,13 +1843,16 @@ class ControlWorker:
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
                     preserved_event=preserved_event,
-                    reason=(
-                        "missing_task_attempt_lineage"
-                        if attempt_id is None
-                        else "missing_task_lineage"
-                    ),
+                    reason=missing_lineage_reason,
                 )
                 return False
+            await self._record_preserved_active_salvage_blocked(
+                candidate,
+                preserved_event=preserved_event,
+                reason=missing_lineage_reason,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
             return True
 
         classification = await self._classify_preserved_active_worktree(
@@ -2556,6 +2565,63 @@ class ControlWorker:
             )
             await session.commit()
 
+    async def _record_preserved_active_salvage_blocked(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        reason: str,
+        attempt_id: str | None,
+        task_id: str | None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=datetime.now(UTC),
+            )
+            if claim_cleanup["action"] == "cleared_stale":
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE
+            await repo.advance_workspace_version(ws)
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                decision="wait_for_preservation_grace",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                extra={
+                    "blocked_reason": reason,
+                    "source_workspace_id": ws.id,
+                    "preservation_expired": False,
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
     async def _has_operator_refresh_after_latest_preservation(
         self,
         candidate: _ActiveExecutionCandidate,
@@ -2755,20 +2821,25 @@ class ControlWorker:
         session: AsyncSession,
         workspace_id: str,
     ) -> bool:
-        repo = OperationRepository(session)
-        for status in (OperationStatus.pending, OperationStatus.running):
-            operations = await repo.list_for_workspace(
-                workspace_id,
-                status=status,
-                operation_type=OperationType.validate,
-                limit=100,
+        stmt = (
+            select(Operation.payload)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.type == OperationType.validate.value,
+                Operation.status.in_(
+                    (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                ),
             )
-            if any(
-                _is_active_execution_salvage_validation_payload(operation.payload)
-                for operation in operations
-            ):
-                return True
-        return False
+            .order_by(Operation.created_at.asc(), Operation.id.asc())
+            .limit(100)
+        )
+        return any(
+            _is_active_execution_salvage_validation_payload(payload)
+            for payload in (await session.execute(stmt)).scalars()
+        )
 
     async def _latest_operator_refresh_requested_at(
         self,
@@ -4585,6 +4656,7 @@ def _latest_active_execution_salvage_reason(events: list[WorkspaceEvent]) -> str
         _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
         _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
         _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
     }
     for event in reversed(events):
         if event.reason_code in salvage_reason_codes:
