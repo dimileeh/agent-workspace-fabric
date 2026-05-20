@@ -6872,7 +6872,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             await worker.wait_for_execution_tasks()
 
     @pytest.mark.unit
-    async def test_preserved_active_validation_request_without_executor_does_not_write_salvage(
+    async def test_preserved_active_committed_work_without_executor_writes_blocked_salvage(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -6951,10 +6951,20 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_validation_requested",
             )
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
             operations = await OperationRepository(s).list_for_workspace(workspace_id)
 
-        assert not recovered
+        assert recovered
         assert salvage_events == []
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["blocked_reason"] == "validation_executor_unavailable"
+        assert blocked_payload["classification"]["state"] == "committed"
+        assert blocked_payload["preservation_expired"] is True
         assert operations == []
 
     @pytest.mark.unit

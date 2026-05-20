@@ -1957,7 +1957,16 @@ class ControlWorker:
         )
         if classification.state == "committed":
             if self._executor is None:
-                return False
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason="validation_executor_unavailable",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                    preservation_expired=preservation_expired,
+                )
+                return True
             await self._request_preserved_active_validation(
                 candidate,
                 preserved_event=preserved_event,
