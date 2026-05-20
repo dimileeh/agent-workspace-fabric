@@ -24,8 +24,8 @@ _DOCKER_CLI_CLIENT_ENV_KEYS = (
     "DOCKER_TLS_VERIFY",
 )
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
-    r"(?<!\$)\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
-    r"(?<!\$)\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?=[}:?+\-])[^}]*\}|"
+    r"\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)"
 )
 _COMPOSE_INTERPOLATION_CACHE_MAX_SIZE = 32
 _COMPOSE_INTERPOLATION_KEYS_CACHE_MISSING = object()
@@ -236,6 +236,8 @@ def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
 
     if isinstance(value, str):
         for match in _COMPOSE_INTERPOLATION_PATTERN.finditer(value):
+            if _is_escaped_compose_interpolation(value, match.start()):
+                continue
             key = match.group("braced") or match.group("plain")
             if key:
                 keys.add(key)
@@ -249,3 +251,14 @@ def _collect_compose_interpolation_keys(value: object, keys: set[str]) -> None:
     if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
         for nested in value:
             _collect_compose_interpolation_keys(nested, keys)
+
+
+def _is_escaped_compose_interpolation(value: str, dollar_index: int) -> bool:
+    """Return whether a Compose ``$`` interpolation start is escaped by ``$$``."""
+
+    previous_dollars = 0
+    index = dollar_index - 1
+    while index >= 0 and value[index] == "$":
+        previous_dollars += 1
+        index -= 1
+    return previous_dollars % 2 == 1

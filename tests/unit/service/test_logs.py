@@ -295,6 +295,7 @@ def test_service_logs_blank_docker_host_clears_stale_caller_env(
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("DOCKER_HOST", "unix:///caller-stale-docker.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "caller-stale-context")
 
     run_service_logs(
         services=[ServiceLogName.api],
@@ -304,7 +305,8 @@ def test_service_logs_blank_docker_host_clears_stale_caller_env(
 
     env = calls[0]["env"]
     assert isinstance(env, dict)
-    assert "DOCKER_HOST" not in env
+    assert env.get("DOCKER_HOST") is None
+    assert env.get("DOCKER_CONTEXT") is None
 
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
@@ -941,6 +943,32 @@ services:
     assert service_environment.compose_interpolation_keys(compose_file) == (
         "AWF_DEFAULTED_INTERPOLATION",
         "AWF_PLAIN_INTERPOLATION",
+    )
+
+
+@pytest.mark.unit
+def test_service_logs_detects_interpolation_after_compose_dollar_escape(
+    tmp_path: Path,
+) -> None:
+    """A doubled dollar escapes one literal dollar; the next dollar can interpolate."""
+    from awf.service import environment as service_environment
+
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment:
+      ESCAPED: "$$AWF_ESCAPED_INTERPOLATION"
+      BRACED_ESCAPED: "$${AWF_BRACED_ESCAPED_INTERPOLATION}"
+      PLAIN_AFTER_ESCAPE: "$$$AWF_PLAIN_AFTER_ESCAPE"
+      BRACED_AFTER_ESCAPE: "$$${AWF_BRACED_AFTER_ESCAPE}"
+""",
+    )
+
+    assert service_environment.compose_interpolation_keys(compose_file) == (
+        "AWF_BRACED_AFTER_ESCAPE",
+        "AWF_PLAIN_AFTER_ESCAPE",
     )
 
 
