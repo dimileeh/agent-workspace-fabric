@@ -396,7 +396,8 @@ def _api_base_url_env_is_explicit(
     """
 
     api_base_url = _env_value(environ, "AWF_API_BASE_URL")
-    assert api_base_url is not None
+    if api_base_url is None:
+        return True
     if api_base_url != DEFAULT_LOCAL_SERVICE_API_BASE_URL:
         return True
     if _env_value(environ, "AWF_API_HOST_PORT"):
@@ -446,7 +447,8 @@ def _database_url_env_is_explicit(
     """
 
     database_url = _env_value(environ, "AWF_DATABASE_URL")
-    assert database_url is not None
+    if database_url is None:
+        return True
     if database_url != DEFAULT_LOCAL_SERVICE_DATABASE_URL:
         return True
     if _env_value(environ, "AWF_POSTGRES_HOST_PORT"):
