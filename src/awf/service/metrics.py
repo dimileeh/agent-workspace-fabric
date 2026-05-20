@@ -777,7 +777,6 @@ async def summarize_resource_saturation_for_session(
         session,
         settings=settings,
         node_id=node_id,
-        allocated_resources=allocated_resources,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
         now=generated_at,
@@ -1317,6 +1316,35 @@ async def _allocated_resources_for_session(
     )
 
 
+async def _scheduler_allocated_resources_for_session(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> ReservedResources:
+    persisted = await _active_latest_totals_for_scheduler_allocation_scope(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
+    )
+    unreserved_workspace_count = await _unreserved_workspace_count_for_session(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
+    )
+    defaulted_dind_slots = await _defaulted_dind_slots_for_session(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
+    )
+    return _reserved_resources_from_totals(
+        persisted,
+        int(persisted["workspace_count"]) + unreserved_workspace_count,
+        resource_defaults=resource_defaults,
+        defaulted_dind_slots=defaulted_dind_slots,
+    )
+
+
 async def _active_latest_totals_for_workspace_scope(
     session: AsyncSession,
     *,
@@ -1455,7 +1483,6 @@ async def _capacity_queue_summary(
     *,
     settings: Settings,
     node_id: str,
-    allocated_resources: ReservedResources,
     resource_defaults: WorkspaceResourceDefaults,
     detected_local_capacity: LocalCapacityLimits | None,
     now: datetime,
@@ -1497,11 +1524,16 @@ async def _capacity_queue_summary(
             0,
             int((_to_utc(now) - _to_utc(oldest_row.created_at)).total_seconds()),
         )
+    allocated_for_gate = await _scheduler_allocated_resources_for_session(
+        session,
+        node_id=node_id,
+        resource_defaults=resource_defaults,
+    )
     blockers = await _capacity_queue_blocked_reason_counts(
         session,
         settings=settings,
         node_id=node_id,
-        allocated_resources=allocated_resources,
+        allocated_resources=allocated_for_gate,
         resource_defaults=resource_defaults,
         detected_local_capacity=detected_local_capacity,
         scoring_at=now,

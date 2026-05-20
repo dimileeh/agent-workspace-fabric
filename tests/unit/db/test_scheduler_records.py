@@ -336,6 +336,106 @@ async def test_resource_reservation_release_uses_single_update_returning(
 
 
 @pytest.mark.unit
+async def test_resource_reservation_active_latest_by_workspace_ids_uses_window_query(
+    session: AsyncSession,
+) -> None:
+    first_workspace_id, _first_task_id, first_attempt_id = await _attempt(session)
+    second_workspace_id, _second_task_id, second_attempt_id = await _attempt(session)
+    reserved_at = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
+    repo = ResourceReservationRepository(session)
+    older = await repo.create(
+        workspace_id=first_workspace_id,
+        attempt_id=first_attempt_id,
+        node_id="node-a",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=4.0,
+        disk_mb=100,
+        dind_slots=0,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    latest = await repo.create(
+        workspace_id=first_workspace_id,
+        attempt_id=first_attempt_id,
+        node_id="node-a",
+        steady_cpu=5.0,
+        steady_memory_gb=6.0,
+        peak_cpu=7.0,
+        peak_memory_gb=8.0,
+        disk_mb=200,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at + timedelta(minutes=1),
+    )
+    released_newer = await repo.create(
+        workspace_id=first_workspace_id,
+        attempt_id=first_attempt_id,
+        node_id="node-a",
+        steady_cpu=9.0,
+        steady_memory_gb=10.0,
+        peak_cpu=11.0,
+        peak_memory_gb=12.0,
+        disk_mb=300,
+        dind_slots=2,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at + timedelta(minutes=2),
+    )
+    second_latest = await repo.create(
+        workspace_id=second_workspace_id,
+        attempt_id=second_attempt_id,
+        node_id="node-b",
+        steady_cpu=13.0,
+        steady_memory_gb=14.0,
+        peak_cpu=15.0,
+        peak_memory_gb=16.0,
+        disk_mb=400,
+        dind_slots=3,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    released_newer.released_at = reserved_at + timedelta(minutes=3)
+    older_id = older.id
+    latest_id = latest.id
+    released_newer_id = released_newer.id
+    second_latest_id = second_latest.id
+    await session.commit()
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    engine = session.bind
+    assert engine is not None
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        rows = await ResourceReservationRepository(session).active_latest_by_workspace_ids(
+            [first_workspace_id, second_workspace_id, first_workspace_id]
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert rows[first_workspace_id].id == latest_id
+    assert rows[second_workspace_id].id == second_latest_id
+    assert older_id not in {row.id for row in rows.values()}
+    assert released_newer_id not in {row.id for row in rows.values()}
+    assert len(statements) == 1
+    assert "row_number() over" in statements[0]
+    assert "partition by resource_reservations.workspace_id" in statements[0]
+    assert "reservation_rank = " in statements[0]
+
+
+@pytest.mark.unit
 async def test_resource_reservation_active_latest_totals_can_filter_by_node_id(
     session: AsyncSession,
 ) -> None:

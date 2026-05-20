@@ -883,6 +883,74 @@ async def test_resource_saturation_allocated_capacity_matches_scheduler_null_nod
 
 
 @pytest.mark.unit
+async def test_capacity_queue_uses_scheduler_allocation_scope_for_migrating_reservation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=6.0,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    migrating_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            migrating_workspace_id: "node-b",
+            requested_id: "node-a",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        migrating_workspace_id,
+        node_id="node-a",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=5.0,
+        peak_memory_gb=4.0,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        requested_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=2.0,
+        peak_memory_gb=8.0,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.allocated_resources.active_workspace_count == 0
+    assert summary.capacity_queue.queued_workspace_count == 1
+    assert summary.capacity_queue.blocked_reason_counts == {
+        "PEAK_CPU_CAPACITY_SATURATED": 1,
+    }
+
+
+@pytest.mark.unit
 async def test_resource_saturation_exposes_open_provider_circuit_breakers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

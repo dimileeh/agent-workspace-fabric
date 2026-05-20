@@ -1153,23 +1153,37 @@ class ResourceReservationRepository:
         ids = tuple(dict.fromkeys(workspace_ids))
         if not ids:
             return {}
-        stmt = (
-            select(ResourceReservation)
+        ranked_reservations = (
+            select(
+                ResourceReservation.id.label("reservation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ResourceReservation.workspace_id,
+                    order_by=(
+                        ResourceReservation.reserved_at.desc(),
+                        ResourceReservation.id.desc(),
+                    ),
+                )
+                .label("reservation_rank"),
+            )
             .where(
                 ResourceReservation.workspace_id.in_(ids),
                 ResourceReservation.released_at.is_(None),
             )
-            .order_by(
-                ResourceReservation.workspace_id.asc(),
-                ResourceReservation.reserved_at.desc(),
-                ResourceReservation.id.desc(),
-            )
+            .subquery()
         )
-        rows = list((await self._session.execute(stmt)).scalars())
-        latest: dict[str, ResourceReservation] = {}
-        for row in rows:
-            latest.setdefault(row.workspace_id, row)
-        return latest
+        stmt = (
+            select(ResourceReservation)
+            .join(
+                ranked_reservations,
+                ResourceReservation.id == ranked_reservations.c.reservation_id,
+            )
+            .where(ranked_reservations.c.reservation_rank == 1)
+        )
+        return {
+            reservation.workspace_id: reservation
+            for reservation in (await self._session.execute(stmt)).scalars()
+        }
 
     async def release_active_for_workspace(
         self,
