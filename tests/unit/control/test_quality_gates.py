@@ -1874,8 +1874,13 @@ jobs:
         "echo ${{ secrets.GITHUB_TOKEN }}",
         'printf "%s\\n" "${{ env.GH_TOKEN }}"',
         'echo "${{ github.token }}"',
+        'printf "%s\\n" "${{ env.PAT }}"',
+        'printf "%s\\n" "${{ env.CI_SUMMARY }}"',
+        'echo "${{ steps.auth.outputs.value }}"',
         'echo "${{ steps.test.outputs.gh_token }}"',
+        'echo "${{ steps.test.outputs.result }}"',
         'echo "${{ needs.validation.outputs.secret }}"',
+        'echo "${{ needs.validation.outputs.summary }}"',
     ],
 )
 def test_added_informational_step_blocks_secret_bearing_expansions(
@@ -2126,10 +2131,7 @@ jobs:
         'echo "Run ${{ github.run_id }} passed for PR ${{ github.event.pull_request.number }}"',
         'printf "%s\\n" "${{ steps.test.outcome }}"',
         'printf "%s\\n" "${{ steps.test.conclusion }}"',
-        'printf "%s\\n" "${{ steps.test.outputs.result }}"',
         'printf "%s\\n" "${{ needs.validation.result }}"',
-        'printf "%s\\n" "${{ needs.validation.outputs.summary }}"',
-        'printf "%s\\n" "${{ env.CI_SUMMARY }}"',
     ],
 )
 def test_added_informational_step_allows_github_actions_expression_echo(
@@ -3198,6 +3200,9 @@ jobs:
     [
         "          body: ${{ secrets.AWF_TOKEN }}",
         "          body: ${{ env.API_KEY }}",
+        "          body: ${{ env.CI_SUMMARY }}",
+        "          body: ${{ steps.test.outputs.result }}",
+        "          body: ${{ needs.validation.outputs.summary }}",
         "          body: ${{ github.event.pull_request.title }}",
     ],
 )
@@ -4283,6 +4288,9 @@ jobs:
         ("printf %s $PATH", True),
         ('echo "${{ github.sha }}"', True),
         ('printf "%s\\n" "${{ steps.test.outcome }}"', True),
+        ('printf "%s\\n" "${{ steps.test.outputs.result }}"', False),
+        ('printf "%s\\n" "${{ needs.validation.outputs.summary }}"', False),
+        ('printf "%s\\n" "${{ env.CI_SUMMARY }}"', False),
         ('echo "${{ secrets.GITHUB_TOKEN }}"', False),
         ("echo ${{ secrets.GITHUB_TOKEN }}", False),
         ('echo "${{ github.token }}"', False),

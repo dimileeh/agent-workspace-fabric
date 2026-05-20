@@ -122,9 +122,8 @@ _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(
     r"github\.(?:sha|run_id|run_number|run_attempt|event_name|repository|server_url|actor|"
     r"triggering_actor|job|action)"
     r"|github\.event\.pull_request\.(?:number|head\.sha|base\.ref)"
-    r"|steps\.[A-Za-z_][A-Za-z0-9_-]*\.(?:outcome|conclusion|outputs\.[A-Za-z_][A-Za-z0-9_-]*)"
-    r"|needs\.[A-Za-z_][A-Za-z0-9_-]*\.(?:result|outputs\.[A-Za-z_][A-Za-z0-9_-]*)"
-    r"|env\.[A-Za-z_][A-Za-z0-9_]*"
+    r"|steps\.[A-Za-z_][A-Za-z0-9_-]*\.(?:outcome|conclusion)"
+    r"|needs\.[A-Za-z_][A-Za-z0-9_-]*\.result"
     r")"
 )
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
@@ -1655,18 +1654,7 @@ def _has_unsafe_github_actions_expression(tokens: Sequence[str]) -> bool:
 
 
 def _is_safe_informational_github_actions_expression(expression: str) -> bool:
-    if _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE.fullmatch(expression) is None:
-        return False
-    if expression.startswith("env."):
-        return not _is_sensitive_informational_expression_name(expression.removeprefix("env."))
-    if ".outputs." in expression:
-        output_name = expression.rsplit(".outputs.", maxsplit=1)[1]
-        return not _is_sensitive_informational_expression_name(output_name)
-    return True
-
-
-def _is_sensitive_informational_expression_name(name: str) -> bool:
-    return _SENSITIVE_ENV_NAME_RE.search(name.replace("-", "_")) is not None
+    return _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE.fullmatch(expression) is not None
 
 
 def _is_validation_command(command: str | None) -> bool:
