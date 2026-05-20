@@ -73,11 +73,12 @@ _INFORMATIONAL_RUN_BLOCKED_OPERATORS: Final[frozenset[str]] = frozenset(
 _VALIDATION_RUN_APPEND_BLOCKED_OPERATORS: Final[frozenset[str]] = (
     _INFORMATIONAL_RUN_BLOCKED_OPERATORS | frozenset({";"})
 )
-_VALIDATION_RUN_DIRECT_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
-    {"coverage", "mypy", "pytest", "ruff"}
-)
+_VALIDATION_RUN_DIRECT_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"mypy", "pytest", "ruff"})
 _VALIDATION_RUN_MODULE_NAMES: Final[frozenset[str]] = (
-    _VALIDATION_RUN_DIRECT_COMMAND_NAMES | frozenset({"unittest"})
+    _VALIDATION_RUN_DIRECT_COMMAND_NAMES | frozenset({"coverage", "unittest"})
+)
+_VALIDATION_RUN_COVERAGE_REPORT_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
+    {"annotate", "html", "json", "lcov", "report", "xml"}
 )
 _VALIDATION_RUN_TEST_COMMAND_NAMES: Final[frozenset[str]] = frozenset(
     {"cargo", "go", "gradle", "gradlew", "make", "mvn", "nox", "tox"}
@@ -107,6 +108,9 @@ _SENSITIVE_ENV_NAME_RE: Final = re.compile(
 )
 _PACKAGE_MANAGER_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
     {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-c", "-w"}
+)
+_COVERAGE_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
+    {"--data-file", "--debug", "--rcfile"}
 )
 _SCRIPT_SUFFIXES: Final[tuple[str, ...]] = (
     ".bash",
@@ -1678,6 +1682,8 @@ def _validation_run_append_command_is_safe(tokens: Sequence[str]) -> bool:
     if not command_words:
         return False
     command_name = _command_basename(command_words[0])
+    if command_name == "coverage":
+        return _coverage_runs_safe_report_command(command_words[1:])
     if command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES:
         return True
     if command_name.startswith("python"):
@@ -1693,11 +1699,11 @@ def _python_runs_validation_module(words: Sequence[str]) -> bool:
     remaining = tuple(words)
     while remaining and remaining[0].startswith("-") and remaining[0] != "-m":
         remaining = remaining[1:]
-    return (
-        len(remaining) >= 2
-        and remaining[0] == "-m"
-        and remaining[1] in _VALIDATION_RUN_MODULE_NAMES
-    )
+    if len(remaining) < 2 or remaining[0] != "-m":
+        return False
+    if remaining[1] == "coverage":
+        return _coverage_runs_safe_report_command(remaining[2:])
+    return remaining[1] in _VALIDATION_RUN_MODULE_NAMES
 
 
 def _package_manager_runs_validation_command(words: Sequence[str]) -> bool:
@@ -1705,14 +1711,42 @@ def _package_manager_runs_validation_command(words: Sequence[str]) -> bool:
     remaining = _strip_package_manager_options(remaining)
     if not remaining:
         return False
-    if remaining[0] in {"exec", "run"}:
+    if remaining[0] == "exec":
         remaining = _strip_package_manager_options(remaining[1:])
+    elif remaining[0] == "run":
+        remaining = _strip_package_manager_options(remaining[1:])
+        if not remaining:
+            return False
+        command_name = _command_basename(remaining[0])
+        return command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES or _is_validation_run_target(
+            command_name
+        )
     if not remaining:
         return False
     command_name = _command_basename(remaining[0])
+    if command_name == "coverage":
+        return _coverage_runs_safe_report_command(remaining[1:])
     return command_name in _VALIDATION_RUN_DIRECT_COMMAND_NAMES or _is_validation_run_target(
         command_name
     )
+
+
+def _coverage_runs_safe_report_command(words: Sequence[str]) -> bool:
+    remaining = _strip_coverage_options(words)
+    if not remaining:
+        return False
+    return remaining[0].lower() in _VALIDATION_RUN_COVERAGE_REPORT_COMMAND_NAMES
+
+
+def _strip_coverage_options(words: Sequence[str]) -> tuple[str, ...]:
+    remaining = tuple(words)
+    while remaining and remaining[0].startswith("-"):
+        option = remaining[0]
+        option_name = option.split("=", 1)[0]
+        remaining = remaining[1:]
+        if "=" not in option and option_name in _COVERAGE_OPTIONS_WITH_VALUE and remaining:
+            remaining = remaining[1:]
+    return remaining
 
 
 def _command_args_include_validation_target(words: Sequence[str]) -> bool:

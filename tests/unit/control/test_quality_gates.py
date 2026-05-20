@@ -4004,6 +4004,12 @@ def test_informational_run_command_shell_safety_edges(
         ("pytest", "pytest && && ruff check", False),
         ("pytest", "pytest && ruff check | tee log", False),
         ("pytest", "pytest && bad`cmd`", False),
+        ("pytest", "pytest && coverage xml", True),
+        ("pytest", "pytest && coverage html", True),
+        ("pytest", "pytest && coverage run scripts/exfiltrate.py", False),
+        ("pytest", "pytest && uv run coverage run scripts/exfiltrate.py", False),
+        ("pytest", "pytest && python -m coverage run scripts/exfiltrate.py", False),
+        ("pytest", "pytest && npm exec coverage run scripts/exfiltrate.py", False),
         (
             "pytest",
             "pytest && command env CI=true uv run --python 3.12 --extra dev ruff check",
