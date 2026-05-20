@@ -1933,22 +1933,11 @@ class ControlWorker:
             if failed_branch_lookup is not None
             else None
         )
-        if failed_branch_lookup is not None:
-            if not preservation_expired:
-                await self._record_preserved_active_salvage_blocked(
-                    candidate,
-                    preserved_event=preserved_event,
-                    reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
-                    attempt_id=attempt_id,
-                    task_id=task_id,
-                    branch_pr_lookup=failed_branch_lookup.payload,
-                )
-                return True
-            await self._record_preserved_active_operator_required(
+        if failed_branch_lookup is not None and not preservation_expired:
+            await self._record_preserved_active_salvage_blocked(
                 candidate,
                 preserved_event=preserved_event,
-                classification=None,
-                ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
                 attempt_id=attempt_id,
                 task_id=task_id,
                 branch_pr_lookup=failed_branch_lookup.payload,
@@ -1966,6 +1955,9 @@ class ControlWorker:
                     attempt_id=attempt_id,
                     task_id=task_id,
                     preservation_expired=True,
+                    branch_pr_lookup=(
+                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
+                    ),
                 )
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
@@ -2001,14 +1993,18 @@ class ControlWorker:
                     preservation_expired=preservation_expired,
                 )
                 return True
-            await self._request_preserved_active_validation(
+            validation_requested = await self._request_preserved_active_validation(
                 candidate,
                 preserved_event=preserved_event,
                 classification=classification,
                 attempt_id=attempt_id,
                 task_id=task_id,
+                branch_pr_lookup=(
+                    failed_branch_lookup.payload if failed_branch_lookup is not None else None
+                ),
             )
-            self._dispatch_preserved_active_validation(candidate.workspace_id)
+            if validation_requested:
+                self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
         if classification.state == "no_work":
             if classification.reason == "clean_branch_not_ahead" and not preservation_expired:
@@ -2047,6 +2043,9 @@ class ControlWorker:
             ambiguity_reason=classification.reason,
             attempt_id=attempt_id,
             task_id=task_id,
+            branch_pr_lookup=(
+                failed_branch_lookup.payload if failed_branch_lookup is not None else None
+            ),
         )
         return True
 
@@ -2311,7 +2310,7 @@ class ControlWorker:
         attempt_id: str,
         task_id: str,
         branch_pr_lookup: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         idempotency_key = _active_execution_salvage_idempotency_key(
             "validate",
             candidate.workspace_id,
@@ -2321,10 +2320,10 @@ class ControlWorker:
             repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
-                return
+                return False
             claim_cutoff = datetime.now(UTC)
             if not _execution_claim_is_stale(ws, claim_cutoff):
-                return
+                return False
             if await self._has_current_salvage_event(
                 session,
                 candidate.workspace_id,
@@ -2333,7 +2332,7 @@ class ControlWorker:
                 event_floor=preserved_event.occurred_at,
                 workspace_status=candidate.status,
             ):
-                return
+                return False
 
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
@@ -2410,6 +2409,7 @@ class ControlWorker:
                 payload=payload_with_operation,
             )
             await session.commit()
+            return True
 
     async def _cancel_superseded_active_execution_operations(
         self,

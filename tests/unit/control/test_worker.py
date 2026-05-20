@@ -9055,7 +9055,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_lookup_failure_requires_operator_recovery(
+    async def test_preserved_active_pushed_branch_pr_lookup_failure_validates_committed_work(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -9071,7 +9071,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
         work_root = tmp_path / "awf-work-pr-lookup-failure"
         branch_name = f"awf/{workspace_id}"
-        _worktree, base_commit, _head_sha = _seed_workspace_worktree(
+        _worktree, base_commit, head_sha = _seed_workspace_worktree(
             worktrees_root=work_root / "worktrees",
             origin=origin_repo,
             workspace_id=workspace_id,
@@ -9131,30 +9131,41 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
             operations = await OperationRepository(s).list_for_workspace(workspace_id)
 
-        assert ws.status == WorkspaceStatus.pushing.value
-        assert ws.subphase == "runtime_preserved_operator_recovery_required"
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_validation_requested"
         assert stale_events == []
-        assert salvage_events == []
-        assert len(operator_events) == 1
-        payload = operator_events[0].payload
-        assert payload is not None
-        assert payload["decision"] == "operator_recovery_required"
-        assert payload["workspace_status"] == WorkspaceStatus.pushing.value
-        assert payload["ambiguity_reason"] == "open_pr_lookup_failed"
-        assert "classification" not in payload
-        assert "head_sha" not in payload
-        assert payload["branch_pr_lookup"] == {
+        assert operator_events == []
+        assert len(salvage_events) == 1
+        salvage_payload = salvage_events[0].payload
+        assert salvage_payload is not None
+        assert salvage_payload["decision"] == "validate_committed_work"
+        assert salvage_payload["workspace_status"] == WorkspaceStatus.pushing.value
+        assert salvage_payload["classification"]["state"] == "committed"
+        assert salvage_payload["classification"]["reason"] == "clean_branch_ahead"
+        assert salvage_payload["head_sha"] == head_sha
+        assert salvage_payload["branch_pr_lookup"] == {
             "branch_name": branch_name,
             "error_type": "RuntimeError",
             "failure": "resolver_exception",
             "source": "open_pr_resolver",
         }
-        assert not any(
-            operation.type == OperationType.validate.value
+        validate_ops = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.validate.value
             and operation.payload is not None
             and operation.payload.get("source") == "worker_restart"
-            for operation in operations
-        )
+        ]
+        assert len(validate_ops) == 1
+        assert validate_ops[0].payload is not None
+        assert validate_ops[0].payload["recovery_mode"] == "validate_only"
+        assert validate_ops[0].payload["source_head_sha"] == head_sha
+        assert validate_ops[0].payload["branch_pr_lookup"] == {
+            "branch_name": branch_name,
+            "error_type": "RuntimeError",
+            "failure": "resolver_exception",
+            "source": "open_pr_resolver",
+        }
         assert resolver.calls == [
             {
                 "repo_url": str(origin_repo),
@@ -9162,11 +9173,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 "base_branch": None,
             }
         ]
-        assert executor.calls == []
+        assert executor.calls == [workspace_id]
         assert cleaner.calls == []
 
     @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_lookup_failure_with_no_local_work_is_operator_recoverable(
+    async def test_preserved_active_pushed_branch_pr_lookup_failure_with_no_local_work_replaces(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -9224,9 +9235,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         await worker.run_once()
 
         async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
+            original = await WorkspaceRepository(s).get(workspace_id)
+            assert original is not None
             workspaces = list((await s.execute(select(Workspace))).scalars())
+            replacements = [ws for ws in workspaces if ws.id != workspace_id]
             replacement_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_replacement_created",
@@ -9241,31 +9253,24 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
             operations = await OperationRepository(s).list_for_workspace(workspace_id)
 
-        assert [workspace.id for workspace in workspaces] == [workspace_id]
-        assert ws.status == WorkspaceStatus.pushing.value
-        assert ws.subphase == "runtime_preserved_operator_recovery_required"
-        assert replacement_events == []
-        assert len(operator_events) == 1
-        payload = operator_events[0].payload
-        assert payload is not None
-        assert payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED"
-        assert payload["ambiguity_reason"] == "open_pr_lookup_failed"
-        assert "classification" not in payload
-        assert payload["branch_pr_lookup"] == {
-            "branch_name": branch_name,
-            "error_type": "RuntimeError",
-            "failure": "resolver_exception",
-            "source": "open_pr_resolver",
-        }
+        assert original.status == WorkspaceStatus.cancelled.value
+        assert original.subphase == "runtime_preserved_replaced"
+        assert len(replacements) == 1
+        assert operator_events == []
+        assert len(replacement_events) == 1
+        replacement_payload = replacement_events[0].payload
+        assert replacement_payload is not None
+        assert replacement_payload["classification"]["state"] == "no_work"
+        assert replacement_payload["classification"]["reason"] == "clean_branch_not_ahead"
         assert stale_events == []
         assert (
             len(
                 [
                     operation
                     for operation in operations
-                    if operation.type == OperationType.refresh.value
+                    if operation.type == OperationType.retry.value
                     and operation.payload is not None
-                    and operation.payload.get("ambiguity_reason") == "open_pr_lookup_failed"
+                    and operation.payload.get("source") == "worker_restart"
                 ]
             )
             == 1
@@ -9426,6 +9431,99 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert ws.status == WorkspaceStatus.running.value
         assert ws.subphase is None
         assert ws.pr_url is None
+        assert ws.execution_claimed_by == "live-worker"
+        assert ws.execution_claim_expires_at is not None
+        assert _utc_datetime(ws.execution_claim_expires_at) > datetime.now(UTC)
+
+    @pytest.mark.unit
+    async def test_preserved_active_validation_noop_for_fresh_claim_does_not_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-fresh-claim-validation-noop",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_fresh_claim_validation_noop",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work-fresh-claim-validation-noop"
+        branch_name = f"awf/{workspace_id}"
+        _worktree, base_commit, _head_sha = _seed_workspace_worktree(
+            worktrees_root=work_root / "worktrees",
+            origin=origin_repo,
+            workspace_id=workspace_id,
+            branch_name=branch_name,
+            commit_change=True,
+        )
+        fresh_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.base_commit = base_commit
+            ws.branch_name = branch_name
+            ws.remote_push_branch = branch_name
+            ws.execution_claimed_by = "live-worker"
+            ws.execution_claim_expires_at = fresh_claim_expires_at
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_fresh_claim_validation_noop": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_fresh_claim_validation_noop",
+            )
+        )
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert recovered
+        assert salvage_events == []
+        assert operations == []
+        assert executor.calls == []
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase is None
         assert ws.execution_claimed_by == "live-worker"
         assert ws.execution_claim_expires_at is not None
         assert _utc_datetime(ws.execution_claim_expires_at) > datetime.now(UTC)
