@@ -377,6 +377,7 @@ async def _seed_running_worker_restart_recovery(
     *,
     execution_claimed_by: str | None = None,
     execution_claim_expires_at: datetime | None = None,
+    workspace_status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> str:
     ws_id = await _seed_ready_workspace(factory)
     async with factory() as s:
@@ -384,6 +385,14 @@ async def _seed_running_worker_restart_recovery(
         ws = await repo.get(ws_id)
         assert ws is not None
         await repo.transition(ws, to=WorkspaceStatus.running, reason_code="TEST_RUNNING")
+        if workspace_status in {WorkspaceStatus.validating, WorkspaceStatus.pushing}:
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.validating,
+                reason_code="TEST_VALIDATING",
+            )
+        if workspace_status == WorkspaceStatus.pushing:
+            await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="TEST_PUSHING")
         ws.execution_claimed_by = execution_claimed_by
         ws.execution_claim_expires_at = execution_claim_expires_at
         await OperationRepository(s).create(
@@ -499,6 +508,37 @@ class TestHappyPath:
         async with factory() as s:
             persisted = await WorkspaceRepository(s).get(ws_id)
             assert persisted is not None
+            assert persisted.execution_claimed_by == "worker-b"
+            assert persisted.execution_claim_expires_at == lease_expires_at
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "workspace_status",
+        [WorkspaceStatus.validating, WorkspaceStatus.pushing],
+    )
+    async def test_claim_ready_worker_restart_recovery_claims_available_inflight_claim(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+        workspace_status: WorkspaceStatus,
+    ) -> None:
+        ws_id = await _seed_running_worker_restart_recovery(
+            factory,
+            workspace_status=workspace_status,
+        )
+        lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-b",
+            execution_lease_expires_at=lease_expires_at,
+        )
+
+        assert ws is not None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.status == workspace_status.value
             assert persisted.execution_claimed_by == "worker-b"
             assert persisted.execution_claim_expires_at == lease_expires_at
 

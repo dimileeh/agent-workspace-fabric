@@ -148,6 +148,11 @@ _ACTIVE_RECOVERY_OPERATION_STATUSES: Final[tuple[str, ...]] = (
     OperationStatus.running.value,
 )
 _VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebase_only")
+_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.running.value,
+    WorkspaceStatus.validating.value,
+    WorkspaceStatus.pushing.value,
+)
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
@@ -3543,7 +3548,7 @@ class WorkspaceRepository:
             update(Workspace)
             .where(
                 Workspace.id == workspace_id,
-                Workspace.status == WorkspaceStatus.running.value,
+                Workspace.status.in_(_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES),
                 active_worker_restart_recovery,
                 claim_available,
             )
