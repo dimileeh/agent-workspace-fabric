@@ -580,6 +580,11 @@ async def test_create_replay_conflicts_when_agent_effort_changes(
         idempotency_key=idempotency_key,
     )
     assert created.id.startswith("ws_")
+    replayed = await service.create(
+        request_with_high_effort,
+        idempotency_key=idempotency_key,
+    )
+    assert replayed.id == created.id
 
     request_payload["task"]["effort"] = "xhigh"
     request_with_xhigh_effort = WorkspaceCreateRequest.model_validate(request_payload)
