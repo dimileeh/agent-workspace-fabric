@@ -7461,6 +7461,57 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_preserved_active_without_usable_work_preserves_sync_remote_push_branch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-sync-no-work",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_sync_no_work",
+            task_kind="sync_release_pr",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.branch_name = "release-sync/source"
+            ws.remote_push_branch = "development"
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_sync_no_work": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            replacements = [ws for ws in workspaces if ws.id != workspace_id]
+
+        assert len(replacements) == 1
+        replacement = replacements[0]
+        assert replacement.task_kind == "sync_release_pr"
+        assert replacement.branch_name is None
+        assert replacement.remote_push_branch == "development"
+
+    @pytest.mark.unit
     async def test_preserved_active_ambiguous_dirty_worktree_is_operator_recoverable(
         self,
         session_factory: async_sessionmaker[AsyncSession],

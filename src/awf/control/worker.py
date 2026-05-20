@@ -36,7 +36,7 @@ from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import BranchOpenPullRequest
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
-from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SCHEDULER_SQL_AGE_BOOST_DIALECTS,
@@ -157,6 +157,13 @@ _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE = (
 )
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
+_PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
+    {
+        TaskKind.monitor_release_pr.value,
+        TaskKind.sync_release_pr.value,
+        TaskKind.sync_feature_pr.value,
+    }
+)
 _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS: tuple[tuple[str, str], ...] = (
     (
         _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
@@ -2251,6 +2258,7 @@ class ControlWorker:
                 replacement = await repo.create_replacement_from(
                     ws,
                     idempotency_key=idempotency_key,
+                    remote_push_branch=_preserved_active_replacement_remote_push_branch(ws),
                 )
                 task = await TaskRepository(session).get(task_id)
                 if task is None:
@@ -4193,6 +4201,12 @@ def _workspace_claim_snapshot(workspace: Workspace) -> dict[str, str | None]:
         "execution_claimed_by": workspace.execution_claimed_by,
         "execution_claim_expires_at": _json_datetime(workspace.execution_claim_expires_at),
     }
+
+
+def _preserved_active_replacement_remote_push_branch(workspace: Workspace) -> str | None:
+    if workspace.task_kind in _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS:
+        return workspace.remote_push_branch
+    return None
 
 
 def _active_execution_preservation_claim_cleanup_payload(
