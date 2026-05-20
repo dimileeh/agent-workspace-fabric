@@ -1051,31 +1051,32 @@ class TestMergeStateStatus:
         assert action.reason == AbortReason.merge_conflict_not_reproduced
 
     @pytest.mark.unit
-    def test_blocked_with_no_review_blockers_reaches_merge_attempt(self) -> None:
-        """A BLOCKED merge-state alone may be stale or branch-protection
-        nuance that the final merge attempt can arbitrate."""
+    def test_blocked_with_no_review_blockers_notifies_human(self) -> None:
+        """A protected merge-state can mean missing approval or another
+        branch-protection blocker with no open review thread. Do not probe
+        merge repeatedly while waiting for human action."""
         action = decide(
             _status(merge_state_status=MergeStateStatus.BLOCKED),
             MonitorState(),
             MonitorConfig(auto_merge=True),
         )
-        assert isinstance(action, Merge)
+        assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
-    def test_has_hooks_with_no_review_blockers_reaches_merge_attempt(self) -> None:
+    def test_has_hooks_with_no_review_blockers_notifies_human(self) -> None:
         action = decide(
             _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
             MonitorState(),
             MonitorConfig(auto_merge=True),
         )
-        assert isinstance(action, Merge)
+        assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "merge_state_status",
         (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS),
     )
-    def test_protected_state_with_addressed_bot_thread_reaches_merge_attempt(
+    def test_protected_state_with_addressed_bot_thread_notifies_human(
         self,
         merge_state_status: MergeStateStatus,
     ) -> None:
@@ -1089,7 +1090,7 @@ class TestMergeStateStatus:
             MonitorConfig(auto_merge=True),
         )
 
-        assert isinstance(action, Merge)
+        assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
     def test_blocked_still_notifies_with_blocking_review(self) -> None:

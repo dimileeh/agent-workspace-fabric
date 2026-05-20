@@ -746,9 +746,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
         nits would linger forever.
-    8.  ``merge_state_status`` BLOCKED / HAS_HOOKS with unresolved
-        human-authored inline threads → NotifyHuman. Bot-only threads
-        already triaged by step 2 do not block the merge attempt.
+    8.  ``merge_state_status`` BLOCKED / HAS_HOOKS → NotifyHuman. These
+        protected states can represent missing approval or branch-protection
+        hooks even when there is no unresolved review thread to address.
     9.  All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
@@ -889,16 +889,14 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_human_defer:
         return NotifyHuman()
 
-    # 8. GitHub may report BLOCKED / HAS_HOOKS while unresolved bot
-    # threads linger after AWF triaged them as false-positive/deferred.
-    # Those bot-only threads should not stall auto-merge forever. Human
-    # inline threads are different: if GitHub still reports them unresolved,
-    # branch protection may be waiting on maintainer review state that this
-    # snapshot cannot inspect, so hand off instead of guessing.
+    # 8. GitHub may report BLOCKED / HAS_HOOKS because required approval,
+    # protected hooks, or maintainer-controlled review state has not cleared.
+    # A rejected merge would only confirm the same protected-state blocker,
+    # so hand off instead of probing GitHub every poll.
     if status.merge_state_status in (
         MergeStateStatus.BLOCKED,
         MergeStateStatus.HAS_HOOKS,
-    ) and any(not _is_bot_review_thread(t) for t in status.unresolved_inline_threads):
+    ):
         return NotifyHuman()
 
     # 9. All green — terminal success action.
