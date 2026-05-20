@@ -50,6 +50,10 @@ from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
+from awf.control.protected_file_diffs import (
+    git_show_text,
+    protected_file_diffs_for_committed_paths,
+)
 from awf.control.quality_gates import (
     ProtectedFileDiff,
     QualityGateViolation,
@@ -5103,7 +5107,8 @@ class PullRequestMonitorRunner:
         )
         if not changed_paths:
             return []
-        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
             worktree_path=worktree_path,
             base_ref=local_base,
             changed_paths=changed_paths,
@@ -5242,8 +5247,8 @@ class PullRequestMonitorRunner:
         diffs: dict[str, ProtectedFileDiff] = {}
         for path in diff_classified_protected_paths(changed_paths):
             worktree_file = worktree_path / path
-            old_text = await self._git_show_text(
-                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+            old_text = await git_show_text(
+                self._deps.runner, worktree_path=worktree_path, refspec=f"HEAD:{path}"
             )
             new_text = _read_worktree_text(worktree_file) if worktree_file.exists() else None
             diffs[path] = ProtectedFileDiff(
@@ -5252,50 +5257,6 @@ class PullRequestMonitorRunner:
                 new_text=new_text,
             )
         return diffs
-
-    async def _protected_file_diffs_for_committed_paths(
-        self,
-        *,
-        worktree_path: Path,
-        base_ref: str,
-        changed_paths: Sequence[str],
-    ) -> dict[str, ProtectedFileDiff]:
-        diffs: dict[str, ProtectedFileDiff] = {}
-        for path in diff_classified_protected_paths(changed_paths):
-            old_text = await self._git_show_text(
-                worktree_path=worktree_path,
-                refspec=f"{base_ref}:{path}",
-            )
-            new_text = await self._git_show_text(
-                worktree_path=worktree_path, refspec=f"HEAD:{path}"
-            )
-            diffs[path] = ProtectedFileDiff(
-                path=path,
-                old_text=old_text,
-                new_text=new_text,
-            )
-        return diffs
-
-    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
-        result = await self._deps.runner.run(
-            [
-                "git",
-                *git_safe_directory_config_args(worktree_path),
-                "-C",
-                str(worktree_path),
-                "show",
-                refspec,
-            ]
-        )
-        if result.ok:
-            return result.stdout
-        error_text = (result.stderr or result.stdout or "").lower()
-        if "path " in error_text and (
-            "does not exist" in error_text or "exists on disk, but not in" in error_text
-        ):
-            return None
-        details = (result.stderr or result.stdout or "<no output>").strip()
-        raise RuntimeError(f"git show failed for {refspec!r} in {worktree_path}: {details}")
 
     async def _protected_scope_violations_for_sync_base_push(
         self,
@@ -5356,7 +5317,8 @@ class PullRequestMonitorRunner:
         )
         if not sync_base_authored_paths:
             return []
-        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._deps.runner,
             worktree_path=worktree_path,
             base_ref=remote_branch_base,
             changed_paths=sync_base_authored_paths,

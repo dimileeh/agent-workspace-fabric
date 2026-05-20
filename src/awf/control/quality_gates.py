@@ -437,23 +437,34 @@ def _pyproject_policy_section_violations(
                 old_number = float(cast(int | float, old_fail_under))
                 new_number = float(cast(int | float, new_fail_under))
                 if new_number < old_number:
-                    violations.append(
-                        _violation(
-                            path=path,
-                            protected_pattern=protected_pattern,
-                            section="tool.coverage.report.fail_under",
-                            line=_line_for_toml_key(
-                                new_text,
-                                section="tool.coverage.report",
-                                key="fail_under",
-                            ),
-                            reason=(
-                                "coverage fail_under lowered from "
-                                f"{_format_number(old_number)} to {_format_number(new_number)}"
-                            ),
-                        )
+                    reason = (
+                        "coverage fail_under lowered from "
+                        f"{_format_number(old_number)} to {_format_number(new_number)}"
                     )
-                    continue
+                elif new_number > old_number:
+                    reason = (
+                        "coverage fail_under raised from "
+                        f"{_format_number(old_number)} to {_format_number(new_number)}"
+                    )
+                else:
+                    reason = (
+                        "coverage fail_under unchanged at "
+                        f"{_format_number(new_number)} while coverage policy changed"
+                    )
+                violations.append(
+                    _violation(
+                        path=path,
+                        protected_pattern=protected_pattern,
+                        section="tool.coverage.report.fail_under",
+                        line=_line_for_toml_key(
+                            new_text,
+                            section="tool.coverage.report",
+                            key="fail_under",
+                        ),
+                        reason=reason,
+                    )
+                )
+                continue
         line_text = new_text if new_value is not None else old_text
         violations.append(
             _violation(

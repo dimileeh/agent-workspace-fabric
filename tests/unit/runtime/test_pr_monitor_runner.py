@@ -25,6 +25,7 @@ from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
+from awf.control.protected_file_diffs import git_show_text
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -261,10 +262,9 @@ async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
 async def test_git_show_text_marks_worktree_safe_directory(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="old text")
-    runner = _monitor_runner(tmp_path, cmd)
     worktree = tmp_path / "worktree"
 
-    show_text = await runner._git_show_text(worktree_path=worktree, refspec="HEAD:README.md")
+    show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:README.md")
 
     assert show_text == "old text"
     assert cmd.calls[0].args == [
@@ -292,10 +292,9 @@ async def test_git_show_text_returns_none_for_missing_path(
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr=stderr)
-    runner = _monitor_runner(tmp_path, cmd)
     worktree = tmp_path / "worktree"
 
-    show_text = await runner._git_show_text(worktree_path=worktree, refspec="HEAD:pyproject.toml")
+    show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:pyproject.toml")
 
     assert show_text is None
 
@@ -304,11 +303,10 @@ async def test_git_show_text_returns_none_for_missing_path(
 async def test_git_show_text_raises_for_unexpected_git_failure(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
-    runner = _monitor_runner(tmp_path, cmd)
     worktree = tmp_path / "worktree"
 
     with pytest.raises(RuntimeError) as exc_info:
-        await runner._git_show_text(worktree_path=worktree, refspec="bad-ref:pyproject.toml")
+        await git_show_text(cmd, worktree_path=worktree, refspec="bad-ref:pyproject.toml")
 
     message = str(exc_info.value)
     assert "bad-ref:pyproject.toml" in message

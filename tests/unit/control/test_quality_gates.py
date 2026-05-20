@@ -144,6 +144,82 @@ fail_under = 80
 
 
 @pytest.mark.unit
+def test_pyproject_raising_coverage_fail_under_is_blocked_with_specific_reason() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 80
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.path == "pyproject.toml"
+    assert violation.section == "tool.coverage.report.fail_under"
+    assert violation.line == 5
+    assert "coverage fail_under raised from 80 to 99" in violation.reason
+
+
+@pytest.mark.unit
+def test_pyproject_unchanged_coverage_fail_under_policy_change_is_specific() -> None:
+    old_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+show_missing = true
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.coverage.report]
+fail_under = 99
+show_missing = false
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.path == "pyproject.toml"
+    assert violation.section == "tool.coverage.report.fail_under"
+    assert violation.line == 5
+    assert "coverage fail_under unchanged at 99 while coverage policy changed" in violation.reason
+
+
+@pytest.mark.unit
 def test_pyproject_dependency_deletion_is_blocked() -> None:
     old_text = """
 [project.optional-dependencies]

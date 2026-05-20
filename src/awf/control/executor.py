@@ -52,6 +52,10 @@ from awf.common.compose_exec import (
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
+from awf.control.protected_file_diffs import (
+    git_show_text,
+    protected_file_diffs_for_committed_paths,
+)
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     ProtectedFileDiff,
@@ -5324,33 +5328,15 @@ class WorkspaceExecutor:
     ) -> dict[str, ProtectedFileDiff]:
         diffs: dict[str, ProtectedFileDiff] = {}
         for path in diff_classified_protected_paths(changed_paths):
-            old_text = await self._git_show_text(
+            old_text = await git_show_text(
+                self._runner,
                 worktree_path=worktree_path,
                 refspec=f"{base_ref}:{path}",
             )
-            new_text = await self._git_show_text(worktree_path=worktree_path, refspec=f":{path}")
-            diffs[path] = ProtectedFileDiff(
-                path=path,
-                old_text=old_text,
-                new_text=new_text,
-            )
-        return diffs
-
-    async def _protected_file_diffs_for_committed_paths(
-        self,
-        *,
-        worktree_path: Path,
-        base_ref: str,
-        changed_paths: Sequence[str],
-    ) -> dict[str, ProtectedFileDiff]:
-        diffs: dict[str, ProtectedFileDiff] = {}
-        for path in diff_classified_protected_paths(changed_paths):
-            old_text = await self._git_show_text(
+            new_text = await git_show_text(
+                self._runner,
                 worktree_path=worktree_path,
-                refspec=f"{base_ref}:{path}",
-            )
-            new_text = await self._git_show_text(
-                worktree_path=worktree_path, refspec=f"HEAD:{path}"
+                refspec=f":{path}",
             )
             diffs[path] = ProtectedFileDiff(
                 path=path,
@@ -5358,27 +5344,6 @@ class WorkspaceExecutor:
                 new_text=new_text,
             )
         return diffs
-
-    async def _git_show_text(self, *, worktree_path: Path, refspec: str) -> str | None:
-        result = await self._runner.run(
-            [
-                "git",
-                *git_safe_directory_config_args(worktree_path),
-                "-C",
-                str(worktree_path),
-                "show",
-                refspec,
-            ]
-        )
-        if result.ok:
-            return result.stdout
-        error_text = (result.stderr or result.stdout or "").lower()
-        if "path " in error_text and (
-            "does not exist" in error_text or "exists on disk, but not in" in error_text
-        ):
-            return None
-        details = (result.stderr or result.stdout or "<no output>").strip()
-        raise RuntimeError(f"git show failed for {refspec!r} in {worktree_path}: {details}")
 
     async def _verify_recovered_post_agent_commit(
         self,
@@ -5412,7 +5377,8 @@ class WorkspaceExecutor:
             expected_status=expected_status,
         ):
             return False
-        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._runner,
             worktree_path=worktree_path,
             base_ref=base_commit,
             changed_paths=changed_paths,
@@ -5545,7 +5511,8 @@ class WorkspaceExecutor:
         )
         if not changed_paths:
             return False
-        protected_file_diffs = await self._protected_file_diffs_for_committed_paths(
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._runner,
             worktree_path=worktree_path,
             base_ref=base_commit,
             changed_paths=changed_paths,
