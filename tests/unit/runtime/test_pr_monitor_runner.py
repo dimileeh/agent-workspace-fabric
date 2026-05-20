@@ -75,6 +75,7 @@ from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
     BaseFetchError,
     MonitorRunnerConfig,
+    ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -376,6 +377,7 @@ async def test_protected_status_diff_for_deleted_file_keeps_head_text(
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
     runner = _monitor_runner(tmp_path, cmd)
     worktree = tmp_path / "worktree"
@@ -395,9 +397,41 @@ async def test_protected_status_diff_for_deleted_file_keeps_head_text(
         f"safe.directory={worktree}",
         "-C",
         str(worktree),
+        "cat-file",
+        "-e",
+        "HEAD:pyproject.toml",
+    ]
+    assert cmd.calls[1].args == [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
         "show",
         "HEAD:pyproject.toml",
     ]
+
+
+@pytest.mark.unit
+async def test_protected_status_diff_for_unreadable_file_fails_closed(
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner = _monitor_runner(tmp_path, cmd)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "pyproject.toml").write_bytes(b"\xff")
+
+    with pytest.raises(
+        ProtectedScopeDiffError,
+        match="Could not read protected worktree file 'pyproject.toml' as UTF-8",
+    ):
+        await runner._protected_file_diffs_for_status_paths(
+            worktree_path=worktree,
+            changed_paths=["pyproject.toml"],
+        )
 
 
 @pytest.mark.unit

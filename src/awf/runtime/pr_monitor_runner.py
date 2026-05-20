@@ -5256,7 +5256,11 @@ class PullRequestMonitorRunner:
             old_text = await git_show_text(
                 self._deps.runner, worktree_path=worktree_path, refspec=f"HEAD:{path}"
             )
-            new_text = _read_worktree_text(worktree_file) if worktree_file.exists() else None
+            new_text = (
+                _read_worktree_text(worktree_file, display_path=path)
+                if worktree_file.exists()
+                else None
+            )
             diffs[path] = ProtectedFileDiff(
                 path=path,
                 old_text=old_text,
@@ -7617,11 +7621,18 @@ def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) ->
     return list(dict.fromkeys(violation.path for violation in violations))
 
 
-def _read_worktree_text(path: Path) -> str | None:
+def _read_worktree_text(path: Path, *, display_path: str | None = None) -> str:
+    label = display_path or str(path)
     try:
         return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+    except UnicodeDecodeError as exc:
+        raise ProtectedScopeDiffError(
+            f"Could not read protected worktree file {label!r} as UTF-8 for classification"
+        ) from exc
+    except OSError as exc:
+        raise ProtectedScopeDiffError(
+            f"Could not read protected worktree file {label!r} for classification: {exc}"
+        ) from exc
 
 
 def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
