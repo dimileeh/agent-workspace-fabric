@@ -262,7 +262,7 @@ def _coverage_metadata_has_pytest_failures(coverage: Mapping[str, Any]) -> bool:
     return bool(node_ids or evidence)
 
 
-def _resolve_session_dialect_name(
+def resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
 ) -> str | None:
@@ -497,7 +497,7 @@ class TaskAttemptRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def create_for_workspace(
         self,
@@ -643,7 +643,7 @@ class PRFeedbackResolutionRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def record_resolution(
         self,
@@ -746,7 +746,7 @@ class ProviderModelCircuitBreakerRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def get(
         self,
@@ -2300,7 +2300,7 @@ class EgressAuditRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def create(
         self,
@@ -2379,7 +2379,7 @@ class SecretLeaseRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def issue_declared_leases(
         self,
@@ -2762,7 +2762,7 @@ class WorkspaceRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     @property
     def dialect_name(self) -> str | None:
@@ -4107,7 +4107,7 @@ def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
 
 
 @dataclass(frozen=True)
-class _SchedulerOrderExpressions:
+class SchedulerOrderExpressions:
     class_priority: ColumnElement[Any]
     effective_score: ColumnElement[Any]
 
@@ -4124,7 +4124,7 @@ def _schedulable_workspace_ids_stmt(
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
 ) -> Select[tuple[Workspace]]:
-    order_expressions = _scheduler_order_expressions(
+    order_expressions = scheduler_order_expressions(
         scoring_at=scoring_at,
         dialect_name=dialect_name,
     )
@@ -4173,12 +4173,12 @@ def _scheduler_scoring_time(
     return after.scoring_at
 
 
-def _scheduler_order_expressions(
+def scheduler_order_expressions(
     *,
     scoring_at: datetime,
     dialect_name: str | None,
     workspace_entity: Any = Workspace,
-) -> _SchedulerOrderExpressions:
+) -> SchedulerOrderExpressions:
     class_priority = _task_class_case(TASK_CLASS_PRIORITIES, workspace_entity=workspace_entity)
     class_bias = _task_class_case(TASK_CLASS_BIASES, workspace_entity=workspace_entity)
     base_priority = _bounded_scheduler_int_expr(
@@ -4244,7 +4244,7 @@ def _scheduler_order_expressions(
         dialect_name=dialect_name,
         workspace_entity=workspace_entity,
     )
-    return _SchedulerOrderExpressions(
+    return SchedulerOrderExpressions(
         class_priority=class_priority,
         effective_score=base_priority + class_bias + age_boost + retry_bonus + human_boost,
     )
@@ -4254,9 +4254,9 @@ def _scheduler_cursor_order_expressions(
     *,
     after: SchedulerOrderCursor,
     dialect_name: str | None,
-) -> _SchedulerOrderExpressions:
+) -> SchedulerOrderExpressions:
     cursor_workspace = aliased(Workspace, name="scheduler_cursor_workspace")
-    cursor_order = _scheduler_order_expressions(
+    cursor_order = scheduler_order_expressions(
         scoring_at=after.scoring_at,
         dialect_name=dialect_name,
         workspace_entity=cursor_workspace,
@@ -4284,7 +4284,7 @@ def _scheduler_cursor_order_expressions(
         cursor_class_priority,
         cursor_effective_score,
     ).cte("scheduler_cursor_order")
-    return _SchedulerOrderExpressions(
+    return SchedulerOrderExpressions(
         class_priority=cursor_order_cte.c.class_priority,
         effective_score=cursor_order_cte.c.effective_score,
     )
@@ -4510,7 +4510,7 @@ SCHEDULER_SQL_AGE_BOOST_DIALECTS: Final[frozenset[str]] = frozenset(
 
 
 def _scheduler_after_cursor_condition(
-    order_expressions: _SchedulerOrderExpressions,
+    order_expressions: SchedulerOrderExpressions,
     after: SchedulerOrderCursor,
     *,
     dialect_name: str | None,
@@ -4760,7 +4760,7 @@ class CallbackSubscriptionRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize callback subscription idempotency decisions."""
@@ -4913,7 +4913,7 @@ class CallbackDeliveryRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def get(self, delivery_id: str) -> CallbackDelivery | None:
         stmt = (
@@ -5135,7 +5135,7 @@ class OperationRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize operation idempotency decisions with a PostgreSQL advisory lock."""

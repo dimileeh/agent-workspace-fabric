@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
@@ -23,8 +24,8 @@ from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     ProviderModelCircuitBreakerRepository,
     ResourceReservationRepository,
-    _resolve_session_dialect_name,
-    _scheduler_order_expressions,
+    resolve_session_dialect_name,
+    scheduler_order_expressions,
 )
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -1432,14 +1433,21 @@ async def _defaulted_dind_slots_for_session(
         )
         .exists()
     )
-    stmt = select(Workspace.resolved_profile).where(
+    stmt = select(func.coalesce(func.sum(_defaulted_dind_slots_sql_expression()), 0)).where(
         status_filter,
         ~active_reservation_exists,
     )
     if node_id is not None:
         stmt = stmt.where(_workspace_node_scope_filter(node_id))
-    profiles = await session.scalars(stmt)
-    return sum(default_dind_slots_from_profile(profile) for profile in profiles)
+    return int(await session.scalar(stmt) or 0)
+
+
+def _defaulted_dind_slots_sql_expression() -> Any:
+    resolved_profile: Any = Workspace.resolved_profile
+    return case(
+        (resolved_profile["docker"]["mode"].as_string() == "dind", 1),
+        else_=0,
+    )
 
 
 async def _unreserved_workspace_count_for_session(
@@ -1677,10 +1685,11 @@ async def _capacity_queue_candidates(
     limit: int,
     scoring_at: datetime,
 ) -> list[_CapacityQueueCandidate]:
-    order_expressions = _scheduler_order_expressions(
+    order_expressions = scheduler_order_expressions(
         scoring_at=scoring_at,
-        dialect_name=_resolve_session_dialect_name(session, None),
+        dialect_name=resolve_session_dialect_name(session, None),
     )
+    requested_reservation_workspace = aliased(Workspace, name="requested_reservation_workspace")
     latest_active_reservations = (
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
@@ -1700,7 +1709,18 @@ async def _capacity_queue_candidates(
             )
             .label("reservation_rank"),
         )
-        .where(ResourceReservation.released_at.is_(None))
+        .join(
+            requested_reservation_workspace,
+            ResourceReservation.workspace_id == requested_reservation_workspace.id,
+        )
+        .where(
+            ResourceReservation.released_at.is_(None),
+            requested_reservation_workspace.status == WorkspaceStatus.requested.value,
+            or_(
+                requested_reservation_workspace.node_id == node_id,
+                requested_reservation_workspace.node_id.is_(None),
+            ),
+        )
         .subquery()
     )
     stmt = (

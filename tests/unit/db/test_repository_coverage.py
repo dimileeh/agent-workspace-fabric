@@ -40,12 +40,12 @@ from awf.db.repositories import (
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
     _provider_model_circuit_breaker_insert_if_absent_stmt,
-    _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
     _workspace_idempotency_advisory_lock_key,
     owned_path_overlap_match,
     owned_paths_overlap,
+    resolve_session_dialect_name,
     sync_candidate_readiness,
 )
 from awf.db.session import make_session_factory
@@ -396,8 +396,8 @@ async def test_postgres_only_repository_locks_execute_advisory_lock_helpers() ->
             {"dialect": type("Dialect", (), {"name": object()})()},
         )()
 
-    assert _resolve_session_dialect_name(NoBindSession(), None) is None
-    assert _resolve_session_dialect_name(NonStringDialectSession(), None) is None
+    assert resolve_session_dialect_name(NoBindSession(), None) is None
+    assert resolve_session_dialect_name(NonStringDialectSession(), None) is None
 
     task_session = RecordingSession()
     await TaskAttemptRepository(

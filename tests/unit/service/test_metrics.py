@@ -1521,6 +1521,91 @@ async def test_capacity_queue_blocked_reason_counts_loads_latest_requested_deman
 
 
 @pytest.mark.unit
+async def test_capacity_queue_candidates_prefilter_reservations_to_requested_scope(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    requested_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    running_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        for workspace_id in (requested_workspace_id, running_workspace_id):
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = "local"
+        await session.commit()
+    for workspace_id in (requested_workspace_id, running_workspace_id):
+        await _reservation_for_workspace(
+            session_factory,
+            workspace_id,
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=1.0,
+            peak_memory_gb=2.0,
+            dind_slots=0,
+            reserved_at=now,
+        )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await _capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(_env_file=None, local_capacity_cpu_cores=2.0),
+                node_id="local",
+                allocated_resources=ReservedResources(
+                    active_workspace_count=0,
+                    steady_cpu=0.0,
+                    steady_memory_gb=0.0,
+                    peak_cpu=0.0,
+                    peak_memory_gb=0.0,
+                    disk_mb=0,
+                    dind_slots=0,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=1.0,
+                    steady_memory_gb=2.0,
+                    peak_cpu=1.0,
+                    peak_memory_gb=2.0,
+                ),
+                detected_local_capacity=None,
+                scoring_at=now,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert counts == {}
+    assert len(statements) == 1
+    assert "join workspaces as requested_reservation_workspace" in statements[0]
+    assert "requested_reservation_workspace.status =" in statements[0]
+    assert "requested_reservation_workspace.node_id =" in statements[0]
+
+
+@pytest.mark.unit
 async def test_capacity_queue_blocked_reason_counts_limits_after_scheduler_priority(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1990,6 +2075,87 @@ async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywher
     assert summary.capacity_queue.queued_workspace_count == 1
     assert summary.capacity_queue.planned_resources.dind_slots == 1
     assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_defaulted_dind_slots_are_aggregated_without_profile_materialization(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _defaulted_dind_slots_for_session
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    dind_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    host_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    reserved_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    remote_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        profiles = {
+            dind_workspace_id: ("local", {"docker": {"mode": "dind"}}),
+            host_workspace_id: ("local", {"docker": {"mode": "host"}}),
+            reserved_workspace_id: ("local", {"docker": {"mode": "dind"}}),
+            remote_workspace_id: ("remote", {"docker": {"mode": "dind"}}),
+        }
+        for workspace_id, (node_id, profile) in profiles.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+            workspace.resolved_profile = profile
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=1.0,
+        peak_cpu=1.0,
+        peak_memory_gb=1.0,
+        reserved_at=now,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            slots = await _defaulted_dind_slots_for_session(
+                session,
+                statuses=(WorkspaceStatus.running,),
+                node_id="local",
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert slots == 1
+    assert len(statements) == 1
+    assert "sum(case" in statements[0]
+    assert "select workspaces.resolved_profile" not in statements[0]
 
 
 @pytest.mark.unit
