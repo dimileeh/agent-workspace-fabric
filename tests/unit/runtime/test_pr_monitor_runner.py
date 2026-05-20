@@ -261,20 +261,33 @@ async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
 @pytest.mark.unit
 async def test_git_show_text_marks_worktree_safe_directory(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="old text")
     worktree = tmp_path / "worktree"
 
     show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:README.md")
 
     assert show_text == "old text"
-    assert cmd.calls[0].args == [
-        "git",
-        "-c",
-        f"safe.directory={worktree}",
-        "-C",
-        str(worktree),
-        "show",
-        "HEAD:README.md",
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "cat-file",
+            "-e",
+            "HEAD:README.md",
+        ],
+        [
+            "git",
+            "-c",
+            f"safe.directory={worktree}",
+            "-C",
+            str(worktree),
+            "show",
+            "HEAD:README.md",
+        ],
     ]
 
 
@@ -292,6 +305,7 @@ async def test_git_show_text_returns_none_for_missing_path(
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr=stderr)
+    cmd.queue_result(returncode=0)
     worktree = tmp_path / "worktree"
 
     show_text = await git_show_text(cmd, worktree_path=worktree, refspec="HEAD:pyproject.toml")
@@ -303,6 +317,7 @@ async def test_git_show_text_returns_none_for_missing_path(
 async def test_git_show_text_raises_for_unexpected_git_failure(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr="fatal: bad revision 'bad-ref:pyproject.toml'")
+    cmd.queue_result(returncode=1)
     worktree = tmp_path / "worktree"
 
     with pytest.raises(RuntimeError) as exc_info:

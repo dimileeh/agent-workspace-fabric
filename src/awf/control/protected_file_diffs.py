@@ -95,7 +95,7 @@ async def git_show_text(
         ]
     )
     if not exists_result.ok:
-        if await _git_refspec_base_exists(
+        if await _git_refspec_missing_path_is_recoverable(
             runner,
             worktree_path=worktree_path,
             refspec=refspec,
@@ -123,15 +123,17 @@ async def git_show_text(
     )
 
 
-async def _git_refspec_base_exists(
+async def _git_refspec_missing_path_is_recoverable(
     runner: AsyncCommandRunner,
     *,
     worktree_path: Path,
     refspec: str,
 ) -> bool:
-    base_ref, separator, _path = refspec.partition(":")
-    if not separator or not base_ref:
+    base_ref, separator, path = refspec.partition(":")
+    if not separator:
         return False
+    if not base_ref:
+        return bool(path)
     result = await runner.run(
         [
             "git",

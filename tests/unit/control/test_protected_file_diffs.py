@@ -164,6 +164,27 @@ async def test_git_show_text_returns_none_for_missing_path(
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_git_show_text_returns_none_for_missing_index_path(
+    tmp_path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: path 'pyproject.toml' is not in the index")
+
+    assert (
+        await git_show_text(
+            runner,
+            worktree_path=tmp_path,
+            refspec=":pyproject.toml",
+        )
+        is None
+    )
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", ":pyproject.toml"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_git_show_text_raises_for_unexpected_git_error(tmp_path) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=128, stderr="fatal: not a valid object name")

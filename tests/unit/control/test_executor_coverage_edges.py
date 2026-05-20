@@ -4071,7 +4071,9 @@ async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # cat-file base-sha:.github/workflows/ci.yml
     runner.queue_result(returncode=0, stdout="base workflow\n")
+    runner.queue_result(returncode=0)  # cat-file :.github/workflows/ci.yml
     runner.queue_result(returncode=0, stdout="staged workflow\n")
     executor = _executor_with_runner(runner, tmp_path)
 
@@ -4083,12 +4085,37 @@ async def test_staged_protected_file_diffs_use_base_ref_for_old_side(
 
     assert diffs[".github/workflows/ci.yml"].old_text == "base workflow\n"
     assert diffs[".github/workflows/ci.yml"].new_text == "staged workflow\n"
-    assert runner.calls[0].args[-2:] == [
-        "show",
-        "base-sha:.github/workflows/ci.yml",
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "base-sha:.github/workflows/ci.yml"],
+        ["show", "base-sha:.github/workflows/ci.yml"],
+        ["cat-file", "-e", ":.github/workflows/ci.yml"],
+        ["show", ":.github/workflows/ci.yml"],
     ]
-    assert runner.calls[1].args[-2:] == ["show", ":.github/workflows/ci.yml"]
-    assert len(runner.calls) == 2
+
+
+@pytest.mark.unit
+async def test_staged_protected_file_diffs_treat_deleted_index_path_as_absent(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # cat-file base-sha:pyproject.toml
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner.queue_result(returncode=128, stderr="fatal: path 'pyproject.toml' is not in the index")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    diffs = await executor._protected_file_diffs_for_staged_paths(
+        worktree_path=tmp_path / "worktree",
+        base_ref="base-sha",
+        changed_paths=["pyproject.toml"],
+    )
+
+    assert diffs["pyproject.toml"].old_text == '[project]\nname = "demo"\n'
+    assert diffs["pyproject.toml"].new_text is None
+    assert [call.args[call.args.index("-C") + 2 :] for call in runner.calls] == [
+        ["cat-file", "-e", "base-sha:pyproject.toml"],
+        ["show", "base-sha:pyproject.toml"],
+        ["cat-file", "-e", ":pyproject.toml"],
+    ]
 
 
 @pytest.mark.unit
