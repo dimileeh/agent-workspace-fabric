@@ -69,13 +69,6 @@ workspaces/
 /comments.json
 /reviews.json
 
-# AWF-generated planning artifacts are local operator evidence. Keep the
-# canonical execution protocol tracked, but do not publish generated runs.
-docs/awf-plans/*
-!docs/awf-plans/README.md
-plans/*
-!plans/PLAN_EXECUTION_PROTOCOL.md
-
 # Docker
 .dockerignore.bak
 

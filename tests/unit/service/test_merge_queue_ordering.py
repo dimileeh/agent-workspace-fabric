@@ -198,14 +198,14 @@ async def test_older_open_candidate_blocks_later_same_repo_base_candidate(
         ([], []),
     ],
 )
-async def test_missing_owned_paths_conservatively_block_later_candidate(
+async def test_missing_owned_paths_do_not_block_later_candidate(
     factory: async_sessionmaker[AsyncSession],
     older_owned_paths: list[str],
     later_owned_paths: list[str],
 ) -> None:
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     async with factory() as session:
-        older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_candidate(
+        _older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_candidate(
             session,
             title="Older unscoped candidate",
             pr_number=17,
@@ -227,11 +227,7 @@ async def test_missing_owned_paths_conservatively_block_later_candidate(
             candidate_id=later_candidate_id,
         )
 
-    assert len(blockers) == 1
-    assert blockers[0].candidate_id == older_candidate_id
-    assert blockers[0].workspace_id == older_workspace_id
-    assert blockers[0].blocker_state == "merge_eligible"
-    assert blockers[0].reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
+    assert blockers == []
 
 
 @pytest.mark.unit
@@ -667,11 +663,11 @@ def test_merge_queue_private_policy_helpers_cover_policy_edges() -> None:
         )
         is None
     )
-    assert merge_queue._candidate_blocks_target(  # noqa: SLF001
+    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
         _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
         target,
     )
-    assert merge_queue._candidate_blocks_target(  # noqa: SLF001
+    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
         target,
         _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
     )
