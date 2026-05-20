@@ -2608,6 +2608,45 @@ def test_merge_env_seed_contents_preserves_context_before_duplicate_overlay_only
 
 
 @pytest.mark.unit
+def test_merge_env_seed_keeps_context_before_first_overlay_only_duplicate_with_blank_separator() -> (
+    None
+):
+    """Keep non-comment notes before the first root-only duplicate with the final value."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        b"AWF_API_TOKEN=compose-example\n",
+        (
+            "\n".join(
+                [
+                    "AWF_API_TOKEN=migrated-token",
+                    "",
+                    "Operator endpoint migrated from the root env file",
+                    "AWF_EXTRA_ENDPOINT=https://first.example.test",
+                    "# Final endpoint",
+                    "AWF_EXTRA_ENDPOINT=https://final.example.test",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ("AWF_EXTRA_ENDPOINT",)
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "AWF_API_TOKEN=migrated-token",
+                "",
+                "Operator endpoint migrated from the root env file",
+                "# Final endpoint",
+                "AWF_EXTRA_ENDPOINT=https://final.example.test",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_keeps_single_comment_before_duplicate_overlay_only_key() -> None:
     """Keep a single adjacent comment before the first root-only duplicate."""
     from awf.cli import main as cli_main

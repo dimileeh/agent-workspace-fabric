@@ -90,6 +90,10 @@ def compose_cli_environ(environ: Mapping[str, str]) -> dict[str, str]:
             caller_found, caller_value = env_lookup(os.environ, key)
             if caller_found and caller_value:
                 resolved[key] = ""
+            continue
+        caller_found, caller_value = env_lookup(os.environ, key)
+        if caller_found and caller_value:
+            resolved[key] = caller_value
     return resolved
 
 

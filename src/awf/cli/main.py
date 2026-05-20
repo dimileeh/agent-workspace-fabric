@@ -1184,6 +1184,12 @@ def _env_context_is_single_adjacent_comment(lines: list[str]) -> bool:
     return len(lines) == 1 and lines[0].strip().startswith("#")
 
 
+def _env_context_has_non_comment_note(lines: list[str]) -> bool:
+    """Return whether context contains an operator note outside dotenv comments."""
+
+    return any(line.strip() and not line.strip().startswith("#") for line in lines)
+
+
 def _merge_env_seed_contents_with_overlay_keys(
     seed_contents: bytes,
     overlay_contents: bytes,
@@ -1270,6 +1276,7 @@ def _merge_env_seed_contents_with_overlay_keys(
                 or key_identity in seen_overlay_assignment_keys
                 or _env_context_looks_like_section_header(context)
                 or _env_context_is_single_adjacent_comment(context)
+                or _env_context_has_non_comment_note(context)
             ):
                 duplicate_context.setdefault(key_identity, []).extend(context)
         pending_context = []
