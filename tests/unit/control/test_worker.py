@@ -7059,7 +7059,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_lookup_failure_falls_back_to_worktree_salvage(
+    async def test_preserved_active_pushed_branch_pr_lookup_failure_requires_operator_recovery(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -7075,7 +7075,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
         work_root = tmp_path / "awf-work-pr-lookup-failure"
         branch_name = f"awf/{workspace_id}"
-        _worktree, base_commit, head_sha = _seed_workspace_worktree(
+        _worktree, base_commit, _head_sha = _seed_workspace_worktree(
             worktrees_root=work_root / "worktrees",
             origin=origin_repo,
             workspace_id=workspace_id,
@@ -7091,7 +7091,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             await s.commit()
 
         resolver = _RecordingBranchOpenPRResolver({branch_name: RuntimeError("gh pr list failed")})
-        executor = _BlockingExecutor()
+        executor = _RecordingExecutor()
         cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(
             session_factory=session_factory,
@@ -7114,65 +7114,59 @@ class TestRunOnceStaleActiveExecutionRecovery:
             ),
         )
 
-        try:
-            await worker.run_once()
-            await asyncio.wait_for(executor.started.wait(), timeout=5.0)
+        await worker.run_once()
+        await worker.wait_for_execution_tasks()
 
-            async with session_factory() as s:
-                ws = await WorkspaceRepository(s).get(workspace_id)
-                assert ws is not None
-                operator_events = await WorkspaceEventRepository(s).list(
-                    workspace_id=workspace_id,
-                    event_type="workspace.active_execution_salvage_operator_required",
-                )
-                stale_events = await WorkspaceEventRepository(s).list(
-                    workspace_id=workspace_id,
-                    event_type="workspace.stale_active_execution_detected",
-                )
-                salvage_events = await WorkspaceEventRepository(s).list(
-                    workspace_id=workspace_id,
-                    event_type="workspace.active_execution_salvage_validation_requested",
-                )
-                operations = await OperationRepository(s).list_for_workspace(workspace_id)
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
 
-            assert ws.status == WorkspaceStatus.running.value
-            assert ws.subphase == "runtime_preserved_validation_requested"
-            assert operator_events == []
-            assert stale_events == []
-            assert len(salvage_events) == 1
-            payload = salvage_events[0].payload
-            assert payload is not None
-            assert payload["decision"] == "validate_committed_work"
-            assert payload["workspace_status"] == WorkspaceStatus.pushing.value
-            assert payload["head_sha"] == head_sha
-            assert payload["branch_pr_lookup"] == {
+        assert ws.status == WorkspaceStatus.pushing.value
+        assert ws.subphase == "runtime_preserved_operator_recovery_required"
+        assert stale_events == []
+        assert salvage_events == []
+        assert len(operator_events) == 1
+        payload = operator_events[0].payload
+        assert payload is not None
+        assert payload["decision"] == "operator_recovery_required"
+        assert payload["workspace_status"] == WorkspaceStatus.pushing.value
+        assert payload["ambiguity_reason"] == "open_pr_lookup_failed"
+        assert "classification" not in payload
+        assert "head_sha" not in payload
+        assert payload["branch_pr_lookup"] == {
+            "branch_name": branch_name,
+            "error_type": "RuntimeError",
+            "failure": "resolver_exception",
+            "source": "open_pr_resolver",
+        }
+        assert not any(
+            operation.type == OperationType.validate.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+            for operation in operations
+        )
+        assert resolver.calls == [
+            {
+                "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "error_type": "RuntimeError",
-                "failure": "resolver_exception",
-                "source": "open_pr_resolver",
+                "base_branch": "development",
             }
-            validate_ops = [
-                operation
-                for operation in operations
-                if operation.type == OperationType.validate.value
-                and operation.payload is not None
-                and operation.payload.get("source") == "worker_restart"
-            ]
-            assert len(validate_ops) == 1
-            assert validate_ops[0].payload is not None
-            assert validate_ops[0].payload["source_head_sha"] == head_sha
-            assert resolver.calls == [
-                {
-                    "repo_url": str(origin_repo),
-                    "branch_name": branch_name,
-                    "base_branch": "development",
-                }
-            ]
-            assert executor.calls == [workspace_id]
-            assert cleaner.calls == []
-        finally:
-            executor.release.set()
-            await worker.wait_for_execution_tasks()
+        ]
+        assert executor.calls == []
+        assert cleaner.calls == []
 
     @pytest.mark.unit
     async def test_preserved_active_pushed_branch_pr_lookup_failure_with_no_local_work_is_operator_recoverable(
@@ -7258,8 +7252,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert payload is not None
         assert payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED"
         assert payload["ambiguity_reason"] == "open_pr_lookup_failed"
-        assert payload["classification"]["state"] == "no_work"
-        assert payload["classification"]["reason"] == "clean_branch_not_ahead"
+        assert "classification" not in payload
         assert payload["branch_pr_lookup"] == {
             "branch_name": branch_name,
             "error_type": "RuntimeError",
@@ -7287,6 +7280,157 @@ class TestRunOnceStaleActiveExecutionRecovery:
             }
         ]
         assert cleaner.calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("salvage_action", "event_type"),
+        [
+            ("monitor", "workspace.active_execution_salvage_monitor_attached"),
+            ("validate", "workspace.active_execution_salvage_validation_requested"),
+            ("replacement", "workspace.active_execution_salvage_replacement_created"),
+            ("operator", "workspace.active_execution_salvage_operator_required"),
+            ("not_possible", "workspace.active_execution_salvage_not_possible"),
+            ("blocked", "workspace.active_execution_salvage_blocked"),
+        ],
+    )
+    async def test_preserved_active_salvage_writers_recheck_fresh_execution_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        salvage_action: str,
+        event_type: str,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            f"preserved-fresh-claim-{salvage_action}",
+            WorkspaceStatus.running,
+            compose_project_name=f"awf_preserved_fresh_claim_{salvage_action}",
+            create_task_attempt=True,
+        )
+        fresh_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            ws.execution_claimed_by = "live-worker"
+            ws.execution_claim_expires_at = fresh_claim_expires_at
+            compose_file_path = ws.compose_file_path
+            attempt_id = attempt.id
+            task_id = attempt.task_id
+            await s.commit()
+
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_preserved_fresh_claim_{salvage_action}",
+            repo_url=str(origin_repo),
+            compose_file_path=compose_file_path,
+        )
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="committed",
+            reason="branch_ahead",
+            branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+            head_sha="b" * 40,
+            commit_count=1,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {candidate.compose_project_name: _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        if salvage_action == "monitor":
+            await worker._attach_preserved_active_pr_monitor(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                open_pr=worker_module._OpenPullRequestSummary(  # noqa: SLF001
+                    pr_url="https://github.com/example/repo/pull/300",
+                    pr_number=300,
+                    head_ref=f"awf/{workspace_id}",
+                    head_sha="b" * 40,
+                ),
+            )
+        elif salvage_action == "validate":
+            await worker._request_preserved_active_validation(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        elif salvage_action == "replacement":
+            await worker._create_preserved_active_replacement(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        elif salvage_action == "operator":
+            await worker._record_preserved_active_operator_required(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                ambiguity_reason="branch_mismatch",
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        elif salvage_action == "not_possible":
+            await worker._record_preserved_active_salvage_not_possible(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                reason="missing_task_lineage",
+            )
+        elif salvage_action == "blocked":
+            await worker._record_preserved_active_salvage_blocked(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                reason="missing_task_lineage",
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        else:
+            raise AssertionError(f"unhandled salvage action {salvage_action}")
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=event_type,
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+
+        assert salvage_events == []
+        assert operations == []
+        assert [workspace.id for workspace in workspaces] == [workspace_id]
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase is None
+        assert ws.pr_url is None
+        assert ws.execution_claimed_by == "live-worker"
+        assert ws.execution_claim_expires_at is not None
+        assert _utc_datetime(ws.execution_claim_expires_at) > datetime.now(UTC)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -7946,12 +8090,31 @@ class TestRunOnceStaleActiveExecutionRecovery:
         both_started = asyncio.Event()
         first_checked = asyncio.Event()
         allow_first_recording = asyncio.Event()
-        second_checked = asyncio.Event()
+        first_recorded = asyncio.Event()
+        second_attempted_acquire = asyncio.Event()
+        allow_second_check = asyncio.Event()
+        second_selected_after_check = asyncio.Event()
         count_lock = asyncio.Lock()
         started_count = 0
+        lock_attempt_count = 0
         check_count = 0
         selected_count = 0
+        first_recording_task: asyncio.Task[Any] | None = None
         original_has_event = ControlWorker._has_current_salvage_event
+        original_get_for_update = WorkspaceRepository.get_for_update
+
+        async def _recording_get_for_update(
+            self: WorkspaceRepository,
+            requested_workspace_id: str,
+        ) -> Workspace | None:
+            nonlocal lock_attempt_count
+            async with count_lock:
+                lock_attempt_count += 1
+                call_number = lock_attempt_count
+                if call_number == 2:
+                    second_attempted_acquire.set()
+
+            return await original_get_for_update(self, requested_workspace_id)
 
         async def _racing_has_current_salvage_event(
             self: ControlWorker,
@@ -7963,13 +8126,15 @@ class TestRunOnceStaleActiveExecutionRecovery:
             event_floor: datetime,
             workspace_status: WorkspaceStatus,
         ) -> bool:
-            nonlocal check_count, selected_count
+            nonlocal check_count, first_recording_task, selected_count
             async with count_lock:
                 check_count += 1
                 call_number = check_count
-                if call_number == 2:
-                    second_checked.set()
 
+            if call_number == 2:
+                await asyncio.wait_for(
+                    allow_second_check.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                )
             has_event = await original_has_event(
                 self,
                 session,
@@ -7981,7 +8146,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
             async with count_lock:
                 selected_count += 1
+            if call_number == 2:
+                second_selected_after_check.set()
             if call_number == 1:
+                first_recording_task = asyncio.current_task()
                 first_checked.set()
                 assert not has_event
                 await asyncio.wait_for(
@@ -7989,6 +8157,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 )
             return has_event
 
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "get_for_update",
+            _recording_get_for_update,
+        )
         monkeypatch.setattr(
             ControlWorker,
             "_has_current_salvage_event",
@@ -8020,22 +8193,32 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 preserved_event=preserved_event,
                 reason="orphaned_committed_work",
             )
+            if asyncio.current_task() is first_recording_task:
+                first_recorded.set()
 
         tasks = [asyncio.create_task(_record_started(worker)) for worker in workers]
         try:
             await asyncio.wait_for(first_checked.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(second_checked.wait(), timeout=0.2)
+            await asyncio.wait_for(
+                second_attempted_acquire.wait(),
+                timeout=WORKER_TEST_TIMEOUT_SECONDS,
+            )
+            assert not second_selected_after_check.is_set()
             allow_first_recording.set()
+            await asyncio.wait_for(first_recorded.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            allow_second_check.set()
             await asyncio.gather(*tasks)
         finally:
             allow_first_recording.set()
+            allow_second_check.set()
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         assert started_count == 2
+        assert lock_attempt_count == 2
+        assert second_selected_after_check.is_set()
         assert check_count == 2
         assert selected_count == 2
         async with session_factory() as s:

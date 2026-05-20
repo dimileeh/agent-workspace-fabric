@@ -1824,21 +1824,21 @@ class ControlWorker:
             if failed_branch_lookup is not None
             else None
         )
+        if failed_branch_lookup is not None:
+            await self._record_preserved_active_operator_required(
+                candidate,
+                preserved_event=preserved_event,
+                classification=None,
+                ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=failed_branch_lookup.payload,
+            )
+            return True
         if attempt_id is None or task_id is None:
             missing_lineage_reason = (
                 "missing_task_attempt_lineage" if attempt_id is None else "missing_task_lineage"
             )
-            if failed_branch_lookup is not None:
-                await self._record_preserved_active_operator_required(
-                    candidate,
-                    preserved_event=preserved_event,
-                    classification=None,
-                    ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
-                    attempt_id=attempt_id,
-                    task_id=task_id,
-                    branch_pr_lookup=failed_branch_lookup.payload,
-                )
-                return True
             if preservation_expired:
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
@@ -1867,24 +1867,10 @@ class ControlWorker:
                 classification=classification,
                 attempt_id=attempt_id,
                 task_id=task_id,
-                branch_pr_lookup=(
-                    failed_branch_lookup.payload if failed_branch_lookup is not None else None
-                ),
             )
             self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
         if classification.state == "no_work":
-            if failed_branch_lookup is not None:
-                await self._record_preserved_active_operator_required(
-                    candidate,
-                    preserved_event=preserved_event,
-                    classification=classification,
-                    ambiguity_reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
-                    attempt_id=attempt_id,
-                    task_id=task_id,
-                    branch_pr_lookup=failed_branch_lookup.payload,
-                )
-                return True
             await self._create_preserved_active_replacement(
                 candidate,
                 preserved_event=preserved_event,
@@ -1901,9 +1887,6 @@ class ControlWorker:
             ambiguity_reason=classification.reason,
             attempt_id=attempt_id,
             task_id=task_id,
-            branch_pr_lookup=(
-                failed_branch_lookup.payload if failed_branch_lookup is not None else None
-            ),
         )
         return True
 
@@ -2071,11 +2054,13 @@ class ControlWorker:
         open_pr: _OpenPullRequestSummary | None = None,
         branch_pr_lookup: Mapping[str, Any] | None = None,
     ) -> None:
-        now = datetime.now(UTC)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
+                return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
                 return
             if open_pr is not None and not ws.pr_url:
                 ws.pr_url = open_pr.pr_url
@@ -2098,7 +2083,7 @@ class ControlWorker:
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
                 ws,
-                claim_cutoff=now,
+                claim_cutoff=claim_cutoff,
             )
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
@@ -2157,6 +2142,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
             if await self._has_current_salvage_event(
                 session,
                 candidate.workspace_id,
@@ -2170,7 +2158,7 @@ class ControlWorker:
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
                 ws,
-                claim_cutoff=datetime.now(UTC),
+                claim_cutoff=claim_cutoff,
             )
             extra: dict[str, Any] = {
                 "action": "validate_only",
@@ -2316,6 +2304,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
             original_attempt = await TaskAttemptRepository(session).get_by_workspace_id(ws.id)
             if original_attempt is None or original_attempt.id != attempt_id:
                 return
@@ -2385,7 +2376,7 @@ class ControlWorker:
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
                 ws,
-                claim_cutoff=datetime.now(UTC),
+                claim_cutoff=claim_cutoff,
             )
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
@@ -2466,6 +2457,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
             if await self._has_current_salvage_event(
                 session,
                 candidate.workspace_id,
@@ -2478,7 +2472,7 @@ class ControlWorker:
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
                 ws,
-                claim_cutoff=datetime.now(UTC),
+                claim_cutoff=claim_cutoff,
             )
             if claim_cleanup["action"] == "cleared_stale":
                 ws.execution_claimed_by = None
@@ -2537,6 +2531,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
             if await self._has_current_salvage_event(
                 session,
                 candidate.workspace_id,
@@ -2557,7 +2554,7 @@ class ControlWorker:
                 previous_claim=_workspace_claim_snapshot(ws),
                 claim_cleanup=_active_execution_preservation_claim_cleanup_payload(
                     ws,
-                    claim_cutoff=datetime.now(UTC),
+                    claim_cutoff=claim_cutoff,
                 ),
                 extra={
                     "unrecoverable_reason": reason,
@@ -2586,6 +2583,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
             if await self._has_current_salvage_event(
                 session,
                 candidate.workspace_id,
@@ -2598,7 +2598,7 @@ class ControlWorker:
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
                 ws,
-                claim_cutoff=datetime.now(UTC),
+                claim_cutoff=claim_cutoff,
             )
             if claim_cleanup["action"] == "cleared_stale":
                 ws.execution_claimed_by = None
