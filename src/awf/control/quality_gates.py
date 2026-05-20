@@ -1393,8 +1393,13 @@ def _workflow_existing_step_violations(
                     ),
                 )
             )
-    elif old_continue != new_continue and not (
-        _is_true(old_continue) and not _is_true(new_continue)
+    elif (
+        old_continue != new_continue
+        and not (_is_true(old_continue) and not _is_true(new_continue))
+        and not (
+            _is_default_false_continue_on_error(old_continue)
+            and _is_default_false_continue_on_error(new_continue)
+        )
     ):
         violations.append(
             _violation(
@@ -2330,6 +2335,10 @@ def _nested_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> object:
 
 def _is_true(value: object) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def _is_default_false_continue_on_error(value: object) -> bool:
+    return value is None or value is False or (isinstance(value, str) and value.lower() == "false")
 
 
 def _string_value(value: object) -> str | None:
