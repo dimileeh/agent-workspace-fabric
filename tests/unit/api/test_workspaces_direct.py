@@ -113,6 +113,25 @@ class TestCreateDirect:
         assert result.version == 1
 
     @pytest.mark.unit
+    async def test_direct_route_settings_do_not_inherit_host_disk_floor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session: AsyncSession,
+    ) -> None:
+        monkeypatch.setenv("AWF_MIN_FREE_DISK_BYTES", str(10**18))
+
+        result = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True, task_title="direct disk independent"
+            ),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+
+        assert isinstance(result, WorkspaceAcceptedResponse)
+
+    @pytest.mark.unit
     async def test_secret_lease_route_missing_workspace_raises_structured_404(
         self,
         session: AsyncSession,
@@ -152,12 +171,13 @@ class TestCreateDirect:
     async def test_idempotent_conflict_returns_409(self, session: AsyncSession) -> None:
         """Same key + different body: returns a 409 JSONResponse (covers
         lines 50-58)."""
-        await create_workspace(
+        first = await create_workspace(
             payload=_payload(provider_readiness_override=True, task_title="first"),
             idempotency_key="IDEM-CONFLICT",
             settings=_route_settings(),
             session=session,
         )
+        assert isinstance(first, WorkspaceAcceptedResponse)
         result = await create_workspace(
             payload=_payload(provider_readiness_override=True, task_title="second"),
             idempotency_key="IDEM-CONFLICT",

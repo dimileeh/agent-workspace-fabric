@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -932,6 +933,48 @@ def test_service_status_strict_provider_failure_sets_top_level_fail(tmp_path: Pa
     assert readiness["status"] == "fail"
     assert readiness["providers"]["github"]["status"] == "fail"
     assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
+
+
+@pytest.mark.unit
+def test_service_status_uses_caller_environ_with_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text("AWF_GITHUB_TOKEN=file-token\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    def _collect_agent_readiness(
+        _settings: ServiceSettings,
+        *,
+        environ: Mapping[str, str],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        captured.update(environ)
+        return {"status": "ok", "providers": {}}
+
+    async def _egress_lookup(_database_url: str) -> Mapping[str, int]:
+        return {}
+
+    monkeypatch.setattr(status_mod, "collect_agent_readiness", _collect_agent_readiness)
+    monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+
+    status = asyncio.run(
+        collect_service_status(
+            replace(_settings(tmp_path), workspace_cleanup_enabled=False),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            compose_env_file=compose_env_file,
+            environ={"AWF_GITHUB_TOKEN": "caller-token"},
+            egress_audit_summary_lookup=_egress_lookup,
+        )
+    )
+
+    assert status["agent_readiness"]["status"] == "ok"
+    assert captured["AWF_GITHUB_TOKEN"] == "caller-token"
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
@@ -27,12 +28,39 @@ DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].d
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
+LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
 _AWF_SOURCE_ROOT_MARKERS = (
     "pyproject.toml",
     "src/awf/__init__.py",
     "docker/compose/local-service.yml",
 )
+
+
+__all__ = [
+    "COMPOSE_ENV_FILE_OMITTED",
+    "DEFAULT_LOCAL_SERVICE_API_BASE_URL",
+    "DEFAULT_LOCAL_SERVICE_DATABASE_URL",
+    "DEFAULT_LOCAL_SERVICE_WORK_DIR",
+    "ComposeEnvFileInput",
+    "ComposeEnvFileOmitted",
+    "LOCAL_SERVICE_COMPOSE_ENV_FILE",
+    "LOCAL_SERVICE_COMPOSE_FILE",
+    "ServiceSettings",
+    "local_service_environ",
+    "resolve_local_service_compose_env_file",
+    "resolve_local_service_provider_environ",
+    "resolve_service_settings",
+    "service_config_payload",
+]
+
+
+class ComposeEnvFileOmitted:
+    """Sentinel for distinguishing omitted env-file arguments from explicit null."""
+
+
+COMPOSE_ENV_FILE_OMITTED = ComposeEnvFileOmitted()
+type ComposeEnvFileInput = Path | None | ComposeEnvFileOmitted
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -199,7 +227,7 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
 def local_service_environ(
     environ: Mapping[str, str] | None = None,
     *,
-    env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    env_file: Path | None = LOCAL_SERVICE_COMPOSE_ENV_FILE,
 ) -> dict[str, str]:
     """Return the environment local Compose services actually receive.
 
@@ -210,8 +238,10 @@ def local_service_environ(
     """
 
     merged: dict[str, str] = {}
-    resolved_env_file = resolve_local_service_compose_env_file(env_file)
-    if resolved_env_file is not None:
+    if (
+        env_file is not None
+        and (resolved_env_file := resolve_local_service_compose_env_file(env_file)) is not None
+    ):
         merged.update(
             {
                 key: value
@@ -222,6 +252,104 @@ def local_service_environ(
     merged.update(os.environ if environ is None else dict(environ))
     _populate_compose_postgres_password(merged)
     return merged
+
+
+def resolve_local_service_provider_environ(
+    *,
+    provider_environ: Mapping[str, str] | None,
+    environ: Mapping[str, str],
+    compose_file: Path | None,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
+) -> Mapping[str, str]:
+    """Resolve provider auth inputs from explicit or adjacent Compose env files."""
+
+    if provider_environ is not None:
+        return provider_environ
+
+    discover_adjacent_env_file = isinstance(compose_env_file, ComposeEnvFileOmitted)
+    env_file = None if discover_adjacent_env_file else cast(Path | None, compose_env_file)
+    if env_file is None and discover_adjacent_env_file and compose_file is not None:
+        env_file = _provider_env_file_from_compose_file(
+            compose_file,
+            allow_custom_adjacent=True,
+        )
+    if env_file is None and compose_env_file is None and compose_file is not None:
+        env_file = _provider_env_file_from_compose_file(
+            compose_file,
+            allow_custom_adjacent=False,
+        )
+    if env_file is None:
+        return environ
+    return local_service_environ(environ, env_file=env_file)
+
+
+def _provider_env_file_from_compose_file(
+    compose_file: Path,
+    *,
+    allow_custom_adjacent: bool,
+) -> Path | None:
+    """Return a trusted provider env file adjacent to compose_file, when available."""
+
+    if _is_local_service_compose_file_path(compose_file):
+        asset_env_file = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+        if asset_env_file is not None and asset_env_file.exists():
+            return asset_env_file
+
+    if not allow_custom_adjacent:
+        return None
+
+    candidate = compose_file.parent / ".env"
+    if candidate.exists() and _can_use_adjacent_provider_env_file(candidate, compose_file):
+        return candidate
+    return None
+
+
+def _can_use_adjacent_provider_env_file(candidate: Path, compose_file: Path) -> bool:
+    """Return true when adjacent provider env fallback is trusted for compose_file."""
+
+    if not _is_local_service_compose_file_path(compose_file):
+        return True
+    return _is_local_service_compose_env_path(candidate)
+
+
+def _is_local_service_compose_file_path(path: Path) -> bool:
+    """Return true for the default local-service compose file path."""
+
+    if path == LOCAL_SERVICE_COMPOSE_FILE:
+        return True
+    expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_FILE)
+    if expected is None:
+        expected = Path.cwd() / LOCAL_SERVICE_COMPOSE_FILE
+    return path.resolve() == expected.resolve()
+
+
+def _is_local_service_compose_env_path(path: Path) -> bool:
+    """Return true for the compose env file under the verified AWF asset root."""
+
+    expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_ENV_FILE)
+    if expected is None:
+        return False
+    return path.resolve() == expected.resolve()
+
+
+def _local_service_asset_path(path: Path) -> Path | None:
+    """Return path resolved under the verified AWF asset root, when available."""
+
+    from awf.service import bootstrap as bootstrap_mod
+
+    asset_root = bootstrap_mod.get_bootstrap_asset_root()
+    if asset_root is None:
+        return None
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        return asset_root / expanded
+    resolved_asset_root = asset_root.expanduser().resolve()
+    resolved_path = expanded.resolve()
+    try:
+        resolved_path.relative_to(resolved_asset_root)
+    except ValueError:
+        return None
+    return resolved_path
 
 
 def resolve_local_service_compose_env_file(
