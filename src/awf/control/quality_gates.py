@@ -2601,7 +2601,7 @@ def _step_remainder(
     *,
     ignore_with: bool = False,
 ) -> dict[str, object]:
-    ignored = {"continue-on-error", "if", "run", "uses"}
+    ignored = {"continue-on-error", "id", "if", "name", "run", "uses"}
     if ignore_with:
         ignored = ignored | {"with"}
     return {key: value for key, value in step.items() if key not in ignored}

@@ -5066,6 +5066,46 @@ def test_workflow_parse_and_shape_failures_block_conservatively(
 
 
 @pytest.mark.unit
+def test_workflow_existing_step_same_id_allows_display_name_change() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - id: unit-tests
+        name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - id: unit-tests
+        name: Run unit tests
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("old_job", "new_job", "section", "reason_fragment"),
     [
