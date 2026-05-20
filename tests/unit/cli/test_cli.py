@@ -34,6 +34,7 @@ def _mock_response(*, status_code: int = 202, payload: object = None, text: str 
 
 
 def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
+    """Assert adopt-pr help exposes model and effort flags."""
     visible_help = click.unstyle(stdout)
     assert "--model" in visible_help
     assert "--effort" in visible_help
@@ -204,6 +205,7 @@ class TestWorkspaceCreate:
 
     @pytest.mark.unit
     def test_create_help_exposes_model_and_effort_flags(self) -> None:
+        """Verify CLI help advertises model and effort for workspace create."""
         result = _runner.invoke(app, ["workspace", "create", "--help"])
 
         assert result.exit_code == 0
