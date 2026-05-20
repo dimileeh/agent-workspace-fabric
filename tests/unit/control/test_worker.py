@@ -818,6 +818,51 @@ class TestRunOnce:
         }
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_claims_without_prefetching_requested_ids(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-no-prefetch-request",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=1.0,
+            peak_memory_gb=1.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=2.0,
+            ),
+        )
+
+        async def _unexpected_list_requested() -> list[str]:
+            raise AssertionError("capacity claims should not pre-list requested IDs")
+
+        worker._list_requested = _unexpected_list_requested  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+
+        assert provisioner.calls == [requested_id]
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_for_unreserved_active_local_workspace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1372,6 +1417,108 @@ class TestRunOnce:
         )
 
     @pytest.mark.unit
+    async def test_requested_capacity_gate_bounds_fully_blocked_page_scan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        candidate_window = _scheduler_candidate_fetch_limit(1)
+        scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+        blocked_ids: list[str] = []
+        for index in range(candidate_window * (scanned_page_limit + 2)):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"bounded-capacity-blocked-{index}",
+                create_task_attempt=True,
+                created_at=now + timedelta(seconds=index),
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+            blocked_ids.append(blocked_id)
+
+        query_cursors: list[SchedulerOrderCursor | None] = []
+        page_end_cursors: list[SchedulerOrderCursor] = []
+        original_list_schedulable_workspaces = WorkspaceRepository.list_schedulable_workspaces
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
+        ) -> list[Workspace]:
+            assert status == WorkspaceStatus.requested
+            assert limit == candidate_window
+            query_cursors.append(after)
+            if after is not None:
+                assert page_end_cursors
+                assert after == page_end_cursors[-1]
+            scoring_time = _scheduler_test_scoring_time(after=after, scoring_at=scoring_at)
+            page = await original_list_schedulable_workspaces(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+                scoring_at=scoring_time,
+            )
+            if page:
+                page_end_cursors.append(
+                    _scheduler_order_cursor_for_workspace(page[-1], scoring_at=scoring_time)
+                )
+            return page
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        assert len(query_cursors) == scanned_page_limit
+        assert query_cursors[0] is None
+        assert query_cursors[1] == page_end_cursors[0]
+
+        scanned_ids = set(blocked_ids[: candidate_window * scanned_page_limit])
+        unscanned_ids = set(blocked_ids[candidate_window * scanned_page_limit :])
+        async with session_factory() as s:
+            decisions = {
+                workspace_id: await QueueDecisionRepository(s).list_for_workspace(workspace_id)
+                for workspace_id in blocked_ids
+            }
+
+        assert all(
+            any(
+                decision.reason_code == "LOCAL_CAPACITY_UNSATISFIABLE"
+                for decision in decisions[workspace_id]
+            )
+            for workspace_id in scanned_ids
+        )
+        assert all(decisions[workspace_id] == [] for workspace_id in unscanned_ids)
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_preserves_scheduler_priority_before_fifo(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1563,7 +1710,7 @@ class TestRunOnce:
         assert decisions == []
 
     @pytest.mark.unit
-    async def test_capacity_requested_race_does_not_log_prelock_stale_dispatch(
+    async def test_capacity_requested_path_skips_prelock_status_filter(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1575,54 +1722,32 @@ class TestRunOnce:
             create_task_attempt=True,
         )
 
-        class _UnexpectedProvisioner:
-            async def provision(self, workspace_id: str) -> None:
-                raise AssertionError(f"unexpected provision call for {workspace_id}")
-
-            async def provision_claimed(self, workspace_id: str) -> None:
-                raise AssertionError(f"unexpected provision call for {workspace_id}")
-
+        provisioner = _TransitioningProvisioner(session_factory)
         worker = ControlWorker(
             session_factory=session_factory,
-            provisioner=_UnexpectedProvisioner(),  # type: ignore[arg-type]
+            provisioner=provisioner,  # type: ignore[arg-type]
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
-                local_capacity_cpu_cores=4.0,
+                local_capacity_cpu_cores=8.0,
             ),
         )
 
-        race_triggered = False
-
-        async def _race_after_filter(
+        async def _unexpected_filter_current_status(
             workspace_ids: list[str],
             *,
             expected: WorkspaceStatus,
             action: str,
         ) -> list[str]:
-            nonlocal race_triggered
-            race_triggered = True
-            assert workspace_ids == [requested_id]
-            assert expected == WorkspaceStatus.requested
-            assert action == "provision"
-            async with session_factory() as session:
-                repo = WorkspaceRepository(session)
-                ws = await repo.transition_if_current(
-                    requested_id,
-                    from_status=WorkspaceStatus.requested,
-                    to=WorkspaceStatus.provisioning,
-                    reason_code="OTHER_WORKER_CLAIMED",
-                )
-                assert ws is not None
-                await session.commit()
-            return [requested_id]
+            del workspace_ids, expected, action
+            raise AssertionError("capacity claims should not run the pre-lock status filter")
 
-        worker._filter_current_status = _race_after_filter  # type: ignore[method-assign]
+        worker._filter_current_status = _unexpected_filter_current_status  # type: ignore[method-assign]
 
         with structlog.testing.capture_logs() as captured:
-            assert await worker.run_once() == 0
+            assert await worker.run_once() == 1
 
-        assert race_triggered is True
+        assert provisioner.calls == [requested_id]
         assert not any(event.get("event") == "worker.skip_stale_dispatch" for event in captured)
 
     @pytest.mark.unit

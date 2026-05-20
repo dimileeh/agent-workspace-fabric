@@ -358,14 +358,17 @@ class ControlWorker:
         if self._executor is not None:
             await self._maybe_recover_stale_active_executions()
 
-        requested_ids = await self._list_requested()
-        requested_ids = await self._filter_current_status(
-            requested_ids,
-            expected=WorkspaceStatus.requested,
-            action="provision",
-        )
-        if requested_ids:
-            requested_ids = await self._claim_requested_ids(requested_ids)
+        if _local_capacity_configured(self._config):
+            requested_ids = await self._claim_requested_ids()
+        else:
+            requested_ids = await self._list_requested()
+            requested_ids = await self._filter_current_status(
+                requested_ids,
+                expected=WorkspaceStatus.requested,
+                action="provision",
+            )
+            if requested_ids:
+                requested_ids = await self._claim_requested_ids(requested_ids)
         if requested_ids:
             await self._record_ordered_decisions(
                 requested_ids,
@@ -479,7 +482,7 @@ class ControlWorker:
         return await self._list_requested()
 
     async def _list_requested(self) -> list[str]:
-        """Return requested candidates for the capacity-aware claim pass."""
+        """Return requested candidate IDs for compatibility and non-capacity claims."""
         candidate_limit = (
             _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
             if _local_capacity_configured(self._config)
@@ -2422,10 +2425,14 @@ class ControlWorker:
             status=OperationStatus.succeeded,
         )
 
-    async def _claim_requested_ids(self, workspace_ids: list[str]) -> list[str]:
-        if not workspace_ids or self._config.max_concurrent_provisions <= 0:
+    async def _claim_requested_ids(self, workspace_ids: list[str] | None = None) -> list[str]:
+        if self._config.max_concurrent_provisions <= 0:
+            return []
+        if workspace_ids is not None and not workspace_ids:
             return []
         if not _local_capacity_configured(self._config):
+            if workspace_ids is None:
+                return []
             claimed: list[str] = []
             for workspace_id in workspace_ids:
                 if len(claimed) >= self._config.max_concurrent_provisions:
@@ -2439,7 +2446,7 @@ class ControlWorker:
                 session,
                 node_id=self._config.node_id or "local",
             )
-            return await self._claim_requested_ids_with_capacity(session, workspace_ids)
+            return await self._claim_requested_ids_with_capacity(session)
 
         return await run_db_operation_with_retry(
             self._session_factory,
@@ -2452,7 +2459,6 @@ class ControlWorker:
     async def _claim_requested_ids_with_capacity(
         self,
         session: AsyncSession,
-        workspace_ids: list[str],
     ) -> list[str]:
         reservation_repo = ResourceReservationRepository(session)
         allocated = await _allocated_totals_for_capacity_gate(
@@ -2462,13 +2468,11 @@ class ControlWorker:
         )
         claimed: list[str] = []
         repo = WorkspaceRepository(session)
-        candidate_limit = max(
-            len(workspace_ids),
-            _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions),
-        )
+        candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
         candidate_after: SchedulerOrderCursor | None = None
         scoring_at = datetime.now(UTC)
         decided_at = datetime.now(UTC)
+        capacity_refill_pages_remaining: int | None = None
 
         while len(claimed) < self._config.max_concurrent_provisions:
             workspaces = await repo.list_schedulable_workspaces(
@@ -2506,6 +2510,14 @@ class ControlWorker:
                 break
             if len(workspaces) < candidate_limit:
                 break
+            if not page_claimed:
+                if capacity_refill_pages_remaining is None:
+                    capacity_refill_pages_remaining = _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+                if capacity_refill_pages_remaining <= 0:
+                    break
+                capacity_refill_pages_remaining -= 1
+            else:
+                capacity_refill_pages_remaining = None
             candidate_after = _scheduler_candidate_cursor(
                 workspaces,
                 scoring_at=scoring_at,
