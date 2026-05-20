@@ -207,6 +207,7 @@ _MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = "NO_EXECUTION_CLAIM_DURING_MO
 _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
     "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
+_ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT = 1024
 QUEUE_DECISION_ORDERED = "ordered"
 QUEUE_DECISION_DEFERRED = "deferred"
 ORDERED_REQUESTED_PROVISIONING_REASON = "ORDERED_REQUESTED_PROVISIONING"
@@ -455,7 +456,8 @@ class ControlWorker:
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
         self._monitor_recovery_operation_ids: dict[str, str] = {}
-        self._active_salvage_monitor_recovery_operation_ids: set[str] = set()
+        # Session-local advisory state; reset on restart and bounded below.
+        self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
         self._active_salvage_monitor_resume_cooldowns: dict[str, float] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
@@ -4213,7 +4215,7 @@ class ControlWorker:
                 self._monitor_recovery_operation_ids[workspace_id] = operation.id
             await session.commit()
             if active_salvage_monitor_recovery_operation_id is not None:
-                self._active_salvage_monitor_recovery_operation_ids.add(
+                self._remember_active_salvage_monitor_recovery_operation_id(
                     active_salvage_monitor_recovery_operation_id
                 )
             return claimed
@@ -4249,7 +4251,20 @@ class ControlWorker:
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
             if recovery_operation_id is not None:
-                self._active_salvage_monitor_recovery_operation_ids.discard(recovery_operation_id)
+                self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
+
+    def _remember_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
+        self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
+        self._active_salvage_monitor_recovery_operation_ids[operation_id] = None
+        while (
+            len(self._active_salvage_monitor_recovery_operation_ids)
+            > _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT
+        ):
+            oldest_operation_id = next(iter(self._active_salvage_monitor_recovery_operation_ids))
+            self._active_salvage_monitor_recovery_operation_ids.pop(oldest_operation_id, None)
+
+    def _forget_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
+        self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
 
     def _active_salvage_monitor_resume_cooldown_active(self, workspace_id: str) -> bool:
         cooldown_until = self._active_salvage_monitor_resume_cooldowns.get(workspace_id)

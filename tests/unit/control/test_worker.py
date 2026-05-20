@@ -13479,6 +13479,24 @@ async def test_dispatch_helpers_respect_limits_and_existing_tasks(
 
 
 @pytest.mark.unit
+def test_active_salvage_monitor_recovery_operation_ids_are_bounded(
+    worker: ControlWorker,
+) -> None:
+    limit = worker_module._ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT  # noqa: SLF001
+
+    for index in range(limit + 2):
+        worker._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+            f"operation-{index:04d}"
+        )
+
+    tracked = worker._active_salvage_monitor_recovery_operation_ids  # noqa: SLF001
+    assert len(tracked) == limit
+    assert "operation-0000" not in tracked
+    assert "operation-0001" not in tracked
+    assert f"operation-{limit + 1:04d}" in tracked
+
+
+@pytest.mark.unit
 async def test_safe_worker_paths_swallow_runtime_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
