@@ -1269,12 +1269,17 @@ def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> 
 def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
     # Real GraphQL payloads include this Boolean. Older/fake payloads are treated
     # as counting to preserve conservative merge-gate behavior.
+    # This is a push-access heuristic, not a complete GitHub branch-protection
+    # required-reviewer model; read-only code-owner blocks still surface through
+    # GitHub's mergeable state.
     return node.get("authorCanPushToRepository") is not False
 
 
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
+    # DISMISSED must be tracked so a maintainer-dismissed review overwrites that
+    # reviewer's prior CHANGES_REQUESTED entry instead of leaving a stale blocker.
     effective_review_states = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
     latest_by_reviewer: dict[str, _FetchedReview] = {}
     for fetched in fetched_reviews:
