@@ -564,6 +564,15 @@ class _TransitioningProvisioner:
         return None
 
 
+class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], worktrees_root: Path):
+        super().__init__(session_factory)
+        self._worktrees_root = worktrees_root
+
+    def get_worktree_path(self, workspace_id: str) -> Path:
+        return self._worktrees_root / workspace_id
+
+
 class _RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -8995,7 +9004,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
-    async def test_preserved_active_unavailable_worktree_root_classifies_as_no_work(
+    async def test_preserved_active_unavailable_worktree_root_classifies_as_ambiguous(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -9023,15 +9032,81 @@ class TestRunOnceStaleActiveExecutionRecovery:
             base_commit="a" * 40,
         )
 
-        assert classification.state == "no_work"
+        assert classification.state == "ambiguous"
         assert classification.reason == "worktree_root_unavailable"
         assert classification.worktree_path is None
+
+    @pytest.mark.unit
+    async def test_preserved_active_unknown_worktree_root_requires_operator_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-unknown-worktree",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_unknown_worktree",
+            create_task_attempt=True,
+        )
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_unknown_worktree": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            original = await WorkspaceRepository(s).get(workspace_id)
+            assert original is not None
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            replacement_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert original.status == WorkspaceStatus.running.value
+        assert original.subphase == "runtime_preserved_operator_recovery_required"
+        assert original.failure_reason is None
+        assert [ws.id for ws in workspaces] == [workspace_id]
+        assert len(operator_events) == 1
+        assert operator_events[0].payload is not None
+        assert operator_events[0].payload["ambiguity_reason"] == "worktree_root_unavailable"
+        assert operator_events[0].payload["classification"]["state"] == "ambiguous"
+        assert replacement_events == []
+        assert stale_events == []
+        assert cleaner.calls == []
 
     @pytest.mark.unit
     async def test_preserved_active_without_usable_work_creates_one_replacement_with_lineage(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        tmp_path: Path,
     ) -> None:
         task_policy = {"provider": "openai", "model": "gpt-5.5", "effort": "high"}
         workspace_id = await _create_active_execution(
@@ -9074,7 +9149,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(
             session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                tmp_path / "known-missing-worktrees",
+            ),  # type: ignore[arg-type]
             executor=_RecordingExecutor(),
             runtime_inspector=_RecordingRuntimeInspector(
                 {"awf_preserved_no_work": _live_agent_snapshot()}
@@ -9181,6 +9259,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        tmp_path: Path,
         status: WorkspaceStatus,
         operation_type: OperationType,
         operation_status: OperationStatus,
@@ -9208,7 +9287,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         worker = ControlWorker(
             session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                tmp_path / "known-missing-worktrees",
+            ),  # type: ignore[arg-type]
             executor=_RecordingExecutor(),
             runtime_inspector=_RecordingRuntimeInspector(
                 {
@@ -9288,6 +9370,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        tmp_path: Path,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -9307,7 +9390,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         worker = ControlWorker(
             session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                tmp_path / "known-missing-worktrees",
+            ),  # type: ignore[arg-type]
             executor=_RecordingExecutor(),
             runtime_inspector=_RecordingRuntimeInspector(
                 {"awf_preserved_sync_no_work": _live_agent_snapshot()}

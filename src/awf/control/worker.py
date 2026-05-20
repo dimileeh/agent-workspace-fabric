@@ -3224,7 +3224,7 @@ class ControlWorker:
         worktree_path = self._preserved_active_worktree_path(workspace_id)
         if worktree_path is None:
             return _PreservedWorktreeClassification(
-                state="no_work",
+                state="ambiguous",
                 reason="worktree_root_unavailable",
                 expected_branch_name=expected_branch_name,
                 base_commit=base_commit,
