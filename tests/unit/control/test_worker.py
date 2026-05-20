@@ -48,6 +48,7 @@ from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -81,6 +82,16 @@ WORKER_TEST_TIMEOUT_SECONDS = 300.0
 
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _git_output(args: list[str], cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 async def _pending_execution_task() -> None:
@@ -299,6 +310,18 @@ async def _create_active_execution(
     node_id: str | None = None,
     persist_compose_project: bool = True,
     task_policy: dict[str, object] | None = None,
+    task_prompt: str = "p",
+    agent: str = "codex",
+    task_class: str | None = None,
+    owned_paths: list[str] | None = None,
+    auto_merge: bool = True,
+    initial_review_grace_period_seconds: float | None = None,
+    profile_ref: str | None = None,
+    requested_profile: dict[str, object] | None = None,
+    resolved_profile: dict[str, object] | None = None,
+    task_kind: str = "feature_branch_pr",
+    test_commands: list[str] | None = None,
+    create_task_attempt: bool = False,
 ) -> str:
     assert status in {
         WorkspaceStatus.running,
@@ -311,11 +334,31 @@ async def _create_active_execution(
             repo_url=str(origin),
             branch_base="development",
             task_title=title,
-            task_prompt="p",
-            agent="codex",
-            test_commands=[],
+            task_prompt=task_prompt,
+            agent=agent,
+            task_class=task_class,
+            owned_paths=owned_paths,
+            test_commands=list(test_commands or []),
             task_policy=task_policy,
+            auto_merge=auto_merge,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            profile_ref=profile_ref,
+            requested_profile=requested_profile,
+            resolved_profile=resolved_profile,
+            task_kind=task_kind,
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
         ws.remote_push_branch = ws.branch_name
@@ -526,6 +569,18 @@ class _RecordingExecutor:
         self.resume_calls.append(workspace_id)
 
 
+class _BlockingExecutor(_RecordingExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        self.calls.append(workspace_id)
+        self.started.set()
+        await self.release.wait()
+
+
 class _BlockingMonitorExecutor(_RecordingExecutor):
     def __init__(self) -> None:
         super().__init__()
@@ -600,6 +655,32 @@ def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
             )
         ],
     )
+
+
+def _seed_workspace_worktree(
+    *,
+    worktrees_root: Path,
+    origin: Path,
+    workspace_id: str,
+    branch_name: str,
+    commit_change: bool,
+    dirty_change: bool = False,
+) -> tuple[Path, str, str]:
+    worktree = worktrees_root / workspace_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _git(["clone", "-q", str(origin), str(worktree)], worktree.parent)
+    _git(["config", "user.name", "T"], worktree)
+    _git(["config", "user.email", "t@t"], worktree)
+    _git(["checkout", "-q", "-b", branch_name], worktree)
+    base_commit = _git_output(["rev-parse", "HEAD"], worktree)
+    if commit_change:
+        (worktree / "agent.txt").write_text(f"work from {workspace_id}\n")
+        _git(["add", "agent.txt"], worktree)
+        _git(["commit", "-q", "-m", "agent work"], worktree)
+    if dirty_change:
+        (worktree / "dirty.txt").write_text("uncommitted\n")
+    head_sha = _git_output(["rev-parse", "HEAD"], worktree)
+    return worktree, base_commit, head_sha
 
 
 def _closed_connection_error() -> InterfaceError:
@@ -6114,6 +6195,484 @@ class TestRunOnceStaleActiveExecutionRecovery:
             "previous_expires_at": expired_at.isoformat(),
         }
         assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_clean_committed_work_dispatches_validation_salvage_once(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-clean-commit",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_clean_commit",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work"
+        branch_name = f"awf/{workspace_id}"
+        _worktree, base_commit, head_sha = _seed_workspace_worktree(
+            worktrees_root=work_root / "worktrees",
+            origin=origin_repo,
+            workspace_id=workspace_id,
+            branch_name=branch_name,
+            commit_change=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.base_commit = base_commit
+            ws.branch_name = branch_name
+            ws.remote_push_branch = branch_name
+            await s.commit()
+
+        executor = _BlockingExecutor()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_clean_commit": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        try:
+            await worker.run_once()
+            await asyncio.wait_for(executor.started.wait(), timeout=5.0)
+            await worker.run_once()
+
+            async with session_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+                assert attempt is not None
+                stale_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.stale_active_execution_detected",
+                )
+                salvage_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_validation_requested",
+                )
+                operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+            assert ws.status == WorkspaceStatus.running.value
+            assert stale_events == []
+            assert len(salvage_events) == 1
+            salvage_payload = salvage_events[0].payload
+            assert salvage_payload is not None
+            assert salvage_payload["reason_code"] == (
+                "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED"
+            )
+            assert salvage_payload["source_workspace_id"] == workspace_id
+            assert salvage_payload["attempt_id"] == attempt.id
+            assert salvage_payload["task_id"] == attempt.task_id
+            assert salvage_payload["base_commit"] == base_commit
+            assert salvage_payload["head_sha"] == head_sha
+            assert salvage_payload["branch_name"] == branch_name
+            assert salvage_payload["preservation_event"]["reason_code"] == (
+                PRESERVED_EXECUTION_REASON_CODE
+            )
+            validate_ops = [
+                operation
+                for operation in operations
+                if operation.type == OperationType.validate.value
+                and operation.payload is not None
+                and operation.payload.get("source") == "worker_restart"
+            ]
+            assert len(validate_ops) == 1
+            assert validate_ops[0].payload is not None
+            assert validate_ops[0].payload["recovery_mode"] == "validate_only"
+            assert validate_ops[0].payload["source_head_sha"] == head_sha
+            assert executor.calls == [workspace_id]
+            assert cleaner.calls == []
+        finally:
+            executor.release.set()
+            await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_preserved_active_pr_handoff_attaches_one_monitor_after_restart(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pr-handoff",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_pr_handoff",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/269"
+            ws.pr_number = 269
+            ws.monitor_last_commit_sha = "f" * 40
+            await s.commit()
+
+        executor = _BlockingMonitorExecutor()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_pr_handoff": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        try:
+            await worker.run_once()
+            await asyncio.wait_for(executor.started.wait(), timeout=5.0)
+            await worker.run_once()
+
+            async with session_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+                assert attempt is not None
+                salvage_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.active_execution_salvage_monitor_attached",
+                )
+                monitor_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.monitor_recovery_started",
+                )
+                remonitor_ops = [
+                    operation
+                    for operation in await OperationRepository(s).list_for_workspace(workspace_id)
+                    if operation.type == OperationType.remonitor.value
+                ]
+
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert len(salvage_events) == 1
+            payload = salvage_events[0].payload
+            assert payload is not None
+            assert payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+            assert payload["pr_url"] == "https://github.com/example/repo/pull/269"
+            assert payload["pr_number"] == 269
+            assert payload["attempt_id"] == attempt.id
+            assert payload["task_id"] == attempt.task_id
+            assert len(monitor_events) == 1
+            assert monitor_events[0].payload is not None
+            assert monitor_events[0].payload["active_execution_salvage_reason_code"] == (
+                "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+            )
+            assert len(remonitor_ops) == 1
+            assert executor.resume_calls == [workspace_id]
+            assert cleaner.calls == []
+        finally:
+            executor.release.set()
+            await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_preserved_active_without_usable_work_creates_one_replacement_with_lineage(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        task_policy = {"provider": "openai", "model": "gpt-5.5", "effort": "high"}
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-no-work",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_no_work",
+            task_policy=task_policy,
+            task_prompt="recover this task",
+            agent="codex",
+            task_class="build_config_task",
+            owned_paths=["src/awf/control/worker.py"],
+            auto_merge=False,
+            initial_review_grace_period_seconds=42.0,
+            profile_ref="python",
+            requested_profile={"source": "requested-profile"},
+            resolved_profile={"source": "resolved-profile"},
+            task_kind="feature_branch_pr",
+            test_commands=["uv run pytest tests/unit/control/test_worker.py -q"],
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            await ResourceReservationRepository(s).create(
+                workspace_id=workspace_id,
+                attempt_id=attempt.id,
+                node_id="test-node-01",
+                steady_cpu=1.5,
+                steady_memory_gb=2.0,
+                peak_cpu=3.0,
+                peak_memory_gb=4.0,
+                disk_mb=512,
+                dind_slots=1,
+                phase="execution",
+            )
+            await s.commit()
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_no_work": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            original = await WorkspaceRepository(s).get(workspace_id)
+            assert original is not None
+            original_attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert original_attempt is not None
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            replacements = [ws for ws in workspaces if ws.id != workspace_id]
+            assert len(replacements) == 1
+            replacement = replacements[0]
+            replacement_attempt = await TaskAttemptRepository(s).get_by_workspace_id(replacement.id)
+            assert replacement_attempt is not None
+            replacement_reservations = await ResourceReservationRepository(s).list_for_workspace(
+                replacement.id
+            )
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            retry_ops = [
+                operation
+                for operation in await OperationRepository(s).list_for_workspace(workspace_id)
+                if operation.type == OperationType.retry.value
+            ]
+
+        assert original.status == WorkspaceStatus.cancelled.value
+        assert original.subphase == "runtime_preserved_replaced"
+        assert original.execution_claimed_by is None
+        assert original.execution_claim_expires_at is None
+        assert replacement.status == WorkspaceStatus.requested.value
+        assert replacement.repo_url == str(origin_repo)
+        assert replacement.branch_base == "development"
+        assert replacement.task_title == "preserved-no-work"
+        assert replacement.task_prompt == "recover this task"
+        assert replacement.owned_paths == ["src/awf/control/worker.py"]
+        assert replacement.task_policy == task_policy
+        assert replacement.auto_merge is False
+        assert replacement.initial_review_grace_period_seconds == 42.0
+        assert replacement.agent == "codex"
+        assert replacement.profile_ref == "python"
+        assert replacement.requested_profile == {"source": "requested-profile"}
+        assert replacement.resolved_profile == {"source": "resolved-profile"}
+        assert replacement.test_commands == ["uv run pytest tests/unit/control/test_worker.py -q"]
+        assert replacement_attempt.parent_attempt_id == original_attempt.id
+        assert replacement_attempt.redispatch_from_attempt_id == original_attempt.id
+        assert original_attempt.superseded_by_attempt_id == replacement_attempt.id
+        assert len(replacement_reservations) == 1
+        assert replacement_reservations[0].steady_cpu == 1.5
+        assert replacement_reservations[0].dind_slots == 1
+        assert len(salvage_events) == 1
+        assert salvage_events[0].payload is not None
+        assert salvage_events[0].payload["replacement_workspace_id"] == replacement.id
+        assert salvage_events[0].payload["replacement_attempt_id"] == replacement_attempt.id
+        assert retry_ops[0].result == {
+            "new_workspace_id": replacement.id,
+            "new_attempt_id": replacement_attempt.id,
+            "status": WorkspaceStatus.requested.value,
+        }
+        assert stale_events == []
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_ambiguous_dirty_worktree_is_operator_recoverable(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-dirty-worktree",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_dirty_worktree",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work"
+        branch_name = f"awf/{workspace_id}"
+        _worktree, base_commit, _head_sha = _seed_workspace_worktree(
+            worktrees_root=work_root / "worktrees",
+            origin=origin_repo,
+            workspace_id=workspace_id,
+            branch_name=branch_name,
+            commit_change=False,
+            dirty_change=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.base_commit = base_commit
+            ws.branch_name = branch_name
+            ws.remote_push_branch = branch_name
+            await s.commit()
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_dirty_worktree": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_operator_recovery_required"
+        assert ws.failure_reason is None
+        assert len(operator_events) == 1
+        assert operator_events[0].payload is not None
+        assert operator_events[0].payload["ambiguity_reason"] == "dirty_worktree"
+        assert operator_events[0].payload["classification"]["state"] == "ambiguous"
+        assert stale_events == []
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_stale_active_failure_still_applies_after_salvage_not_possible_for_orphan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_orphan_no_salvage"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-orphan-no-salvage",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        preserved_at = datetime.now(UTC) - timedelta(minutes=30)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            running_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = preserved_at - timedelta(minutes=1)
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = preserved_at
+            await s.commit()
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert len(not_possible_events) == 1
+        assert not_possible_events[0].payload is not None
+        assert not_possible_events[0].payload["reason_code"] == (
+            "ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE"
+        )
+        assert not_possible_events[0].payload["decision"] == "allow_stale_active_failure"
+        assert len(stale_events) == 1
+        assert cleaner.calls
 
     @pytest.mark.unit
     async def test_cleanup_failure_path_does_not_target_preserved_live_runtime(

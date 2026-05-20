@@ -251,7 +251,7 @@ _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
     OperationStatus.running.value,
 }
-_VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
+_VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api", "worker_restart"}
 _VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
 _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS = (
     "source",
@@ -5462,6 +5462,16 @@ class WorkspaceExecutor:
             if current is None:
                 _log.warning("executor.skip_unknown", workspace_id=workspace_id)
                 return None
+            recovery = _get_active_recovery_payload(current)
+            if (
+                current.status == WorkspaceStatus.running.value
+                and recovery is not None
+                and recovery.get("source") == "worker_restart"
+            ):
+                current.execution_claimed_by = execution_owner_id
+                current.execution_claim_expires_at = execution_lease_expires_at
+                await session.commit()
+                return current
             _log.info(
                 "executor.skip_not_ready",
                 workspace_id=workspace_id,
