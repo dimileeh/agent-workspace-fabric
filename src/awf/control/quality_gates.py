@@ -1513,7 +1513,6 @@ def _informational_job_permissions_are_safe(permissions: object) -> bool:
     if not isinstance(permissions, Mapping):
         return False
 
-    has_comment_write_scope = False
     for scope, level in permissions.items():
         if not isinstance(scope, str) or not isinstance(level, str):
             return False
@@ -1522,13 +1521,12 @@ def _informational_job_permissions_are_safe(permissions: object) -> bool:
         if normalized_scope in _INFORMATIONAL_JOB_COMMENT_PERMISSION_SCOPES:
             if normalized_level not in {"none", "read", "write"}:
                 return False
-            has_comment_write_scope = has_comment_write_scope or normalized_level == "write"
         elif normalized_scope in _INFORMATIONAL_JOB_READ_PERMISSION_SCOPES:
             if normalized_level not in {"none", "read"}:
                 return False
         else:
             return False
-    return has_comment_write_scope
+    return True
 
 
 def _is_informational_step(step: Mapping[str, Any]) -> bool:

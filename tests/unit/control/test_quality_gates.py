@@ -2138,7 +2138,6 @@ jobs:
 @pytest.mark.parametrize(
     "job_field",
     [
-        "permissions:\n      contents: read",
         "permissions:\n      contents: write",
         "permissions: write-all",
         "environment: production",
@@ -2999,6 +2998,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: peter-evans/create-or-update-comment@v4
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        "permissions: {}",
+        "permissions:\n      contents: read",
+    ],
+)
+def test_added_informational_job_with_restricted_permissions_is_allowed(
+    permissions: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  summary:
+    name: Summary report
+    runs-on: ubuntu-latest
+    {permissions}
+    steps:
+      - name: Summary report
+        run: echo "heads up"
 """.strip()
 
     violations = find_protected_quality_gate_changes(
