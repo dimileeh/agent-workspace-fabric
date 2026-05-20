@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -17,7 +18,11 @@ from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAP
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import ProviderModelCircuitBreakerRepository, ResourceReservationRepository
+from awf.db.repositories import (
+    ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+    ProviderModelCircuitBreakerRepository,
+    ResourceReservationRepository,
+)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -255,6 +260,15 @@ class AdmissionSummary:
 
 
 @dataclass(frozen=True)
+class CapacityQueueSummary:
+    queued_workspace_count: int
+    oldest_workspace_id: str | None
+    oldest_wait_seconds: int | None
+    planned_resources: ReservedResources
+    blocked_reason_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
 class ProviderCircuitBreakerSummary:
     provider: str
     model: str
@@ -283,6 +297,9 @@ class ResourceSaturationSummary:
     resource_defaults: WorkspaceResourceDefaults
     reserved_resources: ReservedResources
     capacity: ResourceCapacitySummary
+    allocated_resources: ReservedResources
+    allocated_capacity: ResourceCapacitySummary
+    capacity_queue: CapacityQueueSummary
     concurrency: ResourceConcurrency
     disk: DiskCheck
     orphan_resources: OrphanResourceSummary
@@ -669,6 +686,15 @@ async def summarize_resource_saturation_for_session(
         workspace_counts.active_total,
         resource_defaults=resource_defaults,
     )
+    allocated_workspace_count = _sum_status_counts(
+        status_counts,
+        ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+    )
+    allocated_resources = await _allocated_resources_for_session(
+        session,
+        allocated_workspace_count,
+        resource_defaults=resource_defaults,
+    )
     concurrency = _resource_concurrency(status_counts, worker=worker)
     resolved_disk_check = disk_check
     if resolved_disk_check is None:
@@ -684,6 +710,21 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
         disk_check=resolved_disk_check,
         detected_local_capacity=detected_local_capacity,
+    )
+    allocated_capacity = resource_capacity_summary(
+        settings=settings,
+        reserved=allocated_resources,
+        resource_defaults=resource_defaults,
+        disk_check=resolved_disk_check,
+        detected_local_capacity=detected_local_capacity,
+    )
+    capacity_queue = await _capacity_queue_summary(
+        session,
+        settings=settings,
+        allocated_resources=allocated_resources,
+        resource_defaults=resource_defaults,
+        detected_local_capacity=detected_local_capacity,
+        now=generated_at,
     )
     admission = _resource_admission_summary(
         disk_check=resolved_disk_check,
@@ -722,6 +763,9 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
         reserved_resources=reserved_resources,
         capacity=capacity,
+        allocated_resources=allocated_resources,
+        allocated_capacity=allocated_capacity,
+        capacity_queue=capacity_queue,
         concurrency=concurrency,
         disk=resolved_disk_check,
         orphan_resources=resolved_orphan_resources,
@@ -1172,9 +1216,38 @@ async def _reserved_resources_for_session(
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
     persisted = await ResourceReservationRepository(session).active_latest_totals()
-    fallback_count = max(0, active_workspace_count - persisted["workspace_count"])
+    return _reserved_resources_from_totals(
+        persisted,
+        active_workspace_count,
+        resource_defaults=resource_defaults,
+    )
+
+
+async def _allocated_resources_for_session(
+    session: AsyncSession,
+    allocated_workspace_count: int,
+    *,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> ReservedResources:
+    persisted = await ResourceReservationRepository(session).active_latest_totals(
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES
+    )
+    return _reserved_resources_from_totals(
+        persisted,
+        allocated_workspace_count,
+        resource_defaults=resource_defaults,
+    )
+
+
+def _reserved_resources_from_totals(
+    persisted: dict[str, float | int],
+    workspace_count: int,
+    *,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> ReservedResources:
+    fallback_count = max(0, workspace_count - int(persisted["workspace_count"]))
     return ReservedResources(
-        active_workspace_count=active_workspace_count,
+        active_workspace_count=workspace_count,
         steady_cpu=persisted["steady_cpu"] + fallback_count * resource_defaults.steady_cpu,
         steady_memory_gb=(
             persisted["steady_memory_gb"] + fallback_count * resource_defaults.steady_memory_gb
@@ -1186,6 +1259,177 @@ async def _reserved_resources_for_session(
         disk_mb=int(persisted["disk_mb"]),
         dind_slots=int(persisted["dind_slots"]),
     )
+
+
+async def _capacity_queue_summary(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    allocated_resources: ReservedResources,
+    resource_defaults: WorkspaceResourceDefaults,
+    detected_local_capacity: LocalCapacityLimits | None,
+    now: datetime,
+) -> CapacityQueueSummary:
+    queued_count = await session.scalar(
+        select(func.count(Workspace.id)).where(Workspace.status == WorkspaceStatus.requested.value)
+    )
+    requested_count = int(queued_count or 0)
+    planned_totals = await ResourceReservationRepository(session).active_latest_totals(
+        statuses=(WorkspaceStatus.requested,)
+    )
+    planned_resources = _reserved_resources_from_totals(
+        planned_totals,
+        requested_count,
+        resource_defaults=resource_defaults,
+    )
+    oldest_row = (
+        await session.execute(
+            select(Workspace.id, Workspace.created_at)
+            .where(Workspace.status == WorkspaceStatus.requested.value)
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+            .limit(1)
+        )
+    ).one_or_none()
+    oldest_workspace_id: str | None = None
+    oldest_wait_seconds: int | None = None
+    if oldest_row is not None:
+        oldest_workspace_id = oldest_row.id
+        oldest_wait_seconds = max(
+            0,
+            int((_to_utc(now) - _to_utc(oldest_row.created_at)).total_seconds()),
+        )
+    blockers = await _capacity_queue_blocked_reason_counts(
+        session,
+        settings=settings,
+        allocated_resources=allocated_resources,
+        resource_defaults=resource_defaults,
+        detected_local_capacity=detected_local_capacity,
+    )
+    return CapacityQueueSummary(
+        queued_workspace_count=requested_count,
+        oldest_workspace_id=oldest_workspace_id,
+        oldest_wait_seconds=oldest_wait_seconds,
+        planned_resources=planned_resources,
+        blocked_reason_counts=blockers,
+    )
+
+
+async def _capacity_queue_blocked_reason_counts(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    allocated_resources: ReservedResources,
+    resource_defaults: WorkspaceResourceDefaults,
+    detected_local_capacity: LocalCapacityLimits | None,
+) -> dict[str, int]:
+    workspaces = list(
+        (
+            await session.execute(
+                select(Workspace).where(Workspace.status == WorkspaceStatus.requested.value)
+            )
+        ).scalars()
+    )
+    if not workspaces:
+        return {}
+    reservations = await ResourceReservationRepository(session).active_latest_by_workspace_ids(
+        workspace.id for workspace in workspaces
+    )
+    cpu_limit = settings.local_capacity_cpu_cores
+    memory_limit = settings.local_capacity_memory_gb
+    if detected_local_capacity is not None:
+        cpu_limit = cpu_limit if cpu_limit is not None else detected_local_capacity.cpu_cores
+        memory_limit = (
+            memory_limit if memory_limit is not None else detected_local_capacity.memory_gb
+        )
+    reason_counts: dict[str, int] = {}
+    for workspace in workspaces:
+        reservation = reservations.get(workspace.id)
+        if reservation is None:
+            demand = {
+                "steady_cpu": resource_defaults.steady_cpu,
+                "peak_cpu": resource_defaults.peak_cpu,
+                "steady_memory_gb": resource_defaults.steady_memory_gb,
+                "peak_memory_gb": resource_defaults.peak_memory_gb,
+                "dind_slots": 0,
+            }
+        else:
+            demand = {
+                "steady_cpu": reservation.steady_cpu,
+                "peak_cpu": reservation.peak_cpu,
+                "steady_memory_gb": reservation.steady_memory_gb,
+                "peak_memory_gb": reservation.peak_memory_gb,
+                "dind_slots": int(reservation.dind_slots or 0),
+            }
+        for reason in _queue_blocking_reasons(
+            allocated_resources=allocated_resources,
+            demand=demand,
+            cpu_limit=cpu_limit,
+            memory_limit=memory_limit,
+            dind_limit=settings.local_capacity_dind_slots,
+        ):
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return dict(sorted(reason_counts.items()))
+
+
+def _queue_blocking_reasons(
+    *,
+    allocated_resources: ReservedResources,
+    demand: dict[str, float | int],
+    cpu_limit: float | None,
+    memory_limit: float | None,
+    dind_limit: int | None,
+) -> list[str]:
+    reasons: list[str] = []
+    _append_queue_blocking_reason(
+        reasons,
+        reason_code="STEADY_CPU_CAPACITY_SATURATED",
+        limit=cpu_limit,
+        allocated=allocated_resources.steady_cpu,
+        requested=float(demand["steady_cpu"]),
+    )
+    _append_queue_blocking_reason(
+        reasons,
+        reason_code="PEAK_CPU_CAPACITY_SATURATED",
+        limit=cpu_limit,
+        allocated=allocated_resources.peak_cpu,
+        requested=float(demand["peak_cpu"]),
+    )
+    _append_queue_blocking_reason(
+        reasons,
+        reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
+        limit=memory_limit,
+        allocated=allocated_resources.steady_memory_gb,
+        requested=float(demand["steady_memory_gb"]),
+    )
+    _append_queue_blocking_reason(
+        reasons,
+        reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
+        limit=memory_limit,
+        allocated=allocated_resources.peak_memory_gb,
+        requested=float(demand["peak_memory_gb"]),
+    )
+    _append_queue_blocking_reason(
+        reasons,
+        reason_code="DIND_CAPACITY_SATURATED",
+        limit=dind_limit,
+        allocated=allocated_resources.dind_slots,
+        requested=int(demand["dind_slots"]),
+    )
+    return reasons
+
+
+def _append_queue_blocking_reason(
+    reasons: list[str],
+    *,
+    reason_code: str,
+    limit: float | int | None,
+    allocated: float | int,
+    requested: float | int,
+) -> None:
+    if limit is None:
+        return
+    if requested > limit or allocated + requested > limit:
+        reasons.append(reason_code)
 
 
 def _resource_concurrency(
@@ -1270,7 +1514,7 @@ def _resource_admission_summary(
     return AdmissionSummary(ok=True, status="ok", reason=ADMISSION_OK_REASON)
 
 
-def _sum_status_counts(status_counts: dict[str, int], statuses: frozenset[str]) -> int:
+def _sum_status_counts(status_counts: dict[str, int], statuses: Iterable[str]) -> int:
     return sum(status_counts[status] for status in statuses)
 
 

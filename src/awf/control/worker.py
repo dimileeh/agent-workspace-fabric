@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
@@ -34,13 +35,15 @@ from sqlalchemy.orm.attributes import flag_modified
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import QueueDecision, ResourceReservation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionCreate,
     QueueDecisionRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
 )
@@ -144,6 +147,9 @@ ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
 ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
+LOCAL_CAPACITY_DEFERRED_REASON = "LOCAL_CAPACITY_DEFERRED"
+LOCAL_CAPACITY_UNSATISFIABLE_REASON = "LOCAL_CAPACITY_UNSATISFIABLE"
+LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON = "LOCAL_CAPACITY_RESERVATION_DEFAULTED"
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
 _TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
@@ -173,6 +179,56 @@ class WorkerConfig:
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
     node_id: str | None = None
+    local_capacity_cpu_cores: float | None = None
+    local_capacity_memory_gb: float | None = None
+    local_capacity_dind_slots: int | None = None
+    workspace_steady_cpu: float = 3.0
+    workspace_steady_memory_gb: float = 10.0
+    workspace_peak_cpu: float = 6.0
+    workspace_peak_memory_gb: float = 16.0
+
+
+@dataclass(frozen=True)
+class _ReservationDemand:
+    workspace_id: str
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int
+    dind_slots: int
+    defaulted: bool = False
+
+
+@dataclass
+class _AllocatedReservationTotals:
+    workspace_count: int = 0
+    steady_cpu: float = 0.0
+    steady_memory_gb: float = 0.0
+    peak_cpu: float = 0.0
+    peak_memory_gb: float = 0.0
+    disk_mb: int = 0
+    dind_slots: int = 0
+
+    def add(self, demand: _ReservationDemand) -> None:
+        self.workspace_count += 1
+        self.steady_cpu += demand.steady_cpu
+        self.steady_memory_gb += demand.steady_memory_gb
+        self.peak_cpu += demand.peak_cpu
+        self.peak_memory_gb += demand.peak_memory_gb
+        self.disk_mb += demand.disk_mb
+        self.dind_slots += demand.dind_slots
+
+
+@dataclass(frozen=True)
+class _CapacityBlocker:
+    dimension: str
+    reason_code: str
+    limit: float | int
+    allocated: float | int
+    requested: float | int
+    after: float | int
+    unsatisfiable: bool
 
 
 @dataclass(frozen=True)
@@ -419,10 +475,15 @@ class ControlWorker:
         return await self._list_requested()
 
     async def _list_requested(self) -> list[str]:
-        """Return up to ``max_concurrent_provisions`` workspace IDs in ``requested``."""
+        """Return requested candidates for the capacity-aware claim pass."""
+        candidate_limit = (
+            _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
+            if _local_capacity_configured(self._config)
+            else self._config.max_concurrent_provisions
+        )
         return await self._list_by_status(
             WorkspaceStatus.requested,
-            limit=self._config.max_concurrent_provisions,
+            limit=candidate_limit,
         )
 
     async def _list_ready(
@@ -2358,11 +2419,136 @@ class ControlWorker:
         )
 
     async def _claim_requested_ids(self, workspace_ids: list[str]) -> list[str]:
+        if not workspace_ids or self._config.max_concurrent_provisions <= 0:
+            return []
+        if not _local_capacity_configured(self._config):
+            claimed: list[str] = []
+            for workspace_id in workspace_ids:
+                if len(claimed) >= self._config.max_concurrent_provisions:
+                    break
+                if await self._claim_requested_for_provisioning(workspace_id):
+                    claimed.append(workspace_id)
+            return claimed
+
+        async def _operation(session: AsyncSession) -> list[str]:
+            await _acquire_local_capacity_scheduler_lock(
+                session,
+                node_id=self._config.node_id or "local",
+            )
+            return await self._claim_requested_ids_with_capacity(session, workspace_ids)
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=False,
+            on_retry=self._log_transient_db_retry,
+        )
+
+    async def _claim_requested_ids_with_capacity(
+        self,
+        session: AsyncSession,
+        workspace_ids: list[str],
+    ) -> list[str]:
+        stmt = select(Workspace).where(
+            Workspace.id.in_(workspace_ids),
+            Workspace.status == WorkspaceStatus.requested.value,
+        )
+        workspaces_by_id = {
+            workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
+        }
+        candidates = _order_scheduler_workspaces(
+            [
+                workspaces_by_id[workspace_id]
+                for workspace_id in workspace_ids
+                if workspace_id in workspaces_by_id
+            ]
+        )
+        if not candidates:
+            await self._log_stale_requested_claims(session, workspace_ids)
+            return []
+
+        reservation_repo = ResourceReservationRepository(session)
+        allocated = _allocated_totals_from_repository(
+            await reservation_repo.active_latest_totals(
+                statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES
+            )
+        )
+        reservations = await reservation_repo.active_latest_by_workspace_ids(
+            workspace.id for workspace in candidates
+        )
         claimed: list[str] = []
-        for workspace_id in workspace_ids:
-            if await self._claim_requested_for_provisioning(workspace_id):
-                claimed.append(workspace_id)
+        now = datetime.now(UTC)
+        repo = WorkspaceRepository(session)
+        for workspace in candidates:
+            if len(claimed) >= self._config.max_concurrent_provisions:
+                break
+            demand = _reservation_demand_for_workspace(
+                workspace,
+                reservation=reservations.get(workspace.id),
+                config=self._config,
+            )
+            blockers = _local_capacity_blockers(
+                allocated=allocated,
+                demand=demand,
+                config=self._config,
+            )
+            if blockers:
+                reason_code = (
+                    LOCAL_CAPACITY_UNSATISFIABLE_REASON
+                    if any(blocker.unsatisfiable for blocker in blockers)
+                    else LOCAL_CAPACITY_DEFERRED_REASON
+                )
+                await _record_capacity_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_DEFERRED,
+                    reason_code=reason_code,
+                    decided_at=now,
+                    allocated=allocated,
+                    demand=demand,
+                    blockers=blockers,
+                )
+                continue
+            if demand.defaulted:
+                await _record_capacity_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_ORDERED,
+                    reason_code=LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
+                    decided_at=now,
+                    allocated=allocated,
+                    demand=demand,
+                    blockers=[],
+                )
+            ws = await repo.transition_if_current(
+                workspace.id,
+                from_status=WorkspaceStatus.requested,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+            if ws is None:
+                await self._log_stale_requested_claims(session, [workspace.id])
+                continue
+            claimed.append(workspace.id)
+            allocated.add(demand)
         return claimed
+
+    async def _log_stale_requested_claims(
+        self,
+        session: AsyncSession,
+        workspace_ids: list[str],
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        for workspace_id in workspace_ids:
+            current = await repo.get(workspace_id)
+            _log.info(
+                "worker.skip_stale_dispatch",
+                workspace_id=workspace_id,
+                action="provision",
+                expected_status=WorkspaceStatus.requested.value,
+                status=current.status if current is not None else None,
+            )
 
     async def _claim_requested_for_provisioning(self, workspace_id: str) -> bool:
         async with self._session_factory() as session:
@@ -2829,6 +3015,262 @@ async def _record_scheduler_queue_decision(
         score_summary=score_summary,
         decided_at=decided_at,
     )
+
+
+async def _record_capacity_queue_decision(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    decision: str,
+    reason_code: str,
+    decided_at: datetime,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    blockers: list[_CapacityBlocker],
+) -> None:
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    if attempt is None:
+        return
+
+    queue_repo = QueueDecisionRepository(session)
+    latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
+    score = scheduler_score_from_workspace(workspace, now=decided_at)
+    score_summary = (
+        score_summary_with_suppression(
+            score,
+            reason_code=reason_code,
+            detail={
+                "blockers": [_capacity_blocker_payload(blocker) for blocker in blockers],
+            },
+        )
+        if decision == QUEUE_DECISION_DEFERRED
+        else score.score_summary
+    )
+    resource_summary = _capacity_resource_summary(
+        allocated=allocated,
+        demand=demand,
+        blockers=blockers,
+    )
+    if latest:
+        resource_summary["previous"] = dict(latest[0].resource_summary)
+    await queue_repo.create(
+        workspace_id=workspace.id,
+        task_id=attempt.task_id,
+        attempt_id=attempt.id,
+        decision=decision,
+        reason_code=reason_code,
+        class_priority=score.class_priority,
+        computed_priority=score.effective_score,
+        age_boost=score.age_boost,
+        retry_bonus=score.retry_bonus,
+        resource_summary=resource_summary,
+        overlap_risk_summary=dict(latest[0].overlap_risk_summary) if latest else {},
+        score_summary=score_summary,
+        decided_at=decided_at,
+    )
+
+
+def _allocated_totals_from_repository(
+    totals: Mapping[str, float | int],
+) -> _AllocatedReservationTotals:
+    return _AllocatedReservationTotals(
+        workspace_count=int(totals.get("workspace_count", 0) or 0),
+        steady_cpu=float(totals.get("steady_cpu", 0.0) or 0.0),
+        steady_memory_gb=float(totals.get("steady_memory_gb", 0.0) or 0.0),
+        peak_cpu=float(totals.get("peak_cpu", 0.0) or 0.0),
+        peak_memory_gb=float(totals.get("peak_memory_gb", 0.0) or 0.0),
+        disk_mb=int(totals.get("disk_mb", 0) or 0),
+        dind_slots=int(totals.get("dind_slots", 0) or 0),
+    )
+
+
+def _reservation_demand_for_workspace(
+    workspace: Workspace,
+    *,
+    reservation: ResourceReservation | None,
+    config: WorkerConfig,
+) -> _ReservationDemand:
+    if reservation is not None:
+        return _ReservationDemand(
+            workspace_id=workspace.id,
+            steady_cpu=reservation.steady_cpu,
+            steady_memory_gb=reservation.steady_memory_gb,
+            peak_cpu=reservation.peak_cpu,
+            peak_memory_gb=reservation.peak_memory_gb,
+            disk_mb=int(reservation.disk_mb or 0),
+            dind_slots=int(reservation.dind_slots or 0),
+        )
+    return _ReservationDemand(
+        workspace_id=workspace.id,
+        steady_cpu=config.workspace_steady_cpu,
+        steady_memory_gb=config.workspace_steady_memory_gb,
+        peak_cpu=config.workspace_peak_cpu,
+        peak_memory_gb=config.workspace_peak_memory_gb,
+        disk_mb=0,
+        dind_slots=0,
+        defaulted=True,
+    )
+
+
+def _local_capacity_blockers(
+    *,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    config: WorkerConfig,
+) -> list[_CapacityBlocker]:
+    blockers: list[_CapacityBlocker] = []
+    _append_capacity_blocker(
+        blockers,
+        dimension="steady_cpu",
+        reason_code="STEADY_CPU_CAPACITY_SATURATED",
+        limit=config.local_capacity_cpu_cores,
+        allocated=allocated.steady_cpu,
+        requested=demand.steady_cpu,
+    )
+    _append_capacity_blocker(
+        blockers,
+        dimension="peak_cpu",
+        reason_code="PEAK_CPU_CAPACITY_SATURATED",
+        limit=config.local_capacity_cpu_cores,
+        allocated=allocated.peak_cpu,
+        requested=demand.peak_cpu,
+    )
+    _append_capacity_blocker(
+        blockers,
+        dimension="steady_memory_gb",
+        reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
+        limit=config.local_capacity_memory_gb,
+        allocated=allocated.steady_memory_gb,
+        requested=demand.steady_memory_gb,
+    )
+    _append_capacity_blocker(
+        blockers,
+        dimension="peak_memory_gb",
+        reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
+        limit=config.local_capacity_memory_gb,
+        allocated=allocated.peak_memory_gb,
+        requested=demand.peak_memory_gb,
+    )
+    _append_capacity_blocker(
+        blockers,
+        dimension="dind_slots",
+        reason_code="DIND_CAPACITY_SATURATED",
+        limit=config.local_capacity_dind_slots,
+        allocated=allocated.dind_slots,
+        requested=demand.dind_slots,
+    )
+    return blockers
+
+
+def _local_capacity_configured(config: WorkerConfig) -> bool:
+    return (
+        config.local_capacity_cpu_cores is not None
+        or config.local_capacity_memory_gb is not None
+        or config.local_capacity_dind_slots is not None
+    )
+
+
+def _append_capacity_blocker(
+    blockers: list[_CapacityBlocker],
+    *,
+    dimension: str,
+    reason_code: str,
+    limit: float | int | None,
+    allocated: float | int,
+    requested: float | int,
+) -> None:
+    if limit is None:
+        return
+    after = allocated + requested
+    if requested > limit:
+        blockers.append(
+            _CapacityBlocker(
+                dimension=dimension,
+                reason_code=reason_code,
+                limit=limit,
+                allocated=allocated,
+                requested=requested,
+                after=after,
+                unsatisfiable=True,
+            )
+        )
+        return
+    if after > limit:
+        blockers.append(
+            _CapacityBlocker(
+                dimension=dimension,
+                reason_code=reason_code,
+                limit=limit,
+                allocated=allocated,
+                requested=requested,
+                after=after,
+                unsatisfiable=False,
+            )
+        )
+
+
+def _capacity_resource_summary(
+    *,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    blockers: list[_CapacityBlocker],
+) -> dict[str, Any]:
+    return {
+        "allocated": {
+            "workspace_count": allocated.workspace_count,
+            "steady_cpu": allocated.steady_cpu,
+            "steady_memory_gb": allocated.steady_memory_gb,
+            "peak_cpu": allocated.peak_cpu,
+            "peak_memory_gb": allocated.peak_memory_gb,
+            "disk_mb": allocated.disk_mb,
+            "dind_slots": allocated.dind_slots,
+        },
+        "requested": {
+            "workspace_id": demand.workspace_id,
+            "steady_cpu": demand.steady_cpu,
+            "steady_memory_gb": demand.steady_memory_gb,
+            "peak_cpu": demand.peak_cpu,
+            "peak_memory_gb": demand.peak_memory_gb,
+            "disk_mb": demand.disk_mb,
+            "dind_slots": demand.dind_slots,
+            "defaulted": demand.defaulted,
+        },
+        "blockers": [_capacity_blocker_payload(blocker) for blocker in blockers],
+    }
+
+
+def _capacity_blocker_payload(blocker: _CapacityBlocker) -> dict[str, Any]:
+    return {
+        "dimension": blocker.dimension,
+        "reason_code": blocker.reason_code,
+        "limit": blocker.limit,
+        "allocated": blocker.allocated,
+        "requested": blocker.requested,
+        "after": blocker.after,
+        "unsatisfiable": blocker.unsatisfiable,
+    }
+
+
+async def _acquire_local_capacity_scheduler_lock(
+    session: AsyncSession,
+    *,
+    node_id: str,
+) -> None:
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_key = _postgres_advisory_lock_key(f"awf:local-capacity:{node_id}")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": lock_key},
+    )
+
+
+def _postgres_advisory_lock_key(value: str) -> int:
+    raw = int.from_bytes(hashlib.sha256(value.encode("utf-8")).digest()[:8], "big")
+    if raw >= 2**63:
+        return raw - 2**64
+    return raw
 
 
 def _order_scheduler_workspaces(

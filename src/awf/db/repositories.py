@@ -142,6 +142,15 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 )
+ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.provisioning.value,
+    WorkspaceStatus.ready.value,
+    WorkspaceStatus.running.value,
+    WorkspaceStatus.validating.value,
+    WorkspaceStatus.pushing.value,
+    WorkspaceStatus.monitoring_pr.value,
+    WorkspaceStatus.destroying.value,
+)
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
@@ -1137,6 +1146,31 @@ class ResourceReservationRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def active_latest_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, ResourceReservation]:
+        ids = tuple(dict.fromkeys(workspace_ids))
+        if not ids:
+            return {}
+        stmt = (
+            select(ResourceReservation)
+            .where(
+                ResourceReservation.workspace_id.in_(ids),
+                ResourceReservation.released_at.is_(None),
+            )
+            .order_by(
+                ResourceReservation.workspace_id.asc(),
+                ResourceReservation.reserved_at.desc(),
+                ResourceReservation.id.desc(),
+            )
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        latest: dict[str, ResourceReservation] = {}
+        for row in rows:
+            latest.setdefault(row.workspace_id, row)
+        return latest
+
     async def release_active_for_workspace(
         self,
         workspace_id: str,
@@ -1157,7 +1191,21 @@ class ResourceReservationRepository:
         rows.sort(key=lambda row: (row.reserved_at, row.id))
         return rows
 
-    async def active_latest_totals(self) -> dict[str, float | int]:
+    async def active_latest_totals(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str] | None = None,
+    ) -> dict[str, float | int]:
+        if statuses is None:
+            status_filter = ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
+        else:
+            status_values = tuple(
+                status.value if isinstance(status, WorkspaceStatus) else str(status)
+                for status in statuses
+            )
+            if not status_values:
+                return _empty_resource_reservation_totals()
+            status_filter = Workspace.status.in_(status_values)
         latest_active_reservations = (
             select(
                 ResourceReservation.workspace_id.label("workspace_id"),
@@ -1180,7 +1228,7 @@ class ResourceReservationRepository:
             .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
             .where(
                 ResourceReservation.released_at.is_(None),
-                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES),
+                status_filter,
             )
             .subquery()
         )
@@ -1213,6 +1261,18 @@ class ResourceReservationRepository:
             "disk_mb": int(row[5] or 0),
             "dind_slots": int(row[6] or 0),
         }
+
+
+def _empty_resource_reservation_totals() -> dict[str, float | int]:
+    return {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
 
 
 class MergeCandidateRepository:

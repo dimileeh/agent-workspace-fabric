@@ -307,6 +307,53 @@
         "title": "CapacityDimensionResponse",
         "type": "object"
       },
+      "CapacityQueueSummaryResponse": {
+        "properties": {
+          "blocked_reason_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Blocked Reason Counts",
+            "type": "object"
+          },
+          "oldest_wait_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Wait Seconds"
+          },
+          "oldest_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Workspace Id"
+          },
+          "planned_resources": {
+            "$ref": "#/components/schemas/ReservedResourcesResponse"
+          },
+          "queued_workspace_count": {
+            "title": "Queued Workspace Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "queued_workspace_count",
+          "planned_resources",
+          "blocked_reason_counts"
+        ],
+        "title": "CapacityQueueSummaryResponse",
+        "type": "object"
+      },
       "CheckResult": {
         "description": "One readiness sub-check result.\n\n``reason`` is a stable uppercase code (e.g. ``DOCKER_DAEMON_UNREACHABLE``)\nintended for routing alerts and dashboards; ``detail`` carries the raw\nerror text for human eyes.",
         "properties": {
@@ -4493,9 +4540,21 @@
             "$ref": "#/components/schemas/AdmissionSummaryResponse",
             "description": "Actionable summary explaining whether new workspace admission is blocked."
           },
+          "allocated_capacity": {
+            "$ref": "#/components/schemas/ResourceCapacitySummaryResponse",
+            "description": "Available local capacity after allocated runtime reservations only."
+          },
+          "allocated_resources": {
+            "$ref": "#/components/schemas/ReservedResourcesResponse",
+            "description": "Resource reservations for workspaces that already occupy local runtime capacity."
+          },
           "capacity": {
             "$ref": "#/components/schemas/ResourceCapacitySummaryResponse",
             "description": "Available local capacity and pressure reasons by reserved resource."
+          },
+          "capacity_queue": {
+            "$ref": "#/components/schemas/CapacityQueueSummaryResponse",
+            "description": "Requested workspace demand and local capacity blockers for queued work."
           },
           "concurrency": {
             "$ref": "#/components/schemas/ResourceConcurrencyResponse",
@@ -4569,6 +4628,9 @@
           "resource_defaults",
           "reserved_resources",
           "capacity",
+          "allocated_resources",
+          "allocated_capacity",
+          "capacity_queue",
           "concurrency",
           "disk",
           "orphan_resources",

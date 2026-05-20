@@ -333,6 +333,16 @@ class AdmissionSummaryResponse(BaseModel):
     detail: str | None = None
 
 
+class CapacityQueueSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    queued_workspace_count: int
+    oldest_workspace_id: str | None = None
+    oldest_wait_seconds: int | None = None
+    planned_resources: ReservedResourcesResponse
+    blocked_reason_counts: dict[str, int]
+
+
 class ProviderCircuitBreakerSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -417,6 +427,15 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     capacity: ResourceCapacitySummaryResponse = Field(
         description="Available local capacity and pressure reasons by reserved resource.",
+    )
+    allocated_resources: ReservedResourcesResponse = Field(
+        description="Resource reservations for workspaces that already occupy local runtime capacity.",
+    )
+    allocated_capacity: ResourceCapacitySummaryResponse = Field(
+        description="Available local capacity after allocated runtime reservations only.",
+    )
+    capacity_queue: CapacityQueueSummaryResponse = Field(
+        description="Requested workspace demand and local capacity blockers for queued work.",
     )
     concurrency: ResourceConcurrencyResponse = Field(
         description="Provisioning and execution worker lane saturation.",

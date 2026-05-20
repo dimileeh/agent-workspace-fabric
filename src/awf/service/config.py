@@ -52,6 +52,10 @@ class ServiceSettings:
     worker_poll_interval_seconds: float
     worker_max_concurrent_provisions: int
     worker_max_concurrent_executions: int = 3
+    workspace_steady_cpu: float = 3.0
+    workspace_steady_memory_gb: float = 10.0
+    workspace_peak_cpu: float = 6.0
+    workspace_peak_memory_gb: float = 16.0
     agent_wall_timeout_seconds: float = 7200
     agent_idle_timeout_seconds: float = 3600
     planning_max_iterations_default: int = 3
@@ -165,6 +169,10 @@ def resolve_service_settings(
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,
         worker_max_concurrent_provisions=settings.worker_max_concurrent_provisions,
         worker_max_concurrent_executions=settings.worker_max_concurrent_executions,
+        workspace_steady_cpu=settings.workspace_steady_cpu,
+        workspace_steady_memory_gb=settings.workspace_steady_memory_gb,
+        workspace_peak_cpu=settings.workspace_peak_cpu,
+        workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
         planning_max_iterations_default=settings.planning_max_iterations_default,

@@ -322,6 +322,76 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_endpoint_reports_allocated_capacity_and_queue_pressure(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        local_capacity_cpu_cores=8.0,
+        local_capacity_memory_gb=24.0,
+        local_capacity_dind_slots=1,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
+    )
+    now = datetime.now(UTC)
+    running_id = await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=5),
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+    requested_id = await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.requested,
+        updated_at=now - timedelta(minutes=4),
+        steady_cpu=3.0,
+        steady_memory_gb=8.0,
+        peak_cpu=6.0,
+        peak_memory_gb=16.0,
+        dind_slots=1,
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reserved_resources"]["active_workspace_count"] == 2
+    assert body["allocated_resources"] == {
+        "active_workspace_count": 1,
+        "steady_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 4.0,
+        "peak_memory_gb": 8.0,
+        "disk_mb": 0,
+        "dind_slots": 1,
+    }
+    assert body["allocated_capacity"]["peak_cpu"]["reserved"] == 4.0
+    assert body["allocated_capacity"]["peak_cpu"]["available"] == 4.0
+    assert body["capacity_queue"]["queued_workspace_count"] == 1
+    assert body["capacity_queue"]["oldest_workspace_id"] == requested_id
+    assert body["capacity_queue"]["oldest_wait_seconds"] >= 0
+    assert body["capacity_queue"]["planned_resources"]["active_workspace_count"] == 1
+    assert body["capacity_queue"]["planned_resources"]["peak_cpu"] == 6.0
+    assert body["capacity_queue"]["blocked_reason_counts"] == {
+        "DIND_CAPACITY_SATURATED": 1,
+        "PEAK_CPU_CAPACITY_SATURATED": 1,
+    }
+    assert running_id != requested_id
+
+
+@pytest.mark.unit
 async def test_resource_saturation_endpoint_serializes_orphan_resource_summary(
     metrics_app_and_client: tuple[Any, AsyncClient],
     tmp_path: Path,

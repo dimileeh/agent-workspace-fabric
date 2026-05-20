@@ -703,6 +703,14 @@ export interface AdmissionSummary {
   detail: string | null;
 }
 
+export interface CapacityQueueSummary {
+  queued_workspace_count: number;
+  oldest_workspace_id: string | null;
+  oldest_wait_seconds: number | null;
+  planned_resources: ReservedResources;
+  blocked_reason_counts: Record<string, number>;
+}
+
 export interface ResourceSaturationSummary {
   generated_at: string;
   workspace_counts: WorkspaceSaturationCounts;
@@ -710,6 +718,9 @@ export interface ResourceSaturationSummary {
   resource_defaults: WorkspaceResourceDefaults;
   reserved_resources: ReservedResources;
   capacity: ResourceCapacitySummary;
+  allocated_resources: ReservedResources;
+  allocated_capacity: ResourceCapacitySummary;
+  capacity_queue: CapacityQueueSummary;
   concurrency: ResourceConcurrency;
   disk: DiskCheck;
   admission: AdmissionSummary;

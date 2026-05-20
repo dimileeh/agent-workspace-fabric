@@ -48,6 +48,7 @@ from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -155,6 +156,9 @@ async def _create_requested(
     title: str,
     *,
     create_task_attempt: bool = False,
+    task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    created_at: datetime | None = None,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -165,7 +169,12 @@ async def _create_requested(
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
+            task_class=task_class,
         )
+        if created_at is not None:
+            ws.created_at = created_at
+            ws.updated_at = created_at
         if create_task_attempt:
             task = await TaskRepository(s).create_or_get(
                 repo_url=ws.repo_url,
@@ -180,6 +189,36 @@ async def _create_requested(
             await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await s.commit()
         return ws.id
+
+
+async def _reserve_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    node_id: str = "local",
+    steady_cpu: float = 1.0,
+    steady_memory_gb: float = 1.0,
+    peak_cpu: float = 1.0,
+    peak_memory_gb: float = 1.0,
+    disk_mb: int | None = None,
+    dind_slots: int = 0,
+) -> None:
+    async with session_factory() as s:
+        attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+        assert attempt is not None
+        await ResourceReservationRepository(s).create(
+            workspace_id=workspace_id,
+            attempt_id=attempt.id,
+            node_id=node_id,
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
+            disk_mb=disk_mb,
+            dind_slots=dind_slots,
+            phase="workspace_lifecycle",
+        )
+        await s.commit()
 
 
 async def _create_ready(
@@ -706,6 +745,291 @@ class TestRunOnce:
                 )
             )
             assert count == 5
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "active-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-deferred",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            requested_id,
+            steady_cpu=3.0,
+            steady_memory_gb=8.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            dind_slots=1,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=2,
+                local_capacity_cpu_cores=6.0,
+                local_capacity_memory_gb=16.0,
+                local_capacity_dind_slots=1,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(requested_id)
+            assert workspace is not None
+            decisions = await QueueDecisionRepository(s).list_for_workspace(requested_id)
+
+        assert provisioner.calls == []
+        assert workspace.status == WorkspaceStatus.requested.value
+        assert any(decision.reason_code == "LOCAL_CAPACITY_DEFERRED" for decision in decisions)
+        capacity_decision = next(
+            decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
+        )
+        blockers = capacity_decision.resource_summary.get("blockers")
+        assert isinstance(blockers, list)
+        assert {blocker["reason_code"] for blocker in blockers if isinstance(blocker, dict)} >= {
+            "PEAK_CPU_CAPACITY_SATURATED",
+            "PEAK_MEMORY_CAPACITY_SATURATED",
+            "DIND_CAPACITY_SATURATED",
+        }
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_dispatches_oldest_satisfiable_candidate(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        active_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "active-partial-capacity-holder",
+            create_task_attempt=True,
+        )
+        await _reserve_workspace(
+            session_factory,
+            active_id,
+            steady_cpu=2.0,
+            steady_memory_gb=4.0,
+            peak_cpu=4.0,
+            peak_memory_gb=8.0,
+        )
+        blocked_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "old-blocked-capacity-request",
+            create_task_attempt=True,
+            created_at=now - timedelta(minutes=10),
+        )
+        await _reserve_workspace(
+            session_factory,
+            blocked_id,
+            steady_cpu=4.0,
+            steady_memory_gb=8.0,
+            peak_cpu=8.0,
+            peak_memory_gb=16.0,
+        )
+        fitting_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "younger-fitting-capacity-request",
+            create_task_attempt=True,
+            created_at=now - timedelta(minutes=5),
+        )
+        await _reserve_workspace(
+            session_factory,
+            fitting_id,
+            steady_cpu=2.0,
+            steady_memory_gb=4.0,
+            peak_cpu=4.0,
+            peak_memory_gb=8.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=8.0,
+                local_capacity_memory_gb=24.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            blocked = await repo.get(blocked_id)
+            fitting = await repo.get(fitting_id)
+            blocked_decisions = await QueueDecisionRepository(s).list_for_workspace(blocked_id)
+
+        assert provisioner.calls == [fitting_id]
+        assert blocked is not None
+        assert fitting is not None
+        assert blocked.status == WorkspaceStatus.requested.value
+        assert fitting.status == WorkspaceStatus.ready.value
+        assert any(
+            decision.reason_code == "LOCAL_CAPACITY_DEFERRED" for decision in blocked_decisions
+        )
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_preserves_scheduler_priority_before_fifo(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        older_low_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "older-low-priority-capacity-request",
+            create_task_attempt=True,
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 0}},
+            created_at=now - timedelta(minutes=10),
+        )
+        await _reserve_workspace(
+            session_factory,
+            older_low_id,
+            steady_cpu=2.0,
+            steady_memory_gb=4.0,
+            peak_cpu=4.0,
+            peak_memory_gb=8.0,
+        )
+        younger_high_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "younger-high-priority-capacity-request",
+            create_task_attempt=True,
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+            created_at=now - timedelta(minutes=5),
+        )
+        await _reserve_workspace(
+            session_factory,
+            younger_high_id,
+            steady_cpu=2.0,
+            steady_memory_gb=4.0,
+            peak_cpu=4.0,
+            peak_memory_gb=8.0,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=4.0,
+                local_capacity_memory_gb=8.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            older_low = await repo.get(older_low_id)
+            younger_high = await repo.get(younger_high_id)
+
+        assert provisioner.calls == [younger_high_id]
+        assert older_low is not None
+        assert younger_high is not None
+        assert older_low.status == WorkspaceStatus.requested.value
+        assert younger_high.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_concurrent_capacity_claims_do_not_oversubscribe_requested_workspaces(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        first_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-race-first",
+            create_task_attempt=True,
+        )
+        second_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "capacity-race-second",
+            create_task_attempt=True,
+        )
+        for workspace_id in (first_id, second_id):
+            await _reserve_workspace(
+                session_factory,
+                workspace_id,
+                steady_cpu=2.0,
+                steady_memory_gb=4.0,
+                peak_cpu=4.0,
+                peak_memory_gb=8.0,
+            )
+
+        provisioner = _TransitioningProvisioner(session_factory)
+        config = WorkerConfig(
+            poll_interval_seconds=0.01,
+            max_concurrent_provisions=1,
+            local_capacity_cpu_cores=4.0,
+            local_capacity_memory_gb=8.0,
+        )
+        worker_a = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=config,
+        )
+        worker_b = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=config,
+        )
+
+        async def _list_first() -> list[str]:
+            return [first_id]
+
+        async def _list_second() -> list[str]:
+            return [second_id]
+
+        worker_a._list_requested = _list_first  # type: ignore[method-assign]
+        worker_b._list_requested = _list_second  # type: ignore[method-assign]
+
+        dispatched = await asyncio.gather(worker_a.run_once(), worker_b.run_once())
+
+        assert sum(dispatched) == 1
+        assert len(provisioner.calls) == 1
+
+        async with session_factory() as s:
+            statuses = {
+                workspace_id: (await WorkspaceRepository(s).get(workspace_id)).status  # type: ignore[union-attr]
+                for workspace_id in (first_id, second_id)
+            }
+
+        assert list(statuses.values()).count(WorkspaceStatus.ready.value) == 1
+        assert list(statuses.values()).count(WorkspaceStatus.requested.value) == 1
 
     @pytest.mark.unit
     async def test_requested_race_skip_does_not_record_ordered_decision(
