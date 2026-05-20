@@ -4616,7 +4616,7 @@ class TestNotificationAndGraceHelpers:
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
 
-        assert "external merge-blocking review policy comment" in (
+        assert "merge-blocking changes-requested review" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
         )
         assert "required protection" in (
@@ -4625,6 +4625,16 @@ class TestNotificationAndGraceHelpers:
                 MonitorState(),
             )
             or ""
+        )
+        assert (
+            _notify_human_reason(
+                _status(
+                    reviews=(deferred_review,),
+                    merge_state_status=MergeStateStatus.BLOCKED,
+                ),
+                deferred_state,
+            )
+            == "human review feedback was deferred by the agent and remains unresolved"
         )
         assert (
             _notify_human_reason(
