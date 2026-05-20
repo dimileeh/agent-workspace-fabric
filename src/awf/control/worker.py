@@ -440,6 +440,8 @@ class ControlWorker:
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
         self._monitor_recovery_operation_ids: dict[str, str] = {}
+        self._active_salvage_monitor_recovery_operation_ids: set[str] = set()
+        self._active_salvage_monitor_resume_cooldowns: dict[str, float] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
@@ -1820,6 +1822,7 @@ class ControlWorker:
                     str | None,
                     str | None,
                     str | None,
+                    str | None,
                 ]
                 | None
             ) = None
@@ -1830,6 +1833,7 @@ class ControlWorker:
                     ws.branch_name,
                     ws.remote_push_branch,
                     ws.base_commit,
+                    _pr_adoption_expected_head_repo_slug(ws),
                 )
             await session.commit()
 
@@ -1849,10 +1853,12 @@ class ControlWorker:
             branch_name,
             remote_push_branch,
             base_commit,
+            expected_head_repo_slug,
         ) = branch_recovery_context
         branch_lookup = await self._resolve_preserved_active_branch_open_pr(
             repo_url=repo_url,
             branch_name=remote_push_branch or branch_name,
+            expected_head_repo_slug=expected_head_repo_slug,
             # A preserved branch PR may have been retargeted after creation.
             # Recover by head branch and let match/ambiguity checks below guard safety.
             base_branch=None,
@@ -3115,6 +3121,7 @@ class ControlWorker:
         repo_url: str | None,
         branch_name: str | None,
         base_branch: str | None,
+        expected_head_repo_slug: str | None = None,
     ) -> _BranchOpenPRLookup | None:
         if self._open_pr_resolver is None:
             return None
@@ -3165,13 +3172,20 @@ class ControlWorker:
                 },
             )
 
-        expected_head_repo_slug = _expected_open_pr_head_repo_slug(repo_url)
-        if expected_head_repo_slug is not None and summaries:
+        explicit_expected_head_repo_slug = (
+            expected_head_repo_slug.strip()
+            if isinstance(expected_head_repo_slug, str) and expected_head_repo_slug.strip()
+            else None
+        )
+        resolved_expected_head_repo_slug = explicit_expected_head_repo_slug or (
+            _expected_open_pr_head_repo_slug(repo_url)
+        )
+        if resolved_expected_head_repo_slug is not None and summaries:
             head_repo_matches = [
                 summary
                 for summary in summaries
                 if summary.head_repo_slug is not None
-                and summary.head_repo_slug.lower() == expected_head_repo_slug.lower()
+                and summary.head_repo_slug.lower() == resolved_expected_head_repo_slug.lower()
             ]
             if not head_repo_matches:
                 return _BranchOpenPRLookup(
@@ -3180,7 +3194,7 @@ class ControlWorker:
                     ambiguity_reason="open_pr_head_repo_mismatch",
                     payload={
                         "branch_name": lookup_branch,
-                        "expected_head_repo_slug": expected_head_repo_slug,
+                        "expected_head_repo_slug": resolved_expected_head_repo_slug,
                         "match_count": len(summaries),
                         "matches": [summary.to_payload() for summary in summaries],
                         "source": "open_pr_resolver",
@@ -3199,15 +3213,18 @@ class ControlWorker:
                 },
             )
         if len(summaries) == 1:
+            payload: dict[str, Any] = {
+                "branch_name": lookup_branch,
+                "match_count": 1,
+                "source": "open_pr_resolver",
+            }
+            if explicit_expected_head_repo_slug is not None:
+                payload["expected_head_repo_slug"] = explicit_expected_head_repo_slug
             return _BranchOpenPRLookup(
                 branch_name=lookup_branch,
                 state="matched",
                 match=summaries[0],
-                payload={
-                    "branch_name": lookup_branch,
-                    "match_count": 1,
-                    "source": "open_pr_resolver",
-                },
+                payload=payload,
             )
         return _BranchOpenPRLookup(
             branch_name=lookup_branch,
@@ -3937,7 +3954,7 @@ class ControlWorker:
         workspace_id: str,
         *,
         recovery_operation_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self._executor is None:
             await self._finish_monitor_recovery_operation(
                 workspace_id,
@@ -3946,7 +3963,7 @@ class ControlWorker:
                 error_code="MONITOR_RECOVERY_NO_EXECUTOR",
                 error_message="Worker has no executor configured.",
             )
-            return
+            return False
         try:
             await self._executor.resume_pr_monitor(workspace_id)
         except Exception as exc:
@@ -3961,13 +3978,14 @@ class ControlWorker:
                 error_code="MONITOR_RECOVERY_FAILED",
                 error_message=repr(exc)[:2000],
             )
-            return
+            return False
 
         await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.succeeded,
         )
+        return True
 
     async def _claim_requested_ids(self, workspace_ids: list[str]) -> list[str]:
         claimed: list[str] = []
@@ -4006,6 +4024,8 @@ class ControlWorker:
                 break
             if workspace_id in self._execution_tasks:
                 continue
+            if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
+                continue
             if await self._claim_monitoring_pr(workspace_id):
                 claimed.append(workspace_id)
         return claimed
@@ -4013,6 +4033,7 @@ class ControlWorker:
     async def _claim_monitoring_pr(self, workspace_id: str) -> bool:
         now = datetime.now(UTC)
         lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
+        active_salvage_monitor_recovery_operation_id: str | None = None
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -4062,6 +4083,11 @@ class ControlWorker:
                     status=OperationStatus.running,
                     payload=operation_payload,
                 )
+                if (
+                    operation_payload.get("active_execution_salvage_reason_code")
+                    == _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                ):
+                    active_salvage_monitor_recovery_operation_id = operation.id
                 await repo.add_event(
                     ws,
                     event_type=_MONITOR_RECOVERY_EVENT_TYPE,
@@ -4073,6 +4099,10 @@ class ControlWorker:
                 )
                 self._monitor_recovery_operation_ids[workspace_id] = operation.id
             await session.commit()
+            if active_salvage_monitor_recovery_operation_id is not None:
+                self._active_salvage_monitor_recovery_operation_ids.add(
+                    active_salvage_monitor_recovery_operation_id
+                )
             return claimed
 
     async def _safely_resume_claimed_pr_monitor(
@@ -4085,8 +4115,9 @@ class ControlWorker:
             self._refresh_monitoring_pr_claim_loop(workspace_id),
             name=f"awf-monitor-claim-{workspace_id}",
         )
+        resume_succeeded = False
         try:
-            await self._safely_resume_pr_monitor(
+            resume_succeeded = await self._safely_resume_pr_monitor(
                 workspace_id,
                 recovery_operation_id=recovery_operation_id,
             )
@@ -4094,8 +4125,27 @@ class ControlWorker:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
+            if (
+                resume_succeeded
+                and recovery_operation_id is not None
+                and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
+            ):
+                self._active_salvage_monitor_resume_cooldowns[workspace_id] = monotonic() + max(
+                    0.0, self._config.monitor_claim_lease_seconds
+                )
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            if recovery_operation_id is not None:
+                self._active_salvage_monitor_recovery_operation_ids.discard(recovery_operation_id)
+
+    def _active_salvage_monitor_resume_cooldown_active(self, workspace_id: str) -> bool:
+        cooldown_until = self._active_salvage_monitor_resume_cooldowns.get(workspace_id)
+        if cooldown_until is None:
+            return False
+        if monotonic() < cooldown_until:
+            return True
+        self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        return False
 
     async def _finish_monitor_recovery_operation(
         self,
@@ -4851,6 +4901,17 @@ def _expected_open_pr_head_repo_slug(repo_url: str) -> str | None:
         return RepoRef.from_url(repo_url).slug()
     except ValueError:
         return None
+
+
+def _pr_adoption_expected_head_repo_slug(workspace: Workspace) -> str | None:
+    policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption")
+    if not isinstance(adoption, Mapping):
+        return None
+    head_repo_slug = adoption.get("head_repo_slug")
+    if not isinstance(head_repo_slug, str) or not head_repo_slug.strip():
+        return None
+    return head_repo_slug.strip()
 
 
 def _extract_pr_number(pr_url: str) -> int | None:
