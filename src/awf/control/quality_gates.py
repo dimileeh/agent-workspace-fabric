@@ -133,14 +133,14 @@ _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "report",
 )
 _INFORMATIONAL_JOB_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
-    {"if", "name", "needs", "permissions", "runs-on", "steps"}
+    {"env", "if", "name", "needs", "permissions", "runs-on", "steps"}
 )
 _INFORMATIONAL_JOB_COMMENT_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset(
     {"issues", "pull-requests"}
 )
 _INFORMATIONAL_JOB_READ_PERMISSION_SCOPES: Final[frozenset[str]] = frozenset({"contents"})
 _INFORMATIONAL_STEP_ALLOWED_KEYS: Final[frozenset[str]] = frozenset(
-    {"continue-on-error", "id", "if", "name", "run", "uses", "with"}
+    {"continue-on-error", "env", "id", "if", "name", "run", "uses", "with"}
 )
 _INFORMATIONAL_RUN_COMMAND_NAMES: Final[frozenset[str]] = frozenset({"echo", "printf"})
 _INFORMATIONAL_RUN_SEPARATORS: Final[frozenset[str]] = frozenset({";", "&&"})
@@ -193,6 +193,10 @@ _SAFE_INFORMATIONAL_GITHUB_ACTIONS_EXPRESSION_RE: Final = re.compile(
 _SENSITIVE_ENV_NAME_RE: Final = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIAL|PASSWD|PASSWORD|PAT|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)",
     re.IGNORECASE,
+)
+_ENV_NAME_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_BLOCKED_INFORMATIONAL_ENV_NAMES: Final[frozenset[str]] = frozenset(
+    {"BASH_ENV", "ENV", "GITHUB_ENV", "GITHUB_PATH", "IFS", "PATH", "SHELL", "SHELLOPTS"}
 )
 _SAFE_INFORMATIONAL_RUN_ENV_NAMES: Final[frozenset[str]] = frozenset({"PATH"})
 _PACKAGE_MANAGER_OPTIONS_WITH_VALUE: Final[frozenset[str]] = frozenset(
@@ -1759,6 +1763,9 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
         return False
     if not _informational_job_permissions_are_safe(job.get("permissions")):
         return False
+    job_env_names = _safe_informational_env_names(job.get("env"))
+    if job_env_names is None:
+        return False
     label_parts = [job_id]
     name = _string_value(job.get("name"))
     if name:
@@ -1769,7 +1776,9 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
     steps = _workflow_steps(job)
     if steps is None:
         return False
-    return bool(steps) and all(_is_informational_step(step) for step in steps)
+    return bool(steps) and all(
+        _is_informational_step(step, inherited_env_names=job_env_names) for step in steps
+    )
 
 
 def _informational_job_permissions_are_safe(permissions: object) -> bool:
@@ -1796,9 +1805,18 @@ def _informational_job_permissions_are_safe(permissions: object) -> bool:
     return True
 
 
-def _is_informational_step(step: Mapping[str, Any]) -> bool:
+def _is_informational_step(
+    step: Mapping[str, Any],
+    *,
+    inherited_env_names: set[str] | None = None,
+) -> bool:
     if any(key not in _INFORMATIONAL_STEP_ALLOWED_KEYS for key in step):
         return False
+    safe_env_names = set(inherited_env_names or ())
+    step_env_names = _safe_informational_env_names(step.get("env"))
+    if step_env_names is None:
+        return False
+    safe_env_names.update(step_env_names)
     run = _string_value(step.get("run"))
     uses = _string_value(step.get("uses"))
     if (run is None) == (uses is None):
@@ -1812,13 +1830,46 @@ def _is_informational_step(step: Mapping[str, Any]) -> bool:
         label = _step_label(step).lower()
         if not any(marker in label for marker in _INFORMATIONAL_MARKERS):
             return False
-    return _is_informational_run_command(run) and not _is_validation_command(run)
+    return _is_informational_run_command(run, safe_env_names) and not _is_validation_command(run)
 
 
-def _is_informational_run_command(command: str | None) -> bool:
+def _safe_informational_env_names(env: object) -> set[str] | None:
+    if env is None:
+        return set()
+    if not isinstance(env, Mapping):
+        return None
+    safe_names: set[str] = set()
+    for name, value in env.items():
+        if not isinstance(name, str):
+            return None
+        normalized_name = name.upper()
+        if (
+            _ENV_NAME_RE.fullmatch(name) is None
+            or _SENSITIVE_ENV_NAME_RE.search(name) is not None
+            or normalized_name in _BLOCKED_INFORMATIONAL_ENV_NAMES
+        ):
+            return None
+        if not _is_safe_informational_env_value(value):
+            return None
+        safe_names.add(name)
+    return safe_names
+
+
+def _is_safe_informational_env_value(value: object) -> bool:
+    if not isinstance(value, str | int | float | bool):
+        return False
+    return not _has_unsafe_informational_parameter_expansion((str(value),))
+
+
+def _is_informational_run_command(
+    command: str | None,
+    safe_env_names: set[str] | None = None,
+) -> bool:
     if command is None:
         return True
-    safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
+    command_safe_env_names = set(_SAFE_INFORMATIONAL_RUN_ENV_NAMES)
+    if safe_env_names is not None:
+        command_safe_env_names.update(safe_env_names)
     logical_lines = _logical_shell_lines(command)
     if logical_lines is None:
         return False
@@ -1826,7 +1877,7 @@ def _is_informational_run_command(command: str | None) -> bool:
         tokens = _shell_tokens(line)
         if tokens is None:
             return False
-        if not _informational_shell_tokens_are_safe(tokens, safe_env_names):
+        if not _informational_shell_tokens_are_safe(tokens, command_safe_env_names):
             return False
     return True
 
