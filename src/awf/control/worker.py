@@ -1763,8 +1763,8 @@ class ControlWorker:
                 event_floor=preserved_event.occurred_at,
                 workspace_status=candidate.status,
             ):
-                self._dispatch_preserved_active_validation(candidate.workspace_id)
-                return True
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                return dispatched or self._executor is not None
 
             extracted_pr_number = (
                 _extract_pr_number(ws.pr_url)
@@ -1903,6 +1903,8 @@ class ControlWorker:
             base_commit=base_commit,
         )
         if classification.state == "committed":
+            if self._executor is None:
+                return False
             await self._request_preserved_active_validation(
                 candidate,
                 preserved_event=preserved_event,
@@ -3393,6 +3395,11 @@ class ControlWorker:
                     event_type,
                     reason_code,
                 ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
+                    if (
+                        self._executor is None
+                        and event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE
+                    ):
+                        continue
                     if await self._has_current_salvage_event(
                         session,
                         candidate.workspace_id,
@@ -3734,6 +3741,8 @@ class ControlWorker:
         return dispatched
 
     def _dispatch_preserved_active_validation(self, workspace_id: str) -> bool:
+        if self._executor is None:
+            return False
         if self._available_execution_slots() <= 0:
             return False
         if workspace_id in self._execution_tasks:
