@@ -751,7 +751,7 @@ dev = [
 
 
 @pytest.mark.unit
-def test_workflow_comment_continue_on_error_is_allowed() -> None:
+def test_workflow_comment_github_script_without_script_continue_on_error_is_blocked() -> None:
     old_text = """
 name: CI
 on: [pull_request]
@@ -786,7 +786,10 @@ jobs:
         },
     )
 
-    assert violations == []
+    assert len(violations) == 1
+    assert violations[0].section == "jobs.tests.steps.Post PR comment.continue-on-error"
+    assert violations[0].line == 9
+    assert "continue-on-error is only allowed for comment/notify steps" in violations[0].reason
 
 
 @pytest.mark.unit
