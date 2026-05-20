@@ -156,6 +156,24 @@ _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE = (
 )
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
+_ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS: tuple[tuple[str, str], ...] = (
+    (
+        _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    ),
+)
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -1687,6 +1705,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return True
             if await self._has_current_salvage_event(
@@ -1695,6 +1714,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return True
             if await self._has_current_salvage_event(
@@ -1703,6 +1723,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return True
             if await self._has_current_salvage_event(
@@ -1711,6 +1732,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
                 return True
@@ -1993,6 +2015,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return
 
@@ -2063,6 +2086,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return
 
@@ -2156,6 +2180,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return
 
@@ -2301,6 +2326,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return
             previous_claim = _workspace_claim_snapshot(ws)
@@ -2371,6 +2397,7 @@ class ControlWorker:
                 event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
                 reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
             ):
                 return
             payload = _active_execution_salvage_payload(
@@ -2578,6 +2605,7 @@ class ControlWorker:
         event_type: str,
         reason_code: str,
         event_floor: datetime,
+        workspace_status: WorkspaceStatus,
     ) -> bool:
         stmt = (
             select(WorkspaceEvent.id)
@@ -2586,6 +2614,7 @@ class ControlWorker:
                 WorkspaceEvent.event_type == event_type,
                 WorkspaceEvent.reason_code == reason_code,
                 WorkspaceEvent.occurred_at >= event_floor,
+                WorkspaceEvent.payload["workspace_status"].as_string() == workspace_status.value,
             )
             .limit(1)
         )
@@ -3000,38 +3029,19 @@ class ControlWorker:
                 event_floor=event_floor,
             )
             if latest_preserved is not None:
-                if await self._has_current_salvage_event(
-                    session,
-                    candidate.workspace_id,
-                    event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
-                    reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
-                    event_floor=latest_preserved,
-                ):
-                    return False
-                if await self._has_current_salvage_event(
-                    session,
-                    candidate.workspace_id,
-                    event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
-                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
-                    event_floor=latest_preserved,
-                ):
-                    return False
-                if await self._has_current_salvage_event(
-                    session,
-                    candidate.workspace_id,
-                    event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
-                    reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
-                    event_floor=latest_preserved,
-                ):
-                    return False
-                if await self._has_current_salvage_event(
-                    session,
-                    candidate.workspace_id,
-                    event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
-                    reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
-                    event_floor=latest_preserved,
-                ):
-                    return False
+                for (
+                    event_type,
+                    reason_code,
+                ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
+                    if await self._has_current_salvage_event(
+                        session,
+                        candidate.workspace_id,
+                        event_type=event_type,
+                        reason_code=reason_code,
+                        event_floor=latest_preserved,
+                        workspace_status=candidate.status,
+                    ):
+                        return False
                 if not self._active_execution_preservation_is_expired(latest_preserved):
                     return False
             return await self._has_stale_active_execution_event(
