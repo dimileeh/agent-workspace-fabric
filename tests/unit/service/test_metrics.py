@@ -1363,6 +1363,65 @@ async def test_capacity_queue_blocked_reason_counts_aggregates_requested_demands
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_uses_stale_node_reservation_demand(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.node_id = "local"
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        node_id="prior-node",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=9.0,
+        peak_memory_gb=8.0,
+        dind_slots=0,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=8.0,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=0,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+        )
+
+    assert counts == {"PEAK_CPU_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_memory_limits(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

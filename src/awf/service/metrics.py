@@ -1419,7 +1419,6 @@ async def _capacity_queue_blocked_reason_counts(
     latest_active_reservations = (
         select(
             ResourceReservation.workspace_id.label("workspace_id"),
-            ResourceReservation.node_id.label("node_id"),
             ResourceReservation.steady_cpu.label("steady_cpu"),
             ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
             ResourceReservation.peak_cpu.label("peak_cpu"),
@@ -1489,12 +1488,13 @@ async def _capacity_queue_blocked_reason_counts(
     stmt = (
         select(*(expression for _reason, expression in reason_expressions))
         .select_from(Workspace)
+        # Workspace routing defines the local queue scope; reservation node_id can lag
+        # during reassignment/backfill, but scheduler demand still uses this row.
         .outerjoin(
             latest_active_reservations,
             and_(
                 latest_active_reservations.c.workspace_id == Workspace.id,
                 latest_active_reservations.c.reservation_rank == 1,
-                latest_active_reservations.c.node_id == node_id,
             ),
         )
         .where(
