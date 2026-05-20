@@ -3768,7 +3768,7 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4.2.0
       - name: Run pytest
         run: uv run pytest
 """.strip()

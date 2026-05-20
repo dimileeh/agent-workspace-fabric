@@ -1868,7 +1868,9 @@ def _is_pinned_uses_bump(old_uses: str, new_uses: str) -> bool:
     old_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(old_ref) is not None
     new_is_sha = _PINNED_WORKFLOW_USES_SHA_RE.fullmatch(new_ref) is not None
     if new_is_sha:
-        return True
+        # Arbitrary SHAs cannot be ordered locally against version tags or other
+        # SHAs, so unowned protected workflow edits must fail closed here.
+        return False
     if old_is_sha:
         # A raw SHA cannot be ordered against a tag without resolving refs; locally
         # we can only require the replacement to be a fully pinned version tag.
