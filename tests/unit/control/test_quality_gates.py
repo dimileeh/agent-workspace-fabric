@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+from awf.control import quality_gates as quality_gate_module
 from awf.control.quality_gates import (
     ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
     diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     plan_only_output_message,
+    protected_quality_gate_pattern,
+    quality_gate_violation_details,
     quality_gate_violation_message,
+    requires_protected_file_diff,
 )
 
 
@@ -3278,3 +3282,769 @@ def test_violation_message_reports_overflow_count() -> None:
 
     assert ".awf/workspace.yml" in message
     assert "and 1 more" in message
+
+
+@pytest.mark.unit
+def test_quality_gate_detail_and_pattern_helpers_expose_stable_policy_payloads() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["./pyproject.toml", "src/awf/control/executor.py"],
+        owned_paths=[],
+    )
+
+    assert quality_gate_violation_details(violations) == [
+        {
+            "path": "pyproject.toml",
+            "protected_pattern": "pyproject.toml",
+            "section": "pyproject.toml",
+            "line": None,
+            "reason": "diff unavailable for protected pyproject.toml change",
+        }
+    ]
+    assert protected_quality_gate_pattern(".\\.github\\workflows\\ci.yaml") == (
+        ".github/workflows/"
+    )
+    assert protected_quality_gate_pattern("src/awf/control/executor.py") is None
+    assert requires_protected_file_diff("pyproject.toml")
+    assert requires_protected_file_diff(".github/workflows/release.yaml")
+    assert not requires_protected_file_diff(".awf/workspace.yml")
+
+
+@pytest.mark.unit
+def test_pyproject_absent_both_sides_blocks_as_unavailable() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=None,
+                new_text=None,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert (
+        violations[0].reason
+        == "could not read old and new pyproject.toml content for classification"
+    )
+
+
+@pytest.mark.unit
+def test_old_pyproject_parse_failure_blocks_conservatively() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text="[project\nname = 'demo'\n",
+                new_text="[project]\nname = 'demo'\n",
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert "could not parse pyproject.toml" in violations[0].reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_text", "new_text", "section", "reason"),
+    [
+        (
+            "[project]\nname = 'demo'\ndependencies = 'fastapi'\n",
+            "[project]\nname = 'demo'\ndependencies = ['fastapi']\n",
+            "project.dependencies",
+            "dependency section has unsupported format: project.dependencies",
+        ),
+        (
+            "[project]\nname = 'demo'\ndependencies = ['fastapi']\n",
+            "[project]\nname = 'demo'\ndependencies = { fastapi = 'latest' }\n",
+            "project.dependencies",
+            "dependency section has unsupported format: project.dependencies",
+        ),
+        (
+            "[project]\nname = 'demo'\noptional-dependencies = ['pytest']\n",
+            "[project]\nname = 'demo'\noptional-dependencies = { dev = ['pytest'] }\n",
+            "project.optional-dependencies",
+            "dependency group section has unsupported format: project.optional-dependencies",
+        ),
+        (
+            "[project]\nname = 'demo'\noptional-dependencies = { dev = ['pytest'] }\n",
+            "[project]\nname = 'demo'\noptional-dependencies = ['pytest']\n",
+            "project.optional-dependencies",
+            "dependency group section has unsupported format: project.optional-dependencies",
+        ),
+        (
+            "[project.optional-dependencies]\ndev = ['pytest']\ndocs = ['mkdocs']\n",
+            "[project.optional-dependencies]\ndev = ['pytest']\n",
+            "project.optional-dependencies.docs",
+            "dependency group removed: project.optional-dependencies.docs",
+        ),
+        (
+            "[project.optional-dependencies]\ndev = ['pytest']\n",
+            "[project.optional-dependencies]\ndev = ['pytest']\ndocs = 'mkdocs'\n",
+            "project.optional-dependencies.docs",
+            "dependency group has unsupported format: project.optional-dependencies.docs",
+        ),
+        (
+            "[project]\nname = 'demo'\ndependencies = ['fastapi']\n",
+            "[project]\nname = 'demo'\ndependencies = ['fastapi', 1]\n",
+            "project.dependencies",
+            "dependency section has unsupported format: project.dependencies",
+        ),
+        (
+            "[project]\nname = 'demo'\ndependencies = ['fastapi']\n",
+            "[project]\nname = 'demo'\ndependencies = ['fastapi', '']\n",
+            "project.dependencies",
+            "dependency section has unsupported format: project.dependencies",
+        ),
+    ],
+)
+def test_pyproject_unsupported_dependency_shapes_block_with_specific_reason(
+    old_text: str,
+    new_text: str,
+    section: str,
+    reason: str,
+) -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == section
+    assert violations[0].reason == reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_text", "new_text", "section", "reason_fragment"),
+    [
+        (
+            "project = 'demo'\n",
+            "[project]\nname = 'demo'\n",
+            "project",
+            "project section has unsupported format",
+        ),
+        (
+            "[project]\nname = 'demo'\n",
+            "project = 'demo'\n",
+            "project",
+            "project section has unsupported format",
+        ),
+        (
+            "[project]\nname = 'demo'\n",
+            "[project]\nname = 'demo'\nscripts = { awf = 'awf.cli:app' }\n",
+            "project.scripts",
+            "pyproject project section changed outside allowed metadata",
+        ),
+        (
+            "tool = 'demo'\n",
+            "[tool.black]\nline-length = 100\n",
+            "tool",
+            "tool section has unsupported format",
+        ),
+        (
+            "[tool.black]\nline-length = 100\n",
+            "tool = 'demo'\n",
+            "tool",
+            "tool section has unsupported format",
+        ),
+    ],
+)
+def test_pyproject_unknown_or_unsupported_project_and_tool_shapes_are_blocked(
+    old_text: str,
+    new_text: str,
+    section: str,
+    reason_fragment: str,
+) -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == section
+    assert reason_fragment in violations[0].reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_text", "new_text", "section", "reason_fragment"),
+    [
+        (
+            "name: CI\non: [pull_request\njobs: {}\n",
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            ".github/workflows/ci.yml",
+            "could not parse workflow YAML safely",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            "name: CI\non: [pull_request\njobs: {}\n",
+            ".github/workflows/ci.yml",
+            "could not parse workflow YAML safely",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            "- not\n- a\n- mapping\n",
+            ".github/workflows/ci.yml",
+            "workflow YAML root has unsupported format",
+        ),
+        (
+            "name: CI\non: [pull_request]\n",
+            "name: CI changed\non: [pull_request]\n",
+            "workflow.name",
+            "workflow top-level field changed outside allowed cases: name",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs: []\n",
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            "jobs",
+            "workflow jobs section has unsupported format",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs: {}\n",
+            "name: CI\non: [pull_request]\njobs: []\n",
+            "jobs",
+            "workflow jobs section has unsupported format",
+        ),
+        (
+            "name: CI\non: [pull_request]\njobs:\n  tests: invalid\n",
+            "name: CI\non: [pull_request]\njobs:\n  tests: invalid changed\n",
+            "jobs.tests",
+            "workflow job has unsupported format",
+        ),
+    ],
+)
+def test_workflow_parse_and_shape_failures_block_conservatively(
+    old_text: str,
+    new_text: str,
+    section: str,
+    reason_fragment: str,
+) -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == section
+    assert reason_fragment in violations[0].reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_job", "new_job", "section", "reason_fragment"),
+    [
+        (
+            "if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Run pytest\n        run: uv run pytest",
+            "if: always()\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Run pytest\n        run: uv run pytest",
+            "jobs.tests.if",
+            "workflow gate if changed",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps: echo nope",
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "jobs.tests.steps",
+            "workflow steps have unsupported format",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "runs-on: ubuntu-latest\n    steps: echo nope",
+            "jobs.tests.steps",
+            "workflow steps have unsupported format",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "runs-on: ubuntu-latest\n    steps: []",
+            "jobs.tests.steps.Run pytest",
+            "workflow step removed",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "runs-on: ubuntu-24.04\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "jobs.tests",
+            "workflow job changed outside allowed fields",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        run: uv run pytest",
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Run pytest\n        if: always()\n        run: uv run pytest",
+            "jobs.tests.steps.Run pytest.if",
+            "workflow gate if changed",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Summary report\n        run: echo before",
+            "runs-on: ubuntu-latest\n    steps:\n      - name: Summary report\n        env:\n"
+            "          SAFE: yes\n        run: echo before",
+            "jobs.tests.steps.Summary report",
+            "workflow step changed outside allowed fields",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - {}",
+            "runs-on: ubuntu-latest\n    steps: []",
+            "jobs.tests.steps.unknown",
+            "workflow step removed",
+        ),
+        (
+            "runs-on: ubuntu-latest\n    steps:\n      - echo nope",
+            "runs-on: ubuntu-latest\n    steps: []",
+            "jobs.tests.steps",
+            "workflow steps have unsupported format",
+        ),
+    ],
+)
+def test_existing_workflow_job_and_step_shape_changes_are_blocked(
+    old_job: str,
+    new_job: str,
+    section: str,
+    reason_fragment: str,
+) -> None:
+    old_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    {old_job}
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    {new_job}
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == section
+    assert reason_fragment in violations[0].reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("FOO=bar", True),
+        ("echo ok && printf done", True),
+        ("echo ok && curl https://example.test", False),
+        ("echo ${TOKEN}", False),
+        ("printf %s $PASSWORD", False),
+        ("printf %s $PATH", True),
+        ("echo `date`", False),
+        ("echo $(date)", False),
+        ("echo ok | tee log", False),
+        ('echo "unterminated', False),
+    ],
+)
+def test_informational_run_command_shell_safety_edges(
+    command: str | None,
+    expected: bool,
+) -> None:
+    assert quality_gate_module._is_informational_run_command(command) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_run", "new_run", "expected"),
+    [
+        (None, "pytest", False),
+        ("", "pytest", False),
+        ("pytest", "pytest", True),
+        ("pytest tests", "ruff check", False),
+        ("pytest", "pytest &&", False),
+        ("pytest", "pytest && && ruff check", False),
+        ("pytest", "pytest && ruff check | tee log", False),
+        ("pytest", "pytest && bad`cmd`", False),
+        (
+            "pytest",
+            "pytest && command env CI=true uv run --python 3.12 --extra dev ruff check",
+            True,
+        ),
+        ("pytest", "pytest && python -I -m pytest tests/unit", True),
+        ("pytest", "pytest && python tests/exfiltrate.py", False),
+        ("pytest", "pytest && npm --prefix apps/console run test", True),
+        ("pytest", "pytest && npm --prefix apps/console run docs", False),
+        ("pytest", "pytest && make test", True),
+        ("pytest", "pytest && make docs", False),
+    ],
+)
+def test_validation_run_preservation_allows_only_safe_validation_appends(
+    old_run: str | None,
+    new_run: str | None,
+    expected: bool,
+) -> None:
+    assert quality_gate_module._preserves_existing_validation_run(old_run, new_run) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("npm --prefix apps/console run build", True),
+        ("pnpm --filter console exec lint", True),
+        ("make target=docs lint", True),
+        ("python -I -m build", True),
+        ("docker build .", True),
+        ("docker compose build", True),
+        ("bash scripts/release.sh", True),
+        ("gh release create v1.0.0", True),
+        ("gcloud run deploy api", True),
+        ("firebase deploy", True),
+        ("twine upload dist/*", True),
+        ("env FOO=bar echo release", False),
+    ],
+)
+def test_broad_validation_command_detection_covers_wrappers_and_deploy_tools(
+    command: str,
+    expected: bool,
+) -> None:
+    assert quality_gate_module._has_broad_validation_command_invocation(command) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("old_uses", "new_uses", "expected"),
+    [
+        ("actions/checkout", "actions/checkout@v4", False),
+        ("actions/checkout@v4", "actions/checkout@v4", False),
+        ("actions/checkout@v4", "actions/setup-python@v5", False),
+        ("actions/checkout@main", "actions/checkout@v4", False),
+        ("actions/checkout@v4", "actions/checkout@main", False),
+        (
+            "actions/checkout@v4",
+            "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            True,
+        ),
+        (
+            "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "actions/checkout@v4.2.0",
+            True,
+        ),
+        ("actions/setup-python@v1.0.0", "actions/setup-python@v1.0.0-rc.1", False),
+        ("actions/setup-python@v1.0.0-rc.1", "actions/setup-python@v1.0.0", True),
+        ("actions/setup-python@v1.0.0+1", "actions/setup-python@v1.0.0+2", True),
+    ],
+)
+def test_pinned_uses_bump_edges_require_same_action_and_ordered_pinned_refs(
+    old_uses: str,
+    new_uses: str,
+    expected: bool,
+) -> None:
+    assert quality_gate_module._is_pinned_uses_bump(old_uses, new_uses) is expected
+
+
+@pytest.mark.unit
+def test_line_lookup_helpers_cover_fallback_paths() -> None:
+    assert (
+        quality_gate_module._line_for_toml_section_or_descendant(
+            "[tool.coverage]\nbranch = true\n",
+            "tool.coverage",
+        )
+        == 1
+    )
+    assert (
+        quality_gate_module._line_for_toml_section_or_descendant(
+            "[tool.coverage.report]\nfail_under = 99\n",
+            "tool.coverage",
+        )
+        == 1
+    )
+    assert (
+        quality_gate_module._line_for_toml_key(
+            "[project]\nname = 'demo'\n",
+            section="project",
+            key="missing",
+        )
+        == 1
+    )
+    assert quality_gate_module._line_for_yaml_key("name: CI\n", "jobs") is None
+    assert (
+        quality_gate_module._line_for_workflow_step(
+            "steps:\n  - run: |\n      echo hi\n",
+            {"name": "missing"},
+        )
+        is None
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            "run: echo hi\n",
+            {"run": "echo hi"},
+            key="uses",
+        )
+        is None
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            "run: echo hi\nuses: actions/checkout@v4\n",
+            {"run": "echo hi"},
+            key="uses",
+        )
+        == 2
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            "run: echo hi\n",
+            {"name": "missing"},
+            key="run",
+        )
+        == 1
+    )
+
+
+@pytest.mark.unit
+def test_pyproject_new_optional_dependency_group_is_allowed() -> None:
+    old_text = """
+[project.optional-dependencies]
+dev = ["pytest"]
+""".strip()
+    new_text = """
+[project.optional-dependencies]
+dev = ["pytest"]
+docs = ["mkdocs"]
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_pyproject_unchanged_unknown_sections_are_not_reported() -> None:
+    old_text = """
+[project]
+name = "demo"
+scripts = { awf = "awf.cli:app" }
+
+[tool.black]
+line-length = 100
+
+[custom]
+enabled = true
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+scripts = { awf = "awf.cli:app" }
+dependencies = ["fastapi"]
+
+[tool.black]
+line-length = 100
+
+[custom]
+enabled = true
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_workflow_empty_yaml_is_treated_as_empty_mapping() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text="",
+                new_text="name: CI\n",
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "workflow.name"
+
+
+@pytest.mark.unit
+def test_workflow_parse_error_without_integer_mark_line_reports_unknown_line(monkeypatch) -> None:
+    class _ProblemMark:
+        line = "not-an-int"
+
+    class _MarkedYamlError(quality_gate_module.yaml.YAMLError):
+        problem_mark = _ProblemMark()
+
+    def _raise_marked_error(_text: str) -> object:
+        raise _MarkedYamlError("bad yaml")
+
+    monkeypatch.setattr(quality_gate_module.yaml, "safe_load", _raise_marked_error)
+
+    workflow, violation = quality_gate_module._parse_workflow_yaml(
+        "name: CI\n",
+        ".github/workflows/ci.yml",
+        ".github/workflows/",
+    )
+
+    assert workflow is None
+    assert violation is not None
+    assert violation.line is None
+    assert "could not parse workflow YAML safely" in violation.reason
+
+
+@pytest.mark.unit
+def test_private_coverage_policy_helper_handles_non_mapping_and_report_variants() -> None:
+    assert quality_gate_module._coverage_policy_without_fail_under("strict") == "strict"
+    assert quality_gate_module._coverage_policy_without_fail_under(
+        {"run": {"branch": True}, "report": {"fail_under": 99}}
+    ) == {"run": {"branch": True}}
+    assert quality_gate_module._coverage_policy_without_fail_under(
+        {"report": {"fail_under": 99, "show_missing": True}}
+    ) == {"report": {"show_missing": True}}
+
+
+@pytest.mark.unit
+def test_private_dependency_replacement_helper_falls_back_to_existing_raw_entry() -> None:
+    assert (
+        quality_gate_module._replacement_dependency_raw(
+            old_entries=quality_gate_module.Counter({"fastapi>=1": 1}),
+            new_entries=quality_gate_module.Counter({"fastapi>=1": 1}),
+        )
+        == "fastapi>=1"
+    )
+
+
+@pytest.mark.unit
+def test_private_workflow_shape_helpers_cover_empty_and_invalid_edges() -> None:
+    assert quality_gate_module._workflow_steps({}) == []
+    assert quality_gate_module._is_informational_job("tests", {"steps": []}) is False
+    assert (
+        quality_gate_module._is_informational_job(
+            "summary",
+            {"name": "Summary report", "steps": "echo ok"},
+        )
+        is False
+    )
+    assert (
+        quality_gate_module._is_informational_job(
+            "summary",
+            {
+                "name": "Summary report",
+                "permissions": {"contents": 1},
+                "steps": [{"name": "Summary report", "run": "echo ok"}],
+            },
+        )
+        is False
+    )
+    assert (
+        quality_gate_module._is_informational_job(
+            "summary",
+            {
+                "name": "Summary report",
+                "permissions": {"pull-requests": "admin"},
+                "steps": [{"name": "Summary report", "run": "echo ok"}],
+            },
+        )
+        is False
+    )
+    assert (
+        quality_gate_module._is_informational_job(
+            "summary",
+            {
+                "name": "Summary report",
+                "permissions": {"packages": "write"},
+                "steps": [{"name": "Summary report", "run": "echo ok"}],
+            },
+        )
+        is False
+    )
+    assert quality_gate_module._is_informational_step({"name": "Deploy", "run": "echo ok"}) is False
+
+
+@pytest.mark.unit
+def test_private_shell_and_validation_helpers_cover_remaining_parser_edges() -> None:
+    assert quality_gate_module._informational_shell_command_is_safe(()) is True
+    assert quality_gate_module._validation_run_append_commands("; ruff check") is None
+    assert quality_gate_module._preserves_existing_validation_run(
+        "pytest",
+        "pytest && ruff check && pytest tests/unit",
+    )
+    assert not quality_gate_module._preserves_existing_validation_run(
+        "pytest",
+        "pytest && env CI=true",
+    )
+    assert not quality_gate_module._preserves_existing_validation_run(
+        "pytest",
+        "pytest && npm --prefix apps/console",
+    )
+    assert not quality_gate_module._preserves_existing_validation_run(
+        "pytest",
+        "pytest && npm run --",
+    )
+    assert quality_gate_module._has_broad_validation_command_invocation("build")
+    assert not quality_gate_module._has_broad_validation_command_invocation(
+        "npm --prefix apps/console"
+    )
+    assert not quality_gate_module._has_broad_validation_command_invocation("python build.py")
+    assert not quality_gate_module._docker_runs_broad_validation_command(())
+
+
+@pytest.mark.unit
+def test_private_uses_ref_helpers_cover_invalid_and_short_version_edges() -> None:
+    assert not quality_gate_module._is_comment_or_notify_capable_step_uses(
+        {},
+        "actions/github-script",
+    )
+    assert not quality_gate_module._is_workflow_version_ref_non_downgrade("v1", "main")
+    assert not quality_gate_module._is_full_workflow_version_ref("main")
+    assert quality_gate_module._workflow_version_ref_sort_key("main") is None
+    assert quality_gate_module._workflow_version_ref_sort_key("v1")[0] == (1, 0, 0)
+    assert quality_gate_module._uses_action("actions/checkout") is None

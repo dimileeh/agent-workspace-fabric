@@ -230,6 +230,17 @@ def test_profile_schema_rejects_coverage_threshold_without_local_command() -> No
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_coverage_parallelism_without_local_command() -> None:
+    with pytest.raises(ValueError, match="validation.coverage.command is required"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "parallel-coverage-without-command",
+                "validation": {"coverage": {"parallel_workers": 2}},
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_parallel_coverage_workers() -> None:
     profile = WorkspaceProfile.model_validate(
         {

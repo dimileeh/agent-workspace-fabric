@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import Field
+from pydantic import AliasChoices, AliasPath, Field
 
 import awf.common.config as common_config
 import awf.service.config as service_config
@@ -589,6 +589,107 @@ def test_database_url_env_explicit_treats_missing_host_value_as_non_explicit() -
 @pytest.mark.unit
 def test_api_base_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
     assert service_config._api_base_url_env_is_explicit({}, {}) is False  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_common_settings_alias_detection_handles_choices_paths_and_unknown_aliases() -> None:
+    assert common_config._settings_alias_is_present(  # noqa: SLF001
+        AliasChoices("AWF_DATABASE_URL", "DATABASE_URL"),
+        {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"},
+    )
+    assert common_config._settings_alias_is_present(  # noqa: SLF001
+        AliasPath("AWF_NESTED", "DATABASE_URL"),
+        {"AWF_NESTED": {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"}},
+    )
+
+    class UnknownAlias:
+        choices = "not-a-choice-list"
+        path = ()
+
+    assert not common_config._settings_alias_is_present(UnknownAlias(), {})  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_populate_compose_postgres_password_ignores_unparseable_database_url() -> None:
+    environ = {"AWF_DATABASE_URL": "not a database url"}
+
+    service_config._populate_compose_postgres_password(environ)  # noqa: SLF001
+
+    assert "AWF_POSTGRES_PASSWORD" not in environ
+
+
+@pytest.mark.unit
+def test_populate_compose_postgres_password_ignores_urls_without_password() -> None:
+    environ = {"AWF_DATABASE_URL": "postgresql+asyncpg://awf@localhost:5432/awf"}
+
+    service_config._populate_compose_postgres_password(environ)  # noqa: SLF001
+
+    assert "AWF_POSTGRES_PASSWORD" not in environ
+
+
+@pytest.mark.unit
+def test_resolve_service_api_base_url_uses_explicit_service_environment_url() -> None:
+    settings = Settings(_env_file=None)
+
+    api_base_url = service_config._resolve_service_api_base_url(  # noqa: SLF001
+        settings,
+        environ={},
+        service_environ={"AWF_API_BASE_URL": "http://localhost:9200"},
+    )
+
+    assert api_base_url == "http://localhost:9200"
+
+
+@pytest.mark.unit
+def test_api_base_url_env_explicit_distinguishes_custom_and_derivable_defaults() -> None:
+    assert service_config._api_base_url_env_is_explicit(  # noqa: SLF001
+        {"AWF_API_BASE_URL": "https://awf.example.test"},
+        {},
+    )
+    assert not service_config._api_base_url_env_is_explicit(  # noqa: SLF001
+        {
+            "AWF_API_BASE_URL": DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+            "AWF_API_HOST_PORT": "9100",
+        },
+        {},
+    )
+
+
+@pytest.mark.unit
+def test_project_dotenv_candidates_fall_back_to_awf_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout, _module = _write_awf_source_checkout(tmp_path)
+    nested = checkout / "src" / "awf"
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(service_config, "resolve_local_service_compose_env_file", lambda: None)
+
+    candidates = service_config._project_dotenv_candidates()  # noqa: SLF001
+
+    assert candidates == (
+        nested / ".env",
+        checkout / "src" / ".env",
+        checkout / ".env",
+    )
+
+
+@pytest.mark.unit
+def test_project_dotenv_ancestor_candidates_stop_at_root(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    nested = root / "src" / "awf"
+    nested.mkdir(parents=True)
+
+    candidates = service_config._project_dotenv_ancestor_candidates(  # noqa: SLF001
+        nested,
+        root,
+    )
+
+    assert candidates == (
+        nested / ".env",
+        root / "src" / ".env",
+        root / ".env",
+    )
 
 
 @pytest.mark.unit
