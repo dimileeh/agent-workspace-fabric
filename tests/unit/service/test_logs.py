@@ -989,6 +989,38 @@ services:
 
 
 @pytest.mark.unit
+def test_service_logs_wraps_malformed_compose_yaml_as_structured_failure(
+    tmp_path: Path,
+) -> None:
+    compose_file = _write_compose_file(
+        tmp_path,
+        """
+services:
+  api:
+    environment: [
+""",
+    )
+    subprocess_calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        subprocess_calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    with pytest.raises(ServiceLogsError) as exc_info:
+        run_service_logs(
+            services=[ServiceLogName.api],
+            compose_file=compose_file,
+            service_environ={"AWF_API_TOKEN": "service-token"},
+            run_subprocess=_run,
+        )
+
+    assert exc_info.value.returncode == 1
+    assert "could not parse Compose YAML" in exc_info.value.detail
+    assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
+    assert subprocess_calls == []
+
+
+@pytest.mark.unit
 def test_service_logs_ignores_plain_variables_inside_braced_defaults(tmp_path: Path) -> None:
     """Compose does not recursively interpolate dollar values inside defaults."""
     from awf.service import environment as service_environment

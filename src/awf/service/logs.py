@@ -11,6 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
+import yaml
+
 from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
@@ -141,11 +143,14 @@ def run_service_logs(
         raise ServiceLogsError(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
-    docker_env = _docker_cli_environ(
-        service_environ,
-        compose_file=compose_file,
-        compose_env_file=compose_env_file,
-    )
+    try:
+        docker_env = _docker_cli_environ(
+            service_environ,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+        )
+    except yaml.YAMLError as exc:
+        raise ServiceLogsError(returncode=1, detail=str(exc)) from exc
     command = service_logs_command(
         services=services,
         tail=tail,
