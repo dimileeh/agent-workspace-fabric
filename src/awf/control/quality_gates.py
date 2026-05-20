@@ -129,6 +129,12 @@ _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
     r"^[vV]?(?:\d+|\d+\.\d+|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
 )
+_WORKFLOW_PRERELEASE_IDENTIFIER_CHUNK_RE: Final = re.compile(r"\d+|\D+")
+type _WorkflowPrereleaseChunk = tuple[int, int | str]
+type _WorkflowPrereleaseIdentifierKey = tuple[int, int | tuple[_WorkflowPrereleaseChunk, ...]]
+type _WorkflowVersionRefSortKey = tuple[
+    tuple[int, ...], int, tuple[_WorkflowPrereleaseIdentifierKey, ...]
+]
 _PYPROJECT_POLICY_SECTIONS: Final[tuple[tuple[str, ...], ...]] = (
     ("build-system",),
     ("tool", "hatch"),
@@ -1810,7 +1816,7 @@ def _is_full_workflow_version_ref(ref: str) -> bool:
     return len(core.split(".")) >= 3
 
 
-def _workflow_version_ref_sort_key(ref: str) -> tuple[tuple[int, ...], int, str] | None:
+def _workflow_version_ref_sort_key(ref: str) -> _WorkflowVersionRefSortKey | None:
     if _PINNED_WORKFLOW_USES_VERSION_RE.fullmatch(ref) is None:
         return None
     raw_version = ref[1:] if ref.startswith(("v", "V")) else ref
@@ -1820,7 +1826,32 @@ def _workflow_version_ref_sort_key(ref: str) -> tuple[tuple[int, ...], int, str]
     while len(numbers) < 3:
         numbers.append(0)
     release_rank = 0 if separator else 1
-    return tuple(numbers[:3]), release_rank, prerelease
+    return tuple(numbers[:3]), release_rank, _workflow_prerelease_sort_key(prerelease)
+
+
+def _workflow_prerelease_sort_key(
+    prerelease: str,
+) -> tuple[_WorkflowPrereleaseIdentifierKey, ...]:
+    if not prerelease:
+        return ()
+    return tuple(
+        _workflow_prerelease_identifier_sort_key(identifier) for identifier in prerelease.split(".")
+    )
+
+
+def _workflow_prerelease_identifier_sort_key(
+    identifier: str,
+) -> _WorkflowPrereleaseIdentifierKey:
+    if identifier.isdigit():
+        return 0, int(identifier)
+
+    chunks: list[_WorkflowPrereleaseChunk] = []
+    for chunk in _WORKFLOW_PRERELEASE_IDENTIFIER_CHUNK_RE.findall(identifier):
+        if chunk.isdigit():
+            chunks.append((1, int(chunk)))
+        else:
+            chunks.append((0, chunk))
+    return 1, tuple(chunks)
 
 
 def _uses_action(value: str) -> str | None:

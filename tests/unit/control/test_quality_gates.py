@@ -2261,6 +2261,56 @@ jobs:
     assert "workflow action changed outside pinned ref bump" in violation.reason
 
 
+@pytest.mark.parametrize(
+    ("old_ref", "new_ref"),
+    [
+        ("v1.0.0-rc.10", "v1.0.0-rc.2"),
+        ("v1.0.0-rc10", "v1.0.0-rc2"),
+    ],
+)
+@pytest.mark.unit
+def test_workflow_pinned_uses_prerelease_downgrade_is_blocked(old_ref: str, new_ref: str) -> None:
+    old_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@{old_ref}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@{new_ref}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == f"jobs.tests.steps.actions/setup-python@{new_ref}.uses"
+    assert "workflow action changed outside pinned ref bump" in violation.reason
+
+
 @pytest.mark.unit
 def test_workflow_pinned_uses_version_upgrade_is_allowed() -> None:
     old_text = """
