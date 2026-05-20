@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import column
 
+import awf.service.resource_capacity as resource_capacity
 from awf.common.config import Settings
 from awf.service.disk import DiskCheck
 from awf.service.resource_capacity import (
@@ -13,7 +13,6 @@ from awf.service.resource_capacity import (
     ReservedResources,
     WorkspaceResourceDefaults,
     default_dind_slots_from_profile,
-    local_capacity_blocked_condition,
     local_capacity_blocker,
     local_capacity_limit,
     resource_capacity_summary,
@@ -107,21 +106,11 @@ def test_local_capacity_blocker_classifies_deferred_and_unsatisfiable_requests()
         )
         is None
     )
-    assert local_capacity_blocked_condition(limit=8.0, allocated=6.0, requested=3.0) is True
-    assert local_capacity_blocked_condition(limit=None, allocated=6.0, requested=3.0) is None
 
 
 @pytest.mark.unit
-def test_local_capacity_blocked_condition_uses_combined_capacity_predicate() -> None:
-    blocked = local_capacity_blocked_condition(
-        limit=8.0,
-        allocated=column("allocated"),
-        requested=column("requested"),
-    )
-
-    compiled = str(blocked.compile(compile_kwargs={"literal_binds": True}))
-
-    assert compiled == "allocated + requested > 8.0"
+def test_local_capacity_module_does_not_export_incomplete_blocked_predicate() -> None:
+    assert "local_capacity_blocked_condition" not in resource_capacity.__dict__
 
 
 @pytest.mark.unit

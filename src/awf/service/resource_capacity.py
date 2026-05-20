@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from awf.common.config import Settings
 from awf.service.disk import DiskCheck
@@ -87,17 +86,6 @@ def local_capacity_limit(
     if constraint.limit_source == _DIND_LIMIT_SOURCE:
         return dind_slots
     raise ValueError(f"unknown local capacity limit source: {constraint.limit_source}")
-
-
-def local_capacity_blocked_condition(
-    *,
-    limit: Number | None,
-    allocated: Any,
-    requested: Any,
-) -> Any | None:
-    if limit is None:
-        return None
-    return allocated + requested > limit
 
 
 def local_capacity_blocker(

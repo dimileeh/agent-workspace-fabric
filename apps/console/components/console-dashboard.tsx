@@ -2452,6 +2452,15 @@ function ResourceCapacityPanel({
     saturation !== null &&
     saturation.capacity_queue.queued_workspace_count > 0 &&
     saturation.capacity_queue.oldest_wait_seconds !== null;
+  const queueBlockedReasonEntries = saturation
+    ? Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {})
+    : [];
+  const pressureReasons =
+    saturation === null
+      ? []
+      : saturation.allocated_capacity.pressure_reasons.length > 0
+        ? saturation.allocated_capacity.pressure_reasons
+        : saturation.capacity.pressure_reasons;
 
   return (
     <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
@@ -2525,9 +2534,9 @@ function ResourceCapacityPanel({
             <ResourceDimensionMeter label="Disk" dimension={saturation.allocated_capacity.disk_mb} unit="mb" />
             <ResourceDimensionMeter label="DinD" dimension={saturation.allocated_capacity.dind_slots} unit="slots" />
           </div>
-          {saturation.capacity_queue.blocked_reason_counts && Object.keys(saturation.capacity_queue.blocked_reason_counts).length > 0 ? (
+          {queueBlockedReasonEntries.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {Object.entries(saturation.capacity_queue.blocked_reason_counts).map(([reason, count]) => (
+              {queueBlockedReasonEntries.map(([reason, count]) => (
                 <span
                   key={reason}
                   className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
@@ -2538,9 +2547,9 @@ function ResourceCapacityPanel({
                 </span>
               ))}
             </div>
-          ) : saturation.allocated_capacity.pressure_reasons.length > 0 ? (
+          ) : pressureReasons.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {saturation.allocated_capacity.pressure_reasons.map((reason) => (
+              {pressureReasons.map((reason) => (
                 <span
                   key={reason}
                   className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
