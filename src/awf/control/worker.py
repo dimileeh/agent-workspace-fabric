@@ -245,6 +245,16 @@ def _salvage_workspace_status_values(
     return (workspace_status.value,)
 
 
+def _preserved_active_execution_status_values(
+    workspace_status: WorkspaceStatus,
+    *,
+    match_active_execution_statuses: bool = False,
+) -> tuple[str, ...]:
+    if match_active_execution_statuses and workspace_status in _ACTIVE_EXECUTION_STATUSES:
+        return tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
+    return (workspace_status.value,)
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     poll_interval_seconds: float = 1.0
@@ -1747,6 +1757,28 @@ class ControlWorker:
                 candidate.status,
                 event_floor=event_floor,
             )
+            if preserved_event is None and candidate.status in _ACTIVE_EXECUTION_STATUSES:
+                salvage_event_floor = await self._active_execution_preservation_salvage_event_floor(
+                    session,
+                    ws,
+                    candidate.status,
+                )
+                active_preserved_event = await self._latest_preserved_active_execution_event(
+                    session,
+                    candidate.workspace_id,
+                    candidate.status,
+                    event_floor=salvage_event_floor,
+                    match_active_execution_statuses=True,
+                )
+                if active_preserved_event is not None and await self._has_current_salvage_event(
+                    session,
+                    candidate.workspace_id,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    event_floor=active_preserved_event.occurred_at,
+                    workspace_status=candidate.status,
+                ):
+                    preserved_event = active_preserved_event
             if preserved_event is None:
                 return (
                     event_floor is not None
@@ -2966,14 +2998,19 @@ class ControlWorker:
         status: WorkspaceStatus,
         *,
         event_floor: datetime | None = None,
+        match_active_execution_statuses: bool = False,
     ) -> datetime | None:
+        status_values = _preserved_active_execution_status_values(
+            status,
+            match_active_execution_statuses=match_active_execution_statuses,
+        )
         stmt = (
             select(WorkspaceEvent.occurred_at)
             .where(
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
                 WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(status_values),
             )
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
@@ -2989,14 +3026,19 @@ class ControlWorker:
         status: WorkspaceStatus,
         *,
         event_floor: datetime | None = None,
+        match_active_execution_statuses: bool = False,
     ) -> WorkspaceEvent | None:
+        status_values = _preserved_active_execution_status_values(
+            status,
+            match_active_execution_statuses=match_active_execution_statuses,
+        )
         stmt = (
             select(WorkspaceEvent)
             .where(
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
                 WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(status_values),
             )
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
@@ -3137,6 +3179,44 @@ class ControlWorker:
             )
             if refresh_requested_at is not None:
                 floors.append(_utc_datetime(refresh_requested_at))
+
+        return max(floors) if floors else None
+
+    async def _active_execution_preservation_salvage_event_floor(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+    ) -> datetime | None:
+        if status not in _ACTIVE_EXECUTION_STATUSES:
+            return await self._active_execution_preservation_event_floor(
+                session,
+                workspace,
+                status,
+            )
+
+        floors: list[datetime] = []
+        active_status_values = tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
+        inactive_state_stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace.id,
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                ~WorkspaceEvent.new_state.in_(active_status_values),
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        inactive_state_at = (await session.execute(inactive_state_stmt)).scalar_one_or_none()
+        if inactive_state_at is not None:
+            floors.append(_utc_datetime(inactive_state_at))
+
+        refresh_requested_at = await self._latest_operator_refresh_requested_at(
+            session,
+            workspace.id,
+        )
+        if refresh_requested_at is not None:
+            floors.append(_utc_datetime(refresh_requested_at))
 
         return max(floors) if floors else None
 
@@ -3554,11 +3634,19 @@ class ControlWorker:
                 ws,
                 candidate.status,
             )
+            preservation_event_floor = (
+                await self._active_execution_preservation_salvage_event_floor(
+                    session,
+                    ws,
+                    candidate.status,
+                )
+            )
             latest_preserved = await self._latest_preserved_active_execution_at(
                 session,
                 candidate.workspace_id,
                 candidate.status,
-                event_floor=event_floor,
+                event_floor=preservation_event_floor,
+                match_active_execution_statuses=True,
             )
             if latest_preserved is not None:
                 for (

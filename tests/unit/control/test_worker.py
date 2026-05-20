@@ -7358,6 +7358,118 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert old_operation.status == OperationStatus.pending.value
 
     @pytest.mark.unit
+    async def test_validating_candidate_blocks_stale_failure_with_running_preservation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-validating-blocks-with-running-preservation",
+            WorkspaceStatus.running,
+            compose_project_name="awf_validating_blocks_with_running_preservation",
+            create_task_attempt=True,
+        )
+        now = datetime.now(UTC)
+        running_started_at = now - timedelta(minutes=6)
+        preserved_at = now - timedelta(minutes=5)
+        validation_requested_at = now - timedelta(minutes=4)
+        validating_started_at = now - timedelta(minutes=3)
+        claim_expires_at = now - timedelta(minutes=2)
+        stale_detected_at = now - timedelta(minutes=1)
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            active_status_values = {
+                WorkspaceStatus.running.value,
+                WorkspaceStatus.validating.value,
+                WorkspaceStatus.pushing.value,
+            }
+            for state_event in state_events:
+                if state_event.new_state not in active_status_values:
+                    state_event.occurred_at = running_started_at - timedelta(seconds=30)
+            running_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = running_started_at
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved_event.occurred_at = preserved_at
+            salvage = await repo.add_event(
+                ws,
+                event_type="workspace.active_execution_salvage_validation_requested",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            salvage.occurred_at = validation_requested_at
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="TEST_VALIDATE")
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            validating_started = next(
+                event
+                for event in state_events
+                if event.new_state == WorkspaceStatus.validating.value
+            )
+            validating_started.occurred_at = validating_started_at
+            ws.execution_claimed_by = "stale-validation-worker"
+            ws.execution_claim_expires_at = claim_expires_at
+            stale = await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.validating.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            stale.occurred_at = stale_detected_at
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_validating_blocks_with_running_preservation": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.validating,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_validating_blocks_with_running_preservation",
+            )
+        )
+
+    @pytest.mark.unit
     async def test_validating_candidate_redispatches_active_running_validation_recovery(
         self,
         session_factory: async_sessionmaker[AsyncSession],
