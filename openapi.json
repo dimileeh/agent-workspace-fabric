@@ -4250,6 +4250,10 @@
       },
       "QueuePlannedResourcesResponse": {
         "properties": {
+          "active_workspace_count": {
+            "title": "Active Workspace Count",
+            "type": "integer"
+          },
           "dind_slots": {
             "title": "Dind Slots",
             "type": "integer"
@@ -4276,6 +4280,7 @@
           }
         },
         "required": [
+          "active_workspace_count",
           "steady_cpu",
           "steady_memory_gb",
           "peak_cpu",

@@ -383,6 +383,7 @@ async def test_resource_saturation_endpoint_reports_allocated_capacity_and_queue
     assert body["capacity_queue"]["oldest_workspace_id"] == requested_id
     assert body["capacity_queue"]["oldest_wait_seconds"] >= 0
     assert body["capacity_queue"]["planned_resources"] == {
+        "active_workspace_count": 1,
         "steady_cpu": 3.0,
         "steady_memory_gb": 8.0,
         "peak_cpu": 6.0,
