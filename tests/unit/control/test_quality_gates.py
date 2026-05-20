@@ -3105,6 +3105,61 @@ jobs:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "with_inputs",
+    [
+        "          token: ${{ secrets.DEPLOY_KEY }}",
+        "          token: custom-token",
+        "          path: ${{ secrets.DEPLOY_PATH }}",
+    ],
+)
+def test_workflow_pinned_uses_version_bump_blocks_sensitive_with_input(
+    with_inputs: str,
+) -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+{with_inputs}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    violation = violations[0]
+    assert violation.section == "jobs.tests.steps.actions/checkout@v4.with"
+    assert "workflow action with inputs changed during pinned ref bump" in violation.reason
+
+
+@pytest.mark.unit
 def test_workflow_uses_bump_to_mutable_branch_is_blocked() -> None:
     old_text = """
 name: CI

@@ -58,6 +58,12 @@ _COMMENT_NOTIFY_CAPABLE_ACTION_USES: Final[frozenset[str]] = frozenset(
         "actions/github-script",
     }
 )
+_SENSITIVE_WORKFLOW_WITH_INPUT_PARTS: Final[frozenset[str]] = frozenset(
+    {"credential", "credentials", "password", "secret", "secrets", "token"}
+)
+_SENSITIVE_WORKFLOW_WITH_INPUT_NAMES: Final[frozenset[str]] = frozenset(
+    {"access-key", "api-key", "client-secret", "deploy-key", "private-key", "ssh-key"}
+)
 _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "comment",
     "pr comment",
@@ -1420,6 +1426,24 @@ def _workflow_existing_step_violations(
                 )
             )
 
+    if (
+        is_allowed_pinned_bump
+        and old_step.get("with") != new_step.get("with")
+        and not _workflow_pinned_bump_with_inputs_are_safe(new_step.get("with"))
+    ):
+        violations.append(
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section=f"{section_prefix}.with",
+                line=_line_for_workflow_step_key(new_text, new_step, key="with"),
+                reason=(
+                    "workflow action with inputs changed during pinned ref bump "
+                    f"with unsafe input names or expressions: {section_prefix}.with"
+                ),
+            )
+        )
+
     old_run = _string_value(old_step.get("run"))
     new_run = _string_value(new_step.get("run"))
     if old_run != new_run:
@@ -2120,6 +2144,37 @@ def _comment_notify_action_with_inputs_are_safe(action: str, inputs: object) -> 
 
 
 def _comment_notify_action_with_value_is_safe(value: object) -> bool:
+    if isinstance(value, str):
+        return not _has_unsafe_github_actions_expression((value,))
+    if value is None:
+        return True
+    return isinstance(value, bool | int | float)
+
+
+def _workflow_pinned_bump_with_inputs_are_safe(inputs: object) -> bool:
+    if inputs is None:
+        return True
+    if not isinstance(inputs, Mapping):
+        return False
+    for key, value in inputs.items():
+        if not isinstance(key, str):
+            return False
+        if _is_sensitive_workflow_with_input_key(key):
+            return False
+        if not _workflow_with_input_value_is_safe(value):
+            return False
+    return True
+
+
+def _is_sensitive_workflow_with_input_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("_", "-")
+    parts = tuple(part for part in normalized.split("-") if part)
+    if any(part in _SENSITIVE_WORKFLOW_WITH_INPUT_PARTS for part in parts):
+        return True
+    return any(name in normalized for name in _SENSITIVE_WORKFLOW_WITH_INPUT_NAMES)
+
+
+def _workflow_with_input_value_is_safe(value: object) -> bool:
     if isinstance(value, str):
         return not _has_unsafe_github_actions_expression((value,))
     if value is None:
