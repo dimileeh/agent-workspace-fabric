@@ -1171,7 +1171,7 @@ def _env_comment_looks_key_specific(line: str, key: str) -> bool:
         for word in _ENV_COMMENT_WORD_RE.findall(key.lower())
         if word not in _ENV_COMMENT_KEY_IGNORE_WORDS
     ]
-    if len(key_words) < 2:
+    if not key_words:
         return False
     comment_words = set(_ENV_COMMENT_WORD_RE.findall(comment))
     return all(word in comment_words for word in key_words)
@@ -1202,6 +1202,7 @@ def _split_env_file_header_context(lines: list[str], key: str) -> tuple[list[str
             break
         if _env_comment_looks_key_specific(lines[index], key):
             split_at = index
+            break
     if split_at is None:
         return lines, []
     return lines[:split_at], lines[split_at:]

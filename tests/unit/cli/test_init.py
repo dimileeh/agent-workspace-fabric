@@ -2376,6 +2376,87 @@ def test_merge_env_seed_keeps_first_key_comment_after_header_without_separator()
 
 
 @pytest.mark.unit
+def test_merge_env_seed_splits_header_at_last_adjacent_key_comment() -> None:
+    """Only the final adjacent key comment should move below a header block."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "AWF_POSTGRES_PASSWORD=compose-example",
+                    "AWF_API_TOKEN=compose-example",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Existing API token values migrated by awf init.",
+                    "# Operator API token override",
+                    "AWF_API_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Existing API token values migrated by awf init.",
+                "AWF_POSTGRES_PASSWORD=compose-example",
+                "# Operator API token override",
+                "AWF_API_TOKEN=migrated-token",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
+def test_merge_env_seed_treats_single_word_key_comment_as_assignment_context() -> None:
+    """A single significant key word should still identify assignment context."""
+    from awf.cli import main as cli_main
+
+    merged_contents, overlay_only_keys = cli_main._merge_env_seed_contents_with_overlay_keys(  # noqa: SLF001
+        (
+            "\n".join(
+                [
+                    "# Compose service defaults.",
+                    "AWF_TOKEN=compose-example",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+        (
+            "\n".join(
+                [
+                    "# Existing root .env migrated by awf init.",
+                    "# Provider access token",
+                    "AWF_TOKEN=migrated-token",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+    assert overlay_only_keys == ()
+    assert merged_contents.decode("utf-8") == (
+        "\n".join(
+            [
+                "# Compose service defaults.",
+                "# Provider access token",
+                "AWF_TOKEN=migrated-token",
+            ]
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.unit
 def test_merge_env_seed_keeps_first_key_comment_when_seed_has_header() -> None:
     """Do not discard key-specific first-assignment comments under a seed header."""
     from awf.cli import main as cli_main

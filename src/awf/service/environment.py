@@ -36,6 +36,9 @@ _COMPOSE_INTERPOLATION_KEYS_CACHE_LOCK = threading.Lock()
 def env_lookup(environ: Mapping[str, str], key: str) -> tuple[bool, str]:
     """Return whether an environment key is present using case-insensitive matching."""
 
+    value = environ.get(key)
+    if value is not None:
+        return True, value
     wanted = key.upper()
     for existing, value in environ.items():
         if existing.upper() == wanted:
