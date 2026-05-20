@@ -62,11 +62,64 @@ def _compose_template_value(value: str, env: dict[str, str]) -> str:
     return "".join(rendered)
 
 
+def _compose_short_port_mapping_fields(mapping: str) -> list[str]:
+    fields: list[str] = []
+    current: list[str] = []
+    in_template = False
+    in_brackets = False
+    index = 0
+
+    while index < len(mapping):
+        if not in_template and mapping.startswith("${", index):
+            in_template = True
+            current.append("${")
+            index += 2
+            continue
+
+        char = mapping[index]
+        if in_template:
+            current.append(char)
+            if char == "}":
+                in_template = False
+        elif char == "[":
+            in_brackets = True
+            current.append(char)
+        elif char == "]":
+            in_brackets = False
+            current.append(char)
+        elif char == ":" and not in_brackets:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+
+    fields.append("".join(current))
+    return fields
+
+
 def _compose_published_host_port(mapping: str) -> str:
-    published = mapping.rsplit(":", 1)[0]
-    if published.startswith("127.0.0.1:"):
-        return published.split(":", 1)[1]
-    return published
+    fields = _compose_short_port_mapping_fields(mapping)
+    if len(fields) < 2:
+        raise ValueError(f"Compose port mapping has no published host port: {mapping}")
+    return fields[-2]
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        ("${AWF_API_HOST_PORT:-8000}:8000", "${AWF_API_HOST_PORT:-8000}"),
+        ("127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+        ("0.0.0.0:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+        (
+            "${AWF_BIND_IP:-127.0.0.1}:${AWF_POSTGRES_HOST_PORT:-5433}:5432",
+            "${AWF_POSTGRES_HOST_PORT:-5433}",
+        ),
+        ("[::1]:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+    ],
+)
+def test_compose_published_host_port_extracts_port_template(mapping: str, expected: str) -> None:
+    assert _compose_published_host_port(mapping) == expected
 
 
 @pytest.mark.integration
