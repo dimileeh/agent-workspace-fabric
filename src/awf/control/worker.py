@@ -70,6 +70,12 @@ from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
 )
+from awf.service.resource_capacity import (
+    LOCAL_CAPACITY_CONSTRAINTS,
+    LocalCapacityBlocker,
+    local_capacity_blocker,
+    local_capacity_limit,
+)
 from awf.service.scheduler import (
     SchedulerOrderCursor,
     scheduler_order_key,
@@ -218,17 +224,6 @@ class _AllocatedReservationTotals:
         self.peak_memory_gb += demand.peak_memory_gb
         self.disk_mb += demand.disk_mb
         self.dind_slots += demand.dind_slots
-
-
-@dataclass(frozen=True)
-class _CapacityBlocker:
-    dimension: str
-    reason_code: str
-    limit: float | int
-    allocated: float | int
-    requested: float | int
-    after: float | int
-    unsatisfiable: bool
 
 
 @dataclass(frozen=True)
@@ -3027,7 +3022,7 @@ async def _record_capacity_queue_decision(
     decided_at: datetime,
     allocated: _AllocatedReservationTotals,
     demand: _ReservationDemand,
-    blockers: list[_CapacityBlocker],
+    blockers: list[LocalCapacityBlocker],
 ) -> None:
     attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
     if attempt is None:
@@ -3118,48 +3113,22 @@ def _local_capacity_blockers(
     allocated: _AllocatedReservationTotals,
     demand: _ReservationDemand,
     config: WorkerConfig,
-) -> list[_CapacityBlocker]:
-    blockers: list[_CapacityBlocker] = []
-    _append_capacity_blocker(
-        blockers,
-        dimension="steady_cpu",
-        reason_code="STEADY_CPU_CAPACITY_SATURATED",
-        limit=config.local_capacity_cpu_cores,
-        allocated=allocated.steady_cpu,
-        requested=demand.steady_cpu,
-    )
-    _append_capacity_blocker(
-        blockers,
-        dimension="peak_cpu",
-        reason_code="PEAK_CPU_CAPACITY_SATURATED",
-        limit=config.local_capacity_cpu_cores,
-        allocated=allocated.peak_cpu,
-        requested=demand.peak_cpu,
-    )
-    _append_capacity_blocker(
-        blockers,
-        dimension="steady_memory_gb",
-        reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
-        limit=config.local_capacity_memory_gb,
-        allocated=allocated.steady_memory_gb,
-        requested=demand.steady_memory_gb,
-    )
-    _append_capacity_blocker(
-        blockers,
-        dimension="peak_memory_gb",
-        reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
-        limit=config.local_capacity_memory_gb,
-        allocated=allocated.peak_memory_gb,
-        requested=demand.peak_memory_gb,
-    )
-    _append_capacity_blocker(
-        blockers,
-        dimension="dind_slots",
-        reason_code="DIND_CAPACITY_SATURATED",
-        limit=config.local_capacity_dind_slots,
-        allocated=allocated.dind_slots,
-        requested=demand.dind_slots,
-    )
+) -> list[LocalCapacityBlocker]:
+    blockers: list[LocalCapacityBlocker] = []
+    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
+        blocker = local_capacity_blocker(
+            constraint=constraint,
+            limit=local_capacity_limit(
+                constraint,
+                cpu_limit=config.local_capacity_cpu_cores,
+                memory_limit=config.local_capacity_memory_gb,
+                dind_slots=config.local_capacity_dind_slots,
+            ),
+            allocated=getattr(allocated, constraint.dimension),
+            requested=getattr(demand, constraint.dimension),
+        )
+        if blocker is not None:
+            blockers.append(blocker)
     return blockers
 
 
@@ -3171,50 +3140,11 @@ def _local_capacity_configured(config: WorkerConfig) -> bool:
     )
 
 
-def _append_capacity_blocker(
-    blockers: list[_CapacityBlocker],
-    *,
-    dimension: str,
-    reason_code: str,
-    limit: float | int | None,
-    allocated: float | int,
-    requested: float | int,
-) -> None:
-    if limit is None:
-        return
-    after = allocated + requested
-    if requested > limit:
-        blockers.append(
-            _CapacityBlocker(
-                dimension=dimension,
-                reason_code=reason_code,
-                limit=limit,
-                allocated=allocated,
-                requested=requested,
-                after=after,
-                unsatisfiable=True,
-            )
-        )
-        return
-    if after > limit:
-        blockers.append(
-            _CapacityBlocker(
-                dimension=dimension,
-                reason_code=reason_code,
-                limit=limit,
-                allocated=allocated,
-                requested=requested,
-                after=after,
-                unsatisfiable=False,
-            )
-        )
-
-
 def _capacity_resource_summary(
     *,
     allocated: _AllocatedReservationTotals,
     demand: _ReservationDemand,
-    blockers: list[_CapacityBlocker],
+    blockers: list[LocalCapacityBlocker],
 ) -> dict[str, Any]:
     return {
         "allocated": {
@@ -3240,7 +3170,7 @@ def _capacity_resource_summary(
     }
 
 
-def _capacity_blocker_payload(blocker: _CapacityBlocker) -> dict[str, Any]:
+def _capacity_blocker_payload(blocker: LocalCapacityBlocker) -> dict[str, Any]:
     return {
         "dimension": blocker.dimension,
         "reason_code": blocker.reason_code,

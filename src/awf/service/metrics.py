@@ -34,10 +34,13 @@ from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_STATE_KEY,
 )
 from awf.service.resource_capacity import (
+    LOCAL_CAPACITY_CONSTRAINTS,
     LocalCapacityLimits,
     ReservedResources,
     ResourceCapacitySummary,
     WorkspaceResourceDefaults,
+    local_capacity_blocked_condition,
+    local_capacity_limit,
     resource_capacity_summary,
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
@@ -1371,54 +1374,28 @@ async def _capacity_queue_blocked_reason_counts(
         "dind_slots": func.coalesce(latest_active_reservations.c.dind_slots, 0),
     }
     reason_expressions: list[tuple[str, Any]] = []
-
-    def add_reason(
-        *,
-        reason_code: str,
-        limit: float | int | None,
-        allocated: float | int,
-        requested: Any,
-    ) -> None:
-        if limit is None:
-            return
-        blocked = (requested > limit) | (allocated + requested > limit)
+    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
+        blocked = local_capacity_blocked_condition(
+            limit=local_capacity_limit(
+                constraint,
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                dind_slots=settings.local_capacity_dind_slots,
+            ),
+            allocated=getattr(allocated_resources, constraint.dimension),
+            requested=demand[constraint.dimension],
+        )
+        if blocked is None:
+            continue
         reason_expressions.append(
             (
-                reason_code,
-                func.coalesce(func.sum(case((blocked, 1), else_=0)), 0).label(reason_code),
+                constraint.reason_code,
+                func.coalesce(
+                    func.sum(case((blocked, 1), else_=0)),
+                    0,
+                ).label(constraint.reason_code),
             )
         )
-
-    add_reason(
-        reason_code="STEADY_CPU_CAPACITY_SATURATED",
-        limit=cpu_limit,
-        allocated=allocated_resources.steady_cpu,
-        requested=demand["steady_cpu"],
-    )
-    add_reason(
-        reason_code="PEAK_CPU_CAPACITY_SATURATED",
-        limit=cpu_limit,
-        allocated=allocated_resources.peak_cpu,
-        requested=demand["peak_cpu"],
-    )
-    add_reason(
-        reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
-        limit=memory_limit,
-        allocated=allocated_resources.steady_memory_gb,
-        requested=demand["steady_memory_gb"],
-    )
-    add_reason(
-        reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
-        limit=memory_limit,
-        allocated=allocated_resources.peak_memory_gb,
-        requested=demand["peak_memory_gb"],
-    )
-    add_reason(
-        reason_code="DIND_CAPACITY_SATURATED",
-        limit=settings.local_capacity_dind_slots,
-        allocated=allocated_resources.dind_slots,
-        requested=demand["dind_slots"],
-    )
     if not reason_expressions:
         return {}
 
