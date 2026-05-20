@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -1037,6 +1038,86 @@ class TestRunOnce:
         assert before[2] == after[2] == queued_at
         assert before[3] == after[3]
         assert before != after
+
+    @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_sqlite_reads_queue_once(
+        self,
+    ) -> None:
+        first_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        first_updated_at = datetime(2026, 1, 4, tzinfo=UTC)
+        second_created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        second_updated_at = datetime(2026, 1, 3, tzinfo=UTC)
+        rows = [
+            (
+                "ws_alpha",
+                first_updated_at,
+                first_created_at,
+                "docs_task",
+                "codex",
+                {"scheduler": {"base_priority": 10}},
+            ),
+            (
+                "ws_zulu",
+                second_updated_at,
+                second_created_at,
+                "test_task",
+                "gemini",
+                {"scheduler": {"base_priority": 20}},
+            ),
+        ]
+
+        class SingleReadResult:
+            def __iter__(self) -> object:
+                return iter(rows)
+
+            def one(self) -> tuple[int, datetime, datetime, str]:
+                return (
+                    len(rows),
+                    max(row[1] for row in rows),
+                    max(row[2] for row in rows),
+                    max(row[0] for row in rows),
+                )
+
+        class SingleReadSession:
+            def __init__(self) -> None:
+                self.execute_calls = 0
+
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+            async def execute(self, _stmt: object) -> SingleReadResult:
+                self.execute_calls += 1
+                if self.execute_calls > 1:
+                    raise AssertionError("queue signature fallback must read one snapshot")
+                return SingleReadResult()
+
+        session = SingleReadSession()
+
+        signature = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+            session,  # type: ignore[arg-type]
+            node_id="local",
+        )
+
+        digest = hashlib.sha256()
+        for workspace_id, _updated_at, created_at, task_class, agent, task_policy in rows:
+            digest.update(
+                worker_module._requested_capacity_queue_digest_payload(  # noqa: SLF001
+                    workspace_id=workspace_id,
+                    created_at=created_at,
+                    task_class=task_class,
+                    agent=agent,
+                    task_policy=task_policy,
+                ).encode("utf-8")
+            )
+            digest.update(b"\0")
+        assert session.execute_calls == 1
+        assert signature == (
+            2,
+            first_updated_at,
+            second_created_at,
+            "ws_zulu",
+            digest.hexdigest(),
+        )
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(

@@ -3506,21 +3506,8 @@ async def _requested_capacity_queue_signature(
     if bind.dialect.name != "postgresql":
         stmt = (
             select(
-                func.count(Workspace.id),
-                func.max(Workspace.updated_at),
-                func.max(Workspace.created_at),
-                func.max(Workspace.id),
-            )
-            .where(Workspace.status == WorkspaceStatus.requested.value)
-            .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-        )
-        count, latest_updated_at, latest_created_at, max_workspace_id = (
-            await session.execute(stmt)
-        ).one()
-        digest = hashlib.sha256()
-        queue_fields_stmt = (
-            select(
                 Workspace.id,
+                Workspace.updated_at,
                 Workspace.created_at,
                 Workspace.task_class,
                 Workspace.agent,
@@ -3530,9 +3517,31 @@ async def _requested_capacity_queue_signature(
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
             .order_by(Workspace.id)
         )
-        for workspace_id, created_at, task_class, agent, task_policy in await session.execute(
-            queue_fields_stmt
-        ):
+        count = 0
+        latest_updated_at: datetime | None = None
+        latest_created_at: datetime | None = None
+        max_workspace_id: str | None = None
+        digest = hashlib.sha256()
+        for (
+            workspace_id_value,
+            updated_at,
+            created_at,
+            task_class,
+            agent,
+            task_policy,
+        ) in await session.execute(stmt):
+            workspace_id = str(workspace_id_value)
+            count += 1
+            if isinstance(updated_at, datetime):
+                updated_at = _utc_datetime(updated_at)
+                if latest_updated_at is None or updated_at > latest_updated_at:
+                    latest_updated_at = updated_at
+            if isinstance(created_at, datetime):
+                created_at_for_comparison = _utc_datetime(created_at)
+                if latest_created_at is None or created_at_for_comparison > latest_created_at:
+                    latest_created_at = created_at_for_comparison
+            if max_workspace_id is None or workspace_id > max_workspace_id:
+                max_workspace_id = workspace_id
             digest.update(
                 _requested_capacity_queue_digest_payload(
                     workspace_id=workspace_id,
@@ -3544,10 +3553,10 @@ async def _requested_capacity_queue_signature(
             )
             digest.update(b"\0")
         return (
-            int(count or 0),
-            _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
-            _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
-            str(max_workspace_id) if max_workspace_id is not None else None,
+            count,
+            latest_updated_at,
+            latest_created_at,
+            max_workspace_id,
             digest.hexdigest(),
         )
 
