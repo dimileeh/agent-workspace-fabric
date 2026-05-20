@@ -3152,6 +3152,57 @@ jobs:
     assert violations == []
 
 
+@pytest.mark.parametrize(
+    ("old_ref", "new_ref"),
+    [
+        ("v1.0.0-rc1", "v1.0.0-rc2"),
+        ("v1.0.0-beta2", "v1.0.0-beta3"),
+        ("v1.0.0-alpha3", "v1.0.0-alpha4"),
+    ],
+)
+@pytest.mark.unit
+def test_workflow_pinned_uses_simple_prerelease_bump_is_allowed(
+    old_ref: str,
+    new_ref: str,
+) -> None:
+    old_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@{old_ref}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = f"""
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@{new_ref}
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
 @pytest.mark.unit
 def test_workflow_pinned_uses_version_bump_allows_with_input_update() -> None:
     old_text = """
@@ -3594,6 +3645,50 @@ jobs:
 
 
 @pytest.mark.unit
+def test_added_comment_action_step_with_reactions_edit_mode_is_allowed() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+      - name: Post PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          body: Tests completed
+          reactions: rocket
+          reactions-edit-mode: replace
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "with_inputs",
     [
@@ -3801,6 +3896,7 @@ jobs:
     "permissions",
     [
         "permissions: {}",
+        "permissions: read-all",
         "permissions:\n      contents: read",
     ],
 )

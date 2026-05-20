@@ -50,6 +50,7 @@ _COMMENT_NOTIFY_ACTION_ALLOWED_WITH_KEYS: Final[dict[str, frozenset[str]]] = {
             "edit-mode",
             "issue-number",
             "reactions",
+            "reactions-edit-mode",
         }
     )
 }
@@ -170,6 +171,7 @@ _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
 _PINNED_WORKFLOW_USES_VERSION_RE: Final = re.compile(
     r"^[vV]?(?:\d+|\d+\.\d+|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$"
 )
+_PRERELEASE_NUMERIC_SUFFIX_RE: Final = re.compile(r"^([A-Za-z]+)(\d+)$")
 type _WorkflowPrereleaseIdentifierKey = tuple[int, int | str]
 type _WorkflowVersionRefSortKey = tuple[
     tuple[int, ...], int, tuple[_WorkflowPrereleaseIdentifierKey, ...]
@@ -1595,6 +1597,8 @@ def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
 def _informational_job_permissions_are_safe(permissions: object) -> bool:
     if permissions is None:
         return True
+    if isinstance(permissions, str):
+        return permissions.strip().lower() == "read-all"
     if not isinstance(permissions, Mapping):
         return False
 
@@ -2210,6 +2214,13 @@ def _is_workflow_version_ref_non_downgrade(old_ref: str, new_ref: str) -> bool:
         return False
     if new_key < old_key:
         return False
+    if _has_same_core_simple_prerelease_numeric_suffix_downgrade(
+        old_ref,
+        new_ref,
+        old_key,
+        new_key,
+    ):
+        return False
     return not _has_same_core_mixed_prerelease_label_change(old_ref, new_ref, old_key, new_key)
 
 
@@ -2269,6 +2280,30 @@ def _has_same_core_mixed_prerelease_label_change(
     )
 
 
+def _has_same_core_simple_prerelease_numeric_suffix_downgrade(
+    old_ref: str,
+    new_ref: str,
+    old_key: _WorkflowVersionRefSortKey,
+    new_key: _WorkflowVersionRefSortKey,
+) -> bool:
+    if old_key[0] != new_key[0]:
+        return False
+    old_identifiers = _workflow_version_ref_prerelease(old_ref).split(".")
+    new_identifiers = _workflow_version_ref_prerelease(new_ref).split(".")
+    if len(old_identifiers) != len(new_identifiers):
+        return False
+    for old_identifier, new_identifier in zip(old_identifiers, new_identifiers, strict=True):
+        old_parts = _simple_prerelease_numeric_suffix_parts(old_identifier)
+        new_parts = _simple_prerelease_numeric_suffix_parts(new_identifier)
+        if old_parts is None or new_parts is None:
+            continue
+        old_label, old_number = old_parts
+        new_label, new_number = new_parts
+        if old_label == new_label and new_number < old_number:
+            return True
+    return False
+
+
 def _workflow_version_ref_prerelease(ref: str) -> str:
     raw_version = ref[1:] if ref.startswith(("v", "V")) else ref
     version_without_build = raw_version.split("+", 1)[0]
@@ -2278,9 +2313,18 @@ def _workflow_version_ref_prerelease(ref: str) -> str:
 
 def _has_mixed_prerelease_identifier(prerelease: str) -> bool:
     return any(
-        not identifier.isdigit() and any(character.isdigit() for character in identifier)
+        not identifier.isdigit()
+        and any(character.isdigit() for character in identifier)
+        and _PRERELEASE_NUMERIC_SUFFIX_RE.fullmatch(identifier) is None
         for identifier in prerelease.split(".")
     )
+
+
+def _simple_prerelease_numeric_suffix_parts(identifier: str) -> tuple[str, int] | None:
+    match = _PRERELEASE_NUMERIC_SUFFIX_RE.fullmatch(identifier)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
 
 
 def _uses_action(value: str) -> str | None:
