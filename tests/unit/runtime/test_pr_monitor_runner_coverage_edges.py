@@ -5174,7 +5174,7 @@ def test_changed_paths_from_name_status_z_deduplicates_valid_nul_records() -> No
 @pytest.mark.parametrize(
     ("diff_stdout", "expected_error", "message"),
     [
-        ("M\tsrc/fix.py\n", ValueError, "expected NUL-delimited output"),
+        ("M\tsrc/fix.py\n", ProtectedScopeDiffError, "expected NUL-delimited output"),
         ("M\0src/fix.py", ProtectedScopeDiffError, "missing terminating NUL"),
         (
             "M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",

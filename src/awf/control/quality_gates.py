@@ -1382,8 +1382,6 @@ def _allows_comment_continue_on_error(step: Mapping[str, Any]) -> bool:
 def _is_informational_job(job_id: str, job: Mapping[str, Any]) -> bool:
     if any(key not in _INFORMATIONAL_JOB_ALLOWED_KEYS for key in job):
         return False
-    if _string_value(job.get("uses")) is not None:
-        return False
     label_parts = [job_id]
     name = _string_value(job.get("name"))
     if name:

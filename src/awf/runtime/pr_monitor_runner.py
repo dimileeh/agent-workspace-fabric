@@ -51,6 +51,9 @@ from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.control.protected_file_diffs import (
+    changed_paths_from_name_status_z as _parse_name_status_z,
+)
+from awf.control.protected_file_diffs import (
     git_show_text,
     protected_file_diffs_for_committed_paths,
 )
@@ -5232,7 +5235,7 @@ class PullRequestMonitorRunner:
             )
         try:
             return _changed_paths_from_name_status_z(diff_result.stdout)
-        except (ProtectedScopeDiffError, ValueError) as exc:
+        except ProtectedScopeDiffError as exc:
             raise ProtectedScopeDiffError(
                 f"Could not parse committed diff {error_context} "
                 f"for protected-scope validation: {exc}"
@@ -7601,38 +7604,10 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
 
 def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
     """Extract changed paths from ``git diff --name-status -z`` output."""
-    if not diff_stdout:
-        return ()
-    if "\0" not in diff_stdout:
-        raise ValueError("expected NUL-delimited output from `git diff --name-status -z`")
-
-    fields = diff_stdout.split("\0")
-    if fields[-1] != "":
-        raise ProtectedScopeDiffError(
-            "truncated `--name-status -z` output: missing terminating NUL"
-        )
-    fields = fields[:-1]
-    paths: list[str] = []
-    index = 0
-    while index < len(fields):
-        status = fields[index]
-        if not status:
-            raise ProtectedScopeDiffError("malformed `--name-status -z` output: empty status field")
-        index += 1
-        path_count = 2 if status.startswith(("R", "C")) else 1
-        if index + path_count > len(fields):
-            raise ProtectedScopeDiffError(
-                f"truncated `--name-status -z` record for status {status!r}"
-            )
-        for _ in range(path_count):
-            path = fields[index]
-            index += 1
-            if not path:
-                raise ProtectedScopeDiffError(
-                    f"malformed `--name-status -z` record for status {status!r}"
-                )
-            paths.append(path)
-    return tuple(dict.fromkeys(paths))
+    try:
+        return _parse_name_status_z(diff_stdout)
+    except ValueError as exc:
+        raise ProtectedScopeDiffError(str(exc)) from exc
 
 
 def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:
