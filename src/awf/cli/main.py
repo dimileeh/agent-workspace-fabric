@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,13 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "retry after a timeout or dropped response."
 )
 _MIN_RICH_HELP_WIDTH = 80
+_ENV_ASSIGNMENT_RE = re.compile(r"\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
+_ENV_COMMENT_WORD_RE = re.compile(r"[a-z0-9]+")
+_ENV_COMMENT_KEY_IGNORE_WORDS = frozenset({"awf"})
+
+
+class _EnvSeedMergeError(ValueError):
+    """Raised when env seed merging cannot preserve dotenv semantics."""
 
 
 class _MinRichHelpWidthCommand(typer.core.TyperCommand):
@@ -631,9 +639,10 @@ def init(
         True,
         "--write-env/--no-write-env",
         help=(
-            "When bootstrapping the local service, copy `.env.example` to "
-            "`.env` if `.env` is missing. Has no effect in project-onboarding "
-            "mode."
+            "When bootstrapping the local service, seed the Compose env target "
+            "if it is missing. Target path: docker/compose/.env. Uses existing "
+            "`.env` values before example templates, and uses `.env` when "
+            "Compose assets are unavailable. Has no effect in project-onboarding mode."
         ),
     ),
     timeout_seconds: float = typer.Option(
@@ -664,6 +673,7 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
+    """Bootstrap the local AWF service or run project-onboarding checks."""
     if path is None:
         if include_smoke_request:
             typer.echo(
@@ -685,6 +695,7 @@ def init(
     ctx = click.get_current_context()
 
     def _explicit(name: str) -> bool:
+        """Return whether a bootstrap-only option was explicitly supplied."""
         return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
     bootstrap_only_flags: list[str] = []
@@ -760,8 +771,9 @@ def _run_init_project_onboarding(
                 *,
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
+                **_kwargs: object,
             ) -> dict[str, object]:
-                _ = settings, strict_providers, provider_environ
+                _ = settings, strict_providers, provider_environ, _kwargs
                 try:
                     return await service_status_task
                 except Exception as exc:
@@ -867,16 +879,726 @@ def _existing_project_profile_path(repository: Path) -> Path | None:
     return None
 
 
-def _resolve_state_directory(env: Mapping[str, str]) -> Path:
+def _resolve_state_directory(
+    env: Mapping[str, str],
+    *,
+    home_environ: Mapping[str, str] | None = None,
+) -> Path:
     """Resolve the AWF host state directory matching the Compose default."""
     raw = env.get("AWF_HOST_WORK_DIR") or ""
     if raw:
         return Path(raw).expanduser().resolve()
-    home = env.get("HOME", "~")
+    home_env = os.environ if home_environ is None else home_environ
+    home = home_env.get("HOME", "~")
     return (Path(home) / ".awf" / "service").expanduser().resolve()
 
 
+def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
+    """Return the compose, env, and env seed source files used by service commands.
+
+    If the verified source checkout contains local Compose assets, return those
+    assets as absolute paths. Compose-specific examples are the seed base when
+    present. Otherwise, the root example remains the seed base when it exists so
+    template-only defaults are preserved; an existing root `.env` is applied as
+    an overlay during seeding and remains the fallback read source until the
+    compose `.env` exists.
+    """
+
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
+
+    asset_root = bootstrap_mod.get_bootstrap_asset_root()
+    if asset_root is not None:
+        resolved_asset_root = asset_root.resolve()
+        compose_local_service = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        # get_bootstrap_asset_root() verifies this in production; keep the
+        # guard so tests or stubs that bypass validation fall back to the
+        # asset-root .env without depending on the launch directory.
+        if not compose_local_service.is_file():
+            return (
+                compose_local_service,
+                resolved_asset_root / ".env",
+                resolved_asset_root / ".env.example",
+            )
+        compose_file = compose_local_service
+        compose_env = resolved_asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
+        root_env = resolved_asset_root / ".env"
+        compose_example = compose_env.with_name(".env.example")
+        fallback_example = resolved_asset_root / ".env.example"
+        if compose_example.exists():
+            return compose_file, compose_env, compose_example
+        if fallback_example.exists():
+            return compose_file, compose_env, fallback_example
+        if root_env.exists():
+            return compose_file, compose_env, root_env
+        return compose_file, compose_env, fallback_example
+
+    return LOCAL_SERVICE_COMPOSE_FILE, Path(".env"), Path(".env.example")
+
+
+def _resolve_existing_service_env_file(env_file: Path) -> Path:
+    """Return the existing env file service commands should read."""
+
+    if env_file.exists():
+        return env_file
+    root_env = _compose_root_env_file(env_file)
+    if root_env is not None and root_env.exists():
+        return root_env
+    return env_file
+
+
+def _resolve_service_env_files(
+    env_file: Path,
+    *,
+    trusted_compose_env_file: Path | None = None,
+) -> tuple[Path, Path | None]:
+    """Return the env read source and actual Compose env-file path."""
+
+    active_env_file = _resolve_existing_service_env_file(env_file)
+    return active_env_file, _service_compose_env_file(
+        active_env_file,
+        trusted_compose_env_file=trusted_compose_env_file,
+    )
+
+
+def _resolve_service_runtime_env_files(
+    compose_file: Path,
+    env_file: Path,
+    *,
+    paths_verified: bool = False,
+) -> tuple[Path, Path | None]:
+    """Return service env files using compose paths already verified upstream."""
+
+    return _resolve_service_env_files(
+        env_file,
+        trusted_compose_env_file=(
+            _trusted_service_compose_env_file_from_verified_paths(compose_file, env_file)
+            if paths_verified
+            else _trusted_service_compose_env_file(compose_file, env_file)
+        ),
+    )
+
+
+def _trusted_service_compose_env_file_from_verified_paths(
+    compose_file: Path,
+    env_file: Path,
+) -> Path | None:
+    """Return the Compose env path from already verified local-service paths."""
+
+    from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+
+    if _compose_root_env_file(env_file) is None:
+        return None
+    resolved_compose_file = compose_file.expanduser().resolve()
+    resolved_env_file = env_file.expanduser().resolve()
+    if resolved_compose_file.parent != resolved_env_file.parent:
+        return None
+    if resolved_compose_file.name != LOCAL_SERVICE_COMPOSE_FILE.name:
+        return None
+    return env_file
+
+
+def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Path | None:
+    """Return the Compose env path from `_resolve_service_compose_paths`, if present."""
+
+    from awf.service.config import _is_local_service_compose_file_path
+
+    if _compose_root_env_file(env_file) is None:
+        return None
+    if not _is_local_service_compose_file_path(compose_file):
+        return None
+    if compose_file.expanduser().resolve().parent != env_file.expanduser().resolve().parent:
+        return None
+    return env_file
+
+
+def _service_compose_env_file(
+    active_env_file: Path,
+    *,
+    trusted_compose_env_file: Path | None = None,
+) -> Path | None:
+    """Return the env file that should be passed to Docker Compose, if any."""
+
+    if not active_env_file.exists():
+        return None
+    if trusted_compose_env_file is not None:
+        if (
+            active_env_file.expanduser().resolve()
+            == trusted_compose_env_file.expanduser().resolve()
+        ):
+            return active_env_file
+        return None
+    if _is_local_service_compose_env_file(active_env_file):
+        return active_env_file
+    return None
+
+
+def _is_local_service_compose_env_file(path: Path) -> bool:
+    """Return true for the verified local-service Compose env file."""
+
+    from awf.service.config import _is_local_service_compose_env_path
+
+    return _is_local_service_compose_env_path(path)
+
+
+def _init_env_error_payload(
+    *,
+    operation: str,
+    path: Path,
+    env_file: Path,
+    env_example: Path,
+    exc: Exception,
+) -> dict[str, str]:
+    """Return a machine-readable env seeding failure without env contents."""
+
+    return {
+        "operation": operation,
+        "path": _init_display_path(path),
+        "env_file": _init_display_path(env_file),
+        "env_example": _init_display_path(env_example),
+        "message": str(exc),
+    }
+
+
+def _compose_root_env_file(env_file: Path) -> Path | None:
+    """Return the root `.env` paired with a verified local Compose env file.
+
+    Relative env-file paths come from the no-asset-root fallback used outside an
+    AWF source checkout. They are intentionally not treated as local Compose
+    asset paths, which keeps root-env fallback and `--env-file` forwarding tied
+    to absolute paths resolved from the verified bootstrap asset root.
+    """
+
+    env_file = env_file.expanduser()
+    if not env_file.is_absolute():
+        return None
+    resolved_env_file = env_file.resolve()
+    if (
+        resolved_env_file.name == ".env"
+        and resolved_env_file.parent.name == "compose"
+        and resolved_env_file.parent.parent.name == "docker"
+    ):
+        return resolved_env_file.parent.parent.parent / ".env"
+    return None
+
+
+def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
+    """Return the root `.env` overlay used when seeding compose env files."""
+
+    root_env = _compose_root_env_file(env_file)
+    if root_env is None or env_example == root_env or not root_env.exists():
+        return None
+    compose_example = env_file.with_name(".env.example")
+    root_example = root_env.with_name(".env.example")
+    if env_example not in (compose_example, root_example):
+        return None
+    return root_env
+
+
+def _env_assignment_key(line: str) -> str | None:
+    """Return the key from an env assignment line, ignoring comments."""
+
+    if line.lstrip().startswith("#"):
+        return None
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:
+        return None
+    return match.group("key")
+
+
+def _env_assignment_key_identity(key: str) -> str:
+    """Return the canonical key identity used for seed/overlay matching."""
+
+    return key.upper()
+
+
+def _env_assignment_line_with_key(line: str, key: str) -> str:
+    """Return a Compose env assignment line with the key spelling replaced."""
+
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:
+        return line
+    return f"{key}{line[match.end('key') :]}"
+
+
+def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
+    """Return whether the seed owns the merged file header."""
+
+    for line in lines:
+        if _env_assignment_key(line) is not None:
+            return False
+        if line.strip():
+            return True
+    return False
+
+
+def _env_value_has_same_line_closing_quote(value: str, quote: str) -> bool:
+    """Return whether a quoted dotenv value closes on its assignment line."""
+
+    escaped = False
+    for char in value[1:]:
+        if quote == '"' and char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char == quote and not escaped:
+            return True
+        escaped = False
+    return False
+
+
+def _env_contents_have_multiline_values(text: str) -> bool:
+    """Return true when dotenv assignments span physical lines."""
+
+    for line in text.splitlines(keepends=True):
+        key = _env_assignment_key(line)
+        if key is None:
+            continue
+        _assignment, _separator, value = line.partition("=")
+        stripped_value = value.lstrip()
+        if not stripped_value:
+            continue
+        quote = stripped_value[0]
+        line_without_newline = line.rstrip("\r\n")
+        trailing_backslashes = len(line_without_newline) - len(line_without_newline.rstrip("\\"))
+        if (
+            quote not in {"'", '"'}
+            and line.endswith(("\n", "\r"))
+            and trailing_backslashes % 2 == 1
+        ):
+            return True
+        if quote in {"'", '"'} and not _env_value_has_same_line_closing_quote(
+            stripped_value,
+            quote,
+        ):
+            return True
+    return False
+
+
+def _env_context_looks_like_file_header(lines: list[str]) -> bool:
+    """Return whether leading non-assignment lines look like a file header."""
+
+    comment_count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "":
+            return True
+        if stripped.startswith("#"):
+            comment_count += 1
+    return comment_count > 1
+
+
+def _env_comment_looks_key_specific(line: str, key: str) -> bool:
+    """Return whether a comment appears to document one dotenv assignment key."""
+
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return False
+    comment = stripped.lstrip("#").strip().lower()
+    if key.lower() in comment:
+        return True
+    key_words = [
+        word
+        for word in _ENV_COMMENT_WORD_RE.findall(key.lower())
+        if word not in _ENV_COMMENT_KEY_IGNORE_WORDS
+    ]
+    if not key_words:
+        return False
+    comment_words = set(_ENV_COMMENT_WORD_RE.findall(comment))
+    return all(word in comment_words for word in key_words)
+
+
+def _env_context_has_key_specific_comment(lines: list[str], key: str) -> bool:
+    """Return whether any context comment appears tied to the given key."""
+
+    return any(_env_comment_looks_key_specific(line, key) for line in lines)
+
+
+def _env_context_has_file_header_marker(lines: list[str]) -> bool:
+    """Return whether comments explicitly describe dotenv-file-level context."""
+
+    comments = [line.strip().lstrip("#").strip().lower() for line in lines]
+    return any(
+        ".env" in comment
+        or "dotenv" in comment
+        or "environment file" in comment
+        or "settings here" in comment
+        or "overrides here" in comment
+        for comment in comments
+    )
+
+
+def _split_env_file_header_context(
+    lines: list[str],
+    key: str,
+    *,
+    seed_has_leading_context: bool,
+) -> tuple[list[str], list[str]]:
+    """Split leading overlay comments into file-header and assignment context."""
+
+    if not _env_context_looks_like_file_header(lines):
+        return [], lines
+    last_blank_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == "":
+            last_blank_index = index
+    if last_blank_index is not None:
+        return lines[: last_blank_index + 1], lines[last_blank_index + 1 :]
+
+    split_at: int | None = None
+    for index in range(len(lines) - 1, -1, -1):
+        stripped = lines[index].strip()
+        if not stripped.startswith("#"):
+            break
+        if _env_comment_looks_key_specific(lines[index], key):
+            split_at = index
+            break
+    if split_at is None:
+        if (
+            seed_has_leading_context
+            and len(lines) <= 2
+            and not _env_context_has_file_header_marker(lines)
+        ):
+            return [], lines
+        return lines, []
+    return lines[:split_at], lines[split_at:]
+
+
+def _env_context_looks_like_section_header(lines: list[str]) -> bool:
+    """Return whether non-assignment lines look like reusable section documentation."""
+
+    return sum(1 for line in lines if line.strip().startswith("#")) > 1
+
+
+def _env_context_is_single_adjacent_comment(lines: list[str]) -> bool:
+    """Return whether context is exactly one comment directly above an assignment."""
+
+    return len(lines) == 1 and lines[0].strip().startswith("#")
+
+
+def _env_context_has_non_comment_note(lines: list[str]) -> bool:
+    """Return whether context contains an operator note outside dotenv comments."""
+
+    return any(line.strip() and not line.strip().startswith("#") for line in lines)
+
+
+def _merge_env_seed_contents_with_overlay_keys(
+    seed_contents: bytes,
+    overlay_contents: bytes,
+) -> tuple[bytes, tuple[str, ...]]:
+    """Return merged env contents plus root-only keys appended from the overlay."""
+
+    try:
+        seed_text = seed_contents.decode("utf-8")
+        overlay_text = overlay_contents.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _EnvSeedMergeError("env seeding merge requires UTF-8 dotenv files") from exc
+
+    # This merge is deliberately line-oriented to preserve comments and ordering.
+    # Multi-line dotenv values are unsupported in seed and overlay files; keep
+    # template entries single-line unless this is replaced with a dotenv parser.
+    if _env_contents_have_multiline_values(seed_text) or _env_contents_have_multiline_values(
+        overlay_text
+    ):
+        raise _EnvSeedMergeError(
+            "unsupported multi-line dotenv values; env seeding merge only supports "
+            "single-line assignments"
+        )
+    seed_lines = seed_text.splitlines(keepends=True)
+    overlay_lines = overlay_text.splitlines(keepends=True)
+
+    overlay_assignments: dict[str, str] = {}
+    for line in overlay_lines:
+        key = _env_assignment_key(line)
+        if key is not None:
+            normalized_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
+            overlay_assignments[_env_assignment_key_identity(key)] = _env_assignment_line_with_key(
+                normalized_line, key
+            )
+
+    seed_keys: set[str] = set()
+    for line in seed_lines:
+        key = _env_assignment_key(line)
+        if key is not None:
+            seed_keys.add(_env_assignment_key_identity(key))
+    seed_has_leading_context = _env_seed_has_meaningful_leading_context(seed_lines)
+
+    overlay_last_assignment_index: dict[str, int] = {}
+    for index, line in enumerate(overlay_lines):
+        key = _env_assignment_key(line)
+        if key is not None:
+            overlay_last_assignment_index[_env_assignment_key_identity(key)] = index
+
+    seed_leading_context: dict[str, list[str]] = {}
+    seed_final_context: list[str] = []
+    file_header_context: list[str] = []
+    overlay_only_lines: list[str] = []
+    overlay_only_keys: list[str] = []
+    pending_context: list[str] = []
+    duplicate_context: dict[str, list[str]] = {}
+    seen_overlay_assignment_keys: set[str] = set()
+    last_assignment_key: str | None = None
+    for index, line in enumerate(overlay_lines):
+        key = _env_assignment_key(line)
+        if key is None:
+            pending_context.append(line)
+            continue
+        key_identity = _env_assignment_key_identity(key)
+        first_overlay_assignment = last_assignment_key is None
+        if first_overlay_assignment and pending_context:
+            file_header_context, pending_context = _split_env_file_header_context(
+                pending_context,
+                key,
+                seed_has_leading_context=seed_has_leading_context,
+            )
+        context = [*duplicate_context.pop(key_identity, []), *pending_context]
+        context_has_key_specific_comment = _env_context_has_key_specific_comment(context, key)
+        if overlay_last_assignment_index.get(key_identity) == index:
+            if key_identity in seed_keys:
+                if (
+                    first_overlay_assignment
+                    and seed_has_leading_context
+                    and not context_has_key_specific_comment
+                    and (file_header_context or _env_context_is_single_adjacent_comment(context))
+                ):
+                    context = []
+                seed_leading_context[key_identity] = context
+            else:
+                overlay_only_lines.extend(context)
+                normalized_only_line = line if line.endswith(("\n", "\r")) else f"{line}\n"
+                overlay_only_lines.append(_env_assignment_line_with_key(normalized_only_line, key))
+                overlay_only_keys.append(key)
+        else:
+            if (
+                key_identity in seed_keys
+                or key_identity in seen_overlay_assignment_keys
+                or _env_context_looks_like_section_header(context)
+                or _env_context_is_single_adjacent_comment(context)
+                or _env_context_has_non_comment_note(context)
+            ):
+                duplicate_context.setdefault(key_identity, []).extend(context)
+        pending_context = []
+        seen_overlay_assignment_keys.add(key_identity)
+        last_assignment_key = key_identity
+    if pending_context and last_assignment_key is not None and last_assignment_key in seed_keys:
+        seed_final_context = pending_context
+    elif pending_context:
+        overlay_only_lines.extend(pending_context)
+
+    # Overlay file headers are kept only when the seed starts with assignments.
+    # If the seed has its own leading context, it owns the top of the merged file
+    # and overlay header comments are omitted to avoid duplicate file headers.
+    merged_lines: list[str] = [] if seed_has_leading_context else list(file_header_context)
+    emitted_seed_leading_context: set[str] = set()
+    for line in seed_lines:
+        key = _env_assignment_key(line)
+        if key is None:
+            merged_lines.append(line)
+            continue
+        key_identity = _env_assignment_key_identity(key)
+        if (
+            key_identity in seed_leading_context
+            and key_identity not in emitted_seed_leading_context
+        ):
+            merged_lines.extend(seed_leading_context[key_identity])
+            emitted_seed_leading_context.add(key_identity)
+        overlay_assignment = overlay_assignments.get(key_identity)
+        if overlay_assignment is None:
+            merged_lines.append(line)
+        else:
+            merged_lines.append(_env_assignment_line_with_key(overlay_assignment, key))
+
+    tail_lines = [*overlay_only_lines, *seed_final_context]
+    if tail_lines and merged_lines and not merged_lines[-1].endswith(("\n", "\r")):
+        merged_lines[-1] = f"{merged_lines[-1]}\n"
+    merged_lines.extend(tail_lines)
+
+    return "".join(merged_lines).encode("utf-8"), tuple(overlay_only_keys)
+
+
+def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
+    """Return compose-template env contents with root env assignments overlaid."""
+
+    merged_contents, _overlay_only_keys = _merge_env_seed_contents_with_overlay_keys(
+        seed_contents,
+        overlay_contents,
+    )
+    return merged_contents
+
+
+def _seed_env_file(
+    env_file: Path,
+    env_example: Path,
+    *,
+    env_overlay: Path | None = None,
+) -> tuple[str, dict[str, str] | None, tuple[str, ...]]:
+    """Seed an env file and return action, failure payload, and copied overlay keys."""
+
+    if env_file.exists():
+        return "kept_existing", None, ()
+
+    if not env_example.exists():
+        return "no_example", None, ()
+
+    try:
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="create_parent_directory",
+                path=env_file.parent,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+            (),
+        )
+
+    try:
+        env_contents = env_example.read_bytes()
+    except OSError as exc:
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="read_example",
+                path=env_example,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+            (),
+        )
+
+    env_overlay_keys: tuple[str, ...] = ()
+    if env_overlay is not None and env_overlay.exists():
+        try:
+            overlay_contents = env_overlay.read_bytes()
+        except OSError as exc:
+            return (
+                "write_failed",
+                _init_env_error_payload(
+                    operation="read_overlay",
+                    path=env_overlay,
+                    env_file=env_file,
+                    env_example=env_example,
+                    exc=exc,
+                ),
+                (),
+            )
+        try:
+            env_contents, env_overlay_keys = _merge_env_seed_contents_with_overlay_keys(
+                env_contents,
+                overlay_contents,
+            )
+        except _EnvSeedMergeError as exc:
+            return (
+                "write_failed",
+                _init_env_error_payload(
+                    operation="merge_overlay",
+                    path=env_overlay,
+                    env_file=env_file,
+                    env_example=env_example,
+                    exc=exc,
+                ),
+                (),
+            )
+
+    env_file_created = False
+    try:
+        with env_file.open("xb") as handle:
+            env_file_created = True
+            handle.write(env_contents)
+    except FileExistsError:
+        return "kept_existing", None, ()
+    except OSError as exc:
+        if env_file_created:
+            try:
+                env_file.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        return (
+            "write_failed",
+            _init_env_error_payload(
+                operation="write_env",
+                path=env_file,
+                env_file=env_file,
+                env_example=env_example,
+                exc=exc,
+            ),
+            (),
+        )
+
+    return "wrote_from_example", None, env_overlay_keys
+
+
+def _init_display_path(path: Path | str) -> str:
+    """Return a stable human-readable init path from the launch directory."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return str(candidate)
+    try:
+        return os.path.relpath(candidate, Path.cwd())
+    except ValueError:
+        return str(candidate)
+
+
+def _init_env_warning(env_error: Mapping[str, str]) -> str:
+    """Return the pretty warning for an env seeding failure payload."""
+
+    operation = env_error["operation"]
+    message = env_error["message"]
+    env_file = env_error["env_file"]
+    env_example = env_error["env_example"]
+    if operation == "create_parent_directory":
+        parent = env_error["path"]
+        return f"  warning: could not create parent directory {parent} for {env_file}: {message}"
+    if operation == "read_example":
+        return f"  warning: could not read {env_example} while seeding {env_file}: {message}"
+    if operation == "read_overlay":
+        overlay = env_error["path"]
+        return (
+            f"  warning: could not read {overlay} while seeding {env_file} "
+            f"from {env_example}: {message}"
+        )
+    if operation == "merge_overlay":
+        overlay = env_error["path"]
+        return (
+            f"  warning: could not merge {overlay} while seeding {env_file} "
+            f"from {env_example}: {message}"
+        )
+    return f"  warning: could not write {env_file} from {env_example}: {message}"
+
+
+def _add_init_env_overlay_keys(
+    payload: dict[str, object],
+    env_overlay_keys: tuple[str, ...],
+) -> None:
+    """Add non-secret env overlay audit metadata to a JSON init payload."""
+
+    if env_overlay_keys:
+        payload["env_overlay_keys"] = list(env_overlay_keys)
+
+
+def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
+    """Return the env template paths that explain why init skipped seeding."""
+
+    search_paths: list[Path] = []
+    candidates = [env_file.with_name(".env.example"), env_example]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        search_paths.append(candidate)
+    return tuple(search_paths)
+
+
 def _docker_diagnostic_from_report(report: object) -> object | None:
+    """Return the docker diagnostic entry from a readiness report if present."""
+
     from typing import cast
 
     diagnostics = getattr(report, "diagnostics", ())
@@ -884,6 +1606,17 @@ def _docker_diagnostic_from_report(report: object) -> object | None:
         if getattr(diagnostic, "id", None) == "docker":
             return cast(object, diagnostic)
     return None
+
+
+def _init_preflight_environ(
+    environ: Mapping[str, str],
+    *,
+    provider_secret_keys: frozenset[str],
+) -> dict[str, str]:
+    """Return init preflight env without provider credentials."""
+
+    secret_keys = {key.upper() for key in provider_secret_keys}
+    return {key: value for key, value in environ.items() if key.upper() not in secret_keys}
 
 
 def _run_init_service_bootstrap(
@@ -895,6 +1628,8 @@ def _run_init_service_bootstrap(
     providers: list[str],
     fmt: OutputFormat,
 ) -> None:
+    """Run local-service bootstrap with environment seeding and status output."""
+    from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
@@ -903,6 +1638,7 @@ def _run_init_service_bootstrap(
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report
     from awf.service.provider_readiness import (
+        KNOWN_SECRET_ENV_KEYS,
         ProviderReadinessError,
         validate_provider_names,
     )
@@ -914,20 +1650,69 @@ def _run_init_service_bootstrap(
         raise typer.Exit(code=2) from exc
 
     pretty = fmt == OutputFormat.pretty
+    compose_file, env_file, env_example = _resolve_service_compose_paths()
+    env_action = "skipped"
+    env_error: dict[str, str] | None = None
+    env_overlay_keys: tuple[str, ...] = ()
+    if write_env:
+        env_action, env_error, env_overlay_keys = _seed_env_file(
+            env_file,
+            env_example,
+            env_overlay=_init_env_overlay_source(env_file, env_example),
+        )
+    active_env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+
+    if pretty:
+        typer.echo("AWF init: local service bootstrap")
+        if write_env:
+            if env_action == "write_failed" and env_error is not None:
+                typer.echo(_init_env_warning(env_error))
+            elif env_action == "kept_existing":
+                typer.echo(f"  kept existing {_init_display_path(env_file)}")
+            elif env_action == "wrote_from_example":
+                typer.echo(
+                    f"  wrote {_init_display_path(env_file)} from {_init_display_path(env_example)}"
+                )
+                if env_overlay_keys:
+                    typer.echo(
+                        "  added root .env keys to "
+                        f"{_init_display_path(env_file)}: {', '.join(env_overlay_keys)}"
+                    )
+            elif env_action == "no_example":
+                search_paths = ", ".join(
+                    _init_display_path(path)
+                    for path in _init_env_example_search_paths(env_file, env_example)
+                )
+                typer.echo(
+                    "  no env template found; skipped "
+                    f"{_init_display_path(env_file)} "
+                    f"creation (looked for {search_paths}; run `awf init` from "
+                    "the AWF repository root if you expected one)"
+                )
 
     try:
-        settings = resolve_service_settings()
-        service_env = local_service_environ()
-
-        if pretty:
-            typer.echo("AWF init: local service bootstrap")
+        service_env = local_service_environ(env_file=active_env_file)
+        preflight_env = _init_preflight_environ(
+            service_env,
+            provider_secret_keys=KNOWN_SECRET_ENV_KEYS,
+        )
+        settings = resolve_service_settings(
+            Settings(_env_file=active_env_file, github_token=None),
+            environ=preflight_env,
+        )
 
         docker_report = asyncio.run(
             collect_doctor_report(
                 settings,
                 strict_providers=frozenset(),
-                provider_environ=service_env,
-                environ=service_env,
+                provider_environ=preflight_env,
+                environ=preflight_env,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -949,18 +1734,20 @@ def _run_init_service_bootstrap(
                 typer.echo("")
                 typer.echo("Docker is not available; cannot bootstrap local service.")
             else:
-                _emit(
-                    {
-                        "status": "failed",
-                        "reason_code": reason,
-                        "message": message,
-                        "action": action,
-                    },
-                    fmt,
-                )
+                docker_payload: dict[str, object] = {
+                    "status": "failed",
+                    "reason_code": reason,
+                    "message": message,
+                    "action": action,
+                    "env_action": env_action,
+                }
+                if env_error is not None:
+                    docker_payload["env_error"] = env_error
+                _add_init_env_overlay_keys(docker_payload, env_overlay_keys)
+                _emit(docker_payload, fmt)
             raise typer.Exit(code=1)
 
-        state_dir = _resolve_state_directory(os.environ)
+        state_dir = _resolve_state_directory(service_env)
         created = not state_dir.exists()
         state_dir.mkdir(parents=True, exist_ok=True)
     except typer.Exit:
@@ -969,41 +1756,21 @@ def _run_init_service_bootstrap(
         if pretty:
             typer.echo(f"error: could not collect local checks: {exc}", err=True)
         else:
-            _emit(
-                {
-                    "status": "failed",
-                    "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
-                    "message": str(exc),
-                },
-                fmt,
-            )
+            local_checks_payload: dict[str, object] = {
+                "status": "failed",
+                "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
+                "message": str(exc),
+                "env_action": env_action,
+            }
+            if env_error is not None:
+                local_checks_payload["env_error"] = env_error
+            _add_init_env_overlay_keys(local_checks_payload, env_overlay_keys)
+            _emit(local_checks_payload, fmt)
         raise typer.Exit(code=1) from exc
 
     if pretty:
         typer.echo(f"  state directory: {state_dir}")
         typer.echo(f"  created: {'true' if created else 'false'}")
-
-    env_action = "skipped"
-    if write_env:
-        env_file = Path(".env")
-        env_example = Path(".env.example")
-        if env_file.exists():
-            env_action = "kept_existing"
-            if pretty:
-                typer.echo("  kept existing .env")
-        elif env_example.exists():
-            env_file.write_bytes(env_example.read_bytes())
-            env_action = "wrote_from_example"
-            if pretty:
-                typer.echo("  wrote .env from .env.example")
-        else:
-            env_action = "no_example"
-            if pretty:
-                typer.echo(
-                    "  no .env.example found in current directory; skipped .env "
-                    "creation (run `awf init` from the AWF repository root if "
-                    "you expected one)"
-                )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
@@ -1013,12 +1780,22 @@ def _run_init_service_bootstrap(
     )
     try:
         result = asyncio.run(
-            run_service_bootstrap(settings, options=options),
+            run_service_bootstrap(
+                settings,
+                options=options,
+                compose_file=compose_file,
+                env_file=compose_env_file,
+                service_environ=service_env,
+            ),
         )
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceBootstrapError as exc:
-        _emit(exc.to_dict(), fmt)
+        payload = exc.to_dict()
+        if env_error is not None:
+            payload["env_error"] = env_error
+        _add_init_env_overlay_keys(payload, env_overlay_keys)
+        _emit(payload, fmt)
         raise typer.Exit(code=1) from None
 
     if pretty:
@@ -1036,6 +1813,9 @@ def _run_init_service_bootstrap(
         payload["state_directory"] = str(state_dir)
         payload["state_directory_created"] = created
         payload["env_action"] = env_action
+        if env_error is not None:
+            payload["env_error"] = env_error
+        _add_init_env_overlay_keys(payload, env_overlay_keys)
         _emit(payload, fmt)
 
 
@@ -1083,6 +1863,7 @@ def service_status(
     ),
 ) -> None:
     """Check local AWF service dependencies."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.status import collect_service_status
@@ -1093,11 +1874,24 @@ def service_status(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     payload = asyncio.run(
         collect_service_status(
-            resolve_service_settings(),
+            settings,
             strict_providers=strict_providers,
-            provider_environ=local_service_environ(),
+            provider_environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
         )
     )
     _emit(payload, fmt)
@@ -1120,6 +1914,7 @@ def service_doctor(
     ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
@@ -1131,8 +1926,17 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    settings = resolve_service_settings()
-    service_env = local_service_environ()
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
 
     if bundle:
         bundle_payload = asyncio.run(
@@ -1141,6 +1945,8 @@ def service_doctor(
                 strict_providers=strict_providers,
                 provider_environ=service_env,
                 environ=service_env,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
             )
         )
         path = write_support_bundle(bundle_payload)
@@ -1156,6 +1962,8 @@ def service_doctor(
             strict_providers=strict_providers,
             provider_environ=service_env,
             environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
         )
     )
 
@@ -1220,6 +2028,7 @@ def service_readiness(
     ),
 ) -> None:
     """Run the executable local AWF Core release-readiness gate."""
+    from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.readiness import (
@@ -1234,16 +2043,28 @@ def service_readiness(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    service_env = local_service_environ()
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     report = asyncio.run(
         collect_core_readiness_report(
-            settings=resolve_service_settings(),
+            settings=settings,
             demo_path=demo_path if demo_path is not None else DEFAULT_DEMO_PATH,
             failure_window_hours=failure_window_hours,
             slo_window_hours=slo_window_hours,
             strict_providers=frozenset(strict_providers),
             provider_environ=service_env,
             environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
             allow_generic_failures=allow_generic_failures,
             allow_slo_breach=allow_slo_breach,
         )
@@ -1285,12 +2106,15 @@ def service_bootstrap(
         help=_PROVIDER_HELP,
     ),
 ) -> None:
+    """Start the local AWF service stack and emit structured bootstrap output."""
+
+    from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
         run_service_bootstrap,
     )
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
 
     try:
@@ -1305,11 +2129,25 @@ def service_bootstrap(
         skip_agent_runtime_build=skip_agent_runtime_build,
         strict_providers=frozenset(strict_providers),
     )
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
     try:
         result = asyncio.run(
             run_service_bootstrap(
-                resolve_service_settings(),
+                settings,
                 options=options,
+                compose_file=compose_file,
+                env_file=compose_env_file,
+                service_environ=service_env,
             )
         )
     except KeyboardInterrupt:
@@ -1351,10 +2189,25 @@ def service_logs(
     ),
 ) -> None:
     """Tail local AWF service Compose logs."""
+    from awf.service.config import local_service_environ
     from awf.service.logs import ServiceLogsError, run_service_logs
 
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
     try:
-        result = run_service_logs(services=service, tail=tail, follow=follow)
+        result = run_service_logs(
+            services=service,
+            tail=tail,
+            follow=follow,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+            service_environ=service_env,
+        )
     except KeyboardInterrupt:
         raise typer.Exit(code=130) from None
     except ServiceLogsError as exc:

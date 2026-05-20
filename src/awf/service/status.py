@@ -20,7 +20,12 @@ from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
-from awf.service.config import ServiceSettings
+from awf.service.config import (
+    COMPOSE_ENV_FILE_OMITTED,
+    ComposeEnvFileInput,
+    ServiceSettings,
+    resolve_local_service_provider_environ,
+)
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
@@ -105,6 +110,9 @@ async def collect_service_status(
     workspace_id_lookup: WorkspaceIdLookup | None = None,
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
+    compose_file: Path | None = None,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     provider_http_get: ProviderHttpGet | None = None,
     egress_audit_summary_lookup: EgressAuditSummaryLookup | None = None,
 ) -> dict[str, object]:
@@ -114,6 +122,12 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
+    provider_environ = resolve_local_service_provider_environ(
+        provider_environ=provider_environ,
+        environ=os.environ if environ is None else environ,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     resolved_workspace_lookup: WorkspaceIdLookup
     if workspace_id_lookup is None:
 

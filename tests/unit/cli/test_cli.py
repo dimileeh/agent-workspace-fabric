@@ -1970,7 +1970,9 @@ class TestServiceStatusOrphanReporting:
         from awf.service import status as status_mod
 
         settings = object()
-        monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+        monkeypatch.setattr(
+            config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings
+        )
 
         async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
             assert received is settings
@@ -2095,8 +2097,10 @@ class TestServiceDoctorBundle:
         from awf.service import config as config_mod
         from awf.service import doctor as doctor_mod
 
-        monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
-        monkeypatch.setattr(config_mod, "local_service_environ", lambda: {})
+        monkeypatch.setattr(
+            config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object()
+        )
+        monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: {})
 
         report = SimpleNamespace(
             status="fail",

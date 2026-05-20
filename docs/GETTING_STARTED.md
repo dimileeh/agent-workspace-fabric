@@ -60,9 +60,12 @@ uv sync
 Once AWF is installed, the fastest path to a working local control plane is
 `awf init`. With no arguments it bootstraps AWF on this machine: it checks
 Docker, ensures the host state directory under
-`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, copies `.env.example` to
-`.env` when `.env` is missing (use `--no-write-env` to skip), and starts or
-validates the local Postgres + migrate + API + worker stack via
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, seeds
+`docker/compose/.env` from `docker/compose/.env.example` when present or
+`.env.example` otherwise when the source checkout includes
+`docker/compose/local-service.yml`, and falls back to `.env` otherwise (use
+`--no-write-env` to skip), then starts or validates the local Postgres +
+migrate + API + worker stack via
 `awf service bootstrap`.
 
 ```bash
@@ -80,8 +83,8 @@ PRs and use `awf init <path>` to inspect a project repository (see
 walkthrough and per-provider copy-paste prompts). The two `awf init` shapes are
 explicit:
 
-- `awf init` — bootstrap AWF on this machine (Docker, state dir, `.env`,
-  service stack).
+- `awf init` — bootstrap AWF on this machine (Docker, state dir,
+  `docker/compose/.env` or `.env`, service stack).
 - `awf init <path>` — run local onboarding readiness checks for a project
   checkout.
 
@@ -95,19 +98,38 @@ monitor policy, idempotency, console inspection, and mocked-local validation.
 
 ### Configure Environment
 
+In source checkouts that include local Compose assets, `awf init` writes
+`docker/compose/.env` automatically. The repo-root `.env` is still useful for
+Python `awf` commands in package or non-source contexts.
+
+Transition note: `awf service status`, `awf service doctor`, and
+`awf service bootstrap` resolve `docker/compose/.env` only from verified AWF
+source checkouts with local service Compose assets. In package installs or other
+non-source directories, those commands read `.env`; copy any existing
+`docker/compose/.env` values to `.env` or run the service command from the AWF
+source checkout.
+
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,
 and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 `GITHUB_TOKEN` are accepted fallbacks.
 
 ```bash
-cp .env.example .env
 export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 export AWF_POSTGRES_HOST_PORT=${AWF_POSTGRES_HOST_PORT:-5433}
 export AWF_API_HOST_PORT=${AWF_API_HOST_PORT:-8000}
 # Persist Compose-interpolated values into docker/compose/.env.
+env_example=docker/compose/.env.example
+if [ ! -f "$env_example" ]; then
+  env_example=.env.example
+fi
+if [ ! -f "$env_example" ]; then
+  echo "Missing env template: docker/compose/.env.example or .env.example" >&2
+  exit 1
+fi
 {
+  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' "$env_example"
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"

@@ -3,10 +3,30 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import pytest
 import yaml
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BOOTSTRAP_ASSET_PATHS = (
+    ".env.example",
+    "docker/agent-runtime.Dockerfile",
+    "docker/compose/local-service.yml",
+    "docker/control-plane.Dockerfile",
+    "pyproject.toml",
+    "src/awf/__init__.py",
+)
+
+
+def _copy_bootstrap_assets(checkout: Path) -> None:
+    """Copy real source assets into a temporary checkout shape."""
+    for relative_path in _BOOTSTRAP_ASSET_PATHS:
+        source = _REPO_ROOT / relative_path
+        target = checkout / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _compose_template_token_value(template: str, inner: str, env: dict[str, str]) -> str:
@@ -258,6 +278,70 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr",
         "TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}",
     ]
+
+
+@pytest.mark.integration
+def test_init_env_seeding_uses_real_source_checkout_compose_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise init env target discovery and seeding against real AWF assets."""
+    from awf.cli import main as cli_main
+    from awf.service.config import local_service_environ
+
+    checkout = tmp_path / "checkout"
+    _copy_bootstrap_assets(checkout)
+    root_env = checkout / ".env"
+    root_env.write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=operator-token",
+                "AWF_POSTGRES_PASSWORD=operator-password",
+                "",
+                "# Operator Docker socket",
+                "AWF_DOCKER_HOST=unix:///tmp/awf-review.sock",
+                "AWF_ROOT_ONLY=operator-only",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    nested_project = checkout / "projects" / "demo"
+    nested_project.mkdir(parents=True)
+    monkeypatch.chdir(nested_project)
+
+    compose_file, env_file, env_example = cli_main._resolve_service_compose_paths()  # noqa: SLF001
+
+    assert compose_file == checkout / "docker" / "compose" / "local-service.yml"
+    assert env_file == checkout / "docker" / "compose" / ".env"
+    assert env_example == checkout / ".env.example"
+    assert not env_file.exists()
+
+    action, error, overlay_keys = cli_main._seed_env_file(  # noqa: SLF001
+        env_file,
+        env_example,
+        env_overlay=cli_main._init_env_overlay_source(env_file, env_example),  # noqa: SLF001
+    )
+
+    assert action == "wrote_from_example"
+    assert error is None
+    assert overlay_keys == ("AWF_ROOT_ONLY",)
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "AWF_API_TOKEN=operator-token\n" in env_text
+    assert "AWF_POSTGRES_PASSWORD=operator-password\n" in env_text
+    assert "AWF_WORKSPACE_STEADY_CPU=3\n" in env_text
+    assert "# Operator Docker socket\nAWF_DOCKER_HOST=unix:///tmp/awf-review.sock\n" in env_text
+    assert "AWF_ROOT_ONLY=operator-only\n" in env_text
+
+    active_env_file, compose_env_file = cli_main._resolve_service_env_files(env_file)  # noqa: SLF001
+
+    assert active_env_file == env_file
+    assert compose_env_file == env_file
+    service_env = local_service_environ({}, env_file=active_env_file)
+    assert service_env["AWF_API_TOKEN"] == "operator-token"
+    assert service_env["AWF_POSTGRES_PASSWORD"] == "operator-password"
+    assert service_env["AWF_DOCKER_HOST"] == "unix:///tmp/awf-review.sock"
+    assert service_env["AWF_ROOT_ONLY"] == "operator-only"
 
 
 @pytest.mark.integration
