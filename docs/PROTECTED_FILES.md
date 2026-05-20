@@ -51,8 +51,11 @@ Allowed without ownership:
 - Bumping a pinned version `uses:` ref when the action owner/repo is unchanged
   and AWF can prove the new version is not a downgrade.
 - Replacing a raw SHA `uses:` ref with a full semver tag for the same action.
-- Updating non-sensitive `with:` inputs during an allowed pinned `uses:` bump
-  when the new values do not reference unsafe GitHub Actions expressions.
+- Updating already-present, approved non-sensitive `with:` inputs during an
+  allowed pinned `uses:` bump when the action/input pair is explicitly
+  allowlisted and the new value does not reference unsafe GitHub Actions
+  expressions. The current allowlist permits `actions/setup-python`
+  `python-version` updates.
 - Adding jobs that are informational/comment/notify only and do not run tests,
   lint, coverage, build, deploy, publish, or release commands.
 
@@ -60,6 +63,9 @@ Blocked without ownership:
 
 - Switching a pinned version `uses:` ref to a raw SHA, or switching between raw
   SHAs, because AWF cannot prove the new commit is a non-downgrade locally.
+- Adding, removing, or changing unapproved `with:` inputs during a pinned
+  `uses:` bump, including behavioral inputs such as `script`, commands, paths,
+  or action-specific options that AWF cannot prove safe locally.
 - Adding or changing sensitive `with:` inputs such as tokens, secrets,
   passwords, credentials, private keys, or values sourced from unsafe GitHub
   Actions expressions during a pinned `uses:` bump.

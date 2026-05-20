@@ -86,6 +86,9 @@ _SENSITIVE_WORKFLOW_WITH_INPUT_PARTS: Final[frozenset[str]] = frozenset(
 _SENSITIVE_WORKFLOW_WITH_INPUT_NAMES: Final[frozenset[str]] = frozenset(
     {"access-key", "api-key", "client-secret", "deploy-key", "private-key", "ssh-key"}
 )
+_WORKFLOW_PINNED_BUMP_ALLOWED_WITH_KEYS: Final[dict[str, frozenset[str]]] = {
+    "actions/setup-python": frozenset({"python-version"}),
+}
 _INFORMATIONAL_MARKERS: Final[tuple[str, ...]] = (
     "comment",
     "pr comment",
@@ -1521,7 +1524,11 @@ def _workflow_existing_step_violations(
     if (
         is_allowed_pinned_bump
         and old_step.get("with") != new_step.get("with")
-        and not _workflow_pinned_bump_with_inputs_are_safe(new_step.get("with"))
+        and not _workflow_pinned_bump_with_inputs_are_safe(
+            new_uses=new_uses,
+            old_inputs=old_step.get("with"),
+            new_inputs=new_step.get("with"),
+        )
     ):
         violations.append(
             _violation(
@@ -1531,7 +1538,8 @@ def _workflow_existing_step_violations(
                 line=_line_for_workflow_step_key(new_text, new_step, key="with"),
                 reason=(
                     "workflow action with inputs changed during pinned ref bump "
-                    f"with unsafe input names or expressions: {section_prefix}.with"
+                    "with unapproved input changes, unsafe input names, or unsafe "
+                    f"expressions: {section_prefix}.with"
                 ),
             )
         )
@@ -2337,7 +2345,56 @@ def _comment_notify_action_with_value_is_safe(value: object) -> bool:
     return isinstance(value, bool | int | float)
 
 
-def _workflow_pinned_bump_with_inputs_are_safe(inputs: object) -> bool:
+def _workflow_pinned_bump_with_inputs_are_safe(
+    *,
+    new_uses: str | None,
+    old_inputs: object,
+    new_inputs: object,
+) -> bool:
+    if new_uses is None:
+        return False
+    old_map = _normalized_workflow_with_inputs(old_inputs)
+    new_map = _normalized_workflow_with_inputs(new_inputs)
+    if old_map is None or new_map is None:
+        return False
+    changed_keys = {
+        key for key in set(old_map) | set(new_map) if old_map.get(key) != new_map.get(key)
+    }
+    if not changed_keys:
+        return True
+    allowed_keys = _workflow_pinned_bump_allowed_with_keys(new_uses)
+    if not changed_keys <= allowed_keys:
+        return False
+    if any(key not in old_map or key not in new_map for key in changed_keys):
+        return False
+    return _workflow_with_inputs_have_safe_names_and_values(new_inputs)
+
+
+def _workflow_pinned_bump_allowed_with_keys(uses: str) -> frozenset[str]:
+    parts = _uses_action_and_ref(uses)
+    if parts is None:
+        return frozenset()
+    action, _ref = parts
+    return _WORKFLOW_PINNED_BUMP_ALLOWED_WITH_KEYS.get(action.lower(), frozenset())
+
+
+def _normalized_workflow_with_inputs(inputs: object) -> dict[str, object] | None:
+    if inputs is None:
+        return {}
+    if not isinstance(inputs, Mapping):
+        return None
+    normalized: dict[str, object] = {}
+    for key, value in inputs.items():
+        if not isinstance(key, str):
+            return None
+        normalized_key = _normalize_workflow_with_input_key(key)
+        if not normalized_key or normalized_key in normalized:
+            return None
+        normalized[normalized_key] = value
+    return normalized
+
+
+def _workflow_with_inputs_have_safe_names_and_values(inputs: object) -> bool:
     if inputs is None:
         return True
     if not isinstance(inputs, Mapping):
@@ -2352,8 +2409,12 @@ def _workflow_pinned_bump_with_inputs_are_safe(inputs: object) -> bool:
     return True
 
 
+def _normalize_workflow_with_input_key(key: str) -> str:
+    return key.strip().lower().replace("_", "-")
+
+
 def _is_sensitive_workflow_with_input_key(key: str) -> bool:
-    normalized = key.strip().lower().replace("_", "-")
+    normalized = _normalize_workflow_with_input_key(key)
     parts = tuple(part for part in normalized.split("-") if part)
     if any(part in _SENSITIVE_WORKFLOW_WITH_INPUT_PARTS for part in parts):
         return True
