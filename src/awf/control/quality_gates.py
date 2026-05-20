@@ -59,6 +59,24 @@ _COMMENT_NOTIFY_CAPABLE_ACTION_USES: Final[frozenset[str]] = frozenset(
         "actions/github-script",
     }
 )
+_GITHUB_SCRIPT_COMMENT_ALLOWED_REST_METHODS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("issues", "createComment"),
+        ("issues", "updateComment"),
+        ("pulls", "createReviewComment"),
+    }
+)
+_GITHUB_SCRIPT_REST_METHOD_RE: Final = re.compile(
+    r"\bgithub\.rest\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_GITHUB_SCRIPT_BLOCKED_ACCESS_RE: Final = re.compile(
+    r"\b(?:core|exec|glob|io)\s*\."
+    r"|\b(?:eval|fetch|Function|require|setInterval|setTimeout)\s*\("
+    r"|\bimport\s*\("
+    r"|\bprocess\s*\."
+    r"|\bgithub\s*\["
+    r"|\bgithub\.(?:graphql|paginate|request)\s*\("
+)
 _SENSITIVE_WORKFLOW_WITH_INPUT_PARTS: Final[frozenset[str]] = frozenset(
     {"credential", "credentials", "password", "secret", "secrets", "token"}
 )
@@ -2161,7 +2179,11 @@ def _is_comment_or_notify_capable_step_uses(step: Mapping[str, Any], uses: str) 
             normalized_action,
             step.get("with"),
         )
-    return normalized_action in _COMMENT_NOTIFY_CAPABLE_ACTION_USES and "with" not in step
+    if normalized_action not in _COMMENT_NOTIFY_CAPABLE_ACTION_USES:
+        return False
+    if normalized_action == "actions/github-script":
+        return _github_script_comment_notify_inputs_are_safe(step.get("with"))
+    return "with" not in step
 
 
 def _comment_notify_action_with_inputs_are_safe(action: str, inputs: object) -> bool:
@@ -2178,6 +2200,34 @@ def _comment_notify_action_with_inputs_are_safe(action: str, inputs: object) -> 
         if not _comment_notify_action_with_value_is_safe(value):
             return False
     return True
+
+
+def _github_script_comment_notify_inputs_are_safe(inputs: object) -> bool:
+    if inputs is None:
+        return True
+    if not isinstance(inputs, Mapping):
+        return False
+    script: object = None
+    for key, value in inputs.items():
+        if not isinstance(key, str):
+            return False
+        if key.lower() != "script":
+            return False
+        if not isinstance(value, str):
+            return False
+        if _has_unsafe_github_actions_expression((value,)):
+            return False
+        script = value
+    return isinstance(script, str) and _github_script_comment_notify_script_is_safe(script)
+
+
+def _github_script_comment_notify_script_is_safe(script: str) -> bool:
+    if _GITHUB_SCRIPT_BLOCKED_ACCESS_RE.search(script) is not None:
+        return False
+    rest_methods = tuple(_GITHUB_SCRIPT_REST_METHOD_RE.findall(script))
+    if not rest_methods:
+        return False
+    return all(method in _GITHUB_SCRIPT_COMMENT_ALLOWED_REST_METHODS for method in rest_methods)
 
 
 def _comment_notify_action_with_value_is_safe(value: object) -> bool:
