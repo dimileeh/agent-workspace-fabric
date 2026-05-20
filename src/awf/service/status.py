@@ -20,7 +20,12 @@ from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
-from awf.service.config import ServiceSettings, resolve_local_service_provider_environ
+from awf.service.config import (
+    _COMPOSE_ENV_FILE_OMITTED,
+    ServiceSettings,
+    _ComposeEnvFileInput,
+    resolve_local_service_provider_environ,
+)
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
@@ -107,7 +112,7 @@ async def collect_service_status(
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     compose_file: Path | None = None,
-    compose_env_file: Path | None = None,
+    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     provider_http_get: ProviderHttpGet | None = None,
     egress_audit_summary_lookup: EgressAuditSummaryLookup | None = None,
 ) -> dict[str, object]:

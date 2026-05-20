@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
@@ -34,6 +35,14 @@ _AWF_SOURCE_ROOT_MARKERS = (
     "src/awf/__init__.py",
     "docker/compose/local-service.yml",
 )
+
+
+class _ComposeEnvFileOmitted:
+    """Sentinel for distinguishing omitted env-file arguments from explicit null."""
+
+
+_COMPOSE_ENV_FILE_OMITTED = _ComposeEnvFileOmitted()
+type _ComposeEnvFileInput = Path | None | _ComposeEnvFileOmitted
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -200,7 +209,7 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
 def local_service_environ(
     environ: Mapping[str, str] | None = None,
     *,
-    env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
+    env_file: Path | None = LOCAL_SERVICE_COMPOSE_ENV_FILE,
 ) -> dict[str, str]:
     """Return the environment local Compose services actually receive.
 
@@ -211,8 +220,10 @@ def local_service_environ(
     """
 
     merged: dict[str, str] = {}
-    resolved_env_file = resolve_local_service_compose_env_file(env_file)
-    if resolved_env_file is not None:
+    if (
+        env_file is not None
+        and (resolved_env_file := resolve_local_service_compose_env_file(env_file)) is not None
+    ):
         merged.update(
             {
                 key: value
@@ -230,15 +241,16 @@ def resolve_local_service_provider_environ(
     provider_environ: Mapping[str, str] | None,
     environ: Mapping[str, str],
     compose_file: Path | None,
-    compose_env_file: Path | None,
+    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
 ) -> Mapping[str, str]:
     """Resolve provider auth inputs from explicit or adjacent Compose env files."""
 
     if provider_environ is not None:
         return provider_environ
 
-    env_file = compose_env_file
-    if env_file is None and compose_file is not None:
+    discover_adjacent_env_file = isinstance(compose_env_file, _ComposeEnvFileOmitted)
+    env_file = None if discover_adjacent_env_file else cast(Path | None, compose_env_file)
+    if env_file is None and discover_adjacent_env_file and compose_file is not None:
         candidate = compose_file.parent / ".env"
         if candidate.exists() and _can_use_adjacent_provider_env_file(candidate, compose_file):
             env_file = candidate

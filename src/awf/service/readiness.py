@@ -13,8 +13,11 @@ from typing import Any, Literal, Protocol, cast
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.onboarding import preview_project_onboarding
 from awf.service.config import (
+    _COMPOSE_ENV_FILE_OMITTED,
     LOCAL_SERVICE_COMPOSE_FILE,
     ServiceSettings,
+    _ComposeEnvFileInput,
+    _ComposeEnvFileOmitted,
     resolve_local_service_provider_environ,
 )
 from awf.service.doctor import collect_doctor_report
@@ -51,7 +54,7 @@ class StatusCollector(Protocol):
         provider_environ: Mapping[str, str] | None = None,
         environ: Mapping[str, str] | None = None,
         compose_file: Path | None = None,
-        compose_env_file: Path | None = None,
+        compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     ) -> Awaitable[dict[str, object]]: ...
 
 
@@ -67,7 +70,7 @@ class DoctorCollector(Protocol):
         environ: Mapping[str, str] | None = None,
         status_collector: StatusCollector | None = None,
         compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
-        compose_env_file: Path | None = None,
+        compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     ) -> Awaitable[DoctorReport]:
         """Collect a doctor report using the readiness command context."""
         ...  # pragma: no cover
@@ -175,7 +178,7 @@ async def collect_core_readiness_report(
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
-    compose_env_file: Path | None = None,
+    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     allow_generic_failures: bool = False,
     allow_slo_breach: bool = False,
     status_collector: StatusCollector = collect_service_status,
@@ -197,11 +200,19 @@ async def collect_core_readiness_report(
     checks: list[CoreReadinessCheck] = []
     status_payload: dict[str, object] | None = None
     try:
-        status_payload = await status_collector(
-            settings,
-            strict_providers=strict,
-            provider_environ=provider_env,
-        )
+        if isinstance(compose_env_file, _ComposeEnvFileOmitted):
+            status_payload = await status_collector(
+                settings,
+                strict_providers=strict,
+                provider_environ=provider_env,
+            )
+        else:
+            status_payload = await status_collector(
+                settings,
+                strict_providers=strict,
+                provider_environ=provider_env,
+                compose_env_file=compose_env_file,
+            )
         checks.append(_service_status_check(status_payload))
         checks.append(_provider_readiness_check(status_payload))
         checks.append(_cleanup_posture_check(status_payload))
@@ -218,15 +229,25 @@ async def collect_core_readiness_report(
 
     cached_status_collector = _cached_status_collector(status_payload)
     try:
-        doctor_report = await doctor_collector(
-            settings,
-            strict_providers=strict,
-            provider_environ=provider_env,
-            environ=env,
-            status_collector=cached_status_collector,
-            compose_file=compose_file,
-            compose_env_file=compose_env_file,
-        )
+        if isinstance(compose_env_file, _ComposeEnvFileOmitted):
+            doctor_report = await doctor_collector(
+                settings,
+                strict_providers=strict,
+                provider_environ=provider_env,
+                environ=env,
+                status_collector=cached_status_collector,
+                compose_file=compose_file,
+            )
+        else:
+            doctor_report = await doctor_collector(
+                settings,
+                strict_providers=strict,
+                provider_environ=provider_env,
+                environ=env,
+                status_collector=cached_status_collector,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
+            )
         checks.append(_doctor_check(doctor_report))
     except Exception as exc:
         checks.append(

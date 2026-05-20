@@ -14,7 +14,10 @@ from typing import Any, TypedDict
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
 from awf.service.config import (
+    _COMPOSE_ENV_FILE_OMITTED,
     ServiceSettings,
+    _ComposeEnvFileInput,
+    _ComposeEnvFileOmitted,
     resolve_local_service_provider_environ,
     service_config_payload,
 )
@@ -68,7 +71,7 @@ async def collect_support_bundle(
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     compose_file: Path | None = None,
-    compose_env_file: Path | None = None,
+    compose_env_file: _ComposeEnvFileInput = _COMPOSE_ENV_FILE_OMITTED,
     failure_window_hours: int = 24,
     status_collector: Any = None,
     doctor_collector: Any = None,
@@ -94,7 +97,7 @@ async def collect_support_bundle(
     if compose_file is not None:
         status_kwargs["compose_file"] = compose_file
         doctor_kwargs["compose_file"] = compose_file
-    if compose_env_file is not None:
+    if not isinstance(compose_env_file, _ComposeEnvFileOmitted):
         status_kwargs["compose_env_file"] = compose_env_file
         doctor_kwargs["compose_env_file"] = compose_env_file
     doctor_task = _doctor_collector(
