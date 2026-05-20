@@ -49,6 +49,9 @@ class StatusCollector(Protocol):
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: Path | None = None,
     ) -> Awaitable[dict[str, object]]: ...
 
 
@@ -338,8 +341,11 @@ def _cached_status_collector(payload: dict[str, object] | None) -> StatusCollect
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: Path | None = None,
     ) -> dict[str, object]:
-        del strict_providers, provider_environ
+        del strict_providers, provider_environ, environ, compose_file, compose_env_file
         return payload
 
     return cast(StatusCollector, _collect)
