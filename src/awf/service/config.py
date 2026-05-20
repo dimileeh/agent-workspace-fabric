@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -18,15 +18,22 @@ from awf.common.config import (
     DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
     DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
     Settings,
+    settings_constructor_fields,
     validate_production_settings,
 )
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
+DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
 LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
+_AWF_SOURCE_ROOT_MARKERS = (
+    "pyproject.toml",
+    "src/awf/__init__.py",
+    "docker/compose/local-service.yml",
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -63,6 +70,40 @@ class ServiceSettings:
     local_capacity_dind_slots: int | None = None
 
 
+@dataclass
+class _ProjectDotenvLookup:
+    """Cache project dotenv candidate discovery within one settings resolution."""
+
+    _candidates: tuple[Path, ...] | None = None
+    _values_by_file: dict[Path, dict[str, str]] = field(default_factory=dict)
+
+    def value(self, key: str) -> str | None:
+        for env_file in self._candidate_paths():
+            if not env_file.exists():
+                continue
+            value = _env_value(self._values(env_file), key)
+            if value is not None:
+                return value
+        return None
+
+    def _candidate_paths(self) -> tuple[Path, ...]:
+        if self._candidates is None:
+            self._candidates = _project_dotenv_candidates()
+        return self._candidates
+
+    def _values(self, env_file: Path) -> dict[str, str]:
+        cache_key = env_file.resolve()
+        values = self._values_by_file.get(cache_key)
+        if values is None:
+            values = {
+                env_key: env_value
+                for env_key, env_value in dotenv_values(env_file).items()
+                if env_value is not None
+            }
+            self._values_by_file[cache_key] = values
+        return values
+
+
 def resolve_service_settings(
     base: Settings | None = None,
     *,
@@ -73,28 +114,46 @@ def resolve_service_settings(
     AWF is PostgreSQL-only. Service mode uses the configured database URL, with
     the local Postgres URL as the default unless ``AWF_DATABASE_URL`` is
     explicitly set. When ``environ`` is ``None``, values loaded from ``.env`` by
-    pydantic-settings count as explicit.
+    pydantic-settings count as explicit. When ``environ`` is provided, only the
+    provided environment or direct ``base`` constructor overrides count.
     """
 
     settings = base or Settings()
     env = os.environ if environ is None else environ
-    work_dir_env = local_service_environ(env) if environ is None else env
+    service_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
+    project_dotenv_lookup = _ProjectDotenvLookup()
 
-    database_url_explicit = _has_env_key(env, "AWF_DATABASE_URL")
-    if environ is None:
-        database_url_explicit = database_url_explicit or "database_url" in settings.model_fields_set
+    host_database_url = _env_value(env, "AWF_DATABASE_URL")
+    database_url_explicit = host_database_url is not None and _database_url_env_is_explicit(
+        env,
+        service_env,
+        project_dotenv_lookup=project_dotenv_lookup,
+    )
+    if not database_url_explicit:
+        database_url_explicit = _settings_database_url_is_explicit(
+            settings,
+            service_env,
+            require_init_field=environ is not None,
+        )
 
     if not database_url_explicit:
-        database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
+        database_url = _default_local_service_database_url(service_env)
 
-    work_dir = _resolve_service_work_dir(settings, work_dir_env, host_environ=env)
+    api_base_url = _resolve_service_api_base_url(
+        settings,
+        env,
+        service_env,
+        require_init_field=environ is not None,
+        project_dotenv_lookup=project_dotenv_lookup,
+    )
+    work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
 
     return ServiceSettings(
         service_name=settings.service_name,
         env=settings.env,
-        api_base_url=settings.api_base_url,
+        api_base_url=api_base_url,
         console_url=settings.console_url,
         database_url=database_url,
         docker_host=settings.docker_host,
@@ -152,9 +211,14 @@ def local_service_environ(
     """
 
     merged: dict[str, str] = {}
-    if env_file.exists():
+    resolved_env_file = resolve_local_service_compose_env_file(env_file)
+    if resolved_env_file is not None:
         merged.update(
-            {key: value for key, value in dotenv_values(env_file).items() if value is not None}
+            {
+                key: value
+                for key, value in dotenv_values(resolved_env_file).items()
+                if value is not None
+            }
         )
     merged.update(os.environ if environ is None else dict(environ))
     _populate_compose_postgres_password(merged)
@@ -222,6 +286,51 @@ def _local_service_asset_path(path: Path) -> Path | None:
     return path if path.is_absolute() else asset_root / path
 
 
+def resolve_local_service_compose_env_file(
+    env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
+) -> Path | None:
+    """Resolve the default local service Compose env file from nested commands."""
+
+    expanded = env_file.expanduser()
+    if expanded.is_absolute():
+        return expanded if expanded.exists() else None
+
+    candidates: list[Path] = []
+    if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
+        candidates.append(Path.cwd().resolve() / expanded)
+        candidates.extend(
+            root / expanded for root in _awf_source_search_roots(Path.cwd().resolve())
+        )
+        module_file = Path(__file__).resolve()
+        candidates.extend(root / expanded for root in _awf_source_search_roots(module_file.parent))
+    else:
+        candidates.append(expanded.resolve())
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def _awf_source_search_roots(start: Path) -> tuple[Path, ...]:
+    """Return the nearest AWF source root for default env discovery."""
+
+    roots = (start, *start.parents)
+    for root in roots:
+        if _is_awf_source_root(root):
+            return (root,)
+    return ()
+
+
+def _is_awf_source_root(candidate: Path) -> bool:
+    return all((candidate / marker).exists() for marker in _AWF_SOURCE_ROOT_MARKERS)
+
+
 def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
     """Expose the local Postgres password as the variable Compose interpolates."""
 
@@ -238,10 +347,242 @@ def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
         environ["AWF_POSTGRES_PASSWORD"] = password
 
 
-def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
-    """Return true when ``environ`` contains ``key`` using case-insensitive matching."""
-    wanted = key.upper()
-    return any(existing.upper() == wanted for existing in environ)
+def _default_local_service_database_url(environ: Mapping[str, str]) -> str:
+    """Return the host-side local Postgres URL matching Compose port overrides."""
+
+    host_port = _env_value(environ, "AWF_POSTGRES_HOST_PORT")
+    if not host_port:
+        return DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    parsed_port = _parse_host_port("AWF_POSTGRES_HOST_PORT", host_port)
+    url = make_url(DEFAULT_LOCAL_SERVICE_DATABASE_URL).set(port=parsed_port)
+    return url.render_as_string(hide_password=False)
+
+
+def _resolve_service_api_base_url(
+    settings: Settings,
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
+) -> str:
+    """Return the host-side API base URL matching Compose port overrides."""
+
+    host_api_base_url = _env_value(environ, "AWF_API_BASE_URL")
+    if host_api_base_url is not None and _api_base_url_env_is_explicit(
+        environ,
+        service_environ,
+        project_dotenv_lookup=project_dotenv_lookup,
+    ):
+        return host_api_base_url
+    if _settings_api_base_url_is_explicit(
+        settings,
+        service_environ,
+        require_init_field=require_init_field,
+    ):
+        return settings.api_base_url
+    # This adds new information only for AWF_API_BASE_URL supplied by the
+    # Compose .env while absent from the host env; host values were checked above.
+    service_api_base_url = _env_value(service_environ, "AWF_API_BASE_URL")
+    if service_api_base_url is not None and _api_base_url_is_explicit(
+        service_api_base_url,
+        service_environ,
+    ):
+        return service_api_base_url
+    return _default_local_service_api_base_url(service_environ)
+
+
+def _default_local_service_api_base_url(environ: Mapping[str, str]) -> str:
+    """Return the host-side local API URL matching Compose port overrides."""
+
+    host_port = _env_value(environ, "AWF_API_HOST_PORT")
+    if not host_port:
+        return DEFAULT_LOCAL_SERVICE_API_BASE_URL
+    parsed_port = _parse_host_port("AWF_API_HOST_PORT", host_port)
+    return f"http://localhost:{parsed_port}"
+
+
+def _parse_host_port(env_key: str, value: str) -> int:
+    """Parse a Compose host port override into a TCP port number."""
+
+    invalid_port_message = f"{env_key} must be an integer between 1 and 65535; got {value!r}"
+    try:
+        parsed_port = int(value)
+    except ValueError as exc:
+        raise ValueError(invalid_port_message) from exc
+    if not 1 <= parsed_port <= 65535:
+        raise ValueError(invalid_port_message)
+    return parsed_port
+
+
+def _settings_api_base_url_is_explicit(
+    settings: Settings,
+    environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
+) -> bool:
+    """Return true when settings carries a non-derivable API base URL."""
+
+    if "api_base_url" in _settings_init_fields(settings):
+        return True
+    if require_init_field or "api_base_url" not in settings.model_fields_set:
+        return False
+    return _api_base_url_is_explicit(settings.api_base_url, environ)
+
+
+def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> bool:
+    """Return true when the API base URL should not be derived from Compose ports.
+
+    A default-valued ``AWF_API_BASE_URL`` is treated as non-explicit when
+    ``AWF_API_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged.
+    """
+
+    return not (
+        api_base_url == DEFAULT_LOCAL_SERVICE_API_BASE_URL
+        and _env_value(environ, "AWF_API_HOST_PORT")
+    )
+
+
+def _api_base_url_env_is_explicit(
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+    *,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
+) -> bool:
+    """Return true when the host environment carries a non-derivable API URL.
+
+    A default-valued ``AWF_API_BASE_URL`` is treated as non-explicit when
+    ``AWF_API_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged. If a project ``.env`` was
+    sourced into the host shell, a matching default URL is also non-explicit
+    when the merged Compose environment carries the API host-port override.
+    """
+
+    api_base_url = _env_value(environ, "AWF_API_BASE_URL")
+    if api_base_url is None:
+        return False
+    if api_base_url != DEFAULT_LOCAL_SERVICE_API_BASE_URL:
+        return True
+    if _env_value(environ, "AWF_API_HOST_PORT"):
+        return False
+    return not (
+        _env_value(service_environ, "AWF_API_HOST_PORT")
+        and _project_dotenv_value("AWF_API_BASE_URL", lookup=project_dotenv_lookup) == api_base_url
+    )
+
+
+def _settings_database_url_is_explicit(
+    settings: Settings,
+    environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
+) -> bool:
+    """Return true when settings carries a non-derivable database URL.
+
+    A default-valued database URL is treated as derivable when
+    ``AWF_POSTGRES_HOST_PORT`` is present, unless the value came directly from a
+    ``Settings(...)`` constructor override.
+    """
+
+    if "database_url" in _settings_init_fields(settings):
+        return True
+    if require_init_field or "database_url" not in settings.model_fields_set:
+        return False
+    return not (
+        settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+        and _env_value(environ, "AWF_POSTGRES_HOST_PORT")
+    )
+
+
+def _database_url_env_is_explicit(
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+    *,
+    project_dotenv_lookup: _ProjectDotenvLookup | None = None,
+) -> bool:
+    """Return true when the host environment carries a non-derivable database URL.
+
+    A default-valued ``AWF_DATABASE_URL`` is treated as non-explicit when
+    ``AWF_POSTGRES_HOST_PORT`` is also present, allowing the port-derived URL to
+    replace a stale default that was left unchanged. If a project ``.env`` was
+    sourced into the host shell, a matching default URL is also non-explicit
+    when the merged Compose environment carries the Postgres host-port override.
+    """
+
+    database_url = _env_value(environ, "AWF_DATABASE_URL")
+    if database_url is None:
+        return False
+    if database_url != DEFAULT_LOCAL_SERVICE_DATABASE_URL:
+        return True
+    if _env_value(environ, "AWF_POSTGRES_HOST_PORT"):
+        return False
+    return not (
+        _env_value(service_environ, "AWF_POSTGRES_HOST_PORT")
+        and _project_dotenv_value("AWF_DATABASE_URL", lookup=project_dotenv_lookup) == database_url
+    )
+
+
+def _project_dotenv_value(
+    key: str,
+    *,
+    lookup: _ProjectDotenvLookup | None = None,
+) -> str | None:
+    """Return a value from the project .env associated with local Compose."""
+
+    return (lookup or _ProjectDotenvLookup()).value(key)
+
+
+def _project_dotenv_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    cwd = Path.cwd().resolve()
+
+    resolved_env_file = resolve_local_service_compose_env_file()
+    if resolved_env_file is not None:
+        project_dotenv = _project_dotenv_from_compose_env_file(resolved_env_file)
+        project_root = project_dotenv.parent.resolve()
+        if cwd == project_root or project_root in cwd.parents:
+            candidates.extend(_project_dotenv_ancestor_candidates(cwd, project_root))
+        candidates.append(project_dotenv)
+    else:
+        for root in _awf_source_search_roots(cwd):
+            candidates.extend(_project_dotenv_ancestor_candidates(cwd, root))
+
+    return _dedupe_paths(candidates)
+
+
+def _project_dotenv_ancestor_candidates(start: Path, root: Path) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for directory in (start, *start.parents):
+        candidates.append(directory / ".env")
+        if directory == root:
+            break
+    return tuple(candidates)
+
+
+def _dedupe_paths(paths: list[Path]) -> tuple[Path, ...]:
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(path)
+    return tuple(deduped)
+
+
+def _project_dotenv_from_compose_env_file(env_file: Path) -> Path:
+    project_root = env_file
+    for _ in LOCAL_SERVICE_COMPOSE_ENV_FILE.parts:
+        project_root = project_root.parent
+    return project_root / ".env"
+
+
+def _settings_init_fields(settings: Settings) -> frozenset[str]:
+    """Return direct constructor-provided settings fields."""
+
+    return settings_constructor_fields(settings)
 
 
 def _env_value(environ: Mapping[str, str], key: str) -> str | None:

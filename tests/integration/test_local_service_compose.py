@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -26,6 +27,120 @@ def _copy_bootstrap_assets(checkout: Path) -> None:
         target = checkout / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+
+
+def _compose_template_token_value(template: str, inner: str, env: dict[str, str]) -> str:
+    if not inner:
+        raise ValueError("Compose template variable name must not be empty")
+
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:\?|:\+|-|\?|\+)(.*))?", inner)
+    if match is None:
+        raise ValueError(f"Unsupported Compose template: {template}")
+    key, operator, operand = match.groups(default="")
+    resolved = env.get(key)
+    if operator == "":
+        return env.get(key, "")
+    if operator == ":-":
+        return operand if resolved in (None, "") else resolved
+    if operator == "-":
+        return operand if resolved is None else resolved
+    if operator == ":?":
+        if resolved in (None, ""):
+            raise ValueError(operand or f"{key} is required")
+        return resolved
+    if operator == "?":
+        if resolved is None:
+            raise ValueError(operand or f"{key} is required")
+        return resolved
+    if operator == ":+":
+        return operand if resolved not in (None, "") else ""
+    return operand if resolved is not None else ""
+
+
+def _compose_template_value(value: str, env: dict[str, str]) -> str:
+    rendered: list[str] = []
+    index = 0
+    while index < len(value):
+        if value.startswith("$$", index):
+            rendered.append("$")
+            index += 2
+            continue
+        if value.startswith("${", index):
+            end = value.find("}", index + 2)
+            if end == -1:
+                rendered.append(value[index])
+                index += 1
+                continue
+            template = value[index : end + 1]
+            rendered.append(
+                _compose_template_token_value(template, template[2:-1], env),
+            )
+            index = end + 1
+            continue
+        rendered.append(value[index])
+        index += 1
+    return "".join(rendered)
+
+
+def _compose_short_port_mapping_fields(mapping: str) -> list[str]:
+    fields: list[str] = []
+    current: list[str] = []
+    in_template = False
+    in_brackets = False
+    index = 0
+
+    while index < len(mapping):
+        if not in_template and mapping.startswith("${", index):
+            in_template = True
+            current.append("${")
+            index += 2
+            continue
+
+        char = mapping[index]
+        if in_template:
+            current.append(char)
+            if char == "}":
+                in_template = False
+        elif char == "[":
+            in_brackets = True
+            current.append(char)
+        elif char == "]":
+            in_brackets = False
+            current.append(char)
+        elif char == ":" and not in_brackets:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+
+    fields.append("".join(current))
+    return fields
+
+
+def _compose_published_host_port(mapping: str) -> str:
+    fields = _compose_short_port_mapping_fields(mapping)
+    if len(fields) < 2:
+        raise ValueError(f"Compose port mapping has no published host port: {mapping}")
+    return fields[-2]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        ("${AWF_API_HOST_PORT:-8000}:8000", "${AWF_API_HOST_PORT:-8000}"),
+        ("127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+        ("0.0.0.0:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+        (
+            "${AWF_BIND_IP:-127.0.0.1}:${AWF_POSTGRES_HOST_PORT:-5433}:5432",
+            "${AWF_POSTGRES_HOST_PORT:-5433}",
+        ),
+        ("[::1]:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
+    ],
+)
+def test_compose_published_host_port_extracts_port_template(mapping: str, expected: str) -> None:
+    assert _compose_published_host_port(mapping) == expected
 
 
 @pytest.mark.integration
@@ -139,7 +254,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
     )
     assert "awf_dev" not in yaml.safe_dump(postgres["environment"])
-    assert postgres["ports"] == ["127.0.0.1:5433:5432"]
+    assert postgres["ports"] == ["127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"]
+
+    api = services["api"]
+    assert api["ports"] == ["${AWF_API_HOST_PORT:-8000}:8000"]
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
@@ -224,3 +342,56 @@ def test_init_env_seeding_uses_real_source_checkout_compose_paths(
     assert service_env["AWF_POSTGRES_PASSWORD"] == "operator-password"
     assert service_env["AWF_DOCKER_HOST"] == "unix:///tmp/awf-review.sock"
     assert service_env["AWF_ROOT_ONLY"] == "operator-only"
+
+
+@pytest.mark.integration
+def test_local_service_compose_port_templates_support_default_and_override_values() -> None:
+    compose_path = Path("docker/compose/local-service.yml")
+    data = yaml.safe_load(compose_path.read_text())
+    services = data["services"]
+
+    postgres_mapping = services["postgres"]["ports"][0]
+    api_mapping = services["api"]["ports"][0]
+    postgres_host = _compose_published_host_port(postgres_mapping)
+    api_host = _compose_published_host_port(api_mapping)
+
+    assert postgres_mapping == "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
+    assert api_mapping == "${AWF_API_HOST_PORT:-8000}:8000"
+
+    assert _compose_template_value(postgres_host, {}) == "5433"
+    assert _compose_template_value(api_host, {}) == "8000"
+    assert _compose_template_value(postgres_host, {"AWF_POSTGRES_HOST_PORT": ""}) == "5433"
+    assert _compose_template_value(api_host, {"AWF_API_HOST_PORT": ""}) == "8000"
+
+    override_env = {
+        "AWF_POSTGRES_HOST_PORT": "55333",
+        "AWF_API_HOST_PORT": "9100",
+    }
+    assert _compose_template_value(postgres_host, override_env) == "55333"
+    assert _compose_template_value(api_host, override_env) == "9100"
+
+
+@pytest.mark.unit
+def test_compose_template_value_matches_common_interpolation_forms() -> None:
+    assert _compose_template_value("${AWF_BARE}", {"AWF_BARE": "resolved"}) == "resolved"
+    assert _compose_template_value("${AWF_BARE}", {}) == ""
+    assert (
+        _compose_template_value("$${AWF_ESCAPED:-5433}", {"AWF_ESCAPED": "15433"})
+        == "${AWF_ESCAPED:-5433}"
+    )
+    assert _compose_template_value("prefix $$ ${AWF_BARE}", {"AWF_BARE": "ok"}) == "prefix $ ok"
+    assert _compose_template_value("${AWF_DEFAULT-default}", {}) == "default"
+    assert _compose_template_value("${AWF_DEFAULT-default}", {"AWF_DEFAULT": ""}) == ""
+    assert _compose_template_value("${AWF_DEFAULT:-default}", {"AWF_DEFAULT": ""}) == "default"
+    assert (
+        _compose_template_value("${AWF_BIND_IP:-127.0.0.1}:${AWF_PORT:-5433}", {})
+        == "127.0.0.1:5433"
+    )
+    assert (
+        _compose_template_value("${AWF_REQUIRED?set-AWF_REQUIRED}", {"AWF_REQUIRED": "ok"}) == "ok"
+    )
+    assert (
+        _compose_template_value("${AWF_REQUIRED:?set AWF_REQUIRED}", {"AWF_REQUIRED": "ok"}) == "ok"
+    )
+    with pytest.raises(ValueError, match="AWF_REQUIRED"):
+        _compose_template_value("${AWF_REQUIRED:?set AWF_REQUIRED}", {})

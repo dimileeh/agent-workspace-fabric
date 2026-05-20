@@ -130,6 +130,17 @@ done
 AWF reports these as service status readiness problems; treat them as infra issues
 before provider-level triage:
 
+If the API host port was customized with `AWF_API_HOST_PORT`, keep operator
+checks (`awf service status` / `awf service doctor`) and any manual curl requests
+pointed at the matching API base URL, for example:
+
+```bash
+export AWF_API_HOST_PORT=9001
+export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf service status --format pretty
+curl "${AWF_API_BASE_URL}/readyz?provider=github"
+```
+
 1. Check readiness signals and status detail:
 
 ```bash
@@ -303,6 +314,17 @@ Readiness probes are your primary first-run signal.
 
 ```bash
 curl http://localhost:8000/readyz
+```
+
+If `AWF_API_HOST_PORT` is customized, set `AWF_API_BASE_URL` and use that
+URL for host-side API diagnostics (`awf service status`, `awf service doctor`,
+and `curl` checks):
+
+```bash
+export AWF_API_HOST_PORT=9001
+export AWF_API_BASE_URL="http://localhost:${AWF_API_HOST_PORT}"
+awf service status --format pretty
+curl "${AWF_API_BASE_URL}/readyz?provider=github"
 ```
 
 Use provider filtering for a failing dependency:
