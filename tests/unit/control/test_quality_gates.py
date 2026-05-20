@@ -144,7 +144,7 @@ fail_under = 80
 
 
 @pytest.mark.unit
-def test_pyproject_raising_coverage_fail_under_is_blocked_with_specific_reason() -> None:
+def test_pyproject_raising_coverage_fail_under_is_blocked_with_explicit_policy_reason() -> None:
     old_text = """
 [project]
 name = "demo"
@@ -178,6 +178,7 @@ fail_under = 99
     assert violation.section == "tool.coverage.report.fail_under"
     assert violation.line == 5
     assert "coverage fail_under raised from 80 to 99" in violation.reason
+    assert "requires ownership of pyproject.toml" in violation.reason
 
 
 @pytest.mark.unit
@@ -253,6 +254,43 @@ lint = "ruff check ."
     assert [violation.reason for violation in violations] == [
         "pyproject section changed outside allowed metadata/dependency edits: custom",
         "pyproject section changed outside allowed metadata/dependency edits: scripts",
+    ]
+
+
+@pytest.mark.unit
+def test_pyproject_reports_all_unknown_tool_section_changes() -> None:
+    old_text = """
+[project]
+name = "demo"
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == ["tool.black", "tool.isort"]
+    assert [violation.line for violation in violations] == [4, 7]
+    assert [violation.reason for violation in violations] == [
+        "pyproject tool section changed outside allowed edits: tool.black",
+        "pyproject tool section changed outside allowed edits: tool.isort",
     ]
 
 

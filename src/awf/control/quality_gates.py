@@ -447,7 +447,8 @@ def _pyproject_policy_section_violations(
                 elif new_number > old_number:
                     reason = (
                         "coverage fail_under raised from "
-                        f"{_format_number(old_number)} to {_format_number(new_number)}"
+                        f"{_format_number(old_number)} to {_format_number(new_number)}; "
+                        "this protected coverage policy change requires ownership of pyproject.toml"
                     )
                 else:
                     reason = (
@@ -768,16 +769,16 @@ def _pyproject_unknown_change_violations(
                 violations.append(violation)
             continue
         if top_key == "tool":
-            violation = _tool_unknown_change_violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                old_value=old_value,
-                new_value=new_value,
-                old_text=old_text,
-                new_text=new_text,
+            violations.extend(
+                _tool_unknown_change_violations(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    old_value=old_value,
+                    new_value=new_value,
+                    old_text=old_text,
+                    new_text=new_text,
+                )
             )
-            if violation is not None:
-                violations.append(violation)
             continue
         if top_key in {"build-system", "dependency-groups"}:
             continue
@@ -839,7 +840,7 @@ def _project_unknown_change_violation(
     return None
 
 
-def _tool_unknown_change_violation(
+def _tool_unknown_change_violations(
     *,
     path: str,
     protected_pattern: str,
@@ -847,40 +848,47 @@ def _tool_unknown_change_violation(
     new_value: object,
     old_text: str,
     new_text: str,
-) -> QualityGateViolation | None:
+) -> list[QualityGateViolation]:
     if old_value is not None and not isinstance(old_value, Mapping):
-        return _violation(
-            path=path,
-            protected_pattern=protected_pattern,
-            section="tool",
-            line=_line_for_toml_section(old_text, "tool"),
-            reason="tool section has unsupported format",
-        )
+        return [
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section="tool",
+                line=_line_for_toml_section(old_text, "tool"),
+                reason="tool section has unsupported format",
+            )
+        ]
     if new_value is not None and not isinstance(new_value, Mapping):
-        return _violation(
-            path=path,
-            protected_pattern=protected_pattern,
-            section="tool",
-            line=_line_for_toml_section(new_text, "tool"),
-            reason="tool section has unsupported format",
-        )
+        return [
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section="tool",
+                line=_line_for_toml_section(new_text, "tool"),
+                reason="tool section has unsupported format",
+            )
+        ]
     old_tool = cast(Mapping[str, object], old_value or {})
     new_tool = cast(Mapping[str, object], new_value or {})
     policy_tool_sections = {"coverage", "hatch", "mypy", "pytest", "ruff"}
+    violations: list[QualityGateViolation] = []
     for key in sorted(set(old_tool) | set(new_tool)):
         if key in policy_tool_sections:
             continue
         if old_tool.get(key) != new_tool.get(key):
             section = f"tool.{key}"
-            return _violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                section=section,
-                line=_line_for_toml_section(new_text, section)
-                or _line_for_toml_section(old_text, section),
-                reason=f"pyproject tool section changed outside allowed edits: {section}",
+            violations.append(
+                _violation(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    section=section,
+                    line=_line_for_toml_section(new_text, section)
+                    or _line_for_toml_section(old_text, section),
+                    reason=f"pyproject tool section changed outside allowed edits: {section}",
+                )
             )
-    return None
+    return violations
 
 
 def _classify_workflow_change(
