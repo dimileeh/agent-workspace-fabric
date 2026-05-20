@@ -342,6 +342,46 @@ lint = "ruff check ."
 
 
 @pytest.mark.unit
+def test_pyproject_reports_all_unknown_project_key_changes() -> None:
+    old_text = """
+[project]
+name = "demo"
+""".strip()
+    new_text = """
+[project]
+name = "demo"
+
+[project.scripts]
+awf = "awf.cli:app"
+
+[project.entry-points]
+awf = { hook = "awf.hooks:main" }
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert [violation.section for violation in violations] == [
+        "project.entry-points",
+        "project.scripts",
+    ]
+    assert [violation.line for violation in violations] == [7, 4]
+    assert [violation.reason for violation in violations] == [
+        ("pyproject project section changed outside allowed metadata: project.entry-points"),
+        "pyproject project section changed outside allowed metadata: project.scripts",
+    ]
+
+
+@pytest.mark.unit
 def test_pyproject_reports_all_unknown_tool_section_changes() -> None:
     old_text = """
 [project]
@@ -2949,6 +2989,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v4.2.0
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[".github/workflows/ci.yml"],
+        owned_paths=[],
+        protected_file_diffs={
+            ".github/workflows/ci.yml": ProtectedFileDiff(
+                path=".github/workflows/ci.yml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert violations == []
+
+
+@pytest.mark.unit
+def test_workflow_pinned_uses_version_bump_allows_with_input_update() -> None:
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v4.7.0
+        with:
+          python-version: "3.11"
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5.0.0
+        with:
+          python-version: "3.12"
       - name: Run pytest
         run: uv run pytest
 """.strip()

@@ -900,16 +900,16 @@ def _pyproject_unknown_change_violations(
         old_value = old_doc.get(top_key)
         new_value = new_doc.get(top_key)
         if top_key == "project":
-            violation = _project_unknown_change_violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                old_value=old_value,
-                new_value=new_value,
-                old_text=old_text,
-                new_text=new_text,
+            violations.extend(
+                _project_unknown_change_violations(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    old_value=old_value,
+                    new_value=new_value,
+                    old_text=old_text,
+                    new_text=new_text,
+                )
             )
-            if violation is not None:
-                violations.append(violation)
             continue
         if top_key == "tool":
             violations.extend(
@@ -940,7 +940,7 @@ def _pyproject_unknown_change_violations(
     return violations
 
 
-def _project_unknown_change_violation(
+def _project_unknown_change_violations(
     *,
     path: str,
     protected_pattern: str,
@@ -948,39 +948,46 @@ def _project_unknown_change_violation(
     new_value: object,
     old_text: str,
     new_text: str,
-) -> QualityGateViolation | None:
+) -> list[QualityGateViolation]:
     if old_value is not None and not isinstance(old_value, Mapping):
-        return _violation(
-            path=path,
-            protected_pattern=protected_pattern,
-            section="project",
-            line=_line_for_toml_section(old_text, "project"),
-            reason="project section has unsupported format",
-        )
+        return [
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section="project",
+                line=_line_for_toml_section(old_text, "project"),
+                reason="project section has unsupported format",
+            )
+        ]
     if new_value is not None and not isinstance(new_value, Mapping):
-        return _violation(
-            path=path,
-            protected_pattern=protected_pattern,
-            section="project",
-            line=_line_for_toml_section(new_text, "project"),
-            reason="project section has unsupported format",
-        )
+        return [
+            _violation(
+                path=path,
+                protected_pattern=protected_pattern,
+                section="project",
+                line=_line_for_toml_section(new_text, "project"),
+                reason="project section has unsupported format",
+            )
+        ]
     old_project = cast(Mapping[str, object], old_value or {})
     new_project = cast(Mapping[str, object], new_value or {})
+    violations: list[QualityGateViolation] = []
     for key in sorted(set(old_project) | set(new_project)):
         if key in _ALLOWED_PROJECT_METADATA_KEYS:
             continue
         if old_project.get(key) != new_project.get(key):
             section = f"project.{key}"
-            return _violation(
-                path=path,
-                protected_pattern=protected_pattern,
-                section=section,
-                line=_line_for_toml_section(new_text, section)
-                or _line_for_toml_section(old_text, section),
-                reason=f"pyproject project section changed outside allowed metadata: {section}",
+            violations.append(
+                _violation(
+                    path=path,
+                    protected_pattern=protected_pattern,
+                    section=section,
+                    line=_line_for_toml_section(new_text, section)
+                    or _line_for_toml_section(old_text, section),
+                    reason=f"pyproject project section changed outside allowed metadata: {section}",
+                )
             )
-    return None
+    return violations
 
 
 def _tool_unknown_change_violations(
@@ -1395,6 +1402,7 @@ def _workflow_existing_step_violations(
 
     old_uses = _string_value(old_step.get("uses"))
     new_uses = _string_value(new_step.get("uses"))
+    is_allowed_pinned_bump = False
     if old_uses != new_uses:
         is_allowed_pinned_bump = (
             old_uses is not None
@@ -1452,7 +1460,9 @@ def _workflow_existing_step_violations(
                 )
             )
 
-    if _step_remainder(old_step) != _step_remainder(new_step):
+    if _step_remainder(old_step, ignore_with=is_allowed_pinned_bump) != _step_remainder(
+        new_step, ignore_with=is_allowed_pinned_bump
+    ):
         violations.append(
             _violation(
                 path=path,
@@ -2245,8 +2255,12 @@ def _is_pinned_workflow_uses_ref(ref: str) -> bool:
 
 def _step_remainder(
     step: Mapping[str, Any],
+    *,
+    ignore_with: bool = False,
 ) -> dict[str, object]:
     ignored = {"continue-on-error", "if", "run", "uses"}
+    if ignore_with:
+        ignored = ignored | {"with"}
     return {key: value for key, value in step.items() if key not in ignored}
 
 
