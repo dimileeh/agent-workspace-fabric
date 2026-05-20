@@ -7498,6 +7498,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_replacement_created",
             )
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
             stale_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.stale_active_execution_detected",
@@ -7529,8 +7533,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert replacement.task_kind == "feature_branch_pr"
         assert replacement.branch_name is None
         assert replacement.remote_push_branch is None
-        assert replacement.idempotency_key is not None
-        assert replacement.idempotency_key.startswith(f"active-salvage-replacement:{workspace_id}:")
+        assert len(preserved_events) == 1
+        assert (
+            replacement.idempotency_key
+            == f"active-salvage-replacement:{workspace_id}:{preserved_events[0].id}"
+        )
         assert replacement_attempt.parent_attempt_id == original_attempt.id
         assert replacement_attempt.redispatch_from_attempt_id == original_attempt.id
         assert original_attempt.superseded_by_attempt_id == replacement_attempt.id
