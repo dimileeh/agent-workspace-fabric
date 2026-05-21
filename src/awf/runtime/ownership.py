@@ -51,7 +51,7 @@ def _validated_layout_mirror_for_worktree(
         )
 
     expected_worktree_git_root = resolved_mirror / "worktrees"
-    if linked_worktree_git_dir.parent != expected_worktree_git_root:
+    if linked_worktree_git_dir.parent.resolve() != expected_worktree_git_root:
         raise ValueError(
             "refusing ownership repair: linked-worktree metadata points to another "
             f"workspace. expected parent {expected_worktree_git_root}, got {linked_worktree_git_dir.parent}"
