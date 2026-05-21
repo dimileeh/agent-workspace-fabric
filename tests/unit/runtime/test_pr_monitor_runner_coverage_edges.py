@@ -2730,7 +2730,7 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
     ) -> bool:
         del logger, workspace_id, worktree_path, event_name, reason_code
         repair_reasons.append(reason)
-        return reason != "dirty_worktree_post_commit_failed"
+        return reason != "dirty_worktree_post_commit_succeeded"
 
     monkeypatch.setattr(
         pr_monitor_runner,
