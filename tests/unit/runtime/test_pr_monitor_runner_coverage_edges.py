@@ -2749,7 +2749,7 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
 
     assert repair_reasons == [
         "dirty_worktree_pre_commit",
-        "dirty_worktree_post_commit_failed",
+        "dirty_worktree_post_commit_succeeded",
     ]
     assert any(
         event.get("event") == "monitor.dirty_worktree_committed"
