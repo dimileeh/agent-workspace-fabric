@@ -75,8 +75,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
     pr_feedback_body_hash,
 )
-from awf.node.git_manager import repair_agent_writable_worktree
 from awf.runtime.logs import LogStore, WorkspaceLogSink
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
@@ -153,9 +156,6 @@ from awf.service.provider_recovery import (
 )
 
 _log = get_logger(__name__)
-
-AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-
 
 def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
     return [
@@ -4649,18 +4649,14 @@ class PullRequestMonitorRunner:
         worktree_path: Path,
         reason: str,
     ) -> bool:
-        try:
-            await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
-        except Exception:
-            _log.exception(
-                "monitor.agent_runtime_ownership_repair_failed",
-                workspace_id=workspace_id,
-                worktree_path=str(worktree_path),
-                reason=reason,
-                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-            )
-            return False
-        return True
+        return await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason=reason,
+            event_name="monitor.agent_runtime_ownership_repair_failed",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
 
     async def _repair_protected_scope_commits_before_push(
         self,

@@ -125,6 +125,10 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
     build_monitor_operation_payload,
@@ -201,7 +205,6 @@ _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_PR_CREATED_EVENT = "workspace.audit.pr_created"
 _GIT_PUSH_FAILED_REASON_CODE = "GIT_PUSH_FAILED"
 _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
-AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
 GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
 GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
@@ -3896,18 +3899,14 @@ class WorkspaceExecutor:
         worktree_path: Path,
         reason: str,
     ) -> bool:
-        try:
-            await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
-        except Exception:
-            _log.exception(
-                "executor.agent_runtime_ownership_repair_failed",
-                workspace_id=workspace_id,
-                worktree_path=str(worktree_path),
-                reason=reason,
-                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-            )
-            return False
-        return True
+        return await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason=reason,
+            event_name="executor.agent_runtime_ownership_repair_failed",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
 
     async def _repair_agent_git_ownership(
         self,
