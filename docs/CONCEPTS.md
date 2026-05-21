@@ -257,6 +257,14 @@ The merge gate is intentionally conservative. A PR can merge only after:
 - the branch is not behind the base branch,
 - the final short pre-merge settle recheck still sees the same green state.
 
+For operator visibility, `monitor.action` logs now report:
+
+- `review_feedback`: total outside-diff/issue review items fetched in `unresolved_review_comments`.
+- `pending_review_feedback`: items in that set still requiring agent triage after monitor-state/body-hash/verdict checks.
+- `blocking_reviews`: count of effective GitHub blockers in `status.blocking_reviews`.
+- `unresolved_reviews`: maintained as a backward-compatible alias of `review_feedback` for
+  existing log consumers.
+
 ### AddressComments
 
 `AddressComments` is the review-fix loop.

@@ -196,12 +196,15 @@ class PRStatus:
     check_state: CheckState
     unresolved_inline_threads: tuple[ReviewThread, ...]
     unresolved_review_comments: tuple[ReviewComment, ...]
+    """``unresolved_review_comments`` intentionally preserves advisory review
+    bodies and top-level issue comments for the address-comments loop.
+
+    This field is also mirrored as the raw ``review_feedback``/``unresolved_reviews``
+    operator log metric, which intentionally remains for backward compatibility.
+    """
     base_behind_count: int  # commits on base not in head (local rev-list)
     blocking_reviews: tuple[ReviewComment, ...] = ()
     """Effective review-level blockers used only for merge gating.
-
-    ``unresolved_review_comments`` intentionally preserves advisory review
-    bodies and top-level issue comments for the address-comments loop.
     """
     merge_state_status: MergeStateStatus = MergeStateStatus.UNKNOWN
     """GitHub's authoritative merge-state signal. Combined with
