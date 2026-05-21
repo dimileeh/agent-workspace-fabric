@@ -43,6 +43,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
@@ -1204,6 +1205,7 @@ async def test_runtime_ownership_repair_runs_before_recovery_setup(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     validation = _RecordingSetupFailureValidation(
@@ -1218,14 +1220,26 @@ async def test_runtime_ownership_repair_runs_before_recovery_setup(
     )
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
-    async def _repair(**kwargs: Any) -> bool:
+    async def _repair(
+        *,
+        logger: Any,
+        reason_code: str,
+        event_name: str,
+        **kwargs: Any,
+    ) -> bool:
         events.append("repair")
         assert kwargs["workspace_id"] == ws_id
         assert kwargs["worktree_path"] == _test_worktrees_root(factory) / ws_id
         assert kwargs["reason"] == "profile_setup"
+        assert reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        assert event_name == "executor.agent_runtime_ownership_repair_failed"
+        assert logger is not None
         return True
 
-    executor._repair_agent_runtime_ownership = _repair  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.control.executor.repair_agent_runtime_ownership",
+        _repair,
+    )
 
     await executor.execute(ws_id)
 
@@ -1237,6 +1251,7 @@ async def test_runtime_ownership_repair_failure_blocks_recovery_setup(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     validation = _SetupFailureValidation(
         ValidationResult(commands=[_generic_setup_failure_result(tmp_path)])
@@ -1249,10 +1264,13 @@ async def test_runtime_ownership_repair_failure_blocks_recovery_setup(
     )
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
-    async def _repair(**_kwargs: Any) -> bool:
+    async def _repair(*, logger: Any, **_kwargs: Any) -> bool:
         return False
 
-    executor._repair_agent_runtime_ownership = _repair  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "awf.control.executor.repair_agent_runtime_ownership",
+        _repair,
+    )
 
     await executor.execute(ws_id)
 

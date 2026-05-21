@@ -127,6 +127,7 @@ from awf.runtime.planning import (
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_operations import (
@@ -1745,10 +1746,13 @@ class WorkspaceExecutor:
                 worktree_path=worktree_path,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-            if not await self._repair_agent_runtime_ownership(
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 reason="profile_setup",
+                event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             ):
                 if recovery is not None:
                     await self._finish_active_recovery_operations(
@@ -3891,22 +3895,6 @@ class WorkspaceExecutor:
     async def _load_workspace(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
             return await WorkspaceRepository(session).get(workspace_id)
-
-    async def _repair_agent_runtime_ownership(
-        self,
-        *,
-        workspace_id: str,
-        worktree_path: Path,
-        reason: str,
-    ) -> bool:
-        return await repair_agent_runtime_ownership(
-            logger=_log,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            reason=reason,
-            event_name="executor.agent_runtime_ownership_repair_failed",
-            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-        )
 
     async def _repair_agent_git_ownership(
         self,

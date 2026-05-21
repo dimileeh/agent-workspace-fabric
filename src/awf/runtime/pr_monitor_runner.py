@@ -78,6 +78,7 @@ from awf.db.repositories import (
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
@@ -4601,10 +4602,13 @@ class PullRequestMonitorRunner:
                 return False
             status = repaired_status
 
-        if not await self._repair_agent_runtime_ownership(
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             reason="dirty_worktree_pre_commit",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         ):
             return False
 
@@ -4627,10 +4631,13 @@ class PullRequestMonitorRunner:
             _git_worktree_command(worktree_path, "commit", "-m", message)
         )
         if not commit.ok:
-            if not await self._repair_agent_runtime_ownership(
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 reason="dirty_worktree_post_commit",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             ):
                 _log.warning(
                     "monitor.dirty_worktree_post_commit_ownership_repair_failed",
@@ -4643,10 +4650,13 @@ class PullRequestMonitorRunner:
             )
             return False
 
-        if not await self._repair_agent_runtime_ownership(
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             reason="dirty_worktree_post_commit",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         ):
             _log.warning(
                 "monitor.dirty_worktree_post_commit_ownership_repair_failed",
@@ -4655,22 +4665,6 @@ class PullRequestMonitorRunner:
             return True
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
-
-    async def _repair_agent_runtime_ownership(
-        self,
-        *,
-        workspace_id: str,
-        worktree_path: Path,
-        reason: str,
-    ) -> bool:
-        return await repair_agent_runtime_ownership(
-            logger=_log,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            reason=reason,
-            event_name="monitor.agent_runtime_ownership_repair_failed",
-            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-        )
 
     async def _repair_protected_scope_commits_before_push(
         self,

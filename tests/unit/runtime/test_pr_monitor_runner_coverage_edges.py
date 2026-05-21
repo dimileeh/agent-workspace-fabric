@@ -3655,6 +3655,9 @@ async def test_invoke_cli_for_verdict_reports_fix_committed_when_post_commit_own
         workspace_id: str,
         worktree_path: Path,
         reason: str,
+        logger: Any,
+        event_name: str,
+        reason_code: str,
     ) -> bool:
         repair_reasons.append(reason)
         if reason == "dirty_worktree_pre_commit":
@@ -3662,8 +3665,7 @@ async def test_invoke_cli_for_verdict_reports_fix_committed_when_post_commit_own
         return False
 
     monkeypatch.setattr(
-        runner,
-        "_repair_agent_runtime_ownership",
+        "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
 
