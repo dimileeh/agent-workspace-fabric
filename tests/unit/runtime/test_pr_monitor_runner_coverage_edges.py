@@ -2669,15 +2669,23 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
     )
     repair_call_lengths: list[int] = []
 
-    def _record_repair(_layout_mirror: Path | None, repaired_worktree: Path) -> None:
-        assert repaired_worktree == worktree
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, event_name, reason_code
+        assert worktree_path == worktree
         repair_call_lengths.append(len(cmd.calls))
+        return True
 
     monkeypatch.setattr(
         pr_monitor_runner,
-        "repair_agent_writable_worktree",
-        _record_repair,
-        raising=False,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
     )
 
     result = await runner._commit_dirty_worktree(
@@ -2766,14 +2774,22 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    def _raise_repair(_layout_mirror: Path | None, _repaired_worktree: Path) -> None:
+    async def _raise_repair(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, event_name, reason_code
+        assert worktree_path == worktree
         raise PermissionError("cannot repair .venv")
 
     monkeypatch.setattr(
         pr_monitor_runner,
-        "repair_agent_writable_worktree",
+        "repair_agent_runtime_ownership",
         _raise_repair,
-        raising=False,
     )
 
     with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
