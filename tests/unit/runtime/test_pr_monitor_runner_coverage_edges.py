@@ -30,6 +30,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.runtime import pr_monitor_runner
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -77,6 +78,7 @@ from awf.runtime.pr_monitor_runner import (
     _is_transient_github_client_error,
     _merge_rejection_reason,
     _MonitorPolicyBlockedError,
+    _MonitorAgentRuntimeOwnershipRepairFailed,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
@@ -1939,6 +1941,54 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_policy_block(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_ownership_repair_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_owned",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    async def _ownership_repair_failed(**_kwargs: object) -> str:
+        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    monkeypatch.setattr(runner, "_address_thread", _ownership_repair_failed)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_ownership_fix_cycle",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_ownership_fix_cycle",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
 async def test_fix_cycle_clears_addressed_thread_state_on_protected_scope_early_return(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2723,12 +2773,11 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
         raising=False,
     )
 
-    result = await runner._commit_dirty_worktree(
-        workspace_id=workspace_id,
-        message="fix: dirty",
-    )
-
-    assert result is False
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailed):
+        await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: dirty",
+        )
     assert len(cmd.calls) == 1
 
 
@@ -3682,7 +3731,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
 
 
 @pytest.mark.unit
-async def test_invoke_cli_for_verdict_reports_fix_committed_when_post_commit_ownership_repair_fails(
+async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_ownership_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3725,15 +3774,14 @@ async def test_invoke_cli_for_verdict_reports_fix_committed_when_post_commit_own
         _repair_agent_runtime_ownership,
     )
 
-    verdict = await runner._invoke_cli_for_verdict(
-        workspace_id=workspace_id,
-        prompt="fix it",
-        commit_message="fix: review",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert verdict == "fix_committed"
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailed):
+        await runner._invoke_cli_for_verdict(
+            workspace_id=workspace_id,
+            prompt="fix it",
+            commit_message="fix: review",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
     assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
     assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
 
@@ -3860,6 +3908,58 @@ async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_co
     assert "Supply-chain policy blocked" in push_result.stderr
     assert [finding.reason_code for finding in findings] == ["SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION"]
     assert not any(call.args[:1] == ["git"] and "commit" in call.args for call in cmd.calls)
+    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_sync_base_conflict_ownership_repair_failure_blocks_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="partial conflict resolution")
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    for result in [
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "merge conflict"),
+        (0, "UU src/conflict.py\n", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _ownership_repair_failed(**_kwargs: object) -> None:
+        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _ownership_repair_failed)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert len(adapter.calls) == 1
     assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
 
 
@@ -4276,6 +4376,64 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
 
 
 @pytest.mark.unit
+async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_failed_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _protected_scope_push_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        )
+
+    async def _repair_ownership_failed(**_kwargs: object) -> _GitPushResult:
+        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_push_block)
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_commits_before_push",
+        _repair_ownership_failed,
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(
+            CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
 async def test_refresh_supply_chain_policy_before_push_propagates_type_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -4631,6 +4789,59 @@ async def test_protected_scope_commit_repair_policy_block_uses_specific_reason(
     assert push_result.pushed is False
     assert push_result.stderr == "Supply-chain policy blocked"
     assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
+
+
+@pytest.mark.unit
+async def test_protected_scope_commit_repair_returns_failed_push_when_ownership_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted protected-scope repair")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _ownership_repair_failed(**_kwargs: object) -> object:
+        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "before-repair-sha"
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _ownership_repair_failed)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+
+    push_result = await runner._repair_protected_scope_commits_before_push(
+        workspace_id=workspace_id,
+        pr_number=42,
+        protected_scope_block=_ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 
 
 @pytest.mark.unit
