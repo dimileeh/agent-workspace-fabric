@@ -2639,6 +2639,62 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    repair_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        repair_reasons.append(reason)
+        return reason != "dirty_worktree_post_commit"
+
+    monkeypatch.setattr(
+        pr_monitor_runner,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        result = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="fix: dirty",
+        )
+
+    assert result is True
+    assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
+    assert any(
+        event.get("event") == "monitor.dirty_worktree_committed"
+        and event.get("workspace_id") == workspace_id
+        for event in captured
+    )
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

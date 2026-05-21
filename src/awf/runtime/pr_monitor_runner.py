@@ -4649,6 +4649,7 @@ class PullRequestMonitorRunner:
                 stderr=commit.stderr[:400],
             )
             return False
+        _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
 
         if not await repair_agent_runtime_ownership(
             logger=_log,
@@ -4663,7 +4664,6 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
             )
             return True
-        _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
 
     async def _repair_protected_scope_commits_before_push(
