@@ -13622,6 +13622,42 @@ def test_active_salvage_monitor_recovery_operation_ids_are_bounded(
 
 
 @pytest.mark.unit
+def test_active_salvage_monitor_resume_cooldowns_are_bounded_and_expired_entries_are_evicted(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = 1_000.0
+    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    limit = worker_module._ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT  # noqa: SLF001
+    worker._active_salvage_monitor_resume_cooldowns["expired-workspace"] = (  # noqa: SLF001
+        current_time - 1.0
+    )
+
+    for index in range(limit + 2):
+        worker._remember_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+            f"workspace-{index:04d}",
+            current_time + 60.0,
+        )
+
+    tracked = worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001
+    assert len(tracked) == limit
+    assert "expired-workspace" not in tracked
+    assert "workspace-0000" not in tracked
+    assert "workspace-0001" not in tracked
+    assert f"workspace-{limit + 1:04d}" in tracked
+    assert worker._active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        f"workspace-{limit + 1:04d}"
+    )
+
+    current_time += 61.0
+
+    assert not worker._active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        f"workspace-{limit + 1:04d}"
+    )
+    assert f"workspace-{limit + 1:04d}" not in tracked
+
+
+@pytest.mark.unit
 async def test_safe_worker_paths_swallow_runtime_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

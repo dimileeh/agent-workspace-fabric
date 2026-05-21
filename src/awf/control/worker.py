@@ -208,6 +208,7 @@ _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
     "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
 _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT = 1024
+_ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT = 1024
 QUEUE_DECISION_ORDERED = "ordered"
 QUEUE_DECISION_DEFERRED = "deferred"
 ORDERED_REQUESTED_PROVISIONING_REASON = "ORDERED_REQUESTED_PROVISIONING"
@@ -4253,8 +4254,9 @@ class ControlWorker:
                 and recovery_operation_id is not None
                 and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
             ):
-                self._active_salvage_monitor_resume_cooldowns[workspace_id] = monotonic() + max(
-                    0.0, self._config.monitor_claim_lease_seconds
+                self._remember_active_salvage_monitor_resume_cooldown(
+                    workspace_id,
+                    monotonic() + max(0.0, self._config.monitor_claim_lease_seconds),
                 )
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
@@ -4274,7 +4276,33 @@ class ControlWorker:
     def _forget_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
         self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
 
+    def _remember_active_salvage_monitor_resume_cooldown(
+        self,
+        workspace_id: str,
+        cooldown_until: float,
+    ) -> None:
+        self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        self._active_salvage_monitor_resume_cooldowns[workspace_id] = cooldown_until
+        self._evict_expired_salvage_monitor_cooldowns()
+
+    def _evict_expired_salvage_monitor_cooldowns(self) -> None:
+        now = monotonic()
+        expired_workspace_ids = [
+            workspace_id
+            for workspace_id, cooldown_until in self._active_salvage_monitor_resume_cooldowns.items()
+            if cooldown_until <= now
+        ]
+        for workspace_id in expired_workspace_ids:
+            self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        while (
+            len(self._active_salvage_monitor_resume_cooldowns)
+            > _ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT
+        ):
+            oldest_workspace_id = next(iter(self._active_salvage_monitor_resume_cooldowns))
+            self._active_salvage_monitor_resume_cooldowns.pop(oldest_workspace_id, None)
+
     def _active_salvage_monitor_resume_cooldown_active(self, workspace_id: str) -> bool:
+        self._evict_expired_salvage_monitor_cooldowns()
         cooldown_until = self._active_salvage_monitor_resume_cooldowns.get(workspace_id)
         if cooldown_until is None:
             return False
