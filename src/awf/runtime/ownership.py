@@ -72,14 +72,7 @@ def _validated_layout_mirror_for_worktree(
             f"workspace. expected parent {expected_worktree_git_root}, got {linked_git_dir.parent}"
         )
 
-    if not linked_git_dir.name.startswith(workspace_id):
-        raise ValueError(
-            "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
-        )
-
-    linked_worktree_suffix = linked_git_dir.name.removeprefix(workspace_id)
-    if linked_worktree_suffix and not linked_worktree_suffix.isdigit():
+    if linked_git_dir.name != workspace_id:
         raise ValueError(
             "refusing ownership repair: linked-worktree metadata points to another "
             f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
