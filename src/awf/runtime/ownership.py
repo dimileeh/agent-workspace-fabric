@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import Protocol
 
-from awf.node.git_manager import repair_agent_writable_worktree
+from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
 
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 
@@ -14,6 +14,29 @@ EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
     "executor.agent_runtime_ownership_repair_failed"
 )
 MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
+
+
+def _validated_layout_mirror_for_worktree(worktree_path: Path) -> Path | None:
+    """Resolve and validate the linked-worktree mirror path.
+
+    Control-plane control over git pointers has been compromised during
+    monitor recoveries; trust only mirrored worktree pointers that stay under
+    the expected ``<worktrees_root>/../mirrors`` hierarchy for this
+    worktree path.
+    """
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None:
+        return None
+
+    expected_mirror_root = worktree_path.parent.parent / "mirrors"
+    resolved_expected_root = expected_mirror_root.resolve()
+    resolved_mirror = mirror_path.resolve()
+    if not resolved_mirror.is_relative_to(resolved_expected_root):
+        raise ValueError(
+            "refusing ownership repair: mirror path is outside expected mirrors root "
+            f"for workspace {worktree_path}: {resolved_mirror}"
+        )
+    return mirror_path
 
 
 class _LoggerProtocol(Protocol):
@@ -43,7 +66,11 @@ async def repair_agent_runtime_ownership(
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree."""
     try:
-        await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
+        await asyncio.to_thread(
+            repair_agent_writable_worktree,
+            _validated_layout_mirror_for_worktree(worktree_path),
+            worktree_path,
+        )
     except Exception:
         logger.exception(
             event_name,
