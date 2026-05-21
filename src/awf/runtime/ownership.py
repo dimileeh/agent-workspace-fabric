@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from awf.node.git_manager import (
-    _linked_worktree_git_dir,
+    linked_worktree_git_dir,
     mirror_path_for_worktree,
     repair_agent_writable_worktree,
 )
@@ -31,9 +31,9 @@ def _validated_layout_mirror_for_worktree(
     worktree path and match this workspace's metadata entry.
     """
     mirror_path = mirror_path_for_worktree(worktree_path)
-    linked_worktree_git_dir = _linked_worktree_git_dir(worktree_path)
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
     if mirror_path is None:
-        return None, linked_worktree_git_dir
+        return None, linked_git_dir
 
     expected_mirror_root = worktree_path.parent.parent / "mirrors"
     resolved_expected_root = expected_mirror_root.resolve()
@@ -44,33 +44,33 @@ def _validated_layout_mirror_for_worktree(
             f"for workspace {worktree_path}: {resolved_mirror}"
         )
 
-    if linked_worktree_git_dir is None:
+    if linked_git_dir is None:
         raise ValueError(
             "refusing ownership repair: cannot read linked-worktree git metadata "
             f"for workspace {worktree_path}"
         )
 
     expected_worktree_git_root = resolved_mirror / "worktrees"
-    if linked_worktree_git_dir.parent.resolve() != expected_worktree_git_root:
+    if linked_git_dir.parent.resolve() != expected_worktree_git_root:
         raise ValueError(
             "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected parent {expected_worktree_git_root}, got {linked_worktree_git_dir.parent}"
+            f"workspace. expected parent {expected_worktree_git_root}, got {linked_git_dir.parent}"
         )
 
-    if not linked_worktree_git_dir.name.startswith(workspace_id):
+    if not linked_git_dir.name.startswith(workspace_id):
         raise ValueError(
             "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected workspace id {workspace_id}, got {linked_worktree_git_dir.name}"
+            f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
         )
 
-    linked_worktree_suffix = linked_worktree_git_dir.name.removeprefix(workspace_id)
+    linked_worktree_suffix = linked_git_dir.name.removeprefix(workspace_id)
     if linked_worktree_suffix and not linked_worktree_suffix.isdigit():
         raise ValueError(
             "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected workspace id {workspace_id}, got {linked_worktree_git_dir.name}"
+            f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
         )
 
-    return mirror_path, linked_worktree_git_dir
+    return mirror_path, linked_git_dir
 
 
 class _LoggerProtocol(Protocol):

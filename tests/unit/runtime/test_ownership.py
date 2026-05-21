@@ -114,7 +114,7 @@ async def test_repair_agent_runtime_ownership_passes_validated_git_metadata(
 
     logger = _RecordingLogger()
     monkeypatched = pytest.MonkeyPatch()
-    monkeypatched.setattr(ownership, "_linked_worktree_git_dir", _single_read_linked_git_dir)
+    monkeypatched.setattr(ownership, "linked_worktree_git_dir", _single_read_linked_git_dir)
     monkeypatched.setattr(
         ownership,
         "repair_agent_writable_worktree",

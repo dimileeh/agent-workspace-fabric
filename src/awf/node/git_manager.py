@@ -497,7 +497,7 @@ def _agent_writable_git_targets(
 ) -> tuple[_ChownTarget, ...]:
     targets = [_ChownTarget(worktree_path, recursive=True)]
     if linked_git_dir is None:
-        linked_git_dir = _linked_worktree_git_dir(worktree_path)
+        linked_git_dir = linked_worktree_git_dir(worktree_path)
     if linked_git_dir is not None:
         targets.append(_ChownTarget(linked_git_dir, recursive=True))
     targets.append(_ChownTarget(layout_mirror, recursive=False))
@@ -542,7 +542,7 @@ def repair_agent_writable_worktree(
     if mirror is None:
         targets = [_ChownTarget(worktree_path, recursive=True)]
         if linked_git_dir is None:
-            linked_git_dir = _linked_worktree_git_dir(worktree_path)
+            linked_git_dir = linked_worktree_git_dir(worktree_path)
         if linked_git_dir is not None:
             targets.append(_ChownTarget(linked_git_dir, recursive=True))
     else:
@@ -558,7 +558,7 @@ def repair_agent_writable_worktree(
 
 def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     """Return the bare mirror path backing a linked worktree, when discoverable."""
-    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
     if linked_git_dir is None:
         return None
     commondir = linked_git_dir / "commondir"
@@ -575,7 +575,8 @@ def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     return linked_git_dir.parent.parent.resolve()
 
 
-def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    """Return the Git metadata directory linked from a worktree's ``.git`` file."""
     git_file = worktree_path / ".git"
     if not git_file.is_file():
         return None

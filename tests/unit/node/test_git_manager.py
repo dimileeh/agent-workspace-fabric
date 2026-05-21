@@ -366,18 +366,16 @@ def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfile
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+    assert git_manager.linked_worktree_git_dir(worktree) is None
 
     git_file = worktree / ".git"
     git_file.write_text("not-a-gitdir")
-    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+    assert git_manager.linked_worktree_git_dir(worktree) is None
 
     git_file.write_text("gitdir: ../mirror.git/worktrees/ws")
     assert (
-        git_manager._linked_worktree_git_dir(worktree)
-        == (  # noqa: SLF001
-            worktree / "../mirror.git/worktrees/ws"
-        ).resolve()
+        git_manager.linked_worktree_git_dir(worktree)
+        == (worktree / "../mirror.git/worktrees/ws").resolve()
     )
 
     original_read_text = Path.read_text
@@ -388,7 +386,7 @@ def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfile
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", _raise_for_git_file)
-    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+    assert git_manager.linked_worktree_git_dir(worktree) is None
 
 
 @pytest.mark.unit
@@ -885,7 +883,7 @@ class TestAgentWritableWorktreeHelpers:
     ) -> None:
         missing_gitfile = tmp_path / "missing"
         missing_gitfile.mkdir()
-        assert git_module._linked_worktree_git_dir(missing_gitfile) is None  # noqa: SLF001
+        assert git_module.linked_worktree_git_dir(missing_gitfile) is None
 
         unreadable = tmp_path / "unreadable"
         unreadable.mkdir()
@@ -899,12 +897,12 @@ class TestAgentWritableWorktreeHelpers:
             return original_read_text(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", _read_text)
-        assert git_module._linked_worktree_git_dir(unreadable) is None  # noqa: SLF001
+        assert git_module.linked_worktree_git_dir(unreadable) is None
 
         malformed = tmp_path / "malformed"
         malformed.mkdir()
         (malformed / ".git").write_text("not a gitdir pointer\n", encoding="utf-8")
-        assert git_module._linked_worktree_git_dir(malformed) is None  # noqa: SLF001
+        assert git_module.linked_worktree_git_dir(malformed) is None
 
         relative = tmp_path / "relative"
         relative.mkdir()
@@ -914,10 +912,8 @@ class TestAgentWritableWorktreeHelpers:
         )
 
         assert (
-            git_module._linked_worktree_git_dir(relative)
-            == (  # noqa: SLF001
-                relative / "../mirror.git/worktrees/ws_relative"
-            ).resolve()
+            git_module.linked_worktree_git_dir(relative)
+            == (relative / "../mirror.git/worktrees/ws_relative").resolve()
         )
 
     @pytest.mark.unit
