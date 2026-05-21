@@ -382,6 +382,25 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         ) -> dict[str, object]:
             return {"status": "clean"}
 
+    class _FakeTargetBranchStateProvider:
+        def __init__(self, *, runner: object, checkout_path: Path) -> None:
+            created["state_provider_runner"] = runner
+            created["state_provider_checkout_path"] = checkout_path
+
+        async def fetch(
+            self,
+            *,
+            repo_url: str,
+            branch: str,
+            base_sha: str,
+        ) -> dict[str, str]:
+            called_with["target_state_fetch"] = {
+                "repo_url": repo_url,
+                "branch": branch,
+                "base_sha": base_sha,
+            }
+            return {"base_sha": base_sha}
+
     async def _fake_reconcile_and_refresh(
         *,
         reconcile_fn: Callable[..., Awaitable[object]],
@@ -393,6 +412,7 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         dry_run: bool = False,
     ) -> object:
         called_with["exclude_workspace_ids"] = exclude_workspace_ids
+        called_with["target_state"] = await target_state_for_base_sha("base-sha")
         return {"status": "clean"}
 
     class _FakeFeatureMonitor:
@@ -407,6 +427,9 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         worker_mod, "reconcile_and_refresh_stale_candidates", _fake_reconcile_and_refresh
     )
     monkeypatch.setattr(worker_mod, "TargetBranchReconcileMonitor", _FakeReconciler)
+    monkeypatch.setattr(
+        worker_mod, "GitCheckoutTargetBranchStateProvider", _FakeTargetBranchStateProvider
+    )
     monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", _FakeFeatureMonitor)
     monkeypatch.setattr(worker_mod, "build_release_pr_monitor", _FakeFeatureMonitor)
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _FakeWorkspaceExecutor)
@@ -482,6 +505,13 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         )
     )
     assert called_with.get("exclude_workspace_ids") == {"ws-123"}
+    assert called_with.get("target_state") == {"base_sha": "base-sha"}
+    assert called_with.get("target_state_fetch") == {
+        "repo_url": "https://github.com/org/repo.git",
+        "branch": "main",
+        "base_sha": "base-sha",
+    }
+    assert created["state_provider_checkout_path"] == tmp_path / "checkout"
 
     del runtime
 

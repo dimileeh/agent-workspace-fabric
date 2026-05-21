@@ -783,6 +783,15 @@ def test_request_admission_ensures_bearer_marker_ignores_mismatch() -> None:
     assert not request_admission.request_has_verified_bearer_auth(request)
 
 
+def test_request_admission_ensures_bearer_marker_skips_missing_context() -> None:
+    request = _request(authorization="Bearer shared-secret")
+
+    request_admission.ensure_bearer_auth_verified_from_header(request, expected_token=None)
+    request_admission.ensure_bearer_auth_verified_from_header(None, expected_token="shared-secret")
+
+    assert not request_admission.request_has_verified_bearer_auth(request)
+
+
 @pytest.mark.unit
 def test_request_admission_direct_limiter_tolerates_non_extensible_test_objects() -> None:
     class _Slotless:
