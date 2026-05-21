@@ -108,9 +108,9 @@ async def test_repair_agent_runtime_ownership_passes_validated_git_metadata(
     captured: list[tuple[Path | None, Path, Path | None]] = []
 
     def _repair_agent_writable_worktree(
-        layout_mirror: Path | None, path: Path, linked_git_dir_param: Path | None = None
+        layout_mirror: Path | None, path: Path, linked_git_dir: Path | None = None
     ) -> None:
-        captured.append((layout_mirror, path, linked_git_dir_param))
+        captured.append((layout_mirror, path, linked_git_dir))
 
     logger = _RecordingLogger()
     monkeypatched = pytest.MonkeyPatch()
