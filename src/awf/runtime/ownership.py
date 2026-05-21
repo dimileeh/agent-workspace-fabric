@@ -115,14 +115,14 @@ async def repair_agent_runtime_ownership(
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree."""
     try:
-        layout_mirror, linked_worktree_git_dir = _validated_layout_mirror_for_worktree(
+        layout_mirror, validated_linked_git_dir = _validated_layout_mirror_for_worktree(
             worktree_path, workspace_id
         )
         await asyncio.to_thread(
             repair_agent_writable_worktree,
             layout_mirror,
             worktree_path,
-            linked_git_dir=linked_worktree_git_dir,
+            linked_git_dir=validated_linked_git_dir,
         )
     except Exception:
         logger.exception(
