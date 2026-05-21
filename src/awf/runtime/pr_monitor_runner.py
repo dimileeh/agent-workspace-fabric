@@ -4534,6 +4534,14 @@ class PullRequestMonitorRunner:
                 remote_branch=remote_branch,
                 exc=exc,
             )
+        except _MonitorAgentRuntimeOwnershipRepairFailed as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
                 pushed=False,
