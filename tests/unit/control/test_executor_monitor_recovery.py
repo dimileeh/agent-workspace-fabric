@@ -1290,8 +1290,10 @@ async def test_runtime_ownership_repair_failure_blocks_recovery_setup(
     ]
     assert len(recovery_ops) == 1
     assert recovery_ops[0].status == OperationStatus.failed.value
-    assert recovery_ops[0].error_code == "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-    assert recovery_ops[0].result == {"reason_code": "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"}
+    assert recovery_ops[0].error_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert recovery_ops[0].result == {
+        "reason_code": AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    }
 
 
 @pytest.mark.unit
