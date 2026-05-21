@@ -477,6 +477,67 @@ async def test_repair_agent_runtime_ownership_allows_verified_numeric_worktree_s
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_blocks_symlinked_git_backref(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace"
+    mirror_root = worktrees_root.parent / "mirrors"
+    worktree_path = worktrees_root / workspace_id
+    other_worktree_path = worktrees_root / f"{workspace_id}-other"
+    worktree_path.mkdir(parents=True)
+    other_worktree_path.mkdir(parents=True)
+    linked_git_dir = mirror_root / "repo.git" / "worktrees" / f"{workspace_id}1"
+    linked_git_dir.mkdir(parents=True)
+    other_git_file = other_worktree_path / ".git"
+    other_git_file.write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (worktree_path / ".git").symlink_to(other_git_file)
+    (linked_git_dir / "gitdir").write_text(
+        f"{other_git_file}\n",
+        encoding="utf-8",
+    )
+
+    called = False
+
+    def _repair_agent_writable_worktree(
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
+    ) -> None:
+        _ = linked_git_dir
+        nonlocal called
+        called = True
+
+    logger = _RecordingLogger()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    try:
+        ok = await ownership.repair_agent_runtime_ownership(
+            logger=logger,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="pytest",
+            event_name="monitor.event",
+            reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+        )
+    finally:
+        monkeypatched.undo()
+
+    assert ok is False
+    assert called is False
+    assert len(logger.exception_calls) == 1
+    assert logger.exception_calls[0][0] == "monitor.event"
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_blocks_numeric_worktree_suffix(
     tmp_path: Path,
 ) -> None:

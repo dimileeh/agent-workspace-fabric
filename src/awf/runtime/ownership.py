@@ -43,6 +43,11 @@ def _validate_linked_git_dir_backref(linked_git_dir: Path, worktree_path: Path) 
     """Validate Git's reciprocal metadata pointer for suffixed worktree dirs."""
     metadata_gitdir = linked_git_dir / "gitdir"
     expected_git_file = worktree_path / ".git"
+    if expected_git_file.is_symlink() or not expected_git_file.is_file():
+        raise ValueError(
+            "refusing ownership repair: workspace git metadata must be a "
+            f"non-symlink file at {expected_git_file}"
+        )
     try:
         raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
         if not raw_gitdir:
