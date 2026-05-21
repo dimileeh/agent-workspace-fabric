@@ -84,6 +84,11 @@ from awf.runtime.monitor_prompts import (
     ready_to_merge_comment,
     sync_base_conflict_prompt,
 )
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
     Abort,
@@ -510,6 +515,15 @@ class ProviderRecoveryAuthError(Exception):
 
 class _MonitorPolicyBlockedError(Exception):
     """Raised when monitor-authored changes violate blocking workspace policy."""
+
+
+class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
+    """Raised when monitor cannot repair agent worktree ownership."""
+
+    @property
+    def reason_code(self) -> str:
+        """Return the fixed reason code for ownership repair failures."""
+        return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 
 
 class PullRequestMonitorRunner:
@@ -1665,6 +1679,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
@@ -2061,6 +2082,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
@@ -2206,6 +2234,13 @@ class PullRequestMonitorRunner:
                     error_code=reason_code,
                     error_message=push_result.error_message,
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
@@ -3915,6 +3950,16 @@ class PullRequestMonitorRunner:
                         returncode=1,
                         stderr=str(exc),
                     )
+                except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
+                    )
                 _mark_review_thread_addressed(state, t, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
@@ -3944,6 +3989,16 @@ class PullRequestMonitorRunner:
                         failed=True,
                         returncode=1,
                         stderr=str(exc),
+                    )
+                except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                        reason_code=exc.reason_code,
                     )
                 verdict = verdict_result.verdict
                 _mark_review_comment_addressed(state, c, verdict)
@@ -4416,6 +4471,14 @@ class PullRequestMonitorRunner:
                     returncode=1,
                     stderr=str(exc),
                 )
+            except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
 
             if agent_run_err is not None:
                 _log.warning(
@@ -4510,6 +4573,14 @@ class PullRequestMonitorRunner:
                 remote_branch=remote_branch,
                 exc=exc,
             )
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
                 pushed=False,
@@ -4532,21 +4603,30 @@ class PullRequestMonitorRunner:
             remote_push_url=remote_push_url,
         )
         if protected_scope_block is not None:
-            return await self._repair_protected_scope_commits_before_push(
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                protected_scope_block=protected_scope_block,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                operation_id=operation_id,
-                operation_type=operation_type,
-                monitor_log=monitor_log,
-            )
+            try:
+                return await self._repair_protected_scope_commits_before_push(
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    protected_scope_block=protected_scope_block,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                )
+            except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
@@ -4600,6 +4680,18 @@ class PullRequestMonitorRunner:
         if policy_message is not None:
             raise _MonitorPolicyBlockedError(policy_message)
 
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="dirty_worktree_pre_commit",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        ):
+            raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            )
+
         if compose_project is not None and compose_file is not None:
             repaired_status = await self._repair_protected_scope_changes_before_commit(
                 workspace_id=workspace_id,
@@ -4633,6 +4725,22 @@ class PullRequestMonitorRunner:
             _git_worktree_command(worktree_path, "commit", "-m", message)
         )
         if not commit.ok:
+            if not await repair_agent_runtime_ownership(
+                logger=_log,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_post_commit_failed",
+                event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            ):
+                _log.warning(
+                    "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                    workspace_id=workspace_id,
+                    commit_stderr=commit.stderr[:400],
+                )
+                raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+                )
             _log.warning(
                 "monitor.dirty_commit_failed",
                 workspace_id=workspace_id,
@@ -4640,6 +4748,22 @@ class PullRequestMonitorRunner:
             )
             return False
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
+
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="dirty_worktree_post_commit_succeeded",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        ):
+            _log.warning(
+                "monitor.dirty_worktree_post_commit_succeeded_ownership_repair_failed",
+                workspace_id=workspace_id,
+            )
+            raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            )
         return True
 
     async def _repair_protected_scope_commits_before_push(
@@ -4797,6 +4921,14 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 remote_branch=remote_branch,
                 exc=exc,
+            )
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=exc.reason_code,
             )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(

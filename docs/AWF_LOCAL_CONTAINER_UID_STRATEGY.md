@@ -130,6 +130,11 @@ worktree directory contains `HEAD`, `commondir`, `gitdir`, and a per-worktree
 - The repair helper resolves the linked git dir via `_linked_worktree_git_dir`
   and chowns it recursively. This is cheap (one worktree per workspace) and
   avoids chowning the entire mirror.
+- The same per-worktree repair is also re-run immediately before profile setup
+  and around PR-monitor host-side commits. Runtime directories such as `.venv`
+  may be created after provisioning by root-owned control-plane work, so
+  ownership repair is a recurring setup/commit invariant, not only a
+  post-worktree-add step.
 - The bare mirror's `worktrees/` admin directory is chowned non-recursively
   so `git worktree remove` and `git worktree prune` can mutate the registry
   from either side (control plane or agent), without forcing a recursive

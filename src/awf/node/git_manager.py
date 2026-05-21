@@ -497,9 +497,11 @@ def _agent_writable_git_targets(
     *,
     layout_mirror: Path,
     worktree_path: Path,
+    linked_git_dir: Path | None = None,
 ) -> tuple[_ChownTarget, ...]:
     targets = [_ChownTarget(worktree_path, recursive=True)]
-    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None:
+        linked_git_dir = linked_worktree_git_dir(worktree_path)
     if linked_git_dir is not None:
         targets.append(_ChownTarget(linked_git_dir, recursive=True))
     targets.append(_ChownTarget(layout_mirror, recursive=False))
@@ -529,6 +531,7 @@ def repair_agent_writable_worktree(
     worktree_path: Path,
     uid: int = AGENT_RUNTIME_UID,
     gid: int = AGENT_RUNTIME_GID,
+    linked_git_dir: Path | None = None,
 ) -> None:
     """Repair linked-worktree Git ownership for the agent-runtime user.
 
@@ -542,7 +545,8 @@ def repair_agent_writable_worktree(
     mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
     if mirror is None:
         targets = [_ChownTarget(worktree_path, recursive=True)]
-        linked_git_dir = _linked_worktree_git_dir(worktree_path)
+        if linked_git_dir is None:
+            linked_git_dir = linked_worktree_git_dir(worktree_path)
         if linked_git_dir is not None:
             targets.append(_ChownTarget(linked_git_dir, recursive=True))
     else:
@@ -550,6 +554,7 @@ def repair_agent_writable_worktree(
             _agent_writable_git_targets(
                 layout_mirror=mirror,
                 worktree_path=worktree_path,
+                linked_git_dir=linked_git_dir,
             )
         )
     _chown_targets(tuple(targets), uid, gid)
@@ -557,7 +562,7 @@ def repair_agent_writable_worktree(
 
 def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     """Return the bare mirror path backing a linked worktree, when discoverable."""
-    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    linked_git_dir = linked_worktree_git_dir(worktree_path)
     if linked_git_dir is None:
         return None
     commondir = linked_git_dir / "commondir"
@@ -574,7 +579,8 @@ def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
     return linked_git_dir.parent.parent.resolve()
 
 
-def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+def linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    """Return the Git metadata directory linked from a worktree's ``.git`` file."""
     git_file = worktree_path / ".git"
     if not git_file.is_file():
         return None
@@ -596,23 +602,38 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
     for target in targets:
         resolved = target.path.resolve()
         key = (resolved, target.recursive, target.directories_only)
-        if key in seen or not target.path.exists():
+        if key in seen or not (target.path.exists() or target.path.is_symlink()):
             continue
         seen.add(key)
         if target.recursive:
             _chown_tree(target.path, uid, gid, directories_only=target.directories_only)
+        elif target.path.is_symlink():
+            os.lchown(target.path, uid, gid)
         else:
             os.chown(target.path, uid, gid)
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
+    if path.is_symlink():
+        os.lchown(path, uid, gid)
+        return
+
     os.chown(path, uid, gid)
     if not path.is_dir():
         return
-    for root, dirs, files in os.walk(path):
+
+    for root, dirs, files in os.walk(path, followlinks=False):
         for name in dirs:
-            os.chown(Path(root) / name, uid, gid)
+            child = Path(root) / name
+            if child.is_symlink():
+                os.lchown(child, uid, gid)
+            else:
+                os.chown(child, uid, gid)
         if directories_only:
             continue
         for name in files:
-            os.chown(Path(root) / name, uid, gid)
+            child = Path(root) / name
+            if child.is_symlink():
+                os.lchown(child, uid, gid)
+            else:
+                os.chown(child, uid, gid)
