@@ -8824,6 +8824,80 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
     @pytest.mark.unit
+    async def test_historical_salvage_monitor_attach_does_not_trigger_future_recovery_cooldown(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "historical-salvage-monitor-recovery",
+            pr_number=272,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="workspace.active_execution_salvage_monitor_attached",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+                payload={
+                    "source": "worker_restart",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "attach_pr_monitor",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.monitor_recovery_started",
+                reason_code="MONITOR_RECOVERY_AFTER_RESTART",
+                payload={
+                    "operation_id": "previous-monitor-recovery",
+                    "active_execution_salvage_reason_code": (
+                        "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+                    ),
+                },
+            )
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                monitor_claim_lease_seconds=300.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == [workspace_id]
+        async with session_factory() as s:
+            remonitor_ops = [
+                operation
+                for operation in await OperationRepository(s).list_for_workspace(workspace_id)
+                if operation.type == OperationType.remonitor.value
+            ]
+            cooldown_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_resume_cooldown",
+            )
+
+        assert len(remonitor_ops) == 1
+        operation = remonitor_ops[0]
+        assert operation.payload is not None
+        assert operation.payload["active_execution_salvage_reason_code"] is None
+        assert cooldown_events == []
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("status", "operation_type", "operation_status"),
         [

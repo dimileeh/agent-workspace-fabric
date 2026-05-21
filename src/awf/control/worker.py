@@ -5312,7 +5312,8 @@ def _monitor_recovery_payload(
         "claim_cleanup": claim_cleanup,
         "runtime_stranding_reason": runtime_stranding_reason,
         "active_execution_salvage_reason_code": _latest_active_execution_salvage_reason(
-            workspace.events
+            workspace.events,
+            event_floor=_monitor_recovery_salvage_event_floor(workspace.events),
         ),
         "monitor_state": {
             "monitor_started_at": _json_datetime(workspace.monitor_started_at),
@@ -5557,7 +5558,41 @@ def _preserved_active_event_reference(event: WorkspaceEvent) -> dict[str, Any]:
     }
 
 
-def _latest_active_execution_salvage_reason(events: list[WorkspaceEvent]) -> str | None:
+def _monitor_recovery_salvage_event_floor(
+    events: list[WorkspaceEvent],
+) -> WorkspaceEvent | None:
+    floor: WorkspaceEvent | None = None
+    for event in events:
+        if _is_monitor_recovery_salvage_floor_event(event) and (
+            floor is None or _workspace_event_is_after(event, floor)
+        ):
+            floor = event
+    return floor
+
+
+def _is_monitor_recovery_salvage_floor_event(event: WorkspaceEvent) -> bool:
+    return (
+        event.event_type == _MONITOR_RECOVERY_EVENT_TYPE
+        and event.reason_code == _MONITOR_RECOVERY_REASON_CODE
+    ) or (
+        event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.monitoring_pr.value
+    )
+
+
+def _workspace_event_is_after(event: WorkspaceEvent, floor: WorkspaceEvent) -> bool:
+    event_order = event.event_order
+    floor_order = floor.event_order
+    if isinstance(event_order, int) and isinstance(floor_order, int):
+        return event_order > floor_order
+    return _utc_datetime(event.occurred_at) > _utc_datetime(floor.occurred_at)
+
+
+def _latest_active_execution_salvage_reason(
+    events: list[WorkspaceEvent],
+    *,
+    event_floor: WorkspaceEvent | None = None,
+) -> str | None:
     salvage_reason_codes = {
         _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
         _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
@@ -5566,10 +5601,15 @@ def _latest_active_execution_salvage_reason(events: list[WorkspaceEvent]) -> str
         _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
         _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
     }
-    for event in reversed(events):
-        if event.reason_code in salvage_reason_codes:
-            return event.reason_code
-    return None
+    latest_event: WorkspaceEvent | None = None
+    for event in events:
+        if event_floor is not None and not _workspace_event_is_after(event, event_floor):
+            continue
+        if event.reason_code in salvage_reason_codes and (
+            latest_event is None or _workspace_event_is_after(event, latest_event)
+        ):
+            latest_event = event
+    return latest_event.reason_code if latest_event is not None else None
 
 
 def _runtime_stranding_event_payload(
