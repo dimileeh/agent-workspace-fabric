@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from inspect import getattr_static
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
@@ -3544,7 +3545,7 @@ class ControlWorker:
 
     def _preserved_active_worktree_path(self, workspace_id: str) -> Path | None:
         try:
-            worktree_path = self._provisioner.get_worktree_path(workspace_id)
+            getattr_static(self._provisioner, "get_worktree_path")
         except AttributeError as exc:
             _log.warning(
                 "worker.preserved_active_worktree_path_unavailable",
@@ -3554,6 +3555,7 @@ class ControlWorker:
                 error=str(exc)[:240],
             )
             return None
+        worktree_path = self._provisioner.get_worktree_path(workspace_id)
         return worktree_path if isinstance(worktree_path, Path) else None
 
     async def _run_preserved_active_git(
@@ -3655,7 +3657,12 @@ class ControlWorker:
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
             if (
-                candidate.status in (WorkspaceStatus.running, WorkspaceStatus.validating)
+                candidate.status
+                in (
+                    WorkspaceStatus.running,
+                    WorkspaceStatus.validating,
+                    WorkspaceStatus.pushing,
+                )
                 and await self._has_active_preserved_validation_recovery(
                     session,
                     candidate.workspace_id,

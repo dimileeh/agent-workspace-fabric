@@ -7681,6 +7681,68 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events == []
 
     @pytest.mark.unit
+    async def test_stale_active_execution_check_blocks_pushing_candidate_with_active_validation_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushing-stale-check-blocks-active-validation",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_pushing_stale_check_blocks_active_validation",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "stale-recovery-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": "running-preservation-cycle",
+                },
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_pushing_stale_check_blocks_active_validation": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.pushing,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_pushing_stale_check_blocks_active_validation",
+            )
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "workspace_status",
         [WorkspaceStatus.validating, WorkspaceStatus.pushing],
@@ -9768,10 +9830,6 @@ class TestRunOnceStaleActiveExecutionRecovery:
             async def provision_claimed(self, workspace_id: str) -> None:
                 del workspace_id
 
-            def get_worktree_path(self, workspace_id: str) -> Path | None:
-                del workspace_id
-                raise AttributeError("_git")
-
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_UnavailableWorktreeProvisioner(),  # type: ignore[arg-type]
@@ -9788,6 +9846,32 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert classification.state == "ambiguous"
         assert classification.reason == "worktree_root_unavailable"
         assert classification.worktree_path is None
+
+    @pytest.mark.unit
+    def test_preserved_active_worktree_path_propagates_internal_attribute_error(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        class _BuggyWorktreeProvisioner:
+            async def provision(self, workspace_id: str) -> None:
+                del workspace_id
+
+            async def provision_claimed(self, workspace_id: str) -> None:
+                del workspace_id
+
+            def get_worktree_path(self, workspace_id: str) -> Path | None:
+                del workspace_id
+                raise AttributeError("_worktrees_dir")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_BuggyWorktreeProvisioner(),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        with pytest.raises(AttributeError, match="_worktrees_dir"):
+            worker._preserved_active_worktree_path("ws_buggy_path_provider")  # noqa: SLF001
 
     @pytest.mark.unit
     async def test_preserved_active_unknown_worktree_root_requires_operator_recovery(
