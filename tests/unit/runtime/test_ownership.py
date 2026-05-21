@@ -372,6 +372,65 @@ async def test_repair_agent_runtime_ownership_allows_symlinked_mirror_prefix(
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_allows_symlinked_mirror_worktrees_dir(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace"
+    mirror_root = worktrees_root.parent / "mirrors"
+    worktree_path = worktrees_root / workspace_id
+    worktree_path.mkdir(parents=True)
+
+    mirror_path = mirror_root / "repo.git"
+    mirror_path.mkdir(parents=True)
+    real_mirror_worktrees = tmp_path / "real-mirror-worktrees"
+    real_mirror_worktrees.mkdir()
+    (mirror_path / "worktrees").symlink_to(real_mirror_worktrees, target_is_directory=True)
+
+    linked_git_dir = mirror_path / "worktrees" / workspace_id
+    linked_git_dir.mkdir()
+    (linked_git_dir / "commondir").write_text(
+        f"{mirror_path}\n",
+        encoding="utf-8",
+    )
+    (worktree_path / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    captured: list[tuple[Path | None, Path, Path | None]] = []
+
+    def _repair_agent_writable_worktree(
+        layout_mirror: Path | None, path: Path, linked_git_dir: Path | None = None
+    ) -> None:
+        captured.append((layout_mirror, path, linked_git_dir))
+
+    logger = _RecordingLogger()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    try:
+        ok = await ownership.repair_agent_runtime_ownership(
+            logger=logger,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="pytest",
+            event_name="monitor.event",
+            reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+        )
+    finally:
+        monkeypatched.undo()
+
+    assert ok
+    assert logger.exception_calls == []
+    assert captured == [(mirror_path, worktree_path, linked_git_dir)]
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_blocks_workspace_id_prefix_collision(
     tmp_path: Path,
 ) -> None:
