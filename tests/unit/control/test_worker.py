@@ -9819,7 +9819,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
-    async def test_preserved_active_unavailable_worktree_root_classifies_as_ambiguous(
+    async def test_preserved_active_unavailable_worktree_root_classifies_as_failed(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -9843,7 +9843,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             base_commit="a" * 40,
         )
 
-        assert classification.state == "ambiguous"
+        assert classification.state == "failed"
         assert classification.reason == "worktree_root_unavailable"
         assert classification.worktree_path is None
 
@@ -9874,7 +9874,72 @@ class TestRunOnceStaleActiveExecutionRecovery:
             worker._preserved_active_worktree_path("ws_buggy_path_provider")  # noqa: SLF001
 
     @pytest.mark.unit
-    async def test_preserved_active_unknown_worktree_root_requires_operator_recovery(
+    async def test_preserved_active_unknown_worktree_root_retries_during_grace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-unknown-worktree-during-grace",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_unknown_worktree_during_grace",
+            create_task_attempt=True,
+        )
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_unknown_worktree_during_grace": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_salvage_blocked"
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["blocked_reason"] == "worktree_root_unavailable"
+        assert blocked_payload["decision"] == "wait_for_preservation_grace"
+        assert blocked_payload["classification"]["state"] == "failed"
+        assert blocked_payload["classification"]["reason"] == "worktree_root_unavailable"
+        assert operator_events == []
+        assert stale_events == []
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_unknown_worktree_root_requires_operator_recovery_after_grace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -9933,7 +9998,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert len(operator_events) == 1
         assert operator_events[0].payload is not None
         assert operator_events[0].payload["ambiguity_reason"] == "worktree_root_unavailable"
-        assert operator_events[0].payload["classification"]["state"] == "ambiguous"
+        assert operator_events[0].payload["classification"]["state"] == "failed"
         assert replacement_events == []
         assert stale_events == []
         assert cleaner.calls == []
