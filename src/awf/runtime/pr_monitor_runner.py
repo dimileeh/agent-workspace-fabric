@@ -4713,7 +4713,7 @@ class PullRequestMonitorRunner:
                 logger=_log,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                reason="dirty_worktree_post_commit",
+                reason="dirty_worktree_post_commit_failed",
                 event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             ):
@@ -4736,7 +4736,7 @@ class PullRequestMonitorRunner:
             logger=_log,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            reason="dirty_worktree_post_commit",
+            reason="dirty_worktree_post_commit_succeeded",
             event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
             reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         ):

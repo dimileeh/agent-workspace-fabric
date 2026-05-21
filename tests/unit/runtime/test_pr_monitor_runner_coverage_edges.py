@@ -2730,7 +2730,7 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
     ) -> bool:
         del logger, workspace_id, worktree_path, event_name, reason_code
         repair_reasons.append(reason)
-        return reason != "dirty_worktree_post_commit"
+        return reason != "dirty_worktree_post_commit_failed"
 
     monkeypatch.setattr(
         pr_monitor_runner,
@@ -2747,7 +2747,10 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
             message="fix: dirty",
         )
 
-    assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
+    assert repair_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_failed",
+    ]
     assert any(
         event.get("event") == "monitor.dirty_worktree_committed"
         and event.get("workspace_id") == workspace_id
@@ -3857,7 +3860,10 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-    assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
+    assert repair_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_failed",
+    ]
     assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
 
 
