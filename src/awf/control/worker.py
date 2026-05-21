@@ -2126,6 +2126,21 @@ class ControlWorker:
             expected_branch_name=branch_name or remote_push_branch,
             base_commit=base_commit,
         )
+        if failed_branch_lookup is not None:
+            await self._record_preserved_active_operator_required(
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                ambiguity_reason=(
+                    missing_lineage_reason
+                    or branch_lookup_failure_reason
+                    or "open_pr_lookup_failed"
+                ),
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=failed_branch_lookup.payload,
+            )
+            return True
         if classification.state == "committed":
             if missing_lineage_reason is not None:
                 await self._record_preserved_active_operator_required(
