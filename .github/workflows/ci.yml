@@ -156,22 +156,20 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Validate control-plane image build
-        run: |
-          .venv/bin/python scripts/ci_docker_build_retry.py --attempts 3 --delay-seconds 10 -- \
-            docker buildx build \
-              --file docker/control-plane.Dockerfile \
-              --platform linux/amd64 \
-              --progress=plain \
-              .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/control-plane.Dockerfile
+          platforms: linux/amd64
+          push: false
 
       - name: Validate agent-runtime image build
-        run: |
-          .venv/bin/python scripts/ci_docker_build_retry.py --attempts 3 --delay-seconds 10 -- \
-            docker buildx build \
-              --file docker/agent-runtime.Dockerfile \
-              --platform linux/amd64 \
-              --progress=plain \
-              .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/agent-runtime.Dockerfile
+          platforms: linux/amd64
+          push: false
 
   ci-required:
     runs-on: ubuntu-latest
