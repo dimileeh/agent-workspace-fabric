@@ -334,6 +334,32 @@ def test_doctor_worker_inspection_honors_explicit_null_compose_env_file(
 
 
 @pytest.mark.unit
+def test_doctor_local_compose_env_lookup_skips_duplicate_missing_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import doctor
+
+    monkeypatch.chdir(tmp_path)
+    compose_file = Path("docker") / "compose" / "local-service.yml"
+    assert doctor._local_service_compose_env_file(compose_file) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_doctor_local_compose_env_lookup_accepts_absolute_configured_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import doctor
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+    monkeypatch.setattr(doctor, "LOCAL_SERVICE_COMPOSE_ENV_FILE", env_file)
+
+    assert doctor._local_service_compose_env_file(tmp_path / "compose.yml") == env_file  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_doctor_warns_when_active_open_network_posture_is_visible(
     tmp_path: Path,
 ) -> None:

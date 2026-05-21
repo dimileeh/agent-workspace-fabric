@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -111,6 +112,10 @@ class Provisioner:
                 return
 
         await self._provision_claimed_workspace(workspace_id, ws)
+
+    def get_worktree_path(self, workspace_id: str) -> Path:
+        """Return the node-local worktree path AWF manages for ``workspace_id``."""
+        return self._git.get_worktree_path(workspace_id)
 
     async def _provision_claimed_workspace(self, workspace_id: str, ws: Workspace) -> None:
         if not await self._recheck_status(

@@ -5316,6 +5316,64 @@ async def test_protected_scope_revert_verifies_tracked_restore_against_fetch_hea
 
 
 @pytest.mark.unit
+async def test_protected_scope_revert_skips_empty_violation_list(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
+        workspace_id=workspace_id,
+        status_stdout="",
+        violations=[],
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert remaining == []
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_revert_raises_when_remote_fetch_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stdout="", stderr="no such ref")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="fetch refs/heads"):
+        await runner._protected_scope_violations_not_restored_to_remote_branch(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            violations=[
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                )
+            ],
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+
+@pytest.mark.unit
 async def test_protected_scope_revert_verifies_untracked_restore_against_fetch_head(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5373,6 +5431,73 @@ async def test_protected_scope_revert_verifies_untracked_restore_against_fetch_h
 
 
 @pytest.mark.unit
+async def test_protected_scope_revert_keeps_untracked_path_missing_from_remote(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=128, stderr="not in tree")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    violation = QualityGateViolation(
+        path=".github/workflows/ci.yml",
+        protected_pattern=".github/**",
+    )
+
+    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
+        workspace_id=workspace_id,
+        status_stdout="?? .github/workflows/ci.yml\n",
+        violations=[violation],
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert remaining == [violation]
+
+
+@pytest.mark.unit
+async def test_protected_scope_revert_raises_when_untracked_hash_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="remote-blob\n")
+    cmd.queue_result(returncode=128, stdout="", stderr="cannot hash")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="hash-object"):
+        await runner._protected_scope_violations_not_restored_to_remote_branch(
+            workspace_id=workspace_id,
+            status_stdout="?? .github/workflows/ci.yml\n",
+            violations=[
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                )
+            ],
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+
+@pytest.mark.unit
 async def test_protected_scope_revert_keeps_untracked_restore_with_mismatched_blob(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5426,6 +5551,55 @@ async def test_protected_scope_revert_keeps_untracked_restore_with_mismatched_bl
             ".github/workflows/ci.yml",
         ),
     ]
+
+
+@pytest.mark.unit
+async def test_protected_scope_revert_keeps_tracked_diff_and_raises_on_diff_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    violation = QualityGateViolation(
+        path=".github/workflows/ci.yml",
+        protected_pattern=".github/**",
+    )
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=1, stdout="", stderr="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert await runner._protected_scope_violations_not_restored_to_remote_branch(
+        workspace_id=workspace_id,
+        status_stdout=" M .github/workflows/ci.yml\n",
+        violations=[violation],
+        remote_branch=f"awf/{workspace_id}",
+    ) == [violation]
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=2, stdout="bad diff", stderr="fatal")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    with pytest.raises(ProtectedScopeDiffError, match="diff FETCH_HEAD"):
+        await runner._protected_scope_violations_not_restored_to_remote_branch(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            violations=[violation],
+            remote_branch=f"awf/{workspace_id}",
+        )
 
 
 @pytest.mark.unit
@@ -7469,6 +7643,22 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
 
 
 @pytest.mark.unit
+async def test_workspace_test_commands_returns_empty_for_missing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert await runner._workspace_test_commands("ws_missing") == ()
+
+
+@pytest.mark.unit
 async def test_commit_dirty_worktree_stops_when_protected_scope_repair_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -7654,3 +7844,228 @@ async def test_protected_scope_repair_records_remaining_violations_after_agent_f
     assert events[0].reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_protected_scope_status_check_wraps_diff_read_failures(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_diff_read_failure(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("could not read protected file")
+
+    monkeypatch.setattr(
+        runner,
+        "_protected_file_diffs_for_status_paths",
+        _raise_diff_read_failure,
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="Could not read dirty protected-scope"):
+        await runner._protected_scope_violations_for_status(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+        )
+
+
+@pytest.mark.unit
+async def test_sync_base_protected_scope_covers_missing_and_empty_diff_edges(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktree"
+
+    with pytest.raises(ProtectedScopeDiffError, match="Workspace row ws_missing"):
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id="ws_missing",
+            worktree_path=worktree,
+            remote_branch="awf/ws_missing",
+            base_branch="development",
+        )
+
+    async def _no_remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("remote-base", ())
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _no_remote_changes)
+    assert (
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            base_branch="development",
+        )
+        == []
+    )
+
+    async def _remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("remote-base", ("src/remote.py",))
+
+    async def _base_fetch_fails(**_kwargs: object) -> None:
+        raise BaseFetchError("network reset")
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _remote_changes)
+    monkeypatch.setattr(runner, "_fetch_base", _base_fetch_fails)
+    with pytest.raises(ProtectedScopeDiffError, match="Could not refresh the base branch"):
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            base_branch="development",
+        )
+
+    async def _fetch_base_ok(**_kwargs: object) -> None:
+        return None
+
+    async def _merged_base(**_kwargs: object) -> str:
+        return "merged-base"
+
+    async def _no_base_changes(**_kwargs: object) -> tuple[str, ...]:
+        return ()
+
+    monkeypatch.setattr(runner, "_fetch_base", _fetch_base_ok)
+    monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
+    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _no_base_changes)
+    assert (
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            base_branch="development",
+        )
+        == []
+    )
+
+    async def _different_base_changes(**_kwargs: object) -> tuple[str, ...]:
+        return ("src/base.py",)
+
+    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _different_base_changes)
+    assert (
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            base_branch="development",
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+async def test_sync_base_protected_scope_wraps_committed_diff_read_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _remote_changes(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("remote-base", (".github/workflows/ci.yml",))
+
+    async def _fetch_base_ok(**_kwargs: object) -> None:
+        return None
+
+    async def _merged_base(**_kwargs: object) -> str:
+        return "merged-base"
+
+    async def _base_changes(**_kwargs: object) -> tuple[str, ...]:
+        return (".github/workflows/ci.yml",)
+
+    async def _raise_committed_diff_read(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("show failed")
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _remote_changes)
+    monkeypatch.setattr(runner, "_fetch_base", _fetch_base_ok)
+    monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
+    monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _base_changes)
+    monkeypatch.setattr(
+        pr_monitor_runner,
+        "protected_file_diffs_for_committed_paths",
+        _raise_committed_diff_read,
+    )
+
+    with pytest.raises(ProtectedScopeDiffError, match="sync-base protected-scope"):
+        await runner._protected_scope_violations_for_sync_base_push(
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / "worktree",
+            remote_branch=f"awf/{workspace_id}",
+            base_branch="development",
+        )
+
+
+@pytest.mark.unit
+def test_read_worktree_text_reports_decode_and_os_errors(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.yml"
+    invalid.write_bytes(b"\xff\xfe")
+    with pytest.raises(ProtectedScopeDiffError, match="as UTF-8"):
+        pr_monitor_runner._read_worktree_text(invalid, display_path="invalid.yml")  # noqa: SLF001
+
+    directory = tmp_path / "config-dir"
+    directory.mkdir()
+    with pytest.raises(ProtectedScopeDiffError, match="Could not read protected worktree file"):
+        pr_monitor_runner._read_worktree_text(directory, display_path="config-dir")  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_feedback_refresh_drops_stale_review_comment_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    comment = ReviewComment(comment_id="review-1", body_excerpt="new feedback")
+    state = MonitorState()
+    state.threads_addressed_ids["review-1"] = "fix_committed"
+    state.threads_addressed_ids[_review_comment_body_state_key("review-1")] = "old-body-hash"
+
+    async def _no_remote_resolution_update(**_kwargs: object) -> bool:
+        return False
+
+    runner._apply_pr_feedback_resolution_state = _no_remote_resolution_update  # type: ignore[method-assign]
+
+    changed = await runner._refresh_pr_feedback_resolution_state(
+        workspace_id="ws_feedback",
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=_status_for_helpers(reviews=(comment,)),
+        state=state,
+    )
+
+    assert changed is True
+    assert "review-1" not in state.threads_addressed_ids
+    assert _review_comment_body_state_key("review-1") not in state.threads_addressed_ids

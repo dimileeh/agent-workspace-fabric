@@ -146,6 +146,10 @@ class GitManager:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
+    def get_worktree_path(self, workspace_id: str) -> Path:
+        """Return the managed worktree path for ``workspace_id``."""
+        return self._worktrees_dir / workspace_id
+
     async def ensure_mirror(self, repo_url: str) -> Path:
         """Ensure a bare mirror for ``repo_url`` exists and is up to date.
 

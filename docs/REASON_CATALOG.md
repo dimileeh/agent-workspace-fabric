@@ -2,7 +2,14 @@
 
 This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.
 
-## AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
+### ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED
+**Problem:** AWF rewound a preserved active execution to run validate-only recovery.
+**Likely Cause:** A worker restart found a stale active execution with recoverable committed work and created a validation recovery operation instead of failing the workspace.
+**Operator Fix:** Let the worker dispatch the recovery validation. If it does not progress, inspect workspace events and active operations for the preserved execution.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#active_execution_salvage_validation_requested](#active_execution_salvage_validation_requested)
+
+### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
 **Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
 **Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.
 **Operator Fix:** Inspect worker logs, verify the AWF work directory is writable by the control-plane container, then remonitor or recreate the workspace after fixing permissions.

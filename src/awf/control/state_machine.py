@@ -38,12 +38,18 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
     WorkspaceStatus.running: frozenset(
         {
             WorkspaceStatus.validating,
+            # Worker-restart salvage can attach an already-open PR monitor for
+            # preserved active work that reached PR handoff before restart.
+            WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
     ),
+    # Worker-restart salvage can rewind an abandoned active phase so the
+    # executor can reclaim validate-only recovery through its running path.
     WorkspaceStatus.validating: frozenset(
         {
+            WorkspaceStatus.running,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.completed,
@@ -53,6 +59,7 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
     ),
     WorkspaceStatus.pushing: frozenset(
         {
+            WorkspaceStatus.running,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
