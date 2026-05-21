@@ -7022,6 +7022,106 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert operations == []
 
     @pytest.mark.unit
+    async def test_preserved_active_salvage_blocked_records_changed_reason(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-blocked-reason-change",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_blocked_reason_change",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            attempt_id = attempt.id
+            task_id = attempt.task_id
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_blocked_reason_change": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_preserved_blocked_reason_change",
+        )
+        missing_worktree = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="worktree_missing",
+        )
+        clean_branch = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="clean_branch_not_ahead",
+            branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+            head_sha="a" * 40,
+            commit_count=0,
+        )
+
+        await worker._record_preserved_active_salvage_blocked(  # noqa: SLF001
+            candidate,
+            preserved_event=preserved_event,
+            reason="worktree_missing",
+            attempt_id=attempt_id,
+            task_id=task_id,
+            classification=missing_worktree,
+        )
+        await worker._record_preserved_active_salvage_blocked(  # noqa: SLF001
+            candidate,
+            preserved_event=preserved_event,
+            reason="worktree_missing",
+            attempt_id=attempt_id,
+            task_id=task_id,
+            classification=missing_worktree,
+        )
+        await worker._record_preserved_active_salvage_blocked(  # noqa: SLF001
+            candidate,
+            preserved_event=preserved_event,
+            reason="clean_branch_not_ahead",
+            attempt_id=attempt_id,
+            task_id=task_id,
+            classification=clean_branch,
+        )
+
+        async with session_factory() as s:
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+
+        blocked_reasons = [
+            event.payload["blocked_reason"]
+            for event in sorted(blocked_events, key=lambda event: event.event_order or 0)
+            if event.payload is not None
+        ]
+        assert blocked_reasons == ["worktree_missing", "clean_branch_not_ahead"]
+
+    @pytest.mark.unit
     async def test_preserved_active_validation_salvage_without_executor_blocks_stale_cleanup(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -10576,6 +10676,101 @@ class TestRunOnceStaleActiveExecutionRecovery:
         }
         assert stale_events == []
         assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_replacement_missing_existing_attempt_logs_warning(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-replacement-missing-attempt",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_replacement_missing_attempt",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            original_attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert original_attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            idempotency_key = worker_module._active_execution_salvage_idempotency_key(  # noqa: SLF001
+                "replacement",
+                workspace_id,
+                preserved_event.id,
+            )
+            replacement = await repo.create_replacement_from(
+                ws,
+                idempotency_key=idempotency_key,
+                remote_push_branch=ws.remote_push_branch,
+            )
+            attempt_id = original_attempt.id
+            task_id = original_attempt.task_id
+            replacement_id = replacement.id
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                Path("/tmp/awf-missing-replacement-attempt"),
+            ),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_replacement_missing_attempt": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="worktree_missing",
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_preserved_replacement_missing_attempt",
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await worker._create_preserved_active_replacement(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+
+        async with session_factory() as s:
+            replacement_attempt = await TaskAttemptRepository(s).get_by_workspace_id(replacement_id)
+            replacement_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+
+        assert replacement_attempt is None
+        assert replacement_events == []
+        assert any(
+            event.get("event") == "worker.preserved_active_replacement_attempt_missing"
+            and event.get("log_level") == "warning"
+            and event.get("workspace_id") == workspace_id
+            and event.get("replacement_workspace_id") == replacement_id
+            and event.get("reason_code") == "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED"
+            for event in captured
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

@@ -4,44 +4,39 @@ Plan reference: `plans/REVIEW_4496235802_PLAN.md`
 
 ## Requirement Status
 
-- Complete: the running-workspace operation cancellation concern is already
-  covered by implementation and regression tests.
-  - Evidence: `_record_preserved_active_operator_required` calls
-    `_cancel_superseded_active_execution_operations` without excluding
-    `WorkspaceStatus.running`.
-  - Evidence: `test_preserved_active_operator_required_cancels_superseded_active_operation`
-    covers `running` pending validate operations and neighboring active states.
+- Complete: Added a regression test for the idempotent replacement re-entry path
+  where the existing replacement workspace has no task attempt.
+- Complete: Added a regression test showing `SALVAGE_BLOCKED` writes a new event
+  when the latest blocked reason changes, while preserving exact-repeat
+  deduplication.
+- Complete: Updated `src/awf/control/worker.py` so missing replacement attempts
+  emit structured warning evidence and blocked salvage dedupe compares the
+  latest blocked reason.
+- Complete: Review-specific tests, ruff, and mypy passed.
+- Partial: The full `tests/unit/control/test_worker.py` command was attempted
+  but still fails on this branch for pre-existing failures that reproduce in a
+  clean `HEAD` snapshot outside this patch.
 
-- Complete: invalid open PR summary metadata now produces a retryable failed
-  lookup with `open_pr_lookup_invalid`.
-  - Evidence: `_resolve_preserved_active_branch_open_pr` maps
-    `_open_pull_request_summary` `ValueError` to `state="failed"`.
-  - Evidence: new regression
-    `test_preserved_active_pushed_branch_pr_invalid_open_pr_lookup_is_failed`.
+## Evidence
 
-- Complete: true ambiguity behavior remains unchanged.
-  - Evidence: `test_preserved_active_pushed_branch_pr_from_different_head_repo_is_ambiguous`
-    still passes and asserts head-repo mismatch remains `state="ambiguous"`.
+- Changed `src/awf/control/worker.py`.
+- Changed `tests/unit/control/test_worker.py`.
+- Ran `uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py -q -k 'salvage_blocked_records_changed_reason or replacement_missing_existing_attempt_logs_warning'`: `2 passed, 274 deselected`.
+- Ran `uv run --python 3.12 --extra dev ruff check src/awf tests`: passed.
+- Ran `uv run --python 3.12 --extra dev mypy src/awf`: passed.
+- Ran `uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py -q`: `10 failed, 266 passed`.
+- Baseline check from a clean `HEAD` archive reproduced representative full-file
+  failures:
+  - `preserved_active_without_usable_work_creates_one_replacement_with_lineage`
+    failed with no replacement workspace created.
+  - `stale_active_scan_closed_connection_does_not_terminal_fail_workspace`
+    failed because runtime inspection was called.
+  - `preserved_active_validation_salvage_without_executor_blocks_stale_cleanup`
+    timed out after 120 seconds.
 
-- Complete: the regression was written before implementation and confirmed
-  failing.
-  - Evidence: `invalid_open_pr_lookup` failed before the worker change with
-    `AssertionError: assert 'ambiguous' == 'failed'`.
+## Iteration 1
 
-- Complete: focused validation passed.
-
-## Commands Run
-
-- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py -q -k invalid_open_pr_lookup`
-  - Before implementation: failed for the new regression, proving the previous
-    `ambiguous` mapping.
-
-- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py -q -k "preserved_active_operator_required_cancels_superseded_active_operation or preserved_active_pushed_branch_pr_from_different_head_repo_is_ambiguous or invalid_open_pr_lookup"`
-  - After implementation: passed, `9 passed, 263 deselected`.
-
-- `uv run --python 3.12 --extra dev ruff check src/awf/control/worker.py tests/unit/control/test_worker.py`
-  - Passed.
-
-## Remaining Gaps
-
-None.
+The only validation gap is the full worker suite, and the representative
+failures reproduce without this patch. No additional iteration is required for
+review comment `issue:4496235802`; fixing those broader branch failures would be
+separate work.

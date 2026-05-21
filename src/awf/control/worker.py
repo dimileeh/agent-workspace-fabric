@@ -2672,6 +2672,12 @@ class ControlWorker:
                     )
 
             if replacement_attempt is None:
+                _log.warning(
+                    "worker.preserved_active_replacement_attempt_missing",
+                    workspace_id=ws.id,
+                    replacement_workspace_id=replacement.id,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                )
                 return
             original_attempt.superseded_by_attempt_id = replacement_attempt.id
             previous_claim = _workspace_claim_snapshot(ws)
@@ -2924,14 +2930,13 @@ class ControlWorker:
             claim_cutoff = datetime.now(UTC)
             if not _execution_claim_is_stale(ws, claim_cutoff):
                 return
-            if await self._has_current_salvage_event(
+            latest_blocked_reason = await self._latest_current_salvage_blocked_reason(
                 session,
                 candidate.workspace_id,
-                event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
-                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
                 event_floor=preserved_event.occurred_at,
                 workspace_status=candidate.status,
-            ):
+            )
+            if latest_blocked_reason == reason:
                 return
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
@@ -3179,6 +3184,38 @@ class ControlWorker:
             .limit(1)
         )
         return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _latest_current_salvage_blocked_reason(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        event_floor: datetime,
+        workspace_status: WorkspaceStatus,
+    ) -> str | None:
+        workspace_status_values = _salvage_workspace_status_values(
+            workspace_status,
+            event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+        )
+        blocked_reason = WorkspaceEvent.payload["blocked_reason"].as_string()
+        stmt = (
+            select(blocked_reason)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                WorkspaceEvent.occurred_at >= event_floor,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(workspace_status_values),
+            )
+            .order_by(
+                WorkspaceEvent.event_order.desc().nullslast(),
+                WorkspaceEvent.occurred_at.desc(),
+                WorkspaceEvent.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _has_active_preserved_validation_recovery(
         self,
