@@ -2164,7 +2164,21 @@ class ControlWorker:
                 ),
             )
             if validation_requested:
-                self._dispatch_preserved_active_validation(candidate.workspace_id)
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                if dispatched or candidate.workspace_id in self._execution_tasks:
+                    return True
+                if self._available_execution_slots() <= 0:
+                    if (
+                        not preservation_expired
+                        or self._can_dispatch_execution_when_slot_available()
+                    ):
+                        return True
+                    await self._record_preserved_active_salvage_not_possible(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_execution_slots_disabled",
+                    )
+                    return False
             return True
         if classification.state == "no_work":
             if not preservation_expired:

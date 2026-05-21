@@ -7105,6 +7105,115 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert operations == []
 
     @pytest.mark.unit
+    async def test_preserved_active_committed_work_slot_exhaustion_after_grace_marks_not_possible_on_first_scan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-clean-commit-no-slots",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_clean_commit_no_slots",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "runtime": {"stack_state": "running"},
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await s.commit()
+
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="committed",
+            reason="clean_branch_ahead",
+            branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+            head_sha="b" * 40,
+            commit_count=1,
+        )
+
+        async def _classify_preserved_active_worktree(**_kwargs: object) -> object:
+            return classification
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_clean_commit_no_slots": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                active_execution_preservation_grace_seconds=0.0,
+                max_concurrent_executions=0,
+            ),
+        )
+        monkeypatch.setattr(
+            worker,
+            "_classify_preserved_active_worktree",
+            _classify_preserved_active_worktree,
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_preserved_clean_commit_no_slots",
+        )
+
+        assert not await worker._recover_preserved_active_execution(candidate)  # noqa: SLF001
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            validation_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        validate_ops = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.validate.value
+            and operation.payload is not None
+            and operation.payload.get("source") == "worker_restart"
+        ]
+        assert len(validation_events) == 1
+        assert len(validate_ops) == 1
+        assert len(not_possible_events) == 1
+        not_possible_payload = not_possible_events[0].payload
+        assert not_possible_payload is not None
+        assert not_possible_payload["unrecoverable_reason"] == (
+            "validation_execution_slots_disabled"
+        )
+        assert await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
+
+    @pytest.mark.unit
     async def test_preserved_active_salvage_blocked_records_changed_reason(
         self,
         session_factory: async_sessionmaker[AsyncSession],
