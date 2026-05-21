@@ -107,6 +107,9 @@ class TestMonitorActionLogging:
         assert entry["merge_state"] == "CLEAN"
         assert entry["unresolved_threads"] == 0
         assert entry["unresolved_reviews"] == 0
+        assert entry["review_feedback"] == 0
+        assert entry["pending_review_feedback"] == 0
+        assert entry["unresolved_reviews"] == entry["review_feedback"]
         assert entry["blocking_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
         async with factory() as s:
@@ -193,6 +196,8 @@ class TestMonitorActionLogging:
         assert '"event": "monitor.start"' in log_text
         assert '"event": "monitor.action"' in log_text
         assert '"action": "Merge"' in log_text
+        assert '"review_feedback": 0' in log_text
+        assert '"pending_review_feedback": 0' in log_text
         assert '"blocking_reviews": 0' in log_text
 
     @pytest.mark.unit
@@ -941,13 +946,24 @@ class TestMonitorActionLogging:
         assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
         assert len(adapter.calls) == 1
         assert "Trigger review before merging" in adapter.calls[0]
+        merge_action = _action_entries(captured)[0]
+        address_action = _action_entries(captured)[1]
+        assert merge_action["unresolved_reviews"] == 0
+        assert merge_action["review_feedback"] == 0
+        assert merge_action["pending_review_feedback"] == 0
+        assert merge_action["blocking_reviews"] == 0
+        assert address_action["review_feedback"] == 1
+        assert address_action["pending_review_feedback"] == 1
+        assert address_action["unresolved_reviews"] == address_action["review_feedback"]
         changed_action = next(
             r
             for r in captured
             if r.get("event") == "monitor.pre_merge_recheck_changed_action"
             and r.get("fresh_action") == "AddressComments"
         )
-        assert changed_action["unresolved_reviews"] == 1
+        assert changed_action["review_feedback"] == 1
+        assert changed_action["pending_review_feedback"] == 1
+        assert changed_action["unresolved_reviews"] == changed_action["review_feedback"]
         assert changed_action["blocking_reviews"] == 0
 
 
