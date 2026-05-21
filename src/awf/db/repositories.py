@@ -547,6 +547,17 @@ class TaskAttemptRepository:
         stmt = select(TaskAttempt).where(TaskAttempt.workspace_id == workspace_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_by_workspace_ids(self, workspace_ids: Iterable[str]) -> dict[str, TaskAttempt]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        stmt = select(TaskAttempt).where(TaskAttempt.workspace_id.in_(unique_workspace_ids))
+        return {
+            attempt.workspace_id: attempt
+            for attempt in (await self._session.execute(stmt)).scalars()
+        }
+
     async def get_canonical_for_task(self, task_id: str) -> TaskAttempt | None:
         stmt = select(TaskAttempt).where(
             TaskAttempt.task_id == task_id,

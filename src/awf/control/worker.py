@@ -242,6 +242,12 @@ class _AllocatedReservationTotals:
         self.dind_slots += demand.dind_slots
 
 
+@dataclass(frozen=True)
+class _CapacityQueueDecisionContext:
+    attempt: TaskAttempt | None
+    latest_decision: QueueDecision | None
+
+
 _ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
 
 type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
@@ -2722,13 +2728,22 @@ class ControlWorker:
         if not candidates or claim_slots <= 0:
             return []
 
-        reservations = await reservation_repo.active_latest_by_workspace_ids(
-            workspace.id for workspace in candidates
+        candidate_ids = [workspace.id for workspace in candidates]
+        reservations = await reservation_repo.active_latest_by_workspace_ids(candidate_ids)
+        attempts_by_workspace = await TaskAttemptRepository(session).get_by_workspace_ids(
+            candidate_ids
         )
+        latest_decisions_by_workspace = await QueueDecisionRepository(
+            session
+        ).latest_by_workspace_ids(candidate_ids)
         claimed: list[str] = []
         for workspace in candidates:
             if len(claimed) >= claim_slots:
                 break
+            queue_decision_context = _CapacityQueueDecisionContext(
+                attempt=attempts_by_workspace.get(workspace.id),
+                latest_decision=latest_decisions_by_workspace.get(workspace.id),
+            )
             demand = _reservation_demand_for_workspace(
                 workspace,
                 reservation=reservations.get(workspace.id),
@@ -2754,6 +2769,7 @@ class ControlWorker:
                     allocated=allocated,
                     demand=demand,
                     blockers=blockers,
+                    context=queue_decision_context,
                 )
                 continue
             ws = await repo.transition_if_current(
@@ -2775,6 +2791,7 @@ class ControlWorker:
                     allocated=allocated,
                     demand=demand,
                     blockers=[],
+                    context=queue_decision_context,
                 )
             claimed.append(workspace.id)
             allocated.add(demand)
@@ -3281,8 +3298,13 @@ async def _record_capacity_queue_decision(
     allocated: _AllocatedReservationTotals,
     demand: _ReservationDemand,
     blockers: list[LocalCapacityBlocker],
+    context: _CapacityQueueDecisionContext | None = None,
 ) -> None:
-    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    latest_decision: QueueDecision | None
+    if context is None:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    else:
+        attempt = context.attempt
     if attempt is None:
         _log.warning(
             "worker.capacity_queue_decision_missing_attempt",
@@ -3294,8 +3316,11 @@ async def _record_capacity_queue_decision(
         return
 
     queue_repo = QueueDecisionRepository(session)
-    latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
-    latest_decision = latest[0] if latest else None
+    if context is None:
+        latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
+        latest_decision = latest[0] if latest else None
+    else:
+        latest_decision = context.latest_decision
     if decision == QUEUE_DECISION_DEFERRED and _capacity_deferred_decision_matches(
         latest_decision,
         attempt_id=attempt.id,

@@ -46,7 +46,7 @@ from awf.control.worker import (
     _utc_datetime,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import QueueDecision, Workspace
 from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
@@ -1320,6 +1320,126 @@ class TestRunOnce:
             "PEAK_MEMORY_CAPACITY_SATURATED",
             "DIND_CAPACITY_SATURATED",
         }
+
+    @pytest.mark.unit
+    async def test_requested_capacity_gate_prefetches_queue_decision_context_for_blocked_page(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        now = datetime.now(UTC)
+        blocked_ids: list[str] = []
+        for index in range(3):
+            blocked_id = await _create_requested(
+                session_factory,
+                origin_repo,
+                f"capacity-prefetch-blocked-{index}",
+                create_task_attempt=True,
+                created_at=now + timedelta(seconds=index),
+            )
+            await _reserve_workspace(
+                session_factory,
+                blocked_id,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=2.0,
+                peak_memory_gb=0.0,
+            )
+            blocked_ids.append(blocked_id)
+
+        attempt_batch_calls: list[tuple[str, ...]] = []
+        original_get_by_workspace_ids = getattr(
+            TaskAttemptRepository,
+            "get_by_workspace_ids",
+            None,
+        )
+
+        async def _record_get_by_workspace_ids(
+            self: TaskAttemptRepository,
+            workspace_ids: object,
+        ) -> dict[str, object]:
+            ids = tuple(workspace_ids)  # type: ignore[arg-type]
+            attempt_batch_calls.append(ids)
+            assert original_get_by_workspace_ids is not None
+            return await original_get_by_workspace_ids(self, ids)
+
+        latest_batch_calls: list[tuple[str, ...]] = []
+        original_latest_by_workspace_ids = QueueDecisionRepository.latest_by_workspace_ids
+
+        async def _record_latest_by_workspace_ids(
+            self: QueueDecisionRepository,
+            workspace_ids: object,
+        ) -> dict[str, QueueDecision]:
+            ids = tuple(workspace_ids)  # type: ignore[arg-type]
+            latest_batch_calls.append(ids)
+            return await original_latest_by_workspace_ids(self, ids)
+
+        async def _unexpected_get_by_workspace_id(
+            self: TaskAttemptRepository,
+            workspace_id: str,
+        ) -> object:
+            del self, workspace_id
+            raise AssertionError("capacity decisions should batch-fetch task attempts")
+
+        async def _unexpected_list_for_workspace(
+            self: QueueDecisionRepository,
+            workspace_id: str,
+            *,
+            limit: int = 50,
+        ) -> list[QueueDecision]:
+            del self, workspace_id, limit
+            raise AssertionError("capacity decisions should batch-fetch latest queue decisions")
+
+        monkeypatch.setattr(
+            TaskAttemptRepository,
+            "get_by_workspace_ids",
+            _record_get_by_workspace_ids,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            QueueDecisionRepository,
+            "latest_by_workspace_ids",
+            _record_latest_by_workspace_ids,
+        )
+        monkeypatch.setattr(
+            TaskAttemptRepository,
+            "get_by_workspace_id",
+            _unexpected_get_by_workspace_id,
+        )
+        monkeypatch.setattr(
+            QueueDecisionRepository,
+            "list_for_workspace",
+            _unexpected_list_for_workspace,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                local_capacity_cpu_cores=1.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(QueueDecision.workspace_id, QueueDecision.reason_code).where(
+                        QueueDecision.workspace_id.in_(blocked_ids)
+                    )
+                )
+            ).all()
+
+        assert attempt_batch_calls == [tuple(blocked_ids)]
+        assert latest_batch_calls == [tuple(blocked_ids)]
+        assert {
+            workspace_id
+            for workspace_id, reason_code in rows
+            if reason_code == "LOCAL_CAPACITY_UNSATISFIABLE"
+        } == set(blocked_ids)
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_claims_without_prefetching_requested_ids(
