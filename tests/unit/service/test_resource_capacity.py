@@ -9,6 +9,7 @@ from awf.common.config import Settings
 from awf.service.disk import DiskCheck
 from awf.service.resource_capacity import (
     LOCAL_CAPACITY_CONSTRAINTS,
+    LocalCapacityConstraint,
     LocalCapacityLimits,
     ReservedResources,
     WorkspaceResourceDefaults,
@@ -71,6 +72,21 @@ def test_local_capacity_constraints_share_reason_codes_and_limit_sources() -> No
         ("peak_memory_gb", "PEAK_MEMORY_CAPACITY_SATURATED", 24.0),
         ("dind_slots", "DIND_CAPACITY_SATURATED", 1),
     ]
+
+
+@pytest.mark.unit
+def test_local_capacity_limit_rejects_unknown_limit_source() -> None:
+    with pytest.raises(ValueError, match="unknown local capacity limit source"):
+        local_capacity_limit(
+            LocalCapacityConstraint(
+                dimension="custom",
+                reason_code="CUSTOM_CAPACITY",
+                limit_source="custom",
+            ),
+            cpu_limit=8.0,
+            memory_limit=24.0,
+            dind_slots=1,
+        )
 
 
 @pytest.mark.unit

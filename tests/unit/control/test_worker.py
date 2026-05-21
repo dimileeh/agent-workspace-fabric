@@ -1252,6 +1252,252 @@ class TestRunOnce:
         assert signature == (0, None, None, None, "")
 
     @pytest.mark.unit
+    async def test_claim_requested_ids_short_circuits_without_database(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        disabled_worker = ControlWorker(
+            session_factory=object(),  # type: ignore[arg-type]
+            provisioner=SimpleNamespace(),
+            config=WorkerConfig(max_concurrent_provisions=0),
+        )
+
+        assert await disabled_worker._claim_requested_ids(["ws-disabled"]) == []  # noqa: SLF001
+
+        worker = ControlWorker(
+            session_factory=object(),  # type: ignore[arg-type]
+            provisioner=SimpleNamespace(),
+            config=WorkerConfig(max_concurrent_provisions=1),
+        )
+        claim_calls: list[str] = []
+
+        async def claim_requested(workspace_id: str) -> bool:
+            claim_calls.append(workspace_id)
+            return True
+
+        monkeypatch.setattr(worker, "_claim_requested_for_provisioning", claim_requested)
+
+        assert await worker._claim_requested_ids([]) == []  # noqa: SLF001
+        assert await worker._claim_requested_ids(None) == []  # noqa: SLF001
+        assert await worker._claim_requested_ids(["ws-first", "ws-second"]) == [  # noqa: SLF001
+            "ws-first"
+        ]
+        assert claim_calls == ["ws-first"]
+
+    @pytest.mark.unit
+    async def test_capacity_claim_empty_queue_returns_empty_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class EmptyWorkspaceRepository:
+            dialect_name = "postgresql"
+
+            async def list_schedulable_workspaces(self, **_kwargs: object) -> list[Workspace]:
+                return []
+
+        async def allocated_totals(
+            _session: object,
+            *,
+            reservation_repo: object,
+            config: WorkerConfig,
+        ) -> worker_module._AllocatedReservationTotals:  # noqa: SLF001
+            return worker_module._AllocatedReservationTotals()  # noqa: SLF001
+
+        async def queue_signature(
+            _session: object,
+            *,
+            node_id: str,
+        ) -> worker_module._RequestedCapacityQueueSignature:  # noqa: SLF001
+            return (0, None, None, None, "")
+
+        monkeypatch.setattr(
+            worker_module, "WorkspaceRepository", lambda _session: EmptyWorkspaceRepository()
+        )
+        monkeypatch.setattr(
+            worker_module, "ResourceReservationRepository", lambda _session: object()
+        )
+        monkeypatch.setattr(worker_module, "_allocated_totals_for_capacity_gate", allocated_totals)
+        monkeypatch.setattr(worker_module, "_requested_capacity_queue_signature", queue_signature)
+
+        worker = ControlWorker(
+            session_factory=object(),  # type: ignore[arg-type]
+            provisioner=SimpleNamespace(),
+            config=WorkerConfig(max_concurrent_provisions=2, local_capacity_cpu_cores=4.0),
+        )
+
+        result = await worker._claim_requested_ids_with_capacity(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            resume_after=None,
+            resume_allocated_signature=None,
+            resume_requested_queue_signature=None,
+            resume_provider_suppression_expires_at=None,
+        )
+
+        assert result == worker_module._RequestedCapacityClaimResult(workspace_ids=[])  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_capacity_private_short_circuit_helpers(self) -> None:
+        retry_state_key = worker_module.PROVIDER_RECOVERY_STATE_KEY
+        unsupported_action = worker_module._ActiveExecutionCandidate(  # noqa: SLF001
+            workspace_id="ws-unsupported-action",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name=None,
+            task_policy={retry_state_key: {"action": "pause"}},
+        )
+        agentless_retry = worker_module._ActiveExecutionCandidate(  # noqa: SLF001
+            workspace_id="ws-agentless-retry",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name=None,
+            task_policy={retry_state_key: {"action": "retry"}},
+        )
+        providerless_retry = worker_module._ActiveExecutionCandidate(  # noqa: SLF001
+            workspace_id="ws-providerless-retry",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name=None,
+            agent="unknown-agent",
+            task_policy={retry_state_key: {"action": "retry", "model": "gpt-5"}},
+        )
+
+        assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            unsupported_action,
+        )
+        assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            agentless_retry,
+        )
+        assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            providerless_retry,
+        )
+
+        assert (
+            await worker_module._existing_ordered_queue_decision_keys(  # noqa: SLF001
+                object(),  # type: ignore[arg-type]
+                [],
+                reason_code="ORDERED",
+                decided_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            == set()
+        )
+
+    @pytest.mark.unit
+    async def test_capacity_lock_skips_non_postgres_sessions(self) -> None:
+        class SqliteSession:
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+            async def execute(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("non-postgres capacity lock should not execute SQL")
+
+        await worker_module._acquire_local_capacity_scheduler_lock(  # noqa: SLF001
+            SqliteSession(),  # type: ignore[arg-type]
+            node_id="local",
+        )
+
+    @pytest.mark.unit
+    def test_capacity_decision_signature_helpers_reject_mismatches(self) -> None:
+        blocker = worker_module.LocalCapacityBlocker(
+            dimension="steady_cpu",
+            reason_code="STEADY_CPU_CAPACITY_SATURATED",
+            limit=4.0,
+            allocated=4.0,
+            requested=1.0,
+            after=5.0,
+            unsatisfiable=False,
+        )
+        mismatched = SimpleNamespace(
+            attempt_id="attempt-a",
+            decision=worker_module.QUEUE_DECISION_ORDERED,
+            reason_code="DIFFERENT",
+            resource_summary={"blockers": [worker_module._capacity_blocker_payload(blocker)]},  # noqa: SLF001
+        )
+        malformed = SimpleNamespace(
+            attempt_id="attempt-a",
+            decision=worker_module.QUEUE_DECISION_DEFERRED,
+            reason_code="CAPACITY",
+            resource_summary={"blockers": "not-a-list"},
+        )
+
+        assert not worker_module._capacity_deferred_decision_matches(  # noqa: SLF001
+            mismatched,
+            attempt_id="attempt-a",
+            reason_code="CAPACITY",
+            blockers=[blocker],
+        )
+        assert not worker_module._capacity_deferred_decision_matches(  # noqa: SLF001
+            malformed,
+            attempt_id="attempt-a",
+            reason_code="CAPACITY",
+            blockers=[blocker],
+        )
+        assert (
+            worker_module._capacity_blocker_signatures_from_summary(  # noqa: SLF001
+                {"blockers": [object()]}
+            )
+            is None
+        )
+
+    @pytest.mark.unit
+    def test_earliest_future_datetime_ignores_past_candidate(self) -> None:
+        now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+        current = now + timedelta(hours=2)
+
+        assert (
+            worker_module._earliest_future_datetime(  # noqa: SLF001
+                current,
+                now - timedelta(seconds=1),
+                now=now,
+            )
+            == current
+        )
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_reraises_non_transient_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = ControlWorker(
+            session_factory=object(),  # type: ignore[arg-type]
+            provisioner=SimpleNamespace(),
+            executor=SimpleNamespace(),
+            config=WorkerConfig(),
+        )
+
+        async def fail_scan() -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(worker, "_recover_stale_active_executions", fail_scan)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await worker._maybe_recover_stale_active_executions()  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_requested_capacity_age_boost_short_circuits_empty_windows(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class NoSqlSession:
+            async def execute(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("age boost check should not query without windows")
+
+        now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+        assert not await worker_module._requested_capacity_age_boost_changed(  # noqa: SLF001
+            NoSqlSession(),  # type: ignore[arg-type]
+            node_id="local",
+            since=now,
+            now=now,
+        )
+
+        monkeypatch.setattr(worker_module, "AGE_BOOST_MAX", 0)
+        assert not await worker_module._requested_capacity_age_boost_changed(  # noqa: SLF001
+            NoSqlSession(),  # type: ignore[arg-type]
+            node_id="local",
+            since=now - timedelta(minutes=1),
+            now=now,
+        )
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],

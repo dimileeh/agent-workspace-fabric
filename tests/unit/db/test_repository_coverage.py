@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ProviderModelCircuitBreaker, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
+    CallbackSubscriptionRepository,
     MergeCandidateRepository,
     OperationRepository,
     PolicyFindingCreate,
@@ -1513,6 +1514,32 @@ def test_owned_path_overlap_match_reports_overlapping_wildcard_prefixes() -> Non
     assert match is not None
     assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
     assert "Wildcard owned-path prefixes overlap" in match.explanation
+
+
+@pytest.mark.unit
+def test_owned_path_overlap_match_reports_wildcard_prefix_only_overlap() -> None:
+    match = owned_path_overlap_match("src/awf/service*/**", "src/awf/service-tests*/**")
+
+    assert match is not None
+    assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
+
+
+@pytest.mark.unit
+async def test_repository_replay_key_helpers_short_circuit_non_positive_limits() -> None:
+    assert (
+        await WorkspaceRepository(  # type: ignore[arg-type]
+            object(),
+            dialect_name="sqlite",
+        ).list_idempotency_replay_keys(limit=0)
+        == []
+    )
+    assert (
+        await CallbackSubscriptionRepository(  # type: ignore[arg-type]
+            object(),
+            dialect_name="sqlite",
+        ).list_idempotency_replay_keys(limit=0)
+        == []
+    )
 
 
 @pytest.mark.unit

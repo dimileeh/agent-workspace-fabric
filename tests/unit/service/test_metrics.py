@@ -49,6 +49,129 @@ async def session_factory(
     yield make_session_factory(engine)
 
 
+def _empty_reservation_totals() -> dict[str, float | int]:
+    return {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+
+
+@pytest.mark.unit
+async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    calls: list[tuple[str, str]] = []
+
+    async def metrics_totals(
+        _session: object,
+        *,
+        statuses: object,
+        node_id: str,
+    ) -> dict[str, float | int]:
+        calls.append(("metrics", node_id))
+        return _empty_reservation_totals()
+
+    async def scheduler_totals(
+        _session: object,
+        *,
+        statuses: object,
+        node_id: str,
+    ) -> dict[str, float | int]:
+        calls.append(("scheduler", node_id))
+        return _empty_reservation_totals()
+
+    async def auxiliary_counts(
+        _session: object,
+        *,
+        node_id: str,
+    ) -> metrics._AllocatedResourceAuxiliaryCounts:  # noqa: SLF001
+        calls.append(("auxiliary", node_id))
+        return metrics._AllocatedResourceAuxiliaryCounts(  # noqa: SLF001
+            unreserved_workspace_count=2,
+            defaulted_dind_slots=1,
+        )
+
+    monkeypatch.setattr(
+        metrics,
+        "_active_latest_totals_for_metrics_allocation_scope",
+        metrics_totals,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_active_latest_totals_for_scheduler_allocation_scope",
+        scheduler_totals,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_allocated_resource_auxiliary_counts_for_session",
+        auxiliary_counts,
+    )
+    defaults = metrics.WorkspaceResourceDefaults(
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=4.0,
+    )
+
+    metrics_resources = await metrics._allocated_resources_for_session(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        node_id="node-a",
+        resource_defaults=defaults,
+    )
+    scheduler_resources = await metrics._scheduler_allocated_resources_for_session(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        node_id="node-b",
+        resource_defaults=defaults,
+    )
+
+    assert metrics_resources.active_workspace_count == 2
+    assert metrics_resources.steady_cpu == 2.0
+    assert scheduler_resources.active_workspace_count == 2
+    assert scheduler_resources.dind_slots == 1
+    assert calls == [
+        ("metrics", "node-a"),
+        ("auxiliary", "node-a"),
+        ("scheduler", "node-b"),
+        ("auxiliary", "node-b"),
+    ]
+
+
+@pytest.mark.unit
+async def test_capacity_metrics_helpers_short_circuit_empty_inputs() -> None:
+    from awf.service import metrics
+
+    assert metrics._workspace_status_filter(()) is None  # noqa: SLF001
+    assert (
+        await metrics._defaulted_dind_slots_for_session(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            statuses=(),
+        )
+        == 0
+    )
+    assert (
+        await metrics._unreserved_workspace_count_for_session(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            statuses=(),
+        )
+        == 0
+    )
+    assert (
+        await metrics._provider_recovery_eligible_capacity_queue_candidates(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            [],
+            scoring_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        == []
+    )
+
+
 async def _reservation_for_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,

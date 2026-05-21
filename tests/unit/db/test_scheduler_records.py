@@ -57,6 +57,57 @@ async def _attempt(session: AsyncSession) -> tuple[str, str, str]:
 
 
 @pytest.mark.unit
+async def test_repository_empty_capacity_inputs_short_circuit_without_database() -> None:
+    reservation_repo = ResourceReservationRepository(object())  # type: ignore[arg-type]
+    attempt_repo = TaskAttemptRepository(object(), dialect_name="sqlite")  # type: ignore[arg-type]
+
+    assert await attempt_repo.get_by_workspace_ids([]) == {}
+    assert await reservation_repo.active_latest_by_workspace_ids([]) == {}
+    assert await reservation_repo.active_latest_totals(statuses=()) == {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+    assert await reservation_repo.active_latest_totals_for_workspace_scope(statuses=()) == {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+    assert await reservation_repo.active_latest_totals_for_scheduler_allocation_scope(
+        statuses=(),
+        node_id="local",
+    ) == {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+    assert await reservation_repo.active_latest_totals_for_metrics_allocation_scope(
+        statuses=(),
+        node_id="local",
+    ) == {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+
+
+@pytest.mark.unit
 async def test_queue_decision_repository_creates_and_lists_decisions(
     session: AsyncSession,
 ) -> None:

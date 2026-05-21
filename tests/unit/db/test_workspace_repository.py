@@ -1945,6 +1945,35 @@ class TestOwnedPathOverlapLookup:
         assert 'column("secs")' not in source
 
     @pytest.mark.unit
+    def test_scheduler_json_int_expr_handles_unbounded_digits_and_unknown_dialect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(repositories.sys, "get_int_max_str_digits", lambda: 0)
+
+        postgres_expr = repositories._scheduler_json_int_expr(  # noqa: SLF001
+            ("scheduler", "base_priority"),
+            "postgresql",
+        )
+        sqlite_expr = repositories._scheduler_json_int_expr(  # noqa: SLF001
+            ("scheduler", "base_priority"),
+            "sqlite",
+        )
+        fallback_expr = repositories._scheduler_json_int_expr(  # noqa: SLF001
+            ("scheduler", "base_priority"),
+            "unknown",
+        )
+        zero_boost_expr = repositories._scheduler_age_boost_expr(  # noqa: SLF001
+            scoring_at=datetime(2026, 1, 1, tzinfo=UTC),
+            dialect_name="unknown",
+        )
+
+        assert postgres_expr.compile(dialect=postgresql.dialect()) is not None
+        assert sqlite_expr.compile(dialect=sqlite.dialect()) is not None
+        assert fallback_expr is not None
+        assert zero_boost_expr is not None
+
+    @pytest.mark.unit
     async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
         self,
     ) -> None:
@@ -2295,6 +2324,43 @@ class TestTransition:
         await session.commit()
 
         assert ws.monitor_started_at is not None
+
+    @pytest.mark.unit
+    async def test_atomic_transition_to_monitoring_pr_stamps_monitor_start(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/atomic.git",
+            branch_base="development",
+            task_title="atomic",
+            task_prompt="transition",
+            agent="codex",
+            test_commands=[],
+        )
+        ws.idempotency_key = "atomic-transition-key"
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        ):
+            await repo.transition(ws, to=target, reason_code="X")
+        await session.flush()
+
+        atomic_repo = WorkspaceRepository(session, dialect_name="sqlite")
+        assert await atomic_repo.has_idempotency_key("atomic-transition-key")
+        transitioned = await atomic_repo.transition_if_current(
+            ws.id,
+            from_status=WorkspaceStatus.pushing,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="PR_CREATED",
+        )
+
+        assert transitioned is not None
+        assert transitioned.monitor_started_at is not None
+        assert transitioned.status == WorkspaceStatus.monitoring_pr.value
 
     @pytest.mark.unit
     async def test_invalid_transition_raises_and_does_not_mutate(
