@@ -9121,6 +9121,55 @@ class TestRunOnceStaleActiveExecutionRecovery:
         }
 
     @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_pr_invalid_open_pr_lookup_is_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        branch_name = "awf/ws_branch"
+        resolver = _RecordingBranchOpenPRResolver(
+            {
+                branch_name: [
+                    SimpleNamespace(
+                        url="https://github.com/example/repo/pull/0",
+                        number=0,
+                        head_ref=branch_name,
+                        head_sha="d" * 40,
+                        head_repo_slug="example/repo",
+                    )
+                ]
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="https://github.com/example/repo.git",
+            branch_name=branch_name,
+            base_branch="development",
+        )
+
+        assert lookup is not None
+        assert lookup.state == "failed"
+        assert lookup.ambiguity_reason == "open_pr_lookup_invalid"
+        assert lookup.payload == {
+            "branch_name": branch_name,
+            "error": "open PR lookup result has invalid pr_number",
+            "source": "open_pr_resolver",
+        }
+        assert resolver.calls == [
+            {
+                "repo_url": "https://github.com/example/repo.git",
+                "branch_name": branch_name,
+                "base_branch": "development",
+            }
+        ]
+
+    @pytest.mark.unit
     async def test_preserved_active_adopted_sync_feature_pr_fork_head_repo_attaches_monitor(
         self,
         session_factory: async_sessionmaker[AsyncSession],

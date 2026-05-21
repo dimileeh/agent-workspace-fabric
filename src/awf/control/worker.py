@@ -3301,7 +3301,7 @@ class ControlWorker:
         except ValueError as exc:
             return _BranchOpenPRLookup(
                 branch_name=lookup_branch,
-                state="ambiguous",
+                state="failed",
                 ambiguity_reason="open_pr_lookup_invalid",
                 payload={
                     "branch_name": lookup_branch,
