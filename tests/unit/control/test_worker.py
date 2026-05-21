@@ -10095,6 +10095,82 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_preserved_active_missing_worktree_waits_for_preservation_grace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-missing-worktree",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_missing_worktree",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work-missing-worktree"
+        expected_worktree = work_root / "worktrees" / workspace_id
+        assert not expected_worktree.exists()
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_missing_worktree": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        await worker.run_once()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            replacement_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert [workspace.id for workspace in workspaces] == [workspace_id]
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_salvage_blocked"
+        assert ws.failure_reason is None
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["blocked_reason"] == "worktree_missing"
+        assert blocked_payload["decision"] == "wait_for_preservation_grace"
+        assert blocked_payload["classification"]["state"] == "no_work"
+        assert blocked_payload["classification"]["reason"] == "worktree_missing"
+        assert blocked_payload["classification"]["worktree_path"] == str(expected_worktree)
+        assert replacement_events == []
+        assert stale_events == []
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
     async def test_preserved_active_clean_worktree_without_commits_replaces_after_grace(
         self,
         session_factory: async_sessionmaker[AsyncSession],

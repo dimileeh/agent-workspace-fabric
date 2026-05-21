@@ -2040,7 +2040,10 @@ class ControlWorker:
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
         if classification.state == "no_work":
-            if classification.reason == "clean_branch_not_ahead" and not preservation_expired:
+            if (
+                classification.reason in {"clean_branch_not_ahead", "worktree_missing"}
+                and not preservation_expired
+            ):
                 await self._record_preserved_active_salvage_blocked(
                     candidate,
                     preserved_event=preserved_event,
