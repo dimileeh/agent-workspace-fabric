@@ -79,6 +79,51 @@ async def test_repair_agent_runtime_ownership_uses_mirror_from_worktree(tmp_path
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_allows_numeric_worktree_suffix(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace"
+    mirror_root = worktrees_root.parent / "mirrors"
+    worktree_path = worktrees_root / workspace_id
+    worktree_path.mkdir(parents=True)
+    linked_git_dir = mirror_root / "repo.git" / "worktrees" / f"{workspace_id}1"
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    captured: list[tuple[Path | None, Path]] = []
+
+    def _repair_agent_writable_worktree(layout_mirror: Path | None, path: Path) -> None:
+        captured.append((layout_mirror, path))
+
+    logger = _RecordingLogger()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    try:
+        ok = await ownership.repair_agent_runtime_ownership(
+            logger=logger,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="pytest",
+            event_name="monitor.event",
+            reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+        )
+    finally:
+        monkeypatched.undo()
+
+    assert ok
+    assert captured == [(mirror_root / "repo.git", worktree_path)]
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_blocks_mirrors_outside_workspace_mirrors_root(
     tmp_path: Path,
 ) -> None:
