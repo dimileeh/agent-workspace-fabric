@@ -2190,14 +2190,13 @@ class ControlWorker:
                 return False
             assert attempt_id is not None
             assert task_id is not None
-            await self._create_preserved_active_replacement(
+            return await self._create_preserved_active_replacement(
                 candidate,
                 preserved_event=preserved_event,
                 classification=classification,
                 attempt_id=attempt_id,
                 task_id=task_id,
             )
-            return True
         if classification.state == "failed" and not preservation_expired:
             await self._record_preserved_active_salvage_blocked(
                 candidate,
@@ -2657,7 +2656,7 @@ class ControlWorker:
         classification: _PreservedWorktreeClassification,
         attempt_id: str,
         task_id: str,
-    ) -> None:
+    ) -> bool:
         idempotency_key = _active_execution_salvage_idempotency_key(
             "replacement",
             candidate.workspace_id,
@@ -2669,13 +2668,62 @@ class ControlWorker:
             existing = await repo.get_by_idempotency_key(idempotency_key)
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
-                return
+                return False
             claim_cutoff = datetime.now(UTC)
             if not _execution_claim_is_stale(ws, claim_cutoff):
-                return
+                return True
             original_attempt = await TaskAttemptRepository(session).get_by_workspace_id(ws.id)
             if original_attempt is None or original_attempt.id != attempt_id:
-                return
+                current_attempt_id = original_attempt.id if original_attempt is not None else None
+                mismatch_reason = (
+                    "missing_task_attempt_lineage"
+                    if original_attempt is None
+                    else "attempt_lineage_mismatch"
+                )
+                _log.warning(
+                    "worker.preserved_active_replacement_attempt_mismatch",
+                    workspace_id=ws.id,
+                    expected_attempt_id=attempt_id,
+                    current_attempt_id=current_attempt_id,
+                    reason=mismatch_reason,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                )
+                if not await self._has_current_salvage_event(
+                    session,
+                    ws.id,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                    event_floor=preserved_event.occurred_at,
+                    workspace_status=candidate.status,
+                ):
+                    payload = _active_execution_salvage_payload(
+                        candidate,
+                        preserved_event=preserved_event,
+                        worker_id=self._worker_id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                        decision="allow_stale_active_failure",
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        previous_claim=_workspace_claim_snapshot(ws),
+                        claim_cleanup=_active_execution_preservation_claim_cleanup_payload(
+                            ws,
+                            claim_cutoff=claim_cutoff,
+                        ),
+                        classification=classification,
+                        extra={
+                            "unrecoverable_reason": mismatch_reason,
+                            "source_workspace_id": ws.id,
+                            "current_attempt_id": current_attempt_id,
+                        },
+                    )
+                    await repo.add_event(
+                        ws,
+                        event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                        payload=payload,
+                    )
+                    await session.commit()
+                return False
             if await self._has_current_salvage_event(
                 session,
                 ws.id,
@@ -2684,7 +2732,7 @@ class ControlWorker:
                 event_floor=preserved_event.occurred_at,
                 workspace_status=candidate.status,
             ):
-                return
+                return True
 
             replacement = existing
             replacement_attempt = (
@@ -2743,7 +2791,7 @@ class ControlWorker:
                     replacement_workspace_id=replacement.id,
                     reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
                 )
-                return
+                return True
             original_attempt.superseded_by_attempt_id = replacement_attempt.id
             previous_claim = _workspace_claim_snapshot(ws)
             claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
@@ -2826,6 +2874,7 @@ class ControlWorker:
                 },
             )
             await session.commit()
+            return True
 
     async def _record_preserved_active_operator_required(
         self,

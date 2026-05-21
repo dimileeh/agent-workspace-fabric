@@ -11297,6 +11297,204 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
     @pytest.mark.unit
+    async def test_preserved_active_replacement_attempt_mismatch_records_not_possible(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-replacement-attempt-mismatch",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_replacement_attempt_mismatch",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            original_attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert original_attempt is not None
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            task_id = original_attempt.task_id
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                Path("/tmp/awf-missing-replacement-attempt-mismatch"),
+            ),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_replacement_attempt_mismatch": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="worktree_missing",
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name="awf_preserved_replacement_attempt_mismatch",
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            recovered = await worker._create_preserved_active_replacement(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id="stale-captured-attempt-id",
+                task_id=task_id,
+            )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+            replacement_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+
+        assert recovered is False
+        assert [workspace.id for workspace in workspaces] == [workspace_id]
+        assert ws.status == WorkspaceStatus.running.value
+        assert len(not_possible_events) == 1
+        assert not_possible_events[0].payload is not None
+        assert not_possible_events[0].payload["reason_code"] == (
+            "ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE"
+        )
+        assert not_possible_events[0].payload["decision"] == "allow_stale_active_failure"
+        assert not_possible_events[0].payload["unrecoverable_reason"] == (
+            "attempt_lineage_mismatch"
+        )
+        assert not_possible_events[0].payload["attempt_id"] == "stale-captured-attempt-id"
+        assert not_possible_events[0].payload["current_attempt_id"] == original_attempt.id
+        assert replacement_events == []
+        assert any(
+            event.get("event") == "worker.preserved_active_replacement_attempt_mismatch"
+            and event.get("log_level") == "warning"
+            and event.get("workspace_id") == workspace_id
+            and event.get("expected_attempt_id") == "stale-captured-attempt-id"
+            and event.get("current_attempt_id") == original_attempt.id
+            and event.get("reason_code") == "ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_preserved_active_recovery_propagates_replacement_not_possible(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-replacement-not-possible",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_replacement_not_possible",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            original_attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+            assert original_attempt is not None
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_MissingWorktreePathProvisioner(
+                session_factory,
+                Path("/tmp/awf-missing-replacement-not-possible"),
+            ),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_replacement_not_possible": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="worktree_missing",
+        )
+        replacement_attempted = False
+
+        async def _classify_preserved_active_worktree(**_kwargs: object) -> object:
+            return classification
+
+        async def _create_preserved_active_replacement(
+            _candidate: _ActiveExecutionCandidate,
+            *,
+            preserved_event: object,
+            classification: object,
+            attempt_id: str,
+            task_id: str,
+        ) -> bool:
+            nonlocal replacement_attempted
+            del preserved_event, classification, task_id
+            replacement_attempted = True
+            assert attempt_id == original_attempt.id
+            return False
+
+        monkeypatch.setattr(
+            worker,
+            "_classify_preserved_active_worktree",
+            _classify_preserved_active_worktree,
+        )
+        monkeypatch.setattr(
+            worker,
+            "_create_preserved_active_replacement",
+            _create_preserved_active_replacement,
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_replacement_not_possible",
+            )
+        )
+
+        assert replacement_attempted
+        assert recovered is False
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("status", "operation_type", "operation_status"),
         [
