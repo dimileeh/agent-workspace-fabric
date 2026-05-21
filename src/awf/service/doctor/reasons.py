@@ -18,6 +18,25 @@ class _ReasonText:
 
 
 _REASON_TEXT: dict[str, _ReasonText] = {
+    "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED": _ReasonText(
+        (
+            "AWF could not repair workspace runtime file ownership before "
+            "running setup or committing monitor fixes."
+        ),
+        (
+            "Inspect worker logs, verify the AWF work directory is writable by "
+            "the control-plane container, then remonitor or recreate the "
+            "workspace after fixing permissions."
+        ),
+        (
+            "The local control-plane container could not chown the workspace "
+            "worktree to the agent runtime UID/GID, often because the worktree "
+            "or nested runtime state such as `.venv` is missing, read-only, or "
+            "mounted with incompatible permissions."
+        ),
+        "awf service logs --service worker",
+        "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
+    ),
     "DOCKER_OK": _ReasonText(
         "Docker daemon is reachable.",
         "No action required.",

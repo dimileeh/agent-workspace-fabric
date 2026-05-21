@@ -2,6 +2,13 @@
 
 This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.
 
+### AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED
+**Problem:** AWF could not repair workspace runtime file ownership before running setup or committing monitor fixes.
+**Likely Cause:** The local control-plane container could not chown the workspace worktree to the agent runtime UID/GID, often because the worktree or nested runtime state such as `.venv` is missing, read-only, or mounted with incompatible permissions.
+**Operator Fix:** Inspect worker logs, verify the AWF work directory is writable by the control-plane container, then remonitor or recreate the workspace after fixing permissions.
+**Related Command:** `awf service logs --service worker`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.

@@ -2596,6 +2596,87 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
 
 
 @pytest.mark.unit
+async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    repair_call_lengths: list[int] = []
+
+    def _record_repair(_layout_mirror: Path | None, repaired_worktree: Path) -> None:
+        assert repaired_worktree == worktree
+        repair_call_lengths.append(len(cmd.calls))
+
+    monkeypatch.setattr(
+        pr_monitor_runner,
+        "repair_agent_writable_worktree",
+        _record_repair,
+        raising=False,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+
+    assert result is True
+    assert repair_call_lengths == [1, 4]
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    def _raise_repair(_layout_mirror: Path | None, _repaired_worktree: Path) -> None:
+        raise PermissionError("cannot repair .venv")
+
+    monkeypatch.setattr(
+        pr_monitor_runner,
+        "repair_agent_writable_worktree",
+        _raise_repair,
+        raising=False,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: dirty",
+    )
+
+    assert result is False
+    assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
 async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

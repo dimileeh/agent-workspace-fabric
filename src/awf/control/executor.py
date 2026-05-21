@@ -201,6 +201,7 @@ _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_PR_CREATED_EVENT = "workspace.audit.pr_created"
 _GIT_PUSH_FAILED_REASON_CODE = "GIT_PUSH_FAILED"
 _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
+AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
 GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
 GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
@@ -1741,6 +1742,28 @@ class WorkspaceExecutor:
                 worktree_path=worktree_path,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
+            if not await self._repair_agent_runtime_ownership(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="profile_setup",
+            ):
+                if recovery is not None:
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                        error_message=(
+                            "agent runtime ownership repair failed before profile setup"
+                        ),
+                    )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message="agent runtime ownership repair failed before profile setup",
+                    reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                )
+                return
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -3865,6 +3888,26 @@ class WorkspaceExecutor:
     async def _load_workspace(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
             return await WorkspaceRepository(session).get(workspace_id)
+
+    async def _repair_agent_runtime_ownership(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+    ) -> bool:
+        try:
+            await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
+        except Exception:
+            _log.exception(
+                "executor.agent_runtime_ownership_repair_failed",
+                workspace_id=workspace_id,
+                worktree_path=str(worktree_path),
+                reason=reason,
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            )
+            return False
+        return True
 
     async def _repair_agent_git_ownership(
         self,

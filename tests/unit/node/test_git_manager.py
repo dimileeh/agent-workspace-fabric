@@ -525,6 +525,34 @@ def test_repair_agent_writable_worktree_fallback_repairs_linked_git_dir(
 
 
 @pytest.mark.unit
+def test_repair_agent_writable_worktree_repairs_runtime_venv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    venv_bin = worktree / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    uv = venv_bin / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    chowned: list[Path] = []
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_manager, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, _uid, _gid: chowned.append(Path(path)),
+    )
+
+    git_manager.repair_agent_writable_worktree(None, worktree)
+
+    assert worktree in chowned
+    assert worktree / ".venv" in chowned
+    assert venv_bin in chowned
+    assert uv in chowned
+
+
+@pytest.mark.unit
 def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

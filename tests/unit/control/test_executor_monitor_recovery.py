@@ -185,6 +185,22 @@ class _SetupFailureValidation:
         return None
 
 
+class _RecordingSetupFailureValidation(_SetupFailureValidation):
+    def __init__(self, setup_result: ValidationResult, events: list[str]) -> None:
+        super().__init__(setup_result)
+        self._events = events
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **kwargs: Any,
+    ) -> ValidationResult:
+        if phase_names == ("setup", "pre_agent"):
+            self._events.append("setup")
+        return await super().run_profile_phases(phase_names=phase_names, **kwargs)
+
+
 def _setup_dependency_exhausted_result(tmp_path: Path) -> ValidationCommandResult:
     stdout_path = tmp_path / "setup.stdout"
     stderr_path = tmp_path / "setup.stderr"
@@ -1181,6 +1197,83 @@ async def test_generic_setup_failure_during_recovery_preserves_monitor_setup_rea
     assert recovery_op.status == OperationStatus.failed.value
     assert recovery_op.error_code == "MONITOR_RECOVERY_SETUP_FAILED"
     assert recovery_op.result == {"reason_code": "MONITOR_RECOVERY_SETUP_FAILED"}
+
+
+@pytest.mark.unit
+async def test_runtime_ownership_repair_runs_before_recovery_setup(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    validation = _RecordingSetupFailureValidation(
+        ValidationResult(commands=[_generic_setup_failure_result(tmp_path)]),
+        events,
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    async def _repair(**kwargs: Any) -> bool:
+        events.append("repair")
+        assert kwargs["workspace_id"] == ws_id
+        assert kwargs["worktree_path"] == _test_worktrees_root(factory) / ws_id
+        assert kwargs["reason"] == "profile_setup"
+        return True
+
+    executor._repair_agent_runtime_ownership = _repair  # type: ignore[method-assign]
+
+    await executor.execute(ws_id)
+
+    assert events == ["repair", "setup"]
+
+
+@pytest.mark.unit
+async def test_runtime_ownership_repair_failure_blocks_recovery_setup(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    validation = _SetupFailureValidation(
+        ValidationResult(commands=[_generic_setup_failure_result(tmp_path)])
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    async def _repair(**_kwargs: Any) -> bool:
+        return False
+
+    executor._repair_agent_runtime_ownership = _repair  # type: ignore[method-assign]
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert validation.calls == []
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "infrastructure_failure"
+    assert ws.failure_message == "agent runtime ownership repair failed before profile setup"
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.failed.value
+    assert recovery_ops[0].error_code == "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+    assert recovery_ops[0].result == {"reason_code": "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"}
 
 
 @pytest.mark.unit
