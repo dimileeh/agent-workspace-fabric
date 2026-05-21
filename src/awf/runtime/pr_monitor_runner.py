@@ -4626,19 +4626,33 @@ class PullRequestMonitorRunner:
         commit = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "commit", "-m", message)
         )
-        if not await self._repair_agent_runtime_ownership(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            reason="dirty_worktree_post_commit",
-        ):
-            return False
         if not commit.ok:
+            if not await self._repair_agent_runtime_ownership(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="dirty_worktree_post_commit",
+            ):
+                _log.warning(
+                    "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                    workspace_id=workspace_id,
+                )
             _log.warning(
                 "monitor.dirty_commit_failed",
                 workspace_id=workspace_id,
                 stderr=commit.stderr[:400],
             )
             return False
+
+        if not await self._repair_agent_runtime_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="dirty_worktree_post_commit",
+        ):
+            _log.warning(
+                "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                workspace_id=workspace_id,
+            )
+            return True
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
 

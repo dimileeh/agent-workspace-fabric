@@ -3626,6 +3626,61 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
 
 
 @pytest.mark.unit
+async def test_invoke_cli_for_verdict_reports_fix_committed_when_post_commit_ownership_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="tool crashed")
+    workspace_id = "ws_post_commit_ownership"
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    repair_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+    ) -> bool:
+        repair_reasons.append(reason)
+        if reason == "dirty_worktree_pre_commit":
+            return True
+        return False
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    verdict = await runner._invoke_cli_for_verdict(
+        workspace_id=workspace_id,
+        prompt="fix it",
+        commit_message="fix: review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert verdict == "fix_committed"
+    assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
+    assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
+
+
+@pytest.mark.unit
 async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
