@@ -118,6 +118,17 @@ def _validated_layout_mirror_for_worktree(
     return mirror_path, linked_git_dir
 
 
+def _repair_agent_runtime_ownership_in_thread(worktree_path: Path, workspace_id: str) -> None:
+    layout_mirror, validated_linked_git_dir = _validated_layout_mirror_for_worktree(
+        worktree_path, workspace_id
+    )
+    repair_agent_writable_worktree(
+        layout_mirror,
+        worktree_path,
+        linked_git_dir=validated_linked_git_dir,
+    )
+
+
 class _LoggerProtocol(Protocol):
     """Protocol contract for ownership-repair logging callsites."""
 
@@ -145,14 +156,10 @@ async def repair_agent_runtime_ownership(
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree."""
     try:
-        layout_mirror, validated_linked_git_dir = _validated_layout_mirror_for_worktree(
-            worktree_path, workspace_id
-        )
         await asyncio.to_thread(
-            repair_agent_writable_worktree,
-            layout_mirror,
+            _repair_agent_runtime_ownership_in_thread,
             worktree_path,
-            linked_git_dir=validated_linked_git_dir,
+            workspace_id,
         )
     except Exception:
         logger.exception(

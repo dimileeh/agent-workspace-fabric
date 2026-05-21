@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,76 @@ async def test_repair_agent_runtime_ownership_passes_validated_git_metadata(
     assert ok
     assert linked_read_calls == 1
     assert captured == [(mirror_root / "repo.git", worktree_path, linked_git_dir)]
+
+
+@pytest.mark.unit
+async def test_repair_agent_runtime_ownership_runs_validation_inside_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws"
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    mirror_path = tmp_path / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "worktrees" / workspace_id
+    inside_to_thread = False
+    calls: list[tuple[str, bool]] = []
+
+    async def _to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal inside_to_thread
+        inside_to_thread = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            inside_to_thread = False
+
+    def _validated_layout_mirror_for_worktree(
+        path: Path, validated_workspace_id: str
+    ) -> tuple[Path, Path]:
+        calls.append(("validate", inside_to_thread))
+        assert path == worktree_path
+        assert validated_workspace_id == workspace_id
+        return mirror_path, linked_git_dir
+
+    def _repair_agent_writable_worktree(
+        layout_mirror: Path | None,
+        path: Path,
+        **kwargs: object,
+    ) -> None:
+        calls.append(("repair", inside_to_thread))
+        assert layout_mirror == mirror_path
+        assert path == worktree_path
+        assert kwargs == {"linked_git_dir": linked_git_dir}
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(ownership.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(
+        ownership,
+        "_validated_layout_mirror_for_worktree",
+        _validated_layout_mirror_for_worktree,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    ok = await ownership.repair_agent_runtime_ownership(
+        logger=logger,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pytest",
+        event_name="monitor.event",
+        reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+    )
+
+    assert ok
+    assert logger.exception_calls == []
+    assert calls == [("validate", True), ("repair", True)]
 
 
 @pytest.mark.unit
