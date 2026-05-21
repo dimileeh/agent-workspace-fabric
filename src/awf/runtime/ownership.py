@@ -8,16 +8,12 @@ from typing import Protocol
 
 from awf.node.git_manager import repair_agent_writable_worktree
 
-AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = (
-    "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
-)
+AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 
 EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
     "executor.agent_runtime_ownership_repair_failed"
 )
-MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
-    "monitor.agent_runtime_ownership_repair_failed"
-)
+MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
 
 
 class _LoggerProtocol(Protocol):
