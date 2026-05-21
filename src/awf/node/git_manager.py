@@ -602,7 +602,7 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
     for target in targets:
         resolved = target.path.resolve()
         key = (resolved, target.recursive, target.directories_only)
-        if key in seen or not target.path.exists():
+        if key in seen or not (target.path.exists() or target.path.is_symlink()):
             continue
         seen.add(key)
         if target.recursive:

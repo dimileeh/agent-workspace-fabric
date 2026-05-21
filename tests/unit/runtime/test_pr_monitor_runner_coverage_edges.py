@@ -2819,6 +2819,11 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
         and event.get("workspace_id") == workspace_id
         for event in captured
     )
+    assert any(
+        event.get("event") == "monitor.dirty_worktree_post_commit_succeeded_ownership_repair_failed"
+        and event.get("workspace_id") == workspace_id
+        for event in captured
+    )
 
 
 @pytest.mark.unit

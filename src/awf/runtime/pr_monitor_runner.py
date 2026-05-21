@@ -4749,7 +4749,7 @@ class PullRequestMonitorRunner:
             reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         ):
             _log.warning(
-                "monitor.dirty_worktree_post_commit_ownership_repair_failed",
+                "monitor.dirty_worktree_post_commit_succeeded_ownership_repair_failed",
                 workspace_id=workspace_id,
             )
             raise _MonitorAgentRuntimeOwnershipRepairFailedError(
