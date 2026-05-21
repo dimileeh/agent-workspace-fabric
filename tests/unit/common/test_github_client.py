@@ -416,7 +416,7 @@ class TestListOpenPullRequestsForBranch:
         assert "headRepositoryOwner" in json_fields
 
     @pytest.mark.unit
-    async def test_skips_malformed_items_when_parseable_match_exists(self) -> None:
+    async def test_mixed_malformed_and_parseable_items_fail_closed(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -443,16 +443,26 @@ class TestListOpenPullRequestsForBranch:
             ),
         )
 
-        with structlog.testing.capture_logs() as captured:
-            matches = await list_open_pull_requests_for_branch(
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(PullRequestMetadataError) as excinfo,
+        ):
+            await list_open_pull_requests_for_branch(
                 runner=fake,
                 repo=RepoRef(owner="dimileeh", name="aira-web"),
                 branch_name="feature/head",
             )
 
-        assert len(matches) == 1
-        assert matches[0].number == 278
-        assert matches[0].head_repo_slug == "dimileeh/aira-web"
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "mixed parseable and invalid items" in excinfo.value.message
+        assert excinfo.value.detail == {
+            "repo_slug": "dimileeh/aira-web",
+            "branch_name": "feature/head",
+            "base_branch": None,
+            "parsed_count": 1,
+            "parse_failure_count": 1,
+            "parse_failure_indexes": [0],
+        }
         event = next(
             (item for item in captured if item.get("event") == "github.open_pr_item_parse_failed"),
             None,

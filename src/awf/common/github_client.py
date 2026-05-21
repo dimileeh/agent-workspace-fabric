@@ -576,9 +576,6 @@ async def list_open_pull_requests_for_branch(
         except PullRequestMetadataError as exc:
             parse_failures.append((index, exc))
 
-    if not results and parse_failures:
-        raise parse_failures[0][1]
-
     for index, parse_error in parse_failures:
         _log.warning(
             "github.open_pr_item_parse_failed",
@@ -588,6 +585,21 @@ async def list_open_pull_requests_for_branch(
             reason_code=parse_error.reason_code,
             error=redact_audit_text(parse_error.message),
         )
+    if results and parse_failures:
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message="gh pr list returned mixed parseable and invalid items.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+                "parsed_count": len(results),
+                "parse_failure_count": len(parse_failures),
+                "parse_failure_indexes": [index for index, _parse_error in parse_failures],
+            },
+        )
+    if parse_failures:
+        raise parse_failures[0][1]
     return results
 
 
