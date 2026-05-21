@@ -1856,7 +1856,7 @@ async def test_preserved_active_worktree_classification_covers_mismatch_and_coun
         base_commit="b" * 40,
     )
 
-    assert invalid_count.state == "ambiguous"
+    assert invalid_count.state == "failed"
     assert invalid_count.reason == "ahead_count_invalid"
     assert invalid_count.error == "not-a-number\n"
 

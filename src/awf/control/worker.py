@@ -3508,7 +3508,7 @@ class ControlWorker:
             commit_count = int(count[1].strip())
         except ValueError:
             return _PreservedWorktreeClassification(
-                state="ambiguous",
+                state="failed",
                 reason="ahead_count_invalid",
                 worktree_path=str(worktree_path),
                 branch_name=branch_name,
