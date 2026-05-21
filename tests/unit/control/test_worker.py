@@ -1442,6 +1442,30 @@ class TestRunOnce:
             after=5.0,
             unsatisfiable=False,
         )
+        stored = SimpleNamespace(
+            attempt_id="attempt-a",
+            decision=worker_module.QUEUE_DECISION_DEFERRED,
+            reason_code="CAPACITY",
+            resource_summary={"blockers": [worker_module._capacity_blocker_payload(blocker)]},  # noqa: SLF001
+        )
+        allocation_changed = worker_module.LocalCapacityBlocker(
+            dimension="steady_cpu",
+            reason_code="STEADY_CPU_CAPACITY_SATURATED",
+            limit=4.0,
+            allocated=7.0,
+            requested=1.0,
+            after=8.0,
+            unsatisfiable=False,
+        )
+        request_changed = worker_module.LocalCapacityBlocker(
+            dimension="steady_cpu",
+            reason_code="STEADY_CPU_CAPACITY_SATURATED",
+            limit=4.0,
+            allocated=4.0,
+            requested=2.0,
+            after=6.0,
+            unsatisfiable=False,
+        )
         mismatched = SimpleNamespace(
             attempt_id="attempt-a",
             decision=worker_module.QUEUE_DECISION_ORDERED,
@@ -1460,6 +1484,18 @@ class TestRunOnce:
             attempt_id="attempt-a",
             reason_code="CAPACITY",
             blockers=[blocker],
+        )
+        assert worker_module._capacity_deferred_decision_matches(  # noqa: SLF001
+            stored,
+            attempt_id="attempt-a",
+            reason_code="CAPACITY",
+            blockers=[allocation_changed],
+        )
+        assert not worker_module._capacity_deferred_decision_matches(  # noqa: SLF001
+            stored,
+            attempt_id="attempt-a",
+            reason_code="CAPACITY",
+            blockers=[request_changed],
         )
         assert not worker_module._capacity_deferred_decision_matches(  # noqa: SLF001
             malformed,
@@ -2197,7 +2233,7 @@ class TestRunOnce:
         )
 
     @pytest.mark.unit
-    async def test_requested_capacity_gate_records_changed_capacity_deferral(
+    async def test_requested_capacity_gate_dedupes_allocated_only_capacity_deferral_changes(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -2278,16 +2314,11 @@ class TestRunOnce:
         deferred_decisions = [
             decision for decision in decisions if decision.reason_code == "LOCAL_CAPACITY_DEFERRED"
         ]
-        assert len(deferred_decisions) == 3
-        latest_blockers = deferred_decisions[0].resource_summary["blockers"]
-        prior_blockers = deferred_decisions[1].resource_summary["blockers"]
-        initial_blockers = deferred_decisions[2].resource_summary["blockers"]
-        assert latest_blockers[0]["allocated"] == 8.0
-        assert prior_blockers[0]["allocated"] == 7.0
-        assert initial_blockers[0]["allocated"] == 6.0
-        latest_previous = deferred_decisions[0].resource_summary["previous"]
-        assert latest_previous["blockers"][0]["allocated"] == 7.0
-        assert "previous" not in latest_previous
+        assert len(deferred_decisions) == 1
+        blockers = deferred_decisions[0].resource_summary["blockers"]
+        assert blockers[0]["allocated"] == 6.0
+        assert blockers[0]["after"] == 12.0
+        assert "previous" not in deferred_decisions[0].resource_summary
 
     @pytest.mark.unit
     async def test_requested_capacity_gate_ignores_allocated_capacity_on_other_nodes(

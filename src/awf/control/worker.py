@@ -163,13 +163,13 @@ PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
 LOCAL_CAPACITY_DEFERRED_REASON = "LOCAL_CAPACITY_DEFERRED"
 LOCAL_CAPACITY_UNSATISFIABLE_REASON = "LOCAL_CAPACITY_UNSATISFIABLE"
 LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON = "LOCAL_CAPACITY_RESERVATION_DEFAULTED"
+# Keep allocation snapshots in decision payloads, but dedupe on stable blocker
+# identity so ordinary admissions do not rewrite every still-blocked candidate.
 _CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
     "dimension",
     "reason_code",
     "limit",
-    "allocated",
     "requested",
-    "after",
     "unsatisfiable",
 )
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
