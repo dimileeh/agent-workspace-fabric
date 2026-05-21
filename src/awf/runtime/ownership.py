@@ -39,8 +39,10 @@ def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
     return linked_git_dir
 
 
-def _validated_layout_mirror_for_worktree(worktree_path: Path, workspace_id: str) -> Path | None:
-    """Resolve and validate the linked-worktree mirror path.
+def _validated_layout_mirror_for_worktree(
+    worktree_path: Path, workspace_id: str
+) -> tuple[Path | None, Path | None]:
+    """Resolve and validate the linked-worktree mirror and gitdir.
 
     Control-plane control over git pointers has been compromised during
     monitor recoveries; trust only mirrored worktree pointers that stay under
@@ -48,8 +50,9 @@ def _validated_layout_mirror_for_worktree(worktree_path: Path, workspace_id: str
     worktree path and match this workspace's metadata entry.
     """
     mirror_path = mirror_path_for_worktree(worktree_path)
+    linked_worktree_git_dir = _linked_worktree_git_dir(worktree_path)
     if mirror_path is None:
-        return None
+        return None, linked_worktree_git_dir
 
     expected_mirror_root = worktree_path.parent.parent / "mirrors"
     resolved_expected_root = expected_mirror_root.resolve()
@@ -60,7 +63,6 @@ def _validated_layout_mirror_for_worktree(worktree_path: Path, workspace_id: str
             f"for workspace {worktree_path}: {resolved_mirror}"
         )
 
-    linked_worktree_git_dir = _linked_worktree_git_dir(worktree_path)
     if linked_worktree_git_dir is None:
         raise ValueError(
             "refusing ownership repair: cannot read linked-worktree git metadata "
@@ -87,7 +89,7 @@ def _validated_layout_mirror_for_worktree(worktree_path: Path, workspace_id: str
             f"workspace. expected workspace id {workspace_id}, got {linked_worktree_git_dir.name}"
         )
 
-    return mirror_path
+    return mirror_path, linked_worktree_git_dir
 
 
 class _LoggerProtocol(Protocol):
@@ -117,10 +119,14 @@ async def repair_agent_runtime_ownership(
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree."""
     try:
+        layout_mirror, linked_worktree_git_dir = _validated_layout_mirror_for_worktree(
+            worktree_path, workspace_id
+        )
         await asyncio.to_thread(
             repair_agent_writable_worktree,
-            _validated_layout_mirror_for_worktree(worktree_path, workspace_id),
+            layout_mirror,
             worktree_path,
+            linked_git_dir=linked_worktree_git_dir,
         )
     except Exception:
         logger.exception(

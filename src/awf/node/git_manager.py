@@ -493,9 +493,11 @@ def _agent_writable_git_targets(
     *,
     layout_mirror: Path,
     worktree_path: Path,
+    linked_git_dir: Path | None = None,
 ) -> tuple[_ChownTarget, ...]:
     targets = [_ChownTarget(worktree_path, recursive=True)]
-    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None:
+        linked_git_dir = _linked_worktree_git_dir(worktree_path)
     if linked_git_dir is not None:
         targets.append(_ChownTarget(linked_git_dir, recursive=True))
     targets.append(_ChownTarget(layout_mirror, recursive=False))
@@ -525,6 +527,7 @@ def repair_agent_writable_worktree(
     worktree_path: Path,
     uid: int = AGENT_RUNTIME_UID,
     gid: int = AGENT_RUNTIME_GID,
+    linked_git_dir: Path | None = None,
 ) -> None:
     """Repair linked-worktree Git ownership for the agent-runtime user.
 
@@ -538,7 +541,8 @@ def repair_agent_writable_worktree(
     mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
     if mirror is None:
         targets = [_ChownTarget(worktree_path, recursive=True)]
-        linked_git_dir = _linked_worktree_git_dir(worktree_path)
+        if linked_git_dir is None:
+            linked_git_dir = _linked_worktree_git_dir(worktree_path)
         if linked_git_dir is not None:
             targets.append(_ChownTarget(linked_git_dir, recursive=True))
     else:
@@ -546,6 +550,7 @@ def repair_agent_writable_worktree(
             _agent_writable_git_targets(
                 layout_mirror=mirror,
                 worktree_path=worktree_path,
+                linked_git_dir=linked_git_dir,
             )
         )
     _chown_targets(tuple(targets), uid, gid)
