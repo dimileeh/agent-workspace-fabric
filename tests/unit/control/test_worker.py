@@ -1401,7 +1401,9 @@ class TestRunOnce:
             _session: object,
             *,
             node_id: str,
+            scoring_at: datetime | None,
         ) -> worker_module._RequestedCapacityQueueSignature:  # noqa: SLF001
+            assert scoring_at is not None
             return (0, None, None, None, "")
 
         monkeypatch.setattr(
