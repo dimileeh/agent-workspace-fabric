@@ -49,6 +49,7 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+    scheduler_order_expressions,
 )
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
@@ -2602,11 +2603,12 @@ class ControlWorker:
         claimed: list[str] = []
         repo = WorkspaceRepository(session)
         node_id = self._config.node_id or "local"
+        decided_at = datetime.now(UTC)
         requested_queue_signature = await _requested_capacity_queue_signature(
             session,
             node_id=node_id,
+            scoring_at=decided_at,
         )
-        decided_at = datetime.now(UTC)
         # A provider circuit can open between polls without changing the queue
         # or allocation signatures. That may reuse the cursor for one cycle; a
         # scan that observes suppression stores its expiry and later resets here.
@@ -3523,9 +3525,22 @@ async def _requested_capacity_queue_signature(
     session: AsyncSession,
     *,
     node_id: str,
+    scoring_at: datetime | None = None,
 ) -> _RequestedCapacityQueueSignature:
     bind = session.get_bind()
-    if bind.dialect.name != "postgresql":
+    dialect_name = bind.dialect.name
+    signature_scoring_at = scoring_at or datetime.now(UTC)
+    order_expressions = scheduler_order_expressions(
+        scoring_at=signature_scoring_at,
+        dialect_name=dialect_name,
+    )
+    scheduler_order = (
+        order_expressions.class_priority.desc(),
+        order_expressions.effective_score.desc(),
+        Workspace.created_at.asc(),
+        Workspace.id.asc(),
+    )
+    if dialect_name != "postgresql":
         stmt = (
             select(
                 Workspace.id,
@@ -3538,7 +3553,7 @@ async def _requested_capacity_queue_signature(
             )
             .where(Workspace.status == WorkspaceStatus.requested.value)
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-            .order_by(Workspace.id)
+            .order_by(*scheduler_order)
             .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
         )
         count = 0
@@ -3598,7 +3613,7 @@ async def _requested_capacity_queue_signature(
         )
         .where(Workspace.status == WorkspaceStatus.requested.value)
         .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-        .order_by(Workspace.id)
+        .order_by(*scheduler_order)
         .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
         .subquery()
     )

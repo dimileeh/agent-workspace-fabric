@@ -1109,6 +1109,64 @@ class TestRunOnce:
         assert before != after
 
     @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_changes_when_scheduler_frontier_changes_beyond_id_sample(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monkeypatch.setattr(worker_module, "_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT", 3)
+        generated_ids = iter(
+            [
+                "ws_000000000000000000000000",
+                "ws_000000000000000000000001",
+                "ws_000000000000000000000002",
+                "ws_ffffffffffffffffffffffff",
+            ]
+        )
+        monkeypatch.setattr(repositories_module, "new_workspace_id", lambda: next(generated_ids))
+        queued_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        for index in range(3):
+            await _create_requested(
+                session_factory,
+                origin_repo,
+                f"signature-id-sample-front-{index}",
+                created_at=queued_at + timedelta(seconds=index),
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+        tail_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "signature-priority-tail-outside-id-sample",
+            created_at=queued_at + timedelta(seconds=3),
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+
+        async with session_factory() as session:
+            before = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == tail_id)
+                .values(task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}})
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            after = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+                session,
+                node_id="local",
+            )
+
+        assert before[0] == after[0] == 3
+        assert before != after
+
+    @pytest.mark.unit
     async def test_requested_capacity_queue_signature_sqlite_reads_queue_once(
         self,
     ) -> None:
