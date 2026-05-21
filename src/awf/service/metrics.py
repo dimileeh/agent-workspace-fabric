@@ -1635,21 +1635,11 @@ async def _capacity_queue_blocked_reason_counts(
         return {}
 
     scoring_time = scoring_at or datetime.now(UTC)
-    # Blocker counts are a bounded scheduler-frontier diagnostic on the hot
-    # metrics path; the queue totals above remain whole-queue aggregates.
-    candidates = await _capacity_queue_candidates(
+    candidates = await _provider_recovery_eligible_capacity_queue_scan_candidates(
         session,
         node_id=node_id,
         resource_defaults=resource_defaults,
         limit=DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT,
-        scoring_at=scoring_time,
-    )
-    if not candidates:
-        return {}
-
-    candidates = await _provider_recovery_eligible_capacity_queue_candidates(
-        session,
-        candidates,
         scoring_at=scoring_time,
     )
     if not candidates:
@@ -1687,6 +1677,47 @@ async def _capacity_queue_blocked_reason_counts(
             continue
         allocated.add(candidate.demand)
     return dict(sorted(counts.items()))
+
+
+async def _provider_recovery_eligible_capacity_queue_scan_candidates(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    limit: int,
+    scoring_at: datetime,
+) -> list[_CapacityQueueCandidate]:
+    if limit <= 0:
+        return []
+
+    # Blocker counts are a bounded scheduler-frontier diagnostic on the hot
+    # metrics path; the queue totals above remain whole-queue aggregates. The
+    # bound applies after provider-recovery suppression so cooldown/circuit
+    # rows do not shrink the analyzed scheduler frontier.
+    eligible_candidates: list[_CapacityQueueCandidate] = []
+    offset = 0
+    while len(eligible_candidates) < limit:
+        candidates = await _capacity_queue_candidates(
+            session,
+            node_id=node_id,
+            resource_defaults=resource_defaults,
+            limit=limit,
+            offset=offset,
+            scoring_at=scoring_at,
+        )
+        if not candidates:
+            break
+        eligible_candidates.extend(
+            await _provider_recovery_eligible_capacity_queue_candidates(
+                session,
+                candidates,
+                scoring_at=scoring_at,
+            )
+        )
+        if len(candidates) < limit:
+            break
+        offset += len(candidates)
+    return eligible_candidates[:limit]
 
 
 async def _provider_recovery_eligible_capacity_queue_candidates(
@@ -1732,6 +1763,7 @@ async def _capacity_queue_candidates(
     resource_defaults: WorkspaceResourceDefaults,
     limit: int,
     scoring_at: datetime,
+    offset: int = 0,
 ) -> list[_CapacityQueueCandidate]:
     order_expressions = scheduler_order_expressions(
         scoring_at=scoring_at,
@@ -1807,6 +1839,8 @@ async def _capacity_queue_candidates(
         )
         .limit(limit)
     )
+    if offset > 0:
+        stmt = stmt.offset(offset)
     rows = (await session.execute(stmt)).all()
     return [
         _CapacityQueueCandidate(

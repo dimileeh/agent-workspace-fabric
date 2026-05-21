@@ -2286,6 +2286,101 @@ async def test_capacity_queue_blocked_reason_counts_excludes_open_provider_circu
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_refills_after_provider_suppression(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now,
+        task_policy={
+            "scheduler": {"base_priority": 100},
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "not_before": (now + timedelta(minutes=5)).isoformat(),
+            },
+        },
+    )
+    model = "gpt-5.3-codex-spark"
+    circuit_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now + timedelta(seconds=1),
+        task_policy={
+            "agent_model": model,
+            "scheduler": {"base_priority": 90},
+        },
+    )
+    eligible_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now + timedelta(seconds=2),
+        task_policy={"scheduler": {"base_priority": 1}},
+    )
+    async with session_factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model=model,
+            reason_code="PROVIDER_MODEL_CIRCUIT_OPEN",
+            failure_fingerprint="provider-capacity",
+            workspace_id=circuit_workspace_id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        eligible_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await metrics._capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
 async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywhere(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
