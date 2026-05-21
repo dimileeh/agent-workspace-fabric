@@ -7637,11 +7637,7 @@ def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int
     return sum(
         1
         for comment in status.unresolved_review_comments
-        if (
-            not comment.blocks_merge
-            and _agent_can_triage_review_comment(comment)
-            and _review_comment_needs_attention(state, comment)
-        )
+        if not comment.blocks_merge and _review_comment_needs_attention(state, comment)
     )
 
 
