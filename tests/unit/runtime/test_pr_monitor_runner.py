@@ -104,6 +104,7 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _parse_verdict,
     _parse_verdict_result,
+    _pending_review_feedback_count,
     _review_comment_body_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
@@ -2735,6 +2736,72 @@ def test_changed_review_comment_body_requeues_private_verdict() -> None:
     assert changed is True
     assert "issue:handled" not in state.threads_addressed_ids
     assert _review_comment_body_state_key("issue:handled") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_pending_review_feedback_count_excludes_blocking_reviews_and_honors_state_hash() -> None:
+    state = MonitorState()
+    pending_comment = ReviewComment(
+        comment_id="issue:pending",
+        body_excerpt="please add test coverage",
+        body="please add test coverage",
+        author="reviewer",
+    )
+    handled_comment = ReviewComment(
+        comment_id="issue:handled",
+        body_excerpt="already handled",
+        body="already handled",
+        author="reviewer",
+    )
+    _mark_review_comment_addressed(state, handled_comment, "false_positive")
+    agent_failed_comment = ReviewComment(
+        comment_id="issue:agent-failed",
+        body_excerpt="still failing",
+        body="still failing",
+        author="coderabbitai",
+    )
+    _mark_review_comment_addressed(state, agent_failed_comment, "agent_failed")
+    blocked_comment = ReviewComment(
+        comment_id="issue:blocked",
+        body_excerpt="changes requested",
+        body="changes requested",
+        author="reviewer",
+        blocks_merge=True,
+    )
+    stale_comment_old = ReviewComment(
+        comment_id="issue:stale-body",
+        body_excerpt="old body",
+        body="old body",
+        author="reviewer",
+    )
+    _mark_review_comment_addressed(state, stale_comment_old, "false_positive")
+    stale_comment_current = ReviewComment(
+        comment_id="issue:stale-body",
+        body_excerpt="new body that requires new triage",
+        body="new body that requires new triage",
+        author="reviewer",
+    )
+
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(
+            pending_comment,
+            handled_comment,
+            agent_failed_comment,
+            stale_comment_current,
+            blocked_comment,
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        blocking_reviews=(blocked_comment,),
+    )
+
+    assert _pending_review_feedback_count(status, state) == 3
+    assert len(status.unresolved_review_comments) == 5
 
 
 @pytest.mark.unit

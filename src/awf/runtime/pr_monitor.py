@@ -202,6 +202,9 @@ class PRStatus:
 
     ``unresolved_review_comments`` intentionally preserves advisory review
     bodies and top-level issue comments for the address-comments loop.
+
+    This field is also mirrored as the raw ``review_feedback``/``unresolved_reviews``
+    operator log metric, which intentionally remains for backward compatibility.
     """
     merge_state_status: MergeStateStatus = MergeStateStatus.UNKNOWN
     """GitHub's authoritative merge-state signal. Combined with

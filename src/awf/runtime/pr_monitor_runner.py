@@ -1395,6 +1395,8 @@ class PullRequestMonitorRunner:
         # downstream. Regression guard for PR 342: the monitor ran 200+
         # iterations silently because only handoff_to_pr_monitor and
         # compose_teardown_ok fired.
+        review_feedback = len(status.unresolved_review_comments)
+        pending_review_feedback = _pending_review_feedback_count(status, state)
         _log.info(
             "monitor.action",
             workspace_id=workspace_id,
@@ -1405,7 +1407,11 @@ class PullRequestMonitorRunner:
             base_behind=status.base_behind_count,
             merge_state=(status.merge_state_status.value if status.merge_state_status else None),
             unresolved_threads=len(status.unresolved_inline_threads),
-            unresolved_reviews=len(status.unresolved_review_comments),
+            # compatibility alias retained for downstream consumers of
+            # historical monitor logs.
+            unresolved_reviews=review_feedback,
+            review_feedback=review_feedback,
+            pending_review_feedback=pending_review_feedback,
             blocking_reviews=len(status.blocking_reviews),
         )
         await self._write_monitor_log(
@@ -1422,7 +1428,9 @@ class PullRequestMonitorRunner:
                     status.merge_state_status.value if status.merge_state_status else None
                 ),
                 "unresolved_threads": len(status.unresolved_inline_threads),
-                "unresolved_reviews": len(status.unresolved_review_comments),
+                "unresolved_reviews": review_feedback,
+                "review_feedback": review_feedback,
+                "pending_review_feedback": pending_review_feedback,
                 "blocking_reviews": len(status.blocking_reviews),
             },
         )
@@ -2479,6 +2487,9 @@ class PullRequestMonitorRunner:
                         if not isinstance(checked_action, Merge):
                             fresh_action = checked_action
                             fresh_status = checked_status
+                            pending_review_feedback = _pending_review_feedback_count(
+                                checked_status, state
+                            )
                             _log.info(
                                 "monitor.pre_merge_recheck_changed_action",
                                 workspace_id=workspace_id,
@@ -2488,6 +2499,8 @@ class PullRequestMonitorRunner:
                                 head_sha=checked_status.head_sha[:10],
                                 unresolved_threads=len(checked_status.unresolved_inline_threads),
                                 unresolved_reviews=len(checked_status.unresolved_review_comments),
+                                review_feedback=len(checked_status.unresolved_review_comments),
+                                pending_review_feedback=pending_review_feedback,
                                 blocking_reviews=len(checked_status.blocking_reviews),
                                 check_state=checked_status.check_state.value,
                                 merge_state=(
@@ -7610,6 +7623,26 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
+
+
+def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int:
+    """Count review feedback still requiring agent attention under monitor state.
+
+    This is the operator-facing counterpart to `unresolved_review_comments`:
+    raw outside-diff feedback count stays in ``review_feedback`` (and the
+    compatibility alias ``unresolved_reviews``), while this metric only counts
+    items that can still be triaged now, after body hash and prior verdict state
+    are applied.
+    """
+    return sum(
+        1
+        for comment in status.unresolved_review_comments
+        if (
+            not comment.blocks_merge
+            and _agent_can_triage_review_comment(comment)
+            and _review_comment_needs_attention(state, comment)
+        )
+    )
 
 
 def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
