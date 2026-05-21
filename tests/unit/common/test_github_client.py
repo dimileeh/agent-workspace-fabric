@@ -574,6 +574,61 @@ class TestListOpenPullRequestsForBranch:
         assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
 
     @pytest.mark.unit
+    async def test_all_malformed_pr_list_items_raise_aggregated_parse_context(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRepository": None,
+                    },
+                    {
+                        "number": 278,
+                        "url": None,
+                        "headRepository": {"nameWithOwner": "dimileeh/aira-web"},
+                    },
+                ]
+            ),
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(PullRequestMetadataError) as excinfo,
+        ):
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["failure_count"] == 2
+        assert excinfo.value.detail["failures"] == [
+            {
+                "item_index": 0,
+                "reason_code": "OPEN_PR_LOOKUP_INVALID",
+                "error": "gh pr list payload missing required headRepository identity.",
+            },
+            {
+                "item_index": 1,
+                "reason_code": "OPEN_PR_LOOKUP_INVALID",
+                "error": "gh pr list payload missing required field: url",
+            },
+        ]
+        aggregate_event = next(
+            (item for item in captured if item.get("event") == "github.open_pr_batch_parse_failed"),
+            None,
+        )
+        assert aggregate_event is not None
+        assert aggregate_event.get("log_level") == "warning"
+        assert aggregate_event.get("failure_count") == 2
+        assert aggregate_event.get("failures") == excinfo.value.detail["failures"]
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "owner_payload",
         [

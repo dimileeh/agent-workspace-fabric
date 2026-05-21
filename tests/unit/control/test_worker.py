@@ -10626,6 +10626,102 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_preserved_active_unknown_no_work_reason_waits_for_preservation_grace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-future-no-work",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_future_no_work",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await s.commit()
+
+        classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+            state="no_work",
+            reason="future_no_work_reason",
+            worktree_path=f"/tmp/awf/{workspace_id}",
+            expected_branch_name=f"awf/{workspace_id}",
+            base_commit="a" * 40,
+        )
+
+        async def _classify_preserved_active_worktree(**_kwargs: object) -> object:
+            return classification
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_future_no_work": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+        monkeypatch.setattr(
+            worker,
+            "_classify_preserved_active_worktree",
+            _classify_preserved_active_worktree,
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_future_no_work",
+            )
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            workspaces = list((await s.execute(select(Workspace))).scalars())
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
+            replacement_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_replacement_created",
+            )
+
+        assert recovered
+        assert [workspace.id for workspace in workspaces] == [workspace_id]
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_salvage_blocked"
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["blocked_reason"] == "future_no_work_reason"
+        assert blocked_payload["decision"] == "wait_for_preservation_grace"
+        assert blocked_payload["classification"]["state"] == "no_work"
+        assert blocked_payload["classification"]["reason"] == "future_no_work_reason"
+        assert replacement_events == []
+
+    @pytest.mark.unit
     async def test_preserved_active_clean_worktree_without_commits_replaces_after_grace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -10768,6 +10864,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 max_concurrent_provisions=0,
                 max_concurrent_executions=1,
                 stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
             ),
         )
 
@@ -11011,6 +11108,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 max_concurrent_provisions=0,
                 max_concurrent_executions=1,
                 stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
             ),
         )
 
@@ -11115,6 +11213,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 max_concurrent_provisions=0,
                 max_concurrent_executions=1,
                 stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
             ),
         )
 

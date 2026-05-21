@@ -576,17 +576,48 @@ async def list_open_pull_requests_for_branch(
         except PullRequestMetadataError as exc:
             parse_failures.append((index, exc))
 
+    failure_summaries: list[dict[str, object]] = []
     for index, parse_error in parse_failures:
+        error = redact_audit_text(parse_error.message)
+        failure_summaries.append(
+            {
+                "item_index": index,
+                "reason_code": parse_error.reason_code,
+                "error": error,
+            }
+        )
         _log.warning(
             "github.open_pr_item_parse_failed",
             repo_slug=repo.slug(),
             branch_name=stripped_branch,
             item_index=index,
             reason_code=parse_error.reason_code,
-            error=redact_audit_text(parse_error.message),
+            error=error,
         )
     if parse_failures and not results:
-        raise parse_failures[0][1]
+        failure_count = len(parse_failures)
+        item_label = "item" if failure_count == 1 else "items"
+        _log.warning(
+            "github.open_pr_batch_parse_failed",
+            repo_slug=repo.slug(),
+            branch_name=stripped_branch,
+            base_branch=base_branch,
+            failure_count=failure_count,
+            failures=failure_summaries,
+        )
+        if failure_count == 1:
+            raise parse_failures[0][1]
+        raise PullRequestMetadataError(
+            reason_code="OPEN_PR_LOOKUP_INVALID",
+            message=f"failed to parse {failure_count} gh pr list {item_label}.",
+            detail={
+                "repo_slug": repo.slug(),
+                "branch_name": stripped_branch,
+                "base_branch": base_branch,
+                "failure_count": failure_count,
+                "failures": failure_summaries,
+            },
+        ) from parse_failures[0][1]
     return results
 
 

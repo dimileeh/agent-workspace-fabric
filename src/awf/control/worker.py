@@ -1648,6 +1648,8 @@ class ControlWorker:
             attempted_preserved_active_recovery = True
             if await self._recover_preserved_active_execution(candidate):
                 return
+        if not await self._stale_active_candidate_is_current(candidate):
+            return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
         except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -1740,6 +1742,15 @@ class ControlWorker:
             ):
                 await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
             return
+
+    async def _stale_active_candidate_is_current(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            return ws is not None and ws.status == candidate.status.value
 
     async def _has_preserved_active_recovery_evidence(
         self,
@@ -1946,6 +1957,7 @@ class ControlWorker:
                 if dispatched or candidate.workspace_id in self._execution_tasks:
                     return True
                 if self._executor is None:
+                    await session.commit()
                     await self._record_preserved_active_salvage_blocked(
                         candidate,
                         preserved_event=preserved_event,
@@ -2120,10 +2132,7 @@ class ControlWorker:
                 self._dispatch_preserved_active_validation(candidate.workspace_id)
             return True
         if classification.state == "no_work":
-            if (
-                classification.reason in {"clean_branch_not_ahead", "worktree_missing"}
-                and not preservation_expired
-            ):
+            if not preservation_expired:
                 await self._record_preserved_active_salvage_blocked(
                     candidate,
                     preserved_event=preserved_event,
