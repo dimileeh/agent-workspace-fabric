@@ -4783,6 +4783,60 @@ class TestRunOnceMonitorRecovery:
 
 class TestRunOnceStaleActiveExecutionRecovery:
     @pytest.mark.unit
+    async def test_preserved_active_recovery_guard_skips_full_recovery_without_evidence(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_active_no_evidence_guard"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-active-no-evidence-guard",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "dead-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=5)
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: RuntimeSnapshot(stack_state="unavailable", reason="docker down")}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        async def _unexpected_full_recovery(
+            _candidate: _ActiveExecutionCandidate,
+            **_kwargs: object,
+        ) -> bool:
+            raise AssertionError("full preserved-active recovery should be evidence-gated")
+
+        worker._recover_preserved_active_execution = (  # type: ignore[method-assign]
+            _unexpected_full_recovery
+        )
+
+        await worker._recover_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name=compose_project,
+            )
+        )
+
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_stale_active_scan_closed_connection_does_not_terminal_fail_workspace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -8194,6 +8248,84 @@ class TestRunOnceStaleActiveExecutionRecovery:
         finally:
             executor.release.set()
             await worker.wait_for_execution_tasks()
+
+    @pytest.mark.unit
+    async def test_persisted_salvage_monitor_resume_cooldown_survives_worker_restart(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_pr_handoff_persisted_cooldown"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pr-handoff-persisted-cooldown",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/example/repo/pull/271"
+            ws.pr_number = 271
+            ws.monitor_last_commit_sha = "f" * 40
+            await s.commit()
+
+        first_executor = _RecordingExecutor()
+        first_worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=first_executor,
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                monitor_claim_lease_seconds=300.0,
+            ),
+        )
+
+        assert await first_worker.run_once() == 1
+        await first_worker.wait_for_execution_tasks()
+        assert first_executor.resume_calls == [workspace_id]
+
+        second_executor = _RecordingExecutor()
+        second_worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=second_executor,
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=300.0,
+                monitor_claim_lease_seconds=300.0,
+            ),
+        )
+
+        assert await second_worker.run_once() == 0
+        await second_worker.wait_for_execution_tasks()
+
+        assert second_executor.resume_calls == []
+        async with session_factory() as s:
+            monitor_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+            cooldown_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_monitor_resume_cooldown",
+            )
+
+        assert len(monitor_events) == 1
+        assert len(cooldown_events) == 1
+        assert cooldown_events[0].payload is not None
+        assert (
+            cooldown_events[0].payload["operation_id"] == monitor_events[0].payload["operation_id"]
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

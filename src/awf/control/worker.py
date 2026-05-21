@@ -159,6 +159,12 @@ _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE = (
 )
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE = "workspace.active_execution_salvage_blocked"
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE = (
+    "ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN"
+)
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE = (
+    "workspace.active_execution_salvage_monitor_resume_cooldown"
+)
 _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
 _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
@@ -191,6 +197,21 @@ _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS: tuple[tuple[str, str], 
     (
         _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
         _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    ),
+)
+_ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS: tuple[tuple[str, str], ...] = (
+    (
+        ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    ),
+    *_ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS,
+    (
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
     ),
 )
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
@@ -1622,7 +1643,9 @@ class ControlWorker:
                 reason_code="PROVIDER_RECOVERY_MONITOR_RESUME_PENDING",
             )
             return
-        if await self._recover_preserved_active_execution(candidate):
+        if await self._has_preserved_active_recovery_evidence(
+            candidate
+        ) and await self._recover_preserved_active_execution(candidate):
             return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
@@ -1713,6 +1736,55 @@ class ControlWorker:
             ):
                 await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
             return
+
+    async def _has_preserved_active_recovery_evidence(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        event_filters = [
+            and_(
+                WorkspaceEvent.event_type == event_type,
+                WorkspaceEvent.reason_code == reason_code,
+            )
+            for event_type, reason_code in _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS
+        ]
+        preserved_event_exists = (
+            select(literal(1))
+            .select_from(WorkspaceEvent)
+            .where(
+                WorkspaceEvent.workspace_id == candidate.workspace_id,
+                or_(*event_filters),
+            )
+            .limit(1)
+            .exists()
+        )
+        active_recovery_operation_exists = (
+            select(literal(1))
+            .select_from(Operation)
+            .where(
+                Operation.workspace_id == candidate.workspace_id,
+                Operation.status.in_(
+                    (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                ),
+                Operation.payload["source"].as_string() == _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                Operation.payload["reason_code"].as_string()
+                == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+            )
+            .limit(1)
+            .exists()
+        )
+        stmt = select(literal(1)).where(
+            or_(preserved_event_exists, active_recovery_operation_exists)
+        )
+
+        async with self._session_factory() as session:
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
 
     async def _recover_preserved_active_execution(
         self,
@@ -4177,7 +4249,7 @@ class ControlWorker:
                 break
             if workspace_id in self._execution_tasks:
                 continue
-            if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
+            if await self._active_salvage_monitor_resume_cooldown_blocks_claim(workspace_id):
                 continue
             if await self._claim_monitoring_pr(workspace_id):
                 claimed.append(workspace_id)
@@ -4283,10 +4355,17 @@ class ControlWorker:
                 and recovery_operation_id is not None
                 and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
             ):
+                cooldown_seconds = max(0.0, self._config.monitor_claim_lease_seconds)
                 self._remember_active_salvage_monitor_resume_cooldown(
                     workspace_id,
-                    monotonic() + max(0.0, self._config.monitor_claim_lease_seconds),
+                    monotonic() + cooldown_seconds,
                 )
+                if cooldown_seconds > 0:
+                    await self._record_active_salvage_monitor_resume_cooldown(
+                        workspace_id,
+                        recovery_operation_id=recovery_operation_id,
+                        cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
+                    )
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
             if recovery_operation_id is not None:
@@ -4304,6 +4383,86 @@ class ControlWorker:
 
     def _forget_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
         self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
+
+    async def _active_salvage_monitor_resume_cooldown_blocks_claim(
+        self,
+        workspace_id: str,
+    ) -> bool:
+        if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
+            return True
+        return await self._persisted_active_salvage_monitor_resume_cooldown_active(workspace_id)
+
+    async def _persisted_active_salvage_monitor_resume_cooldown_active(
+        self,
+        workspace_id: str,
+    ) -> bool:
+        if max(0.0, self._config.monitor_claim_lease_seconds) <= 0:
+            return False
+
+        stmt = (
+            select(WorkspaceEvent)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type
+                == _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE,
+                WorkspaceEvent.reason_code
+                == _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        async with self._session_factory() as session:
+            event = (await session.execute(stmt)).scalar_one_or_none()
+        if event is None:
+            return False
+
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        cooldown_until = _datetime_from_json(payload.get("cooldown_until"))
+        if cooldown_until is None:
+            cooldown_until = _utc_datetime(event.occurred_at) + timedelta(
+                seconds=max(0.0, self._config.monitor_claim_lease_seconds)
+            )
+        return datetime.now(UTC) < cooldown_until
+
+    async def _record_active_salvage_monitor_resume_cooldown(
+        self,
+        workspace_id: str,
+        *,
+        recovery_operation_id: str,
+        cooldown_until: datetime,
+    ) -> None:
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(workspace_id)
+                if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+                    return
+                await repo.add_event(
+                    ws,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE,
+                    payload={
+                        "source": _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                        "owner": _ACTIVE_EXECUTION_SALVAGE_OWNER,
+                        "reason_code": (
+                            _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE
+                        ),
+                        "workspace_status": ws.status,
+                        "operation_id": recovery_operation_id,
+                        "worker_id": self._worker_id,
+                        "cooldown_until": _json_datetime(cooldown_until),
+                        "salvage_reason_code": (
+                            _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                        ),
+                    },
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.active_salvage_monitor_resume_cooldown_record_failed",
+                workspace_id=workspace_id,
+                operation_id=recovery_operation_id,
+            )
 
     def _remember_active_salvage_monitor_resume_cooldown(
         self,
@@ -4995,6 +5154,15 @@ def _json_datetime(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.isoformat()
+
+
+def _datetime_from_json(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return _utc_datetime(datetime.fromisoformat(value.strip()))
+    except ValueError:
+        return None
 
 
 def _utc_datetime(value: datetime) -> datetime:
