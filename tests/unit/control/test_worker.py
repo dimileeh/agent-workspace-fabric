@@ -10267,6 +10267,99 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_preserved_active_pushed_branch_no_open_pr_uses_remote_push_branch_when_branch_name_blank(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-pushed-blank-branch-name-no-open-pr",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_preserved_blank_branch_name_no_open_pr",
+            create_task_attempt=True,
+        )
+        work_root = tmp_path / "awf-work-blank-branch-name-no-open-pr"
+        remote_push_branch = f"awf/{workspace_id}"
+        _worktree, base_commit, head_sha = _seed_workspace_worktree(
+            worktrees_root=work_root / "worktrees",
+            origin=origin_repo,
+            workspace_id=workspace_id,
+            branch_name=remote_push_branch,
+            commit_change=True,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.base_commit = base_commit
+            ws.branch_name = "   "
+            ws.remote_push_branch = remote_push_branch
+            await s.commit()
+
+        resolver = _RecordingBranchOpenPRResolver({remote_push_branch: []})
+        executor = _RecordingExecutor()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=Provisioner(
+                session_factory=session_factory,
+                git=GitManager(work_root),
+                config=ProvisionerConfig(node_id="test-node-01"),
+            ),
+            executor=executor,
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_blank_branch_name_no_open_pr": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=cleaner,
+            open_pr_resolver=resolver,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            operator_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_operator_required",
+            )
+            salvage_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_validation_requested",
+            )
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.subphase == "runtime_preserved_validation_requested"
+        assert operator_events == []
+        assert len(salvage_events) == 1
+        salvage_payload = salvage_events[0].payload
+        assert salvage_payload is not None
+        assert salvage_payload["classification"]["state"] == "committed"
+        assert salvage_payload["classification"]["reason"] == "clean_branch_ahead"
+        assert salvage_payload["classification"]["branch_name"] == remote_push_branch
+        assert salvage_payload["classification"]["expected_branch_name"] == remote_push_branch
+        assert salvage_payload["classification"]["head_sha"] == head_sha
+        assert resolver.calls == [
+            {
+                "repo_url": str(origin_repo),
+                "branch_name": remote_push_branch,
+                "base_branch": None,
+            }
+        ]
+        assert executor.calls == [workspace_id]
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
     async def test_preserved_active_pushed_branch_pr_lookup_failure_with_committed_work_requires_operator_recovery(
         self,
         session_factory: async_sessionmaker[AsyncSession],

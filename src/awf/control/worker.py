@@ -2120,7 +2120,7 @@ class ControlWorker:
 
         classification = await self._classify_preserved_active_worktree(
             workspace_id=workspace_id,
-            expected_branch_name=branch_name or remote_push_branch,
+            expected_branch_name=lookup_branch_name,
             base_commit=base_commit,
         )
         if failed_branch_lookup is not None:
