@@ -1643,10 +1643,11 @@ class ControlWorker:
                 reason_code="PROVIDER_RECOVERY_MONITOR_RESUME_PENDING",
             )
             return
-        if await self._has_preserved_active_recovery_evidence(
-            candidate
-        ) and await self._recover_preserved_active_execution(candidate):
-            return
+        attempted_preserved_active_recovery = False
+        if await self._has_preserved_active_recovery_evidence(candidate):
+            attempted_preserved_active_recovery = True
+            if await self._recover_preserved_active_execution(candidate):
+                return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
         except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -1714,7 +1715,10 @@ class ControlWorker:
             return
         if candidate.status in _ACTIVE_EXECUTION_STATUSES and _has_running_agent_runtime(snapshot):
             if await self._has_expired_preserved_active_execution(candidate):
-                if await self._recover_preserved_active_execution(candidate):
+                if (
+                    not attempted_preserved_active_recovery
+                    and await self._recover_preserved_active_execution(candidate)
+                ):
                     return
                 if not await self._record_stale_active_execution_detected(
                     candidate,

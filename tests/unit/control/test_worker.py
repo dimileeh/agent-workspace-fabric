@@ -4837,6 +4837,89 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project]
 
     @pytest.mark.unit
+    async def test_preserved_active_recovery_evidence_is_not_retried_in_same_expired_scan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_active_no_duplicate_recovery"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-active-no-duplicate-recovery",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        preserved_at = datetime.now(UTC) - timedelta(minutes=30)
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "dead-worker"
+            ws.execution_claim_expires_at = preserved_at - timedelta(minutes=5)
+            state_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            running_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = preserved_at - timedelta(minutes=1)
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved_event.occurred_at = preserved_at
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+        recovery_calls: list[dict[str, object]] = []
+
+        async def _recover_once(
+            _candidate: _ActiveExecutionCandidate,
+            **kwargs: object,
+        ) -> bool:
+            recovery_calls.append(dict(kwargs))
+            return False
+
+        worker._recover_preserved_active_execution = _recover_once  # type: ignore[method-assign]
+
+        await worker._recover_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name=compose_project,
+            )
+        )
+
+        async with session_factory() as session:
+            stale_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert recovery_calls == [{}]
+        assert inspector.calls == [compose_project]
+        assert len(stale_events) == 1
+
+    @pytest.mark.unit
     async def test_stale_active_scan_closed_connection_does_not_terminal_fail_workspace(
         self,
         session_factory: async_sessionmaker[AsyncSession],
