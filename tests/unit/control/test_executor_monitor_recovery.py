@@ -38,12 +38,12 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
-from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     SETUP_DEPENDENCY_NETWORK_METADATA_KEY,

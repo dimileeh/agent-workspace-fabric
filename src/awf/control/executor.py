@@ -101,6 +101,11 @@ from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_PHASE,
 )
 from awf.runtime.logs import LogStore
+from awf.runtime.ownership import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+    EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
@@ -125,11 +130,6 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
-from awf.runtime.ownership import (
-    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
-    EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-    repair_agent_runtime_ownership,
-)
 from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
     build_monitor_operation_payload,
