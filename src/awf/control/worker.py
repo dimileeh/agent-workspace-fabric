@@ -1724,7 +1724,7 @@ class ControlWorker:
 
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(candidate.workspace_id)
+            ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
             has_active_validation_recovery = candidate.status in (
@@ -1736,6 +1736,29 @@ class ControlWorker:
                 candidate.workspace_id,
             )
             if has_active_validation_recovery:
+                can_continue_validation = self._preserved_active_validation_can_continue(
+                    candidate.workspace_id
+                )
+                if can_continue_validation and candidate.status != WorkspaceStatus.running:
+                    previous_claim = _workspace_claim_snapshot(ws)
+                    ws.execution_claimed_by = None
+                    ws.execution_claim_expires_at = None
+                    ws.subphase = "runtime_preserved_validation_requested"
+                    await repo.transition(
+                        ws,
+                        to=WorkspaceStatus.running,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                        payload={
+                            "source": _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                            "reason_code": (
+                                _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+                            ),
+                            "decision": "redispatch_active_validation_recovery",
+                            "workspace_status": candidate.status.value,
+                            "previous_claim": previous_claim,
+                        },
+                    )
+                    await session.commit()
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
                 can_continue_validation = self._preserved_active_validation_can_continue(
                     candidate.workspace_id
