@@ -2487,6 +2487,7 @@ class PullRequestMonitorRunner:
                         if not isinstance(checked_action, Merge):
                             fresh_action = checked_action
                             fresh_status = checked_status
+                            review_feedback = len(checked_status.unresolved_review_comments)
                             pending_review_feedback = _pending_review_feedback_count(
                                 checked_status, state
                             )
@@ -2498,8 +2499,8 @@ class PullRequestMonitorRunner:
                                 fresh_action=type(checked_action).__name__,
                                 head_sha=checked_status.head_sha[:10],
                                 unresolved_threads=len(checked_status.unresolved_inline_threads),
-                                unresolved_reviews=len(checked_status.unresolved_review_comments),
-                                review_feedback=len(checked_status.unresolved_review_comments),
+                                unresolved_reviews=review_feedback,
+                                review_feedback=review_feedback,
                                 pending_review_feedback=pending_review_feedback,
                                 blocking_reviews=len(checked_status.blocking_reviews),
                                 check_state=checked_status.check_state.value,
