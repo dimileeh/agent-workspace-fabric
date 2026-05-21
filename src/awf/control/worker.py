@@ -1809,6 +1809,7 @@ class ControlWorker:
                 candidate.workspace_id,
             )
             if has_active_validation_recovery:
+                committed_validation_rewind = False
                 can_continue_validation = self._preserved_active_validation_can_continue(
                     candidate.workspace_id
                 )
@@ -1832,6 +1833,7 @@ class ControlWorker:
                         },
                     )
                     await session.commit()
+                    committed_validation_rewind = True
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
                 can_continue_validation = self._preserved_active_validation_can_continue(
                     candidate.workspace_id
@@ -1845,6 +1847,8 @@ class ControlWorker:
                 )
                 if dispatched or can_continue_validation:
                     return True
+                if committed_validation_rewind:
+                    await session.refresh(ws)
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,

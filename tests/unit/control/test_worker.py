@@ -7970,6 +7970,96 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert ws.execution_claim_expires_at is None
 
     @pytest.mark.unit
+    async def test_non_running_active_validation_fallthrough_refreshes_expiring_session(
+        self,
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with postgres_test_engine() as engine:
+            setup_factory = make_session_factory(engine)
+            expiring_factory = async_sessionmaker(
+                engine,
+                expire_on_commit=True,
+                class_=AsyncSession,
+            )
+            workspace_id = await _create_active_execution(
+                setup_factory,
+                origin_repo,
+                "preserved-expiring-session-fallthrough",
+                WorkspaceStatus.validating,
+                compose_project_name="awf_preserved_expiring_session_fallthrough",
+                create_task_attempt=True,
+            )
+            async with setup_factory() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                ws.execution_claimed_by = "stale-recovery-worker"
+                ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                salvage_event = await repo.add_event(
+                    ws,
+                    event_type="workspace.active_execution_salvage_validation_requested",
+                    reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    payload={
+                        "workspace_status": WorkspaceStatus.validating.value,
+                        "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                        "preservation_event_id": "running-preservation-cycle",
+                    },
+                )
+                await OperationRepository(s).create(
+                    workspace_id=workspace_id,
+                    operation_type=OperationType.validate,
+                    status=OperationStatus.pending,
+                    payload={
+                        "source": "worker_restart",
+                        "recovery_mode": "validate_only",
+                        "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                        "preservation_event_id": salvage_event.id,
+                    },
+                )
+                await s.commit()
+
+            worker = ControlWorker(
+                session_factory=expiring_factory,
+                provisioner=_TransitioningProvisioner(setup_factory),  # type: ignore[arg-type]
+                executor=_RecordingExecutor(),
+                runtime_inspector=_RecordingRuntimeInspector(
+                    {"awf_preserved_expiring_session_fallthrough": _live_agent_snapshot()}
+                ),
+                runtime_cleaner=_RecordingRuntimeCleaner(),
+                config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+            )
+
+            def _executor_disappears(workspace_id_arg: str) -> bool:
+                assert workspace_id_arg == workspace_id
+                worker._executor = None  # noqa: SLF001
+                return False
+
+            monkeypatch.setattr(
+                worker,
+                "_dispatch_preserved_active_validation",
+                _executor_disappears,
+            )
+
+            recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+                _ActiveExecutionCandidate(
+                    workspace_id=workspace_id,
+                    status=WorkspaceStatus.validating,
+                    repo_url=str(origin_repo),
+                    compose_project_name="awf_preserved_expiring_session_fallthrough",
+                )
+            )
+
+            async with setup_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+
+            assert recovered
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+
+    @pytest.mark.unit
     async def test_preserved_active_validation_recovery_lookup_uses_single_active_query(
         self,
         session_factory: async_sessionmaker[AsyncSession],
