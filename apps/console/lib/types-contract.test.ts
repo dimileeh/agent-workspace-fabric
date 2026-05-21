@@ -1,4 +1,5 @@
 import type {
+  CapacityQueueSummary,
   HostHomeAuthMountPolicy,
   Operation,
   PolicyFinding,
@@ -42,6 +43,22 @@ type WorkspaceOverviewIncludesTaskPrompt = Expect<
 >;
 
 export const workspaceOverviewIncludesTaskPrompt: WorkspaceOverviewIncludesTaskPrompt = true;
+
+type CapacityQueuePlannedResourcesOmitActiveCount = Expect<
+  Equal<
+    CapacityQueueSummary["planned_resources"],
+    {
+      steady_cpu: number;
+      steady_memory_gb: number;
+      peak_cpu: number;
+      peak_memory_gb: number;
+      disk_mb: number;
+      dind_slots: number;
+    }
+  >
+>;
+
+export const capacityQueuePlannedResourcesOmitActiveCount: CapacityQueuePlannedResourcesOmitActiveCount = true;
 
 type CoordinationWarningShape = Expect<
   Equal<

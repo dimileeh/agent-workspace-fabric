@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ProviderModelCircuitBreaker, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
+    CallbackSubscriptionRepository,
     MergeCandidateRepository,
     OperationRepository,
     PolicyFindingCreate,
@@ -40,12 +41,12 @@ from awf.db.repositories import (
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
     _provider_model_circuit_breaker_insert_if_absent_stmt,
-    _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
     _workspace_idempotency_advisory_lock_key,
     owned_path_overlap_match,
     owned_paths_overlap,
+    resolve_session_dialect_name,
     sync_candidate_readiness,
 )
 from awf.db.session import make_session_factory
@@ -396,8 +397,8 @@ async def test_postgres_only_repository_locks_execute_advisory_lock_helpers() ->
             {"dialect": type("Dialect", (), {"name": object()})()},
         )()
 
-    assert _resolve_session_dialect_name(NoBindSession(), None) is None
-    assert _resolve_session_dialect_name(NonStringDialectSession(), None) is None
+    assert resolve_session_dialect_name(NoBindSession(), None) is None
+    assert resolve_session_dialect_name(NonStringDialectSession(), None) is None
 
     task_session = RecordingSession()
     await TaskAttemptRepository(
@@ -1513,6 +1514,32 @@ def test_owned_path_overlap_match_reports_overlapping_wildcard_prefixes() -> Non
     assert match is not None
     assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
     assert "Wildcard owned-path prefixes overlap" in match.explanation
+
+
+@pytest.mark.unit
+def test_owned_path_overlap_match_reports_wildcard_prefix_only_overlap() -> None:
+    match = owned_path_overlap_match("src/awf/service*/**", "src/awf/service-tests*/**")
+
+    assert match is not None
+    assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
+
+
+@pytest.mark.unit
+async def test_repository_replay_key_helpers_short_circuit_non_positive_limits() -> None:
+    assert (
+        await WorkspaceRepository(  # type: ignore[arg-type]
+            object(),
+            dialect_name="sqlite",
+        ).list_idempotency_replay_keys(limit=0)
+        == []
+    )
+    assert (
+        await CallbackSubscriptionRepository(  # type: ignore[arg-type]
+            object(),
+            dialect_name="sqlite",
+        ).list_idempotency_replay_keys(limit=0)
+        == []
+    )
 
 
 @pytest.mark.unit

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,7 +28,9 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import String, and_, func, literal, or_, select, text
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB, aggregate_order_by
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
@@ -34,15 +38,18 @@ from sqlalchemy.orm.attributes import flag_modified
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import QueueDecision, ResourceReservation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionCreate,
     QueueDecisionRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+    scheduler_order_expressions,
 )
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
@@ -67,7 +74,16 @@ from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
 )
+from awf.service.resource_capacity import (
+    LOCAL_CAPACITY_CONSTRAINTS,
+    LocalCapacityBlocker,
+    default_dind_slots_from_profile,
+    local_capacity_blocker,
+    local_capacity_limit,
+)
 from awf.service.scheduler import (
+    AGE_BOOST_INTERVAL_SECONDS,
+    AGE_BOOST_MAX,
     SchedulerOrderCursor,
     scheduler_order_key,
     scheduler_score_from_workspace,
@@ -127,6 +143,7 @@ _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
 _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
+_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT = 500
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -144,6 +161,18 @@ ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
 ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
+LOCAL_CAPACITY_DEFERRED_REASON = "LOCAL_CAPACITY_DEFERRED"
+LOCAL_CAPACITY_UNSATISFIABLE_REASON = "LOCAL_CAPACITY_UNSATISFIABLE"
+LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON = "LOCAL_CAPACITY_RESERVATION_DEFAULTED"
+# Keep allocation snapshots in decision payloads, but dedupe on stable blocker
+# identity so ordinary admissions do not rewrite every still-blocked candidate.
+_CAPACITY_BLOCKER_SIGNATURE_FIELDS: tuple[str, ...] = (
+    "dimension",
+    "reason_code",
+    "limit",
+    "requested",
+    "unsatisfiable",
+)
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
 _TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
@@ -173,6 +202,78 @@ class WorkerConfig:
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
     node_id: str | None = None
+    local_capacity_cpu_cores: float | None = None
+    local_capacity_memory_gb: float | None = None
+    local_capacity_dind_slots: int | None = None
+    workspace_steady_cpu: float = 3.0
+    workspace_steady_memory_gb: float = 10.0
+    workspace_peak_cpu: float = 6.0
+    workspace_peak_memory_gb: float = 16.0
+
+
+@dataclass(frozen=True)
+class _ReservationDemand:
+    workspace_id: str
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int
+    dind_slots: int
+    defaulted: bool = False
+
+
+@dataclass
+class _AllocatedReservationTotals:
+    workspace_count: int = 0
+    steady_cpu: float = 0.0
+    steady_memory_gb: float = 0.0
+    peak_cpu: float = 0.0
+    peak_memory_gb: float = 0.0
+    disk_mb: int = 0
+    dind_slots: int = 0
+
+    def add(self, demand: _ReservationDemand) -> None:
+        self.workspace_count += 1
+        self.steady_cpu += demand.steady_cpu
+        self.steady_memory_gb += demand.steady_memory_gb
+        self.peak_cpu += demand.peak_cpu
+        self.peak_memory_gb += demand.peak_memory_gb
+        self.disk_mb += demand.disk_mb
+        self.dind_slots += demand.dind_slots
+
+
+@dataclass(frozen=True)
+class _CapacityQueueDecisionContext:
+    attempt: TaskAttempt | None
+    latest_decision: QueueDecision | None
+
+
+_ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000
+
+type _AllocatedReservationSignature = tuple[int, int, int, int, int, int, int]
+type _RequestedCapacityQueueSignature = tuple[
+    int,
+    datetime | None,
+    datetime | None,
+    str | None,
+    str,
+]
+
+
+@dataclass(frozen=True)
+class _RequestedCapacityClaimResult:
+    workspace_ids: list[str]
+    resume_after: SchedulerOrderCursor | None = None
+    allocated_signature: _AllocatedReservationSignature | None = None
+    requested_queue_signature: _RequestedCapacityQueueSignature | None = None
+    provider_suppression_resume_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _SchedulerCandidateFilterResult:
+    workspace_ids: list[str]
+    provider_suppression_resume_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -278,6 +379,12 @@ class ControlWorker:
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
         self._next_terminal_runtime_release_scan_at = 0.0
+        self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
+        self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
+        self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
+            None
+        )
+        self._requested_capacity_resume_provider_suppression_expires_at: datetime | None = None
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -298,14 +405,17 @@ class ControlWorker:
         if self._executor is not None:
             await self._maybe_recover_stale_active_executions()
 
-        requested_ids = await self._list_requested()
-        requested_ids = await self._filter_current_status(
-            requested_ids,
-            expected=WorkspaceStatus.requested,
-            action="provision",
-        )
-        if requested_ids:
-            requested_ids = await self._claim_requested_ids(requested_ids)
+        if _local_capacity_configured(self._config):
+            requested_ids = await self._claim_requested_ids()
+        else:
+            requested_ids = await self._list_requested()
+            requested_ids = await self._filter_current_status(
+                requested_ids,
+                expected=WorkspaceStatus.requested,
+                action="provision",
+            )
+            if requested_ids:
+                requested_ids = await self._claim_requested_ids(requested_ids)
         if requested_ids:
             await self._record_ordered_decisions(
                 requested_ids,
@@ -419,7 +529,7 @@ class ControlWorker:
         return await self._list_requested()
 
     async def _list_requested(self) -> list[str]:
-        """Return up to ``max_concurrent_provisions`` workspace IDs in ``requested``."""
+        """Return requested candidate IDs for non-capacity claims."""
         return await self._list_by_status(
             WorkspaceStatus.requested,
             limit=self._config.max_concurrent_provisions,
@@ -577,17 +687,43 @@ class ControlWorker:
         *,
         limit: int,
         scoring_at: datetime,
+        provider_recovery_decision_candidate_limit: int | None = None,
     ) -> list[str]:
-        if not candidate_workspaces:
-            return []
-
-        eligible = await self._filter_provider_recovery_suppressed(
+        result = await self._filter_scheduler_candidate_workspaces_with_result(
             session,
             candidate_workspaces,
+            limit=limit,
+            scoring_at=scoring_at,
+            provider_recovery_decision_candidate_limit=(provider_recovery_decision_candidate_limit),
         )
+        return result.workspace_ids
+
+    async def _filter_scheduler_candidate_workspaces_with_result(
+        self,
+        session: AsyncSession,
+        candidate_workspaces: list[Workspace],
+        *,
+        limit: int,
+        scoring_at: datetime,
+        provider_recovery_decision_candidate_limit: int | None = None,
+    ) -> _SchedulerCandidateFilterResult:
+        if not candidate_workspaces:
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
+
+        if provider_recovery_decision_candidate_limit is None:
+            filter_result = await self._filter_provider_recovery_suppressed_with_result(
+                session,
+                candidate_workspaces,
+            )
+        else:
+            filter_result = await self._filter_provider_recovery_suppressed_with_result(
+                session,
+                candidate_workspaces,
+                decision_candidate_limit=provider_recovery_decision_candidate_limit,
+            )
         workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
         eligible_workspaces_by_id: dict[str, Workspace] = {}
-        for workspace_id in eligible:
+        for workspace_id in filter_result.workspace_ids:
             workspace = workspaces_by_id.get(workspace_id)
             if workspace is not None:
                 eligible_workspaces_by_id.setdefault(workspace_id, workspace)
@@ -595,15 +731,36 @@ class ControlWorker:
             list(eligible_workspaces_by_id.values()),
             now=scoring_at,
         )
-        return [workspace.id for workspace in ordered_workspaces[:limit]]
+        return _SchedulerCandidateFilterResult(
+            workspace_ids=[workspace.id for workspace in ordered_workspaces[:limit]],
+            provider_suppression_resume_expires_at=(
+                filter_result.provider_suppression_resume_expires_at
+            ),
+        )
 
     async def _filter_provider_recovery_suppressed(
         self,
         session: AsyncSession,
         workspaces: list[Workspace] | list[str],
+        *,
+        decision_candidate_limit: int | None = None,
     ) -> list[str]:
+        result = await self._filter_provider_recovery_suppressed_with_result(
+            session,
+            workspaces,
+            decision_candidate_limit=decision_candidate_limit,
+        )
+        return result.workspace_ids
+
+    async def _filter_provider_recovery_suppressed_with_result(
+        self,
+        session: AsyncSession,
+        workspaces: list[Workspace] | list[str],
+        *,
+        decision_candidate_limit: int | None = None,
+    ) -> _SchedulerCandidateFilterResult:
         if not workspaces:
-            return []
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
         if _scheduler_items_are_workspace_ids(workspaces):
             workspace_ids = workspaces
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
@@ -615,25 +772,36 @@ class ControlWorker:
             workspace_ids = [workspace.id for workspace in workspace_rows]
             rows = {workspace.id: workspace for workspace in workspace_rows}
         else:
-            return []
+            return _SchedulerCandidateFilterResult(workspace_ids=[])
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
         circuit_candidates: dict[str, tuple[str, str]] = {}
-        for workspace_id in workspace_ids:
+        circuit_decision_workspace_ids: set[str] = set()
+        provider_suppression_resume_expires_at: datetime | None = None
+        for index, workspace_id in enumerate(workspace_ids):
             workspace = rows.get(workspace_id)
             if workspace is None:
                 continue
+            record_suppression_decision = (
+                decision_candidate_limit is None or index < decision_candidate_limit
+            )
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
-                await _record_scheduler_queue_decision(
-                    session,
-                    workspace,
-                    decision=QUEUE_DECISION_DEFERRED,
-                    reason_code=PROVIDER_RECOVERY_NOT_BEFORE_REASON,
-                    decided_at=now,
-                    suppression_detail={"not_before": not_before.isoformat()},
+                provider_suppression_resume_expires_at = _earliest_future_datetime(
+                    provider_suppression_resume_expires_at,
+                    not_before,
+                    now=now,
                 )
+                if record_suppression_decision:
+                    await _record_scheduler_queue_decision(
+                        session,
+                        workspace,
+                        decision=QUEUE_DECISION_DEFERRED,
+                        reason_code=PROVIDER_RECOVERY_NOT_BEFORE_REASON,
+                        decided_at=now,
+                        suppression_detail={"not_before": not_before.isoformat()},
+                    )
                 continue
             model = agent_model_from_task_policy(workspace.task_policy)
             provider = provider_for_agent_model(workspace.agent, model)
@@ -641,6 +809,8 @@ class ControlWorker:
                 allowed.add(workspace_id)
                 continue
             circuit_candidates[workspace_id] = (provider, model)
+            if record_suppression_decision:
+                circuit_decision_workspace_ids.add(workspace_id)
 
         open_breakers = await breaker_repo.open_breakers_for_pairs(
             pairs=circuit_candidates.values(),
@@ -654,19 +824,30 @@ class ControlWorker:
             if workspace is None:
                 continue
             breaker = open_breakers[pair]
-            await _record_scheduler_queue_decision(
-                session,
-                workspace,
-                decision=QUEUE_DECISION_DEFERRED,
-                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
-                decided_at=now,
-                suppression_detail={
-                    "provider": breaker.provider,
-                    "model": breaker.model,
-                    "cooldown_until": _json_datetime(breaker.cooldown_until),
-                },
+            if workspace_id in circuit_decision_workspace_ids:
+                await _record_scheduler_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_DEFERRED,
+                    reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+                    decided_at=now,
+                    suppression_detail={
+                        "provider": breaker.provider,
+                        "model": breaker.model,
+                        "cooldown_until": _json_datetime(breaker.cooldown_until),
+                    },
+                )
+            provider_suppression_resume_expires_at = _earliest_future_datetime(
+                provider_suppression_resume_expires_at,
+                breaker.cooldown_until,
+                now=now,
             )
-        return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
+        return _SchedulerCandidateFilterResult(
+            workspace_ids=[
+                workspace_id for workspace_id in workspace_ids if workspace_id in allowed
+            ],
+            provider_suppression_resume_expires_at=provider_suppression_resume_expires_at,
+        )
 
     async def _record_ordered_decisions(
         self,
@@ -2357,12 +2538,282 @@ class ControlWorker:
             status=OperationStatus.succeeded,
         )
 
-    async def _claim_requested_ids(self, workspace_ids: list[str]) -> list[str]:
+    async def _claim_requested_ids(self, workspace_ids: list[str] | None = None) -> list[str]:
+        if self._config.max_concurrent_provisions <= 0:
+            return []
+        if workspace_ids is not None and not workspace_ids:
+            return []
+        if not _local_capacity_configured(self._config):
+            if workspace_ids is None:
+                return []
+            claimed: list[str] = []
+            for workspace_id in workspace_ids:
+                if len(claimed) >= self._config.max_concurrent_provisions:
+                    break
+                if await self._claim_requested_for_provisioning(workspace_id):
+                    claimed.append(workspace_id)
+            return claimed
+
+        async def _operation(session: AsyncSession) -> _RequestedCapacityClaimResult:
+            await _acquire_local_capacity_scheduler_lock(
+                session,
+                node_id=self._config.node_id or "local",
+            )
+            return await self._claim_requested_ids_with_capacity(
+                session,
+                resume_after=self._requested_capacity_resume_after,
+                resume_allocated_signature=self._requested_capacity_resume_signature,
+                resume_requested_queue_signature=(self._requested_capacity_resume_queue_signature),
+                resume_provider_suppression_expires_at=(
+                    self._requested_capacity_resume_provider_suppression_expires_at
+                ),
+            )
+
+        result = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=False,
+            on_retry=self._log_transient_db_retry,
+        )
+        self._requested_capacity_resume_after = result.resume_after
+        self._requested_capacity_resume_signature = result.allocated_signature
+        self._requested_capacity_resume_queue_signature = result.requested_queue_signature
+        self._requested_capacity_resume_provider_suppression_expires_at = (
+            result.provider_suppression_resume_expires_at
+        )
+        return result.workspace_ids
+
+    async def _claim_requested_ids_with_capacity(
+        self,
+        session: AsyncSession,
+        *,
+        resume_after: SchedulerOrderCursor | None,
+        resume_allocated_signature: _AllocatedReservationSignature | None,
+        resume_requested_queue_signature: _RequestedCapacityQueueSignature | None,
+        resume_provider_suppression_expires_at: datetime | None,
+    ) -> _RequestedCapacityClaimResult:
+        reservation_repo = ResourceReservationRepository(session)
+        allocated = await _allocated_totals_for_capacity_gate(
+            session,
+            reservation_repo=reservation_repo,
+            config=self._config,
+        )
+        allocated_signature = _allocated_reservation_signature(allocated)
         claimed: list[str] = []
-        for workspace_id in workspace_ids:
-            if await self._claim_requested_for_provisioning(workspace_id):
-                claimed.append(workspace_id)
+        repo = WorkspaceRepository(session)
+        node_id = self._config.node_id or "local"
+        decided_at = datetime.now(UTC)
+        requested_queue_signature = await _requested_capacity_queue_signature(
+            session,
+            node_id=node_id,
+            scoring_at=decided_at,
+        )
+        # A provider circuit can open between polls without changing the queue
+        # or allocation signatures. That may reuse the cursor for one cycle; a
+        # scan that observes suppression stores its expiry and later resets here.
+        resume_provider_suppression_open = (
+            resume_provider_suppression_expires_at is None
+            or _utc_datetime(resume_provider_suppression_expires_at) > decided_at
+        )
+        candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
+        candidate_after: SchedulerOrderCursor | None = None
+        if (
+            resume_after is not None
+            and resume_allocated_signature == allocated_signature
+            and resume_requested_queue_signature == requested_queue_signature
+            and resume_provider_suppression_open
+            and not await _requested_capacity_age_boost_changed(
+                session,
+                node_id=node_id,
+                since=resume_after.scoring_at,
+                now=decided_at,
+            )
+        ):
+            candidate_after = resume_after
+        scoring_at = candidate_after.scoring_at if candidate_after is not None else decided_at
+        capacity_refill_pages_remaining: int | None = None
+        next_resume_after: SchedulerOrderCursor | None = None
+        next_resume_signature: _AllocatedReservationSignature | None = None
+        next_resume_queue_signature: _RequestedCapacityQueueSignature | None = None
+        next_resume_provider_suppression_expires_at: datetime | None = None
+
+        while len(claimed) < self._config.max_concurrent_provisions:
+            workspaces = await repo.list_schedulable_workspaces(
+                status=WorkspaceStatus.requested,
+                limit=candidate_limit,
+                node_id=self._config.node_id or "local",
+                after=candidate_after,
+                scoring_at=scoring_at,
+            )
+            if not workspaces:
+                break
+            page_end_cursor = _scheduler_candidate_cursor(
+                workspaces,
+                scoring_at=scoring_at,
+                dialect_name=repo.dialect_name,
+            )
+
+            workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+            claim_slots = self._config.max_concurrent_provisions - len(claimed)
+            page_filter_result = await self._filter_scheduler_candidate_workspaces_with_result(
+                session,
+                workspaces,
+                limit=len(workspaces),
+                scoring_at=scoring_at,
+                provider_recovery_decision_candidate_limit=claim_slots,
+            )
+            page_dispatchable_ids = page_filter_result.workspace_ids
+            next_resume_provider_suppression_expires_at = _earliest_future_datetime(
+                next_resume_provider_suppression_expires_at,
+                page_filter_result.provider_suppression_resume_expires_at,
+                now=decided_at,
+            )
+            page_candidates = [
+                workspaces_by_id[workspace_id]
+                for workspace_id in page_dispatchable_ids
+                if workspace_id in workspaces_by_id
+            ]
+            page_claimed = await self._claim_requested_capacity_candidates(
+                session,
+                repo=repo,
+                reservation_repo=reservation_repo,
+                candidates=page_candidates,
+                allocated=allocated,
+                claim_slots=claim_slots,
+                decided_at=decided_at,
+            )
+            claimed.extend(page_claimed)
+            if len(claimed) >= self._config.max_concurrent_provisions:
+                break
+            if len(workspaces) < candidate_limit:
+                break
+            if not page_claimed:
+                if capacity_refill_pages_remaining is None:
+                    capacity_refill_pages_remaining = _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+                if capacity_refill_pages_remaining <= 0:
+                    next_resume_after = page_end_cursor
+                    if next_resume_after is not None:
+                        next_resume_signature = _allocated_reservation_signature(allocated)
+                        next_resume_queue_signature = requested_queue_signature
+                    break
+                capacity_refill_pages_remaining -= 1
+            else:
+                capacity_refill_pages_remaining = None
+            candidate_after = page_end_cursor
+            if candidate_after is None:
+                break
+
+        return _RequestedCapacityClaimResult(
+            workspace_ids=claimed,
+            resume_after=next_resume_after,
+            allocated_signature=next_resume_signature,
+            requested_queue_signature=next_resume_queue_signature,
+            provider_suppression_resume_expires_at=(
+                next_resume_provider_suppression_expires_at
+                if next_resume_after is not None
+                else None
+            ),
+        )
+
+    async def _claim_requested_capacity_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        repo: WorkspaceRepository,
+        reservation_repo: ResourceReservationRepository,
+        candidates: list[Workspace],
+        allocated: _AllocatedReservationTotals,
+        claim_slots: int,
+        decided_at: datetime,
+    ) -> list[str]:
+        if not candidates or claim_slots <= 0:
+            return []
+
+        candidate_ids = [workspace.id for workspace in candidates]
+        reservations = await reservation_repo.active_latest_by_workspace_ids(candidate_ids)
+        attempts_by_workspace = await TaskAttemptRepository(session).get_by_workspace_ids(
+            candidate_ids
+        )
+        latest_decisions_by_workspace = await QueueDecisionRepository(
+            session
+        ).latest_by_workspace_ids(candidate_ids)
+        claimed: list[str] = []
+        for workspace in candidates:
+            if len(claimed) >= claim_slots:
+                break
+            queue_decision_context = _CapacityQueueDecisionContext(
+                attempt=attempts_by_workspace.get(workspace.id),
+                latest_decision=latest_decisions_by_workspace.get(workspace.id),
+            )
+            demand = _reservation_demand_for_workspace(
+                workspace,
+                reservation=reservations.get(workspace.id),
+                config=self._config,
+            )
+            blockers = _local_capacity_blockers(
+                allocated=allocated,
+                demand=demand,
+                config=self._config,
+            )
+            if blockers:
+                reason_code = (
+                    LOCAL_CAPACITY_UNSATISFIABLE_REASON
+                    if any(blocker.unsatisfiable for blocker in blockers)
+                    else LOCAL_CAPACITY_DEFERRED_REASON
+                )
+                await _record_capacity_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_DEFERRED,
+                    reason_code=reason_code,
+                    decided_at=decided_at,
+                    allocated=allocated,
+                    demand=demand,
+                    blockers=blockers,
+                    context=queue_decision_context,
+                )
+                continue
+            ws = await repo.transition_if_current(
+                workspace.id,
+                from_status=WorkspaceStatus.requested,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+            if ws is None:
+                await self._log_stale_requested_claims(session, [workspace.id])
+                continue
+            if demand.defaulted:
+                await _record_capacity_queue_decision(
+                    session,
+                    ws,
+                    decision=QUEUE_DECISION_ORDERED,
+                    reason_code=LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
+                    decided_at=decided_at,
+                    allocated=allocated,
+                    demand=demand,
+                    blockers=[],
+                    context=queue_decision_context,
+                )
+            claimed.append(workspace.id)
+            allocated.add(demand)
         return claimed
+
+    async def _log_stale_requested_claims(
+        self,
+        session: AsyncSession,
+        workspace_ids: list[str],
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        for workspace_id in workspace_ids:
+            current = await repo.get(workspace_id)
+            _log.info(
+                "worker.skip_stale_dispatch",
+                workspace_id=workspace_id,
+                action="provision",
+                expected_status=WorkspaceStatus.requested.value,
+                status=current.status if current is not None else None,
+            )
 
     async def _claim_requested_for_provisioning(self, workspace_id: str) -> bool:
         async with self._session_factory() as session:
@@ -2779,13 +3230,21 @@ def _ordered_queue_decision_matches(
 ) -> bool:
     if decision is None:
         return False
-    return (
+    if not (
         decision.workspace_id == candidate.workspace_id
         and decision.task_id == candidate.task_id
         and decision.attempt_id == candidate.attempt_id
         and decision.decision == QUEUE_DECISION_ORDERED
-        and decision.reason_code == reason_code
-        and _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
+    ):
+        return False
+    if decision.reason_code == reason_code:
+        return _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
+    # A defaulted reservation is recorded while capacity candidates are claimed
+    # and is the ordering record for that attempt; suppress the follow-up
+    # ordered-provisioning row even though its decision timestamp differs.
+    return (
+        reason_code == ORDERED_REQUESTED_PROVISIONING_REASON
+        and decision.reason_code == LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON
     )
 
 
@@ -2829,6 +3288,577 @@ async def _record_scheduler_queue_decision(
         score_summary=score_summary,
         decided_at=decided_at,
     )
+
+
+async def _record_capacity_queue_decision(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    decision: str,
+    reason_code: str,
+    decided_at: datetime,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    blockers: list[LocalCapacityBlocker],
+    context: _CapacityQueueDecisionContext | None = None,
+) -> None:
+    latest_decision: QueueDecision | None
+    if context is None:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    else:
+        attempt = context.attempt
+    if attempt is None:
+        _log.warning(
+            "worker.capacity_queue_decision_missing_attempt",
+            workspace_id=workspace.id,
+            workspace_status=workspace.status,
+            decision=decision,
+            reason_code=reason_code,
+        )
+        return
+
+    queue_repo = QueueDecisionRepository(session)
+    if context is None:
+        latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
+        latest_decision = latest[0] if latest else None
+    else:
+        latest_decision = context.latest_decision
+    if decision == QUEUE_DECISION_DEFERRED and _capacity_deferred_decision_matches(
+        latest_decision,
+        attempt_id=attempt.id,
+        reason_code=reason_code,
+        blockers=blockers,
+    ):
+        return
+
+    score = scheduler_score_from_workspace(workspace, now=decided_at)
+    score_summary = (
+        score_summary_with_suppression(
+            score,
+            reason_code=reason_code,
+            detail={
+                "blockers": [_capacity_blocker_payload(blocker) for blocker in blockers],
+            },
+        )
+        if decision == QUEUE_DECISION_DEFERRED
+        else score.score_summary
+    )
+    resource_summary = _capacity_resource_summary(
+        allocated=allocated,
+        demand=demand,
+        blockers=blockers,
+    )
+    if latest_decision is not None:
+        resource_summary["previous"] = _capacity_previous_resource_summary(
+            latest_decision.resource_summary
+        )
+    await queue_repo.create(
+        workspace_id=workspace.id,
+        task_id=attempt.task_id,
+        attempt_id=attempt.id,
+        decision=decision,
+        reason_code=reason_code,
+        class_priority=score.class_priority,
+        computed_priority=score.effective_score,
+        age_boost=score.age_boost,
+        retry_bonus=score.retry_bonus,
+        resource_summary=resource_summary,
+        overlap_risk_summary=(
+            dict(latest_decision.overlap_risk_summary) if latest_decision is not None else {}
+        ),
+        score_summary=score_summary,
+        decided_at=decided_at,
+    )
+
+
+def _capacity_deferred_decision_matches(
+    decision: QueueDecision | None,
+    *,
+    attempt_id: str,
+    reason_code: str,
+    blockers: list[LocalCapacityBlocker],
+) -> bool:
+    if decision is None:
+        return False
+    if (
+        decision.attempt_id != attempt_id
+        or decision.decision != QUEUE_DECISION_DEFERRED
+        or decision.reason_code != reason_code
+    ):
+        return False
+    stored_signatures = _capacity_blocker_signatures_from_summary(decision.resource_summary)
+    if stored_signatures is None:
+        return False
+    return stored_signatures == _capacity_blocker_signatures(blockers)
+
+
+def _capacity_previous_resource_summary(
+    resource_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    previous = dict(resource_summary)
+    previous.pop("previous", None)
+    return previous
+
+
+def _capacity_blocker_signatures(
+    blockers: list[LocalCapacityBlocker],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        _capacity_blocker_payload_signature(_capacity_blocker_payload(blocker))
+        for blocker in blockers
+    )
+
+
+def _capacity_blocker_signatures_from_summary(
+    resource_summary: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], ...] | None:
+    blockers = resource_summary.get("blockers")
+    if not isinstance(blockers, list):
+        return None
+    signatures: list[tuple[Any, ...]] = []
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping):
+            return None
+        signatures.append(_capacity_blocker_payload_signature(blocker))
+    return tuple(signatures)
+
+
+def _capacity_blocker_payload_signature(
+    payload: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    return tuple(payload.get(field) for field in _CAPACITY_BLOCKER_SIGNATURE_FIELDS)
+
+
+async def _allocated_totals_for_capacity_gate(
+    session: AsyncSession,
+    *,
+    reservation_repo: ResourceReservationRepository,
+    config: WorkerConfig,
+) -> _AllocatedReservationTotals:
+    node_id = config.node_id or "local"
+    allocated = _allocated_totals_from_repository(
+        await reservation_repo.active_latest_totals_for_scheduler_allocation_scope(
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        )
+    )
+    await _add_unreserved_active_workspace_defaults(
+        session,
+        allocated=allocated,
+        config=config,
+        node_id=node_id,
+    )
+    return allocated
+
+
+def _active_reservation_workspace_ids_subquery() -> Any:
+    # Deliberately node-agnostic: scheduler totals already count stale-node
+    # reservations for local workspaces, and any active reservation keeps a
+    # null-node legacy workspace from being default-counted on multiple nodes.
+    return (
+        select(ResourceReservation.workspace_id.label("workspace_id"))
+        .where(ResourceReservation.released_at.is_(None))
+        .distinct()
+        .subquery()
+    )
+
+
+async def _add_unreserved_active_workspace_defaults(
+    session: AsyncSession,
+    *,
+    allocated: _AllocatedReservationTotals,
+    config: WorkerConfig,
+    node_id: str,
+) -> None:
+    active_reservation_workspace_ids = _active_reservation_workspace_ids_subquery()
+    stmt = (
+        select(Workspace.id, Workspace.resolved_profile)
+        .outerjoin(
+            active_reservation_workspace_ids,
+            active_reservation_workspace_ids.c.workspace_id == Workspace.id,
+        )
+        .where(
+            Workspace.status.in_(ALLOCATED_RESOURCE_RESERVATION_STATUSES),
+            or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)),
+            active_reservation_workspace_ids.c.workspace_id.is_(None),
+        )
+    )
+    for workspace_id, resolved_profile in await session.execute(stmt):
+        allocated.add(
+            _default_reservation_demand_for_workspace(
+                workspace_id,
+                resolved_profile=resolved_profile,
+                config=config,
+            )
+        )
+
+
+def _allocated_totals_from_repository(
+    totals: Mapping[str, float | int],
+) -> _AllocatedReservationTotals:
+    return _AllocatedReservationTotals(
+        workspace_count=int(totals.get("workspace_count", 0) or 0),
+        steady_cpu=float(totals.get("steady_cpu", 0.0) or 0.0),
+        steady_memory_gb=float(totals.get("steady_memory_gb", 0.0) or 0.0),
+        peak_cpu=float(totals.get("peak_cpu", 0.0) or 0.0),
+        peak_memory_gb=float(totals.get("peak_memory_gb", 0.0) or 0.0),
+        disk_mb=int(totals.get("disk_mb", 0) or 0),
+        dind_slots=int(totals.get("dind_slots", 0) or 0),
+    )
+
+
+def _allocated_reservation_signature(
+    allocated: _AllocatedReservationTotals,
+) -> _AllocatedReservationSignature:
+    return (
+        allocated.workspace_count,
+        _capacity_signature_units(allocated.steady_cpu),
+        _capacity_signature_units(allocated.steady_memory_gb),
+        _capacity_signature_units(allocated.peak_cpu),
+        _capacity_signature_units(allocated.peak_memory_gb),
+        allocated.disk_mb,
+        allocated.dind_slots,
+    )
+
+
+async def _requested_capacity_queue_signature(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    scoring_at: datetime | None = None,
+) -> _RequestedCapacityQueueSignature:
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    signature_scoring_at = scoring_at or datetime.now(UTC)
+    order_expressions = scheduler_order_expressions(
+        scoring_at=signature_scoring_at,
+        dialect_name=dialect_name,
+    )
+    scheduler_order = (
+        order_expressions.class_priority.desc(),
+        order_expressions.effective_score.desc(),
+        Workspace.created_at.asc(),
+        Workspace.id.asc(),
+    )
+    if dialect_name != "postgresql":
+        stmt = (
+            select(
+                Workspace.id,
+                Workspace.updated_at,
+                Workspace.created_at,
+                Workspace.task_class,
+                Workspace.agent,
+                Workspace.task_policy,
+                Workspace.resolved_profile,
+            )
+            .where(Workspace.status == WorkspaceStatus.requested.value)
+            .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+            .order_by(*scheduler_order)
+            .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
+        )
+        count = 0
+        latest_updated_at: datetime | None = None
+        latest_created_at: datetime | None = None
+        max_workspace_id: str | None = None
+        digest = hashlib.sha256()
+        for (
+            workspace_id_value,
+            updated_at,
+            created_at,
+            task_class,
+            agent,
+            task_policy,
+            resolved_profile,
+        ) in await session.execute(stmt):
+            workspace_id = str(workspace_id_value)
+            count += 1
+            if isinstance(updated_at, datetime):
+                updated_at = _utc_datetime(updated_at)
+                if latest_updated_at is None or updated_at > latest_updated_at:
+                    latest_updated_at = updated_at
+            if isinstance(created_at, datetime):
+                created_at_for_comparison = _utc_datetime(created_at)
+                if latest_created_at is None or created_at_for_comparison > latest_created_at:
+                    latest_created_at = created_at_for_comparison
+            if max_workspace_id is None or workspace_id > max_workspace_id:
+                max_workspace_id = workspace_id
+            digest.update(
+                _requested_capacity_queue_digest_payload(
+                    workspace_id=workspace_id,
+                    created_at=created_at,
+                    task_class=task_class,
+                    agent=agent,
+                    task_policy=task_policy,
+                    resolved_profile=resolved_profile,
+                ).encode("utf-8")
+            )
+            digest.update(b"\0")
+        return (
+            count,
+            latest_updated_at,
+            latest_created_at,
+            max_workspace_id,
+            digest.hexdigest(),
+        )
+
+    requested_queue_frontier = (
+        select(
+            Workspace.id.label("id"),
+            Workspace.updated_at.label("updated_at"),
+            Workspace.created_at.label("created_at"),
+            Workspace.task_class.label("task_class"),
+            Workspace.agent.label("agent"),
+            Workspace.task_policy.label("task_policy"),
+            Workspace.resolved_profile.label("resolved_profile"),
+        )
+        .where(Workspace.status == WorkspaceStatus.requested.value)
+        .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        .order_by(*scheduler_order)
+        .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
+        .subquery()
+    )
+    stmt = select(
+        func.count(requested_queue_frontier.c.id),
+        func.max(requested_queue_frontier.c.updated_at),
+        func.max(requested_queue_frontier.c.created_at),
+        func.max(requested_queue_frontier.c.id),
+        func.md5(
+            func.coalesce(
+                func.string_agg(
+                    func.md5(
+                        sql_cast(
+                            func.jsonb_build_array(
+                                requested_queue_frontier.c.id,
+                                requested_queue_frontier.c.created_at,
+                                requested_queue_frontier.c.task_class,
+                                requested_queue_frontier.c.agent,
+                                sql_cast(requested_queue_frontier.c.task_policy, JSONB),
+                                sql_cast(
+                                    requested_queue_frontier.c.resolved_profile,
+                                    JSONB,
+                                ),
+                            ),
+                            String(),
+                        )
+                    ),
+                    aggregate_order_by(literal(","), requested_queue_frontier.c.id),
+                ),
+                literal(""),
+            )
+        ),
+    )
+    count, latest_updated_at, latest_created_at, max_workspace_id, ids_digest = (
+        await session.execute(stmt)
+    ).one()
+    return (
+        int(count or 0),
+        _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
+        _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
+        str(max_workspace_id) if max_workspace_id is not None else None,
+        str(ids_digest or ""),
+    )
+
+
+async def _requested_capacity_age_boost_changed(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    since: datetime,
+    now: datetime,
+) -> bool:
+    since_utc = _utc_datetime(since)
+    now_utc = _utc_datetime(now)
+    if now_utc <= since_utc:
+        return False
+
+    threshold_windows = [
+        and_(
+            Workspace.created_at
+            > since_utc - timedelta(seconds=boost * AGE_BOOST_INTERVAL_SECONDS),
+            Workspace.created_at <= now_utc - timedelta(seconds=boost * AGE_BOOST_INTERVAL_SECONDS),
+        )
+        for boost in range(1, AGE_BOOST_MAX + 1)
+    ]
+    if not threshold_windows:
+        return False
+
+    stmt = (
+        select(Workspace.id)
+        .where(Workspace.status == WorkspaceStatus.requested.value)
+        .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        .where(or_(*threshold_windows))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+def _requested_capacity_queue_digest_payload(
+    *,
+    workspace_id: str,
+    created_at: datetime,
+    task_class: str | None,
+    agent: str | None,
+    task_policy: Mapping[str, Any] | None,
+    resolved_profile: object,
+) -> str:
+    return json.dumps(
+        {
+            "agent": agent,
+            "created_at": _json_datetime(created_at),
+            "id": workspace_id,
+            "resolved_profile": resolved_profile,
+            "task_class": task_class,
+            "task_policy": dict(task_policy or {}),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _capacity_signature_units(value: float) -> int:
+    return round(value * _ALLOCATED_RESERVATION_SIGNATURE_SCALE)
+
+
+def _reservation_demand_for_workspace(
+    workspace: Workspace,
+    *,
+    reservation: ResourceReservation | None,
+    config: WorkerConfig,
+) -> _ReservationDemand:
+    if reservation is not None:
+        return _reservation_demand_from_reservation(reservation)
+    return _default_reservation_demand_for_workspace(
+        workspace.id,
+        resolved_profile=workspace.resolved_profile,
+        config=config,
+    )
+
+
+def _reservation_demand_from_reservation(
+    reservation: ResourceReservation,
+) -> _ReservationDemand:
+    return _ReservationDemand(
+        workspace_id=reservation.workspace_id,
+        steady_cpu=reservation.steady_cpu,
+        steady_memory_gb=reservation.steady_memory_gb,
+        peak_cpu=reservation.peak_cpu,
+        peak_memory_gb=reservation.peak_memory_gb,
+        disk_mb=int(reservation.disk_mb or 0),
+        dind_slots=int(reservation.dind_slots or 0),
+    )
+
+
+def _default_reservation_demand_for_workspace(
+    workspace_id: str,
+    *,
+    resolved_profile: object,
+    config: WorkerConfig,
+) -> _ReservationDemand:
+    return _ReservationDemand(
+        workspace_id=workspace_id,
+        steady_cpu=config.workspace_steady_cpu,
+        steady_memory_gb=config.workspace_steady_memory_gb,
+        peak_cpu=config.workspace_peak_cpu,
+        peak_memory_gb=config.workspace_peak_memory_gb,
+        disk_mb=0,
+        dind_slots=default_dind_slots_from_profile(resolved_profile),
+        defaulted=True,
+    )
+
+
+def _local_capacity_blockers(
+    *,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    config: WorkerConfig,
+) -> list[LocalCapacityBlocker]:
+    blockers: list[LocalCapacityBlocker] = []
+    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
+        blocker = local_capacity_blocker(
+            constraint=constraint,
+            limit=local_capacity_limit(
+                constraint,
+                cpu_limit=config.local_capacity_cpu_cores,
+                memory_limit=config.local_capacity_memory_gb,
+                dind_slots=config.local_capacity_dind_slots,
+            ),
+            allocated=getattr(allocated, constraint.dimension),
+            requested=getattr(demand, constraint.dimension),
+        )
+        if blocker is not None:
+            blockers.append(blocker)
+    return blockers
+
+
+def _local_capacity_configured(config: WorkerConfig) -> bool:
+    return (
+        config.local_capacity_cpu_cores is not None
+        or config.local_capacity_memory_gb is not None
+        or config.local_capacity_dind_slots is not None
+    )
+
+
+def _capacity_resource_summary(
+    *,
+    allocated: _AllocatedReservationTotals,
+    demand: _ReservationDemand,
+    blockers: list[LocalCapacityBlocker],
+) -> dict[str, Any]:
+    return {
+        "allocated": {
+            "workspace_count": allocated.workspace_count,
+            "steady_cpu": allocated.steady_cpu,
+            "steady_memory_gb": allocated.steady_memory_gb,
+            "peak_cpu": allocated.peak_cpu,
+            "peak_memory_gb": allocated.peak_memory_gb,
+            "disk_mb": allocated.disk_mb,
+            "dind_slots": allocated.dind_slots,
+        },
+        "requested": {
+            "workspace_id": demand.workspace_id,
+            "steady_cpu": demand.steady_cpu,
+            "steady_memory_gb": demand.steady_memory_gb,
+            "peak_cpu": demand.peak_cpu,
+            "peak_memory_gb": demand.peak_memory_gb,
+            "disk_mb": demand.disk_mb,
+            "dind_slots": demand.dind_slots,
+            "defaulted": demand.defaulted,
+        },
+        "blockers": [_capacity_blocker_payload(blocker) for blocker in blockers],
+    }
+
+
+def _capacity_blocker_payload(blocker: LocalCapacityBlocker) -> dict[str, Any]:
+    return {
+        "dimension": blocker.dimension,
+        "reason_code": blocker.reason_code,
+        "limit": blocker.limit,
+        "allocated": blocker.allocated,
+        "requested": blocker.requested,
+        "after": blocker.after,
+        "unsatisfiable": blocker.unsatisfiable,
+    }
+
+
+async def _acquire_local_capacity_scheduler_lock(
+    session: AsyncSession,
+    *,
+    node_id: str,
+) -> None:
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_key = _postgres_advisory_lock_key(f"awf:local-capacity:{node_id}")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": lock_key},
+    )
+
+
+def _postgres_advisory_lock_key(value: str) -> int:
+    raw = int.from_bytes(hashlib.sha256(value.encode("utf-8")).digest()[:8], "big")
+    # Wrap unsigned 8-byte value into PostgreSQL's signed int8 range.
+    return raw if raw < 2**63 else raw - 2**64
 
 
 def _order_scheduler_workspaces(
@@ -3137,6 +4167,22 @@ def _utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _earliest_future_datetime(
+    current: datetime | None,
+    candidate: datetime | None,
+    *,
+    now: datetime,
+) -> datetime | None:
+    if candidate is None:
+        return current
+    candidate = _utc_datetime(candidate)
+    if candidate <= now:
+        return current
+    if current is None or candidate < current:
+        return candidate
+    return current
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:

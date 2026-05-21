@@ -142,6 +142,15 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 )
+ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.provisioning.value,
+    WorkspaceStatus.ready.value,
+    WorkspaceStatus.running.value,
+    WorkspaceStatus.validating.value,
+    WorkspaceStatus.pushing.value,
+    WorkspaceStatus.monitoring_pr.value,
+    WorkspaceStatus.destroying.value,
+)
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
@@ -253,7 +262,7 @@ def _coverage_metadata_has_pytest_failures(coverage: Mapping[str, Any]) -> bool:
     return bool(node_ids or evidence)
 
 
-def _resolve_session_dialect_name(
+def resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
 ) -> str | None:
@@ -488,7 +497,7 @@ class TaskAttemptRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def create_for_workspace(
         self,
@@ -537,6 +546,17 @@ class TaskAttemptRepository:
     async def get_by_workspace_id(self, workspace_id: str) -> TaskAttempt | None:
         stmt = select(TaskAttempt).where(TaskAttempt.workspace_id == workspace_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_workspace_ids(self, workspace_ids: Iterable[str]) -> dict[str, TaskAttempt]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        stmt = select(TaskAttempt).where(TaskAttempt.workspace_id.in_(unique_workspace_ids))
+        return {
+            attempt.workspace_id: attempt
+            for attempt in (await self._session.execute(stmt)).scalars()
+        }
 
     async def get_canonical_for_task(self, task_id: str) -> TaskAttempt | None:
         stmt = select(TaskAttempt).where(
@@ -634,7 +654,7 @@ class PRFeedbackResolutionRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def record_resolution(
         self,
@@ -737,7 +757,7 @@ class ProviderModelCircuitBreakerRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def get(
         self,
@@ -1137,6 +1157,45 @@ class ResourceReservationRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def active_latest_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, ResourceReservation]:
+        ids = tuple(dict.fromkeys(workspace_ids))
+        if not ids:
+            return {}
+        ranked_reservations = (
+            select(
+                ResourceReservation.id.label("reservation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ResourceReservation.workspace_id,
+                    order_by=(
+                        ResourceReservation.reserved_at.desc(),
+                        ResourceReservation.id.desc(),
+                    ),
+                )
+                .label("reservation_rank"),
+            )
+            .where(
+                ResourceReservation.workspace_id.in_(ids),
+                ResourceReservation.released_at.is_(None),
+            )
+            .subquery()
+        )
+        stmt = (
+            select(ResourceReservation)
+            .join(
+                ranked_reservations,
+                ResourceReservation.id == ranked_reservations.c.reservation_id,
+            )
+            .where(ranked_reservations.c.reservation_rank == 1)
+        )
+        return {
+            reservation.workspace_id: reservation
+            for reservation in (await self._session.execute(stmt)).scalars()
+        }
+
     async def release_active_for_workspace(
         self,
         workspace_id: str,
@@ -1157,62 +1216,201 @@ class ResourceReservationRepository:
         rows.sort(key=lambda row: (row.reserved_at, row.id))
         return rows
 
-    async def active_latest_totals(self) -> dict[str, float | int]:
-        latest_active_reservations = (
-            select(
-                ResourceReservation.workspace_id.label("workspace_id"),
-                ResourceReservation.steady_cpu.label("steady_cpu"),
-                ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
-                ResourceReservation.peak_cpu.label("peak_cpu"),
-                ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
-                ResourceReservation.disk_mb.label("disk_mb"),
-                ResourceReservation.dind_slots.label("dind_slots"),
-                func.row_number()
-                .over(
-                    partition_by=ResourceReservation.workspace_id,
-                    order_by=(
-                        ResourceReservation.reserved_at.desc(),
-                        ResourceReservation.id.desc(),
-                    ),
-                )
-                .label("reservation_rank"),
-            )
-            .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
-            .where(
-                ResourceReservation.released_at.is_(None),
-                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES),
-            )
-            .subquery()
+    async def active_latest_totals(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str] | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            reservation_node_id=node_id,
         )
-        stmt = (
-            select(
-                func.count(latest_active_reservations.c.workspace_id),
-                func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
-                func.coalesce(
-                    func.sum(latest_active_reservations.c.steady_memory_gb),
-                    0.0,
-                ),
-                func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
-                func.coalesce(
-                    func.sum(latest_active_reservations.c.peak_memory_gb),
-                    0.0,
-                ),
-                func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
-                func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
-            )
-            .select_from(latest_active_reservations)
-            .where(latest_active_reservations.c.reservation_rank == 1)
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
+    async def active_latest_totals_for_workspace_scope(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str] | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            workspace_node_id=node_id,
         )
-        row = (await self._session.execute(stmt)).one()
-        return {
-            "workspace_count": int(row[0] or 0),
-            "steady_cpu": float(row[1] or 0.0),
-            "steady_memory_gb": float(row[2] or 0.0),
-            "peak_cpu": float(row[3] or 0.0),
-            "peak_memory_gb": float(row[4] or 0.0),
-            "disk_mb": int(row[5] or 0),
-            "dind_slots": int(row[6] or 0),
-        }
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
+    async def active_latest_totals_for_scheduler_allocation_scope(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            scheduler_allocation_node_id=node_id,
+        )
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
+    async def active_latest_totals_for_metrics_allocation_scope(
+        self,
+        *,
+        statuses: Iterable[WorkspaceStatus | str],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        stmt = _active_latest_resource_reservation_totals_stmt(
+            statuses=statuses,
+            metrics_allocation_node_id=node_id,
+        )
+        if stmt is None:
+            return empty_resource_reservation_totals()
+        return await _fetch_resource_reservation_totals(self._session, stmt)
+
+
+def empty_resource_reservation_totals() -> dict[str, float | int]:
+    return {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+
+
+def _active_resource_reservation_status_filter(
+    statuses: Iterable[WorkspaceStatus | str] | None,
+) -> ColumnElement[Any] | None:
+    if statuses is None:
+        return ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
+    status_values = tuple(
+        status.value if isinstance(status, WorkspaceStatus) else str(status) for status in statuses
+    )
+    if not status_values:
+        return None
+    return Workspace.status.in_(status_values)
+
+
+def _active_latest_resource_reservation_totals_stmt(
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+    reservation_node_id: str | None = None,
+    workspace_node_id: str | None = None,
+    scheduler_allocation_node_id: str | None = None,
+    metrics_allocation_node_id: str | None = None,
+) -> Select[tuple[Any, ...]] | None:
+    status_filter = _active_resource_reservation_status_filter(statuses)
+    if status_filter is None:
+        return None
+    latest_active_reservations_query = (
+        select(
+            ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.node_id.label("node_id"),
+            Workspace.node_id.label("workspace_node_id"),
+            ResourceReservation.steady_cpu.label("steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            ResourceReservation.disk_mb.label("disk_mb"),
+            ResourceReservation.dind_slots.label("dind_slots"),
+            func.row_number()
+            .over(
+                partition_by=ResourceReservation.workspace_id,
+                order_by=(
+                    ResourceReservation.reserved_at.desc(),
+                    ResourceReservation.id.desc(),
+                ),
+            )
+            .label("reservation_rank"),
+        )
+        .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
+        .where(
+            ResourceReservation.released_at.is_(None),
+            status_filter,
+        )
+    )
+    if workspace_node_id is not None:
+        latest_active_reservations_query = latest_active_reservations_query.where(
+            or_(Workspace.node_id == workspace_node_id, Workspace.node_id.is_(None))
+        )
+    latest_active_reservations = latest_active_reservations_query.subquery()
+    stmt = (
+        select(
+            func.count(latest_active_reservations.c.workspace_id),
+            func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
+            func.coalesce(
+                func.sum(latest_active_reservations.c.steady_memory_gb),
+                0.0,
+            ),
+            func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
+            func.coalesce(
+                func.sum(latest_active_reservations.c.peak_memory_gb),
+                0.0,
+            ),
+            func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
+            func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
+        )
+        .select_from(latest_active_reservations)
+        .where(latest_active_reservations.c.reservation_rank == 1)
+    )
+    if reservation_node_id is not None:
+        stmt = stmt.where(latest_active_reservations.c.node_id == reservation_node_id)
+    if scheduler_allocation_node_id is not None:
+        stmt = stmt.where(
+            or_(
+                latest_active_reservations.c.node_id == scheduler_allocation_node_id,
+                latest_active_reservations.c.workspace_node_id == scheduler_allocation_node_id,
+                # Legacy single-node rows may predate persisted node ownership
+                # on both tables. Count them conservatively for scheduler
+                # gates until a multi-node rollout can backfill or claim them.
+                and_(
+                    latest_active_reservations.c.node_id.is_(None),
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                ),
+            )
+        )
+    if metrics_allocation_node_id is not None:
+        stmt = stmt.where(
+            or_(
+                latest_active_reservations.c.workspace_node_id == metrics_allocation_node_id,
+                and_(
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                    latest_active_reservations.c.node_id == metrics_allocation_node_id,
+                ),
+                # Mirrors scheduler allocation for legacy single-node
+                # reservations that have no persisted owner. Multi-node
+                # deployments must stamp or backfill node IDs to avoid treating
+                # these ambiguous rows as precise per-node metrics.
+                and_(
+                    latest_active_reservations.c.workspace_node_id.is_(None),
+                    latest_active_reservations.c.node_id.is_(None),
+                ),
+            )
+        )
+    return stmt
+
+
+async def _fetch_resource_reservation_totals(
+    session: AsyncSession,
+    stmt: Select[tuple[Any, ...]],
+) -> dict[str, float | int]:
+    row = (await session.execute(stmt)).one()
+    return {
+        "workspace_count": int(row[0] or 0),
+        "steady_cpu": float(row[1] or 0.0),
+        "steady_memory_gb": float(row[2] or 0.0),
+        "peak_cpu": float(row[3] or 0.0),
+        "peak_memory_gb": float(row[4] or 0.0),
+        "disk_mb": int(row[5] or 0),
+        "dind_slots": int(row[6] or 0),
+    }
 
 
 class MergeCandidateRepository:
@@ -2124,7 +2322,7 @@ class EgressAuditRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def create(
         self,
@@ -2203,7 +2401,7 @@ class SecretLeaseRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def issue_declared_leases(
         self,
@@ -2586,7 +2784,7 @@ class WorkspaceRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     @property
     def dialect_name(self) -> str | None:
@@ -3069,6 +3267,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
         after: SchedulerOrderCursor | None = None,
         scoring_at: datetime | None = None,
     ) -> builtins.list[str]:
@@ -3088,6 +3287,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            node_id=node_id,
             after=after,
             scoring_at=scoring_time,
         )
@@ -3106,6 +3306,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
         after: SchedulerOrderCursor | None = None,
         scoring_at: datetime | None = None,
     ) -> builtins.list[Workspace]:
@@ -3118,6 +3319,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            node_id=node_id,
             after=after,
             scoring_at=scoring_time,
         )
@@ -3134,6 +3336,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int | None,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
         after: SchedulerOrderCursor | None = None,
         scoring_at: datetime,
     ) -> builtins.list[Workspace]:
@@ -3141,6 +3344,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            node_id=node_id,
             after=after,
             scoring_at=scoring_at,
             dialect_name=self._dialect_name,
@@ -3925,7 +4129,7 @@ def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
 
 
 @dataclass(frozen=True)
-class _SchedulerOrderExpressions:
+class SchedulerOrderExpressions:
     class_priority: ColumnElement[Any]
     effective_score: ColumnElement[Any]
 
@@ -3935,17 +4139,20 @@ def _schedulable_workspace_ids_stmt(
     status: WorkspaceStatus,
     limit: int | None,
     exclude_ids: set[str] | None = None,
+    node_id: str | None = None,
     after: SchedulerOrderCursor | None = None,
     scoring_at: datetime,
     dialect_name: str | None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
 ) -> Select[tuple[Workspace]]:
-    order_expressions = _scheduler_order_expressions(
+    order_expressions = scheduler_order_expressions(
         scoring_at=scoring_at,
         dialect_name=dialect_name,
     )
     stmt = select(Workspace).where(Workspace.status == status.value)
+    if node_id is not None:
+        stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
         stmt = stmt.where(
             or_(
@@ -3988,12 +4195,12 @@ def _scheduler_scoring_time(
     return after.scoring_at
 
 
-def _scheduler_order_expressions(
+def scheduler_order_expressions(
     *,
     scoring_at: datetime,
     dialect_name: str | None,
     workspace_entity: Any = Workspace,
-) -> _SchedulerOrderExpressions:
+) -> SchedulerOrderExpressions:
     class_priority = _task_class_case(TASK_CLASS_PRIORITIES, workspace_entity=workspace_entity)
     class_bias = _task_class_case(TASK_CLASS_BIASES, workspace_entity=workspace_entity)
     base_priority = _bounded_scheduler_int_expr(
@@ -4059,7 +4266,7 @@ def _scheduler_order_expressions(
         dialect_name=dialect_name,
         workspace_entity=workspace_entity,
     )
-    return _SchedulerOrderExpressions(
+    return SchedulerOrderExpressions(
         class_priority=class_priority,
         effective_score=base_priority + class_bias + age_boost + retry_bonus + human_boost,
     )
@@ -4069,9 +4276,9 @@ def _scheduler_cursor_order_expressions(
     *,
     after: SchedulerOrderCursor,
     dialect_name: str | None,
-) -> _SchedulerOrderExpressions:
+) -> SchedulerOrderExpressions:
     cursor_workspace = aliased(Workspace, name="scheduler_cursor_workspace")
-    cursor_order = _scheduler_order_expressions(
+    cursor_order = scheduler_order_expressions(
         scoring_at=after.scoring_at,
         dialect_name=dialect_name,
         workspace_entity=cursor_workspace,
@@ -4099,7 +4306,7 @@ def _scheduler_cursor_order_expressions(
         cursor_class_priority,
         cursor_effective_score,
     ).cte("scheduler_cursor_order")
-    return _SchedulerOrderExpressions(
+    return SchedulerOrderExpressions(
         class_priority=cursor_order_cte.c.class_priority,
         effective_score=cursor_order_cte.c.effective_score,
     )
@@ -4325,7 +4532,7 @@ SCHEDULER_SQL_AGE_BOOST_DIALECTS: Final[frozenset[str]] = frozenset(
 
 
 def _scheduler_after_cursor_condition(
-    order_expressions: _SchedulerOrderExpressions,
+    order_expressions: SchedulerOrderExpressions,
     after: SchedulerOrderCursor,
     *,
     dialect_name: str | None,
@@ -4575,7 +4782,7 @@ class CallbackSubscriptionRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize callback subscription idempotency decisions."""
@@ -4728,7 +4935,7 @@ class CallbackDeliveryRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def get(self, delivery_id: str) -> CallbackDelivery | None:
         stmt = (
@@ -4950,7 +5157,7 @@ class OperationRepository:
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
-        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+        self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize operation idempotency decisions with a PostgreSQL advisory lock."""

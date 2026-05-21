@@ -219,6 +219,15 @@ function fallbackResourceSaturation(
       disk_mb: saturation.reserved_resources?.disk_mb ?? 0,
       dind_slots: saturation.reserved_resources?.dind_slots ?? 0,
     },
+    allocated_resources: {
+      active_workspace_count: saturation.allocated_resources?.active_workspace_count ?? 0,
+      steady_cpu: saturation.allocated_resources?.steady_cpu ?? 0,
+      steady_memory_gb: saturation.allocated_resources?.steady_memory_gb ?? 0,
+      peak_cpu: saturation.allocated_resources?.peak_cpu ?? 0,
+      peak_memory_gb: saturation.allocated_resources?.peak_memory_gb ?? 0,
+      disk_mb: saturation.allocated_resources?.disk_mb ?? 0,
+      dind_slots: saturation.allocated_resources?.dind_slots ?? 0,
+    },
     capacity: {
       steady_cpu: fallbackCapacityDimension(saturation.capacity?.steady_cpu),
       peak_cpu: fallbackCapacityDimension(saturation.capacity?.peak_cpu),
@@ -227,6 +236,29 @@ function fallbackResourceSaturation(
       disk_mb: fallbackCapacityDimension(saturation.capacity?.disk_mb),
       dind_slots: fallbackCapacityDimension(saturation.capacity?.dind_slots),
       pressure_reasons: saturation.capacity?.pressure_reasons ?? [],
+    },
+    allocated_capacity: {
+      steady_cpu: fallbackCapacityDimension(saturation.allocated_capacity?.steady_cpu),
+      peak_cpu: fallbackCapacityDimension(saturation.allocated_capacity?.peak_cpu),
+      steady_memory_gb: fallbackCapacityDimension(saturation.allocated_capacity?.steady_memory_gb),
+      peak_memory_gb: fallbackCapacityDimension(saturation.allocated_capacity?.peak_memory_gb),
+      disk_mb: fallbackCapacityDimension(saturation.allocated_capacity?.disk_mb),
+      dind_slots: fallbackCapacityDimension(saturation.allocated_capacity?.dind_slots),
+      pressure_reasons: saturation.allocated_capacity?.pressure_reasons ?? [],
+    },
+    capacity_queue: {
+      queued_workspace_count: saturation.capacity_queue?.queued_workspace_count ?? 0,
+      oldest_workspace_id: saturation.capacity_queue?.oldest_workspace_id ?? null,
+      oldest_wait_seconds: saturation.capacity_queue?.oldest_wait_seconds ?? null,
+      planned_resources: {
+        steady_cpu: saturation.capacity_queue?.planned_resources?.steady_cpu ?? 0,
+        steady_memory_gb: saturation.capacity_queue?.planned_resources?.steady_memory_gb ?? 0,
+        peak_cpu: saturation.capacity_queue?.planned_resources?.peak_cpu ?? 0,
+        peak_memory_gb: saturation.capacity_queue?.planned_resources?.peak_memory_gb ?? 0,
+        disk_mb: saturation.capacity_queue?.planned_resources?.disk_mb ?? 0,
+        dind_slots: saturation.capacity_queue?.planned_resources?.dind_slots ?? 0,
+      },
+      blocked_reason_counts: saturation.capacity_queue?.blocked_reason_counts ?? {},
     },
     concurrency: {
       provision: {
@@ -2416,6 +2448,19 @@ function ResourceCapacityPanel({
 }) {
   const totalReason = workspaceSummary ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count : 0;
   const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
+  const showOldestQueued =
+    saturation !== null &&
+    saturation.capacity_queue.queued_workspace_count > 0 &&
+    saturation.capacity_queue.oldest_wait_seconds !== null;
+  const queueBlockedReasonEntries = saturation
+    ? Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {})
+    : [];
+  const pressureReasons =
+    saturation === null
+      ? []
+      : saturation.allocated_capacity.pressure_reasons.length > 0
+        ? saturation.allocated_capacity.pressure_reasons
+        : saturation.capacity.pressure_reasons;
 
   return (
     <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
@@ -2450,11 +2495,27 @@ function ResourceCapacityPanel({
               )} peak`}
             />
             <Fact
+              label="Allocated CPU"
+              value={`${formatScalar(saturation.allocated_resources.steady_cpu)} steady / ${formatScalar(
+                saturation.allocated_resources.peak_cpu,
+              )} peak`}
+            />
+            <Fact
               label="Reserved memory"
               value={`${formatGb(saturation.reserved_resources.steady_memory_gb)} steady / ${formatGb(
                 saturation.reserved_resources.peak_memory_gb,
               )} peak`}
             />
+            <Fact
+              label="Capacity queue"
+              value={`${saturation.capacity_queue.queued_workspace_count} requested`}
+            />
+            {showOldestQueued ? (
+              <Fact
+                label="Oldest queued"
+                value={compactDuration(saturation.capacity_queue.oldest_wait_seconds)}
+              />
+            ) : null}
             <Fact label="Reserved disk" value={formatCapacityValue(saturation.reserved_resources.disk_mb, "mb")} />
             <Fact label="DinD slots" value={`${saturation.reserved_resources.dind_slots} reserved`} />
             <Fact
@@ -2468,14 +2529,28 @@ function ResourceCapacityPanel({
             <LaneMeter label="Execution" lane={saturation.concurrency.execution} />
           </div>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-            <ResourceDimensionMeter label="CPU peak" dimension={saturation.capacity.peak_cpu} unit="cores" />
-            <ResourceDimensionMeter label="Memory peak" dimension={saturation.capacity.peak_memory_gb} unit="gb" />
-            <ResourceDimensionMeter label="Disk" dimension={saturation.capacity.disk_mb} unit="mb" />
-            <ResourceDimensionMeter label="DinD" dimension={saturation.capacity.dind_slots} unit="slots" />
+            <ResourceDimensionMeter label="CPU peak" dimension={saturation.allocated_capacity.peak_cpu} unit="cores" />
+            <ResourceDimensionMeter label="Memory peak" dimension={saturation.allocated_capacity.peak_memory_gb} unit="gb" />
+            <ResourceDimensionMeter label="Disk" dimension={saturation.allocated_capacity.disk_mb} unit="mb" />
+            <ResourceDimensionMeter label="DinD" dimension={saturation.allocated_capacity.dind_slots} unit="slots" />
           </div>
-          {saturation.capacity.pressure_reasons.length > 0 ? (
+          {queueBlockedReasonEntries.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {saturation.capacity.pressure_reasons.map((reason) => (
+              {queueBlockedReasonEntries.map(([reason, count]) => (
+                <span
+                  key={reason}
+                  className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
+                    "bad",
+                  )}`}
+                  title="Deferred blockers count the first FIFO frontier per constraint; unsatisfiable requests count each workspace."
+                >
+                  {reason}: {count} frontier-counted blocker{count === 1 ? "" : "s"}
+                </span>
+              ))}
+            </div>
+          ) : pressureReasons.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {pressureReasons.map((reason) => (
                 <span
                   key={reason}
                   className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
