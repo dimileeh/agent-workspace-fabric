@@ -11371,7 +11371,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
-    async def test_preserved_active_replacement_missing_existing_attempt_logs_warning(
+    async def test_preserved_active_replacement_missing_existing_attempt_records_blocked(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -11446,22 +11446,44 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 attempt_id=attempt_id,
                 task_id=task_id,
             )
+            await worker._create_preserved_active_replacement(  # noqa: SLF001
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
 
         async with session_factory() as s:
             replacement_attempt = await TaskAttemptRepository(s).get_by_workspace_id(replacement_id)
+            blocked_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_blocked",
+            )
             replacement_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_replacement_created",
             )
 
         assert replacement_attempt is None
+        assert len(blocked_events) == 1
+        blocked_payload = blocked_events[0].payload
+        assert blocked_payload is not None
+        assert blocked_payload["reason_code"] == "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
+        assert blocked_payload["decision"] == "wait_for_preservation_grace"
+        assert blocked_payload["blocked_reason"] == "replacement_attempt_missing"
+        assert blocked_payload["replacement_workspace_id"] == replacement_id
+        assert blocked_payload["attempt_id"] == attempt_id
+        assert blocked_payload["task_id"] == task_id
+        assert blocked_payload["classification"]["state"] == "no_work"
+        assert blocked_payload["classification"]["reason"] == "worktree_missing"
         assert replacement_events == []
         assert any(
             event.get("event") == "worker.preserved_active_replacement_attempt_missing"
             and event.get("log_level") == "warning"
             and event.get("workspace_id") == workspace_id
             and event.get("replacement_workspace_id") == replacement_id
-            and event.get("reason_code") == "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED"
+            and event.get("reason_code") == "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
             for event in captured
         )
 

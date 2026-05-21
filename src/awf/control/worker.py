@@ -2797,7 +2797,20 @@ class ControlWorker:
                     "worker.preserved_active_replacement_attempt_missing",
                     workspace_id=ws.id,
                     replacement_workspace_id=replacement.id,
-                    reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                )
+                await session.commit()
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason="replacement_attempt_missing",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                    preservation_expired=self._active_execution_preservation_is_expired(
+                        preserved_event.occurred_at
+                    ),
+                    additional_payload={"replacement_workspace_id": replacement.id},
                 )
                 return True
             original_attempt.superseded_by_attempt_id = replacement_attempt.id
@@ -3043,6 +3056,7 @@ class ControlWorker:
         classification: _PreservedWorktreeClassification | None = None,
         branch_pr_lookup: Mapping[str, Any] | None = None,
         preservation_expired: bool = False,
+        additional_payload: Mapping[str, Any] | None = None,
     ) -> None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -3077,6 +3091,8 @@ class ControlWorker:
             }
             if branch_pr_lookup is not None:
                 extra["branch_pr_lookup"] = dict(branch_pr_lookup)
+            if additional_payload is not None:
+                extra.update(dict(additional_payload))
             payload = _active_execution_salvage_payload(
                 candidate,
                 preserved_event=preserved_event,
