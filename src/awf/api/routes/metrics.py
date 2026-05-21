@@ -270,6 +270,17 @@ class ReservedResourcesResponse(BaseModel):
     dind_slots: int
 
 
+class QueuePlannedResourcesResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int
+    dind_slots: int
+
+
 class CapacityDimensionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -331,6 +342,22 @@ class AdmissionSummaryResponse(BaseModel):
     status: str
     reason: str
     detail: str | None = None
+
+
+class CapacityQueueSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    queued_workspace_count: int
+    oldest_workspace_id: str | None = None
+    oldest_wait_seconds: int | None = None
+    planned_resources: QueuePlannedResourcesResponse
+    blocked_reason_counts: dict[str, int] = Field(
+        description=(
+            "Capacity blocker reason counts for queued work. Deferred blockers count the first "
+            "FIFO frontier per constraint, not every blocked workspace behind it; unsatisfiable "
+            "requests count each workspace because they do not depend on allocated capacity."
+        ),
+    )
 
 
 class ProviderCircuitBreakerSummaryResponse(BaseModel):
@@ -417,6 +444,19 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     capacity: ResourceCapacitySummaryResponse = Field(
         description="Available local capacity and pressure reasons by reserved resource.",
+    )
+    allocated_resources: ReservedResourcesResponse = Field(
+        description="Resource reservations for workspaces that already occupy local runtime capacity.",
+    )
+    allocated_capacity: ResourceCapacitySummaryResponse = Field(
+        description="Available local capacity after allocated runtime reservations only.",
+    )
+    capacity_queue: CapacityQueueSummaryResponse = Field(
+        description=(
+            "Requested workspace demand and local capacity blockers for queued work. "
+            "blocked_reason_counts counts the first FIFO frontier per constraint, "
+            "not every blocked workspace behind it."
+        ),
     )
     concurrency: ResourceConcurrencyResponse = Field(
         description="Provisioning and execution worker lane saturation.",

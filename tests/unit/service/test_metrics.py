@@ -49,10 +49,134 @@ async def session_factory(
     yield make_session_factory(engine)
 
 
+def _empty_reservation_totals() -> dict[str, float | int]:
+    return {
+        "workspace_count": 0,
+        "steady_cpu": 0.0,
+        "steady_memory_gb": 0.0,
+        "peak_cpu": 0.0,
+        "peak_memory_gb": 0.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
+    }
+
+
+@pytest.mark.unit
+async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    calls: list[tuple[str, str]] = []
+
+    async def metrics_totals(
+        _session: object,
+        *,
+        statuses: object,
+        node_id: str,
+    ) -> dict[str, float | int]:
+        calls.append(("metrics", node_id))
+        return _empty_reservation_totals()
+
+    async def scheduler_totals(
+        _session: object,
+        *,
+        statuses: object,
+        node_id: str,
+    ) -> dict[str, float | int]:
+        calls.append(("scheduler", node_id))
+        return _empty_reservation_totals()
+
+    async def auxiliary_counts(
+        _session: object,
+        *,
+        node_id: str,
+    ) -> metrics._AllocatedResourceAuxiliaryCounts:  # noqa: SLF001
+        calls.append(("auxiliary", node_id))
+        return metrics._AllocatedResourceAuxiliaryCounts(  # noqa: SLF001
+            unreserved_workspace_count=2,
+            defaulted_dind_slots=1,
+        )
+
+    monkeypatch.setattr(
+        metrics,
+        "_active_latest_totals_for_metrics_allocation_scope",
+        metrics_totals,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_active_latest_totals_for_scheduler_allocation_scope",
+        scheduler_totals,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_allocated_resource_auxiliary_counts_for_session",
+        auxiliary_counts,
+    )
+    defaults = metrics.WorkspaceResourceDefaults(
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=4.0,
+    )
+
+    metrics_resources = await metrics._allocated_resources_for_session(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        node_id="node-a",
+        resource_defaults=defaults,
+    )
+    scheduler_resources = await metrics._scheduler_allocated_resources_for_session(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        node_id="node-b",
+        resource_defaults=defaults,
+    )
+
+    assert metrics_resources.active_workspace_count == 2
+    assert metrics_resources.steady_cpu == 2.0
+    assert scheduler_resources.active_workspace_count == 2
+    assert scheduler_resources.dind_slots == 1
+    assert calls == [
+        ("metrics", "node-a"),
+        ("auxiliary", "node-a"),
+        ("scheduler", "node-b"),
+        ("auxiliary", "node-b"),
+    ]
+
+
+@pytest.mark.unit
+async def test_capacity_metrics_helpers_short_circuit_empty_inputs() -> None:
+    from awf.service import metrics
+
+    assert metrics._workspace_status_filter(()) is None  # noqa: SLF001
+    assert (
+        await metrics._defaulted_dind_slots_for_session(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            statuses=(),
+        )
+        == 0
+    )
+    assert (
+        await metrics._unreserved_workspace_count_for_session(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            statuses=(),
+        )
+        == 0
+    )
+    assert (
+        await metrics._provider_recovery_eligible_capacity_queue_candidates(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            [],
+            scoring_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        == []
+    )
+
+
 async def _reservation_for_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
     *,
+    node_id: str = "local",
     steady_cpu: float,
     steady_memory_gb: float,
     peak_cpu: float,
@@ -85,7 +209,7 @@ async def _reservation_for_workspace(
         reservation = await ResourceReservationRepository(session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
-            node_id="local",
+            node_id=node_id,
             steady_cpu=steady_cpu,
             steady_memory_gb=steady_memory_gb,
             peak_cpu=peak_cpu,
@@ -684,6 +808,401 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
 
 
 @pytest.mark.unit
+async def test_resource_saturation_scopes_capacity_view_to_local_node(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    local_running_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    sibling_running_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    local_requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=5),
+    )
+    sibling_requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=10),
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            local_running_id: "node-a",
+            local_requested_id: "node-a",
+            sibling_running_id: "node-b",
+            sibling_requested_id: "node-b",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        local_running_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        sibling_running_id,
+        node_id="node-b",
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=40.0,
+        peak_memory_gb=80.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        local_requested_id,
+        node_id="node-a",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=3.0,
+        peak_memory_gb=6.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        sibling_requested_id,
+        node_id="node-b",
+        steady_cpu=30.0,
+        steady_memory_gb=60.0,
+        peak_cpu=60.0,
+        peak_memory_gb=120.0,
+        dind_slots=1,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.workspace_counts.running == 1
+    assert summary.workspace_counts.requested == 1
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.steady_cpu == 3.0
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.steady_cpu == 2.0
+    assert summary.capacity_queue.queued_workspace_count == 1
+    assert summary.capacity_queue.oldest_workspace_id == local_requested_id
+    assert summary.capacity_queue.planned_resources.steady_cpu == 1.0
+    assert summary.capacity_queue.planned_resources.dind_slots == 1
+    assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_resource_saturation_allocated_capacity_matches_scheduler_null_node_rules(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=6.0,
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    local_mismatched_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    null_remote_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            local_mismatched_id: "node-a",
+            null_remote_id: None,
+            requested_id: "node-a",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        local_mismatched_id,
+        node_id="node-b",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=2.0,
+        peak_memory_gb=4.0,
+        dind_slots=0,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        null_remote_id,
+        node_id="node-b",
+        steady_cpu=3.0,
+        steady_memory_gb=8.0,
+        peak_cpu=6.0,
+        peak_memory_gb=16.0,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        requested_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.reserved_resources.active_workspace_count == 3
+    assert summary.capacity_queue.planned_resources.active_workspace_count == 1
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.peak_cpu == 2.0
+    assert summary.allocated_resources.dind_slots == 0
+    assert summary.capacity_queue.blocked_reason_counts == {}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_summary_skips_scheduler_allocation_when_unconstrained(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=2),
+    )
+
+    async def fail_scheduler_allocation(*args: Any, **kwargs: Any) -> metrics.ReservedResources:
+        raise AssertionError("scheduler allocation should not be loaded without capacity limits")
+
+    monkeypatch.setattr(
+        metrics,
+        "_scheduler_allocated_resources_for_session",
+        fail_scheduler_allocation,
+    )
+
+    async with session_factory() as session:
+        summary = await metrics._capacity_queue_summary(  # noqa: SLF001
+            session,
+            settings=settings,
+            node_id=metrics._local_capacity_node_id(settings),  # noqa: SLF001
+            resource_defaults=metrics.WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=3.0,
+                peak_memory_gb=4.0,
+            ),
+            detected_local_capacity=metrics.LocalCapacityLimits(cpu_cores=1.0, memory_gb=1.0),
+            now=now,
+        )
+
+    assert summary.queued_workspace_count == 1
+    assert summary.oldest_workspace_id == requested_id
+    assert summary.oldest_wait_seconds == 120
+    assert summary.planned_resources.active_workspace_count == 1
+    assert summary.planned_resources.steady_cpu == 1.0
+    assert summary.planned_resources.steady_memory_gb == 2.0
+    assert summary.planned_resources.peak_cpu == 3.0
+    assert summary.planned_resources.peak_memory_gb == 4.0
+    assert summary.blocked_reason_counts == {}
+
+
+@pytest.mark.unit
+async def test_resource_saturation_reuses_allocation_auxiliary_counts_for_capacity_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=100.0,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    unreserved_calls: list[tuple[tuple[str, ...] | None, str | None]] = []
+    defaulted_dind_calls: list[tuple[tuple[str, ...] | None, str | None]] = []
+
+    def status_values(statuses: Any) -> tuple[str, ...] | None:
+        if statuses is None:
+            return None
+        return tuple(
+            status.value if isinstance(status, WorkspaceStatus) else str(status)
+            for status in statuses
+        )
+
+    async def record_unreserved_count(
+        session: AsyncSession,
+        *,
+        statuses: Any,
+        node_id: str | None,
+    ) -> int:
+        del session
+        unreserved_calls.append((status_values(statuses), node_id))
+        return 0
+
+    async def record_defaulted_dind_slots(
+        session: AsyncSession,
+        *,
+        statuses: Any = None,
+        node_id: str | None = None,
+    ) -> int:
+        del session
+        defaulted_dind_calls.append((status_values(statuses), node_id))
+        return 0
+
+    monkeypatch.setattr(
+        metrics,
+        "_unreserved_workspace_count_for_session",
+        record_unreserved_count,
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_defaulted_dind_slots_for_session",
+        record_defaulted_dind_slots,
+    )
+
+    await metrics.summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    allocated_statuses = metrics.ALLOCATED_RESOURCE_RESERVATION_STATUSES
+    assert unreserved_calls.count((allocated_statuses, "node-a")) == 1
+    assert defaulted_dind_calls.count((allocated_statuses, "node-a")) == 1
+
+
+@pytest.mark.unit
+async def test_capacity_queue_uses_scheduler_allocation_scope_for_migrating_reservation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_node_id="node-a",
+        local_capacity_cpu_cores=6.0,
+    )
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    migrating_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+
+    async with session_factory() as session:
+        node_ids = {
+            migrating_workspace_id: "node-b",
+            requested_id: "node-a",
+        }
+        for workspace_id, node_id in node_ids.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+        await session.commit()
+
+    await _reservation_for_workspace(
+        session_factory,
+        migrating_workspace_id,
+        node_id="node-a",
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=5.0,
+        peak_memory_gb=4.0,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        requested_id,
+        node_id="node-a",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=2.0,
+        peak_memory_gb=8.0,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.allocated_resources.active_workspace_count == 0
+    assert summary.capacity_queue.queued_workspace_count == 1
+    assert summary.capacity_queue.blocked_reason_counts == {
+        "PEAK_CPU_CAPACITY_SATURATED": 1,
+    }
+
+
+@pytest.mark.unit
 async def test_resource_saturation_exposes_open_provider_circuit_breakers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1152,6 +1671,923 @@ async def test_resource_saturation_includes_runtime_health_counts(
         "AGENT_CONTAINER_EXITED": 1,
         "STRANDED_WORKSPACE": 2,
     }
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_loads_latest_requested_demands_once(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    reserved_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=20.0,
+        peak_memory_gb=40.0,
+        dind_slots=0,
+        reserved_at=now - timedelta(minutes=5),
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=4.0,
+        peak_cpu=7.0,
+        peak_memory_gb=25.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await _capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(
+                    _env_file=None,
+                    local_capacity_cpu_cores=8.0,
+                    local_capacity_memory_gb=24.0,
+                    local_capacity_dind_slots=1,
+                ),
+                node_id="local",
+                allocated_resources=ReservedResources(
+                    active_workspace_count=1,
+                    steady_cpu=2.0,
+                    steady_memory_gb=4.0,
+                    peak_cpu=4.0,
+                    peak_memory_gb=8.0,
+                    disk_mb=0,
+                    dind_slots=1,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=3.0,
+                    steady_memory_gb=8.0,
+                    peak_cpu=6.0,
+                    peak_memory_gb=16.0,
+                ),
+                detected_local_capacity=None,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert counts == {
+        "DIND_CAPACITY_SATURATED": 1,
+        "PEAK_CPU_CAPACITY_SATURATED": 1,
+        "PEAK_MEMORY_CAPACITY_SATURATED": 1,
+    }
+    assert len(statements) == 1
+    assert "sum(case" not in statements[0]
+    assert "row_number() over" in statements[0]
+    assert "left outer join" in statements[0]
+    assert "select workspaces.id as queue_workspace_id" in statements[0]
+    assert "workspaces.repo_url" not in statements[0]
+    assert " limit " in statements[0]
+
+
+@pytest.mark.unit
+async def test_capacity_queue_candidates_prefilter_reservations_to_requested_scope(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    requested_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    running_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        for workspace_id in (requested_workspace_id, running_workspace_id):
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = "local"
+        await session.commit()
+    for workspace_id in (requested_workspace_id, running_workspace_id):
+        await _reservation_for_workspace(
+            session_factory,
+            workspace_id,
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=1.0,
+            peak_memory_gb=2.0,
+            dind_slots=0,
+            reserved_at=now,
+        )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await _capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(_env_file=None, local_capacity_cpu_cores=2.0),
+                node_id="local",
+                allocated_resources=ReservedResources(
+                    active_workspace_count=0,
+                    steady_cpu=0.0,
+                    steady_memory_gb=0.0,
+                    peak_cpu=0.0,
+                    peak_memory_gb=0.0,
+                    disk_mb=0,
+                    dind_slots=0,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=1.0,
+                    steady_memory_gb=2.0,
+                    peak_cpu=1.0,
+                    peak_memory_gb=2.0,
+                ),
+                detected_local_capacity=None,
+                scoring_at=now,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert counts == {}
+    assert len(statements) == 1
+    assert "join workspaces as requested_reservation_workspace" in statements[0]
+    assert "requested_reservation_workspace.status =" in statements[0]
+    assert "requested_reservation_workspace.node_id =" in statements[0]
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_limits_after_scheduler_priority(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=30),
+        task_policy={"scheduler": {"base_priority": 0}},
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=29),
+        task_policy={"scheduler": {"base_priority": 0}},
+    )
+    high_priority_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now - timedelta(minutes=1),
+        task_policy={"scheduler": {"base_priority": 100}},
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        high_priority_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=5.0,
+        peak_memory_gb=2.0,
+        dind_slots=0,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await metrics._capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=4.0,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=0,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {"PEAK_CPU_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_accumulates_fifo_demands(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    first_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now,
+    )
+    second_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now + timedelta(seconds=1),
+    )
+    async with session_factory() as session:
+        for workspace_id in (first_id, second_id):
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.resolved_profile = {"docker": {"mode": "dind"}}
+        await session.commit()
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=0,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_collapses_fifo_deferred_frontier(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_ids = [
+        await create_workspace(
+            session_factory,
+            status=WorkspaceStatus.requested,
+            updated_at=now,
+            created_at=now + timedelta(seconds=index),
+        )
+        for index in range(3)
+    ]
+    async with session_factory() as session:
+        for workspace_id in workspace_ids:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.resolved_profile = {"docker": {"mode": "dind"}}
+        await session.commit()
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_uses_stale_node_reservation_demand(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.node_id = "local"
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        node_id="prior-node",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=9.0,
+        peak_memory_gb=8.0,
+        dind_slots=0,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=8.0,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=0,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+        )
+
+    assert counts == {"PEAK_CPU_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_ignores_detected_cpu_and_memory_limits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import (
+        LocalCapacityLimits,
+        ReservedResources,
+        WorkspaceResourceDefaults,
+    )
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=3.0,
+        peak_memory_gb=5.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_cpu_cores=None,
+                local_capacity_memory_gb=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=0,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=2.0,
+                steady_memory_gb=4.0,
+                peak_cpu=3.0,
+                peak_memory_gb=5.0,
+            ),
+            detected_local_capacity=LocalCapacityLimits(cpu_cores=1.0, memory_gb=1.0),
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_excludes_provider_cooldown_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "not_before": (now + timedelta(minutes=5)).isoformat(),
+            }
+        },
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_excludes_open_provider_circuit_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _capacity_queue_blocked_reason_counts
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    model = "gpt-5.3-codex-spark"
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        task_policy={"agent_model": model},
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+    async with session_factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model=model,
+            reason_code="PROVIDER_MODEL_CIRCUIT_OPEN",
+            failure_fingerprint="provider-capacity",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        counts = await _capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_refills_after_provider_suppression(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now,
+        task_policy={
+            "scheduler": {"base_priority": 100},
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "not_before": (now + timedelta(minutes=5)).isoformat(),
+            },
+        },
+    )
+    model = "gpt-5.3-codex-spark"
+    circuit_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now + timedelta(seconds=1),
+        task_policy={
+            "agent_model": model,
+            "scheduler": {"base_priority": 90},
+        },
+    )
+    eligible_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+        created_at=now + timedelta(seconds=2),
+        task_policy={"scheduler": {"base_priority": 1}},
+    )
+    async with session_factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model=model,
+            reason_code="PROVIDER_MODEL_CIRCUIT_OPEN",
+            failure_fingerprint="provider-capacity",
+            workspace_id=circuit_workspace_id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        eligible_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=2.0,
+        peak_cpu=1.0,
+        peak_memory_gb=2.0,
+        dind_slots=1,
+        reserved_at=now,
+    )
+
+    async with session_factory() as session:
+        counts = await metrics._capacity_queue_blocked_reason_counts(
+            session,
+            settings=Settings(
+                _env_file=None,
+                local_capacity_dind_slots=1,
+            ),
+            node_id="local",
+            allocated_resources=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=0.0,
+                steady_memory_gb=0.0,
+                peak_cpu=0.0,
+                peak_memory_gb=0.0,
+                disk_mb=0,
+                dind_slots=1,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=1.0,
+                peak_memory_gb=2.0,
+            ),
+            detected_local_capacity=None,
+            scoring_at=now,
+        )
+
+    assert counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_caps_provider_suppression_refill_pages(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    monkeypatch.setattr(
+        metrics,
+        "DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT",
+        2,
+        raising=False,
+    )
+    for index in range(5):
+        await create_workspace(
+            session_factory,
+            status=WorkspaceStatus.requested,
+            updated_at=now,
+            created_at=now + timedelta(seconds=index),
+            task_policy={
+                "scheduler": {"base_priority": 100 - index},
+                PROVIDER_RECOVERY_STATE_KEY: {
+                    "not_before": (now + timedelta(minutes=5)).isoformat(),
+                },
+            },
+        )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await metrics._capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(
+                    _env_file=None,
+                    local_capacity_dind_slots=1,
+                ),
+                node_id="local",
+                allocated_resources=ReservedResources(
+                    active_workspace_count=1,
+                    steady_cpu=0.0,
+                    steady_memory_gb=0.0,
+                    peak_cpu=0.0,
+                    peak_memory_gb=0.0,
+                    disk_mb=0,
+                    dind_slots=1,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=1.0,
+                    steady_memory_gb=2.0,
+                    peak_cpu=1.0,
+                    peak_memory_gb=2.0,
+                ),
+                detected_local_capacity=None,
+                scoring_at=now,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    queue_page_reads = [
+        statement
+        for statement in statements
+        if "select workspaces.id as queue_workspace_id" in statement
+    ]
+    assert counts == {}
+    assert len(queue_page_reads) == 2
+
+
+@pytest.mark.unit
+async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywhere(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    allocated_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    requested_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.requested,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        for workspace_id in (allocated_workspace_id, requested_workspace_id):
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.resolved_profile = {"docker": {"mode": "dind"}}
+        await session.commit()
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=Settings(
+            _env_file=None,
+            work_dir="/tmp/awf-work",
+            local_capacity_dind_slots=1,
+        ),
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.dind_slots == 2
+    assert summary.allocated_resources.active_workspace_count == 1
+    assert summary.allocated_resources.dind_slots == 1
+    assert summary.capacity_queue.queued_workspace_count == 1
+    assert summary.capacity_queue.planned_resources.dind_slots == 1
+    assert summary.capacity_queue.blocked_reason_counts == {"DIND_CAPACITY_SATURATED": 1}
+
+
+@pytest.mark.unit
+async def test_defaulted_dind_slots_are_aggregated_without_profile_materialization(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import _defaulted_dind_slots_for_session
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    dind_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    host_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    reserved_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    remote_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        profiles = {
+            dind_workspace_id: ("local", {"docker": {"mode": "dind"}}),
+            host_workspace_id: ("local", {"docker": {"mode": "host"}}),
+            reserved_workspace_id: ("local", {"docker": {"mode": "dind"}}),
+            remote_workspace_id: ("remote", {"docker": {"mode": "dind"}}),
+        }
+        for workspace_id, (node_id, profile) in profiles.items():
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.node_id = node_id
+            workspace.resolved_profile = profile
+        await session.commit()
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=1.0,
+        steady_memory_gb=1.0,
+        peak_cpu=1.0,
+        peak_memory_gb=1.0,
+        reserved_at=now,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            slots = await _defaulted_dind_slots_for_session(
+                session,
+                statuses=(WorkspaceStatus.running,),
+                node_id="local",
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert slots == 1
+    assert len(statements) == 1
+    assert "sum(case" in statements[0]
+    assert "select workspaces.resolved_profile" not in statements[0]
 
 
 @pytest.mark.unit

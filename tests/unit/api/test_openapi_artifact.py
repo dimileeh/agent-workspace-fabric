@@ -289,6 +289,44 @@ def test_response_model_schemas_present(openapi_spec: dict) -> None:
 
 
 @pytest.mark.unit
+def test_capacity_queue_planned_resources_uses_queue_specific_schema(
+    openapi_spec: dict,
+) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+    planned_resources_ref = schemas["CapacityQueueSummaryResponse"]["properties"][
+        "planned_resources"
+    ]
+
+    assert planned_resources_ref == {"$ref": "#/components/schemas/QueuePlannedResourcesResponse"}
+    planned_resources = schemas["QueuePlannedResourcesResponse"]
+    assert "active_workspace_count" not in planned_resources["properties"]
+    assert set(planned_resources["required"]) == {
+        "steady_cpu",
+        "steady_memory_gb",
+        "peak_cpu",
+        "peak_memory_gb",
+        "disk_mb",
+        "dind_slots",
+    }
+    assert "active_workspace_count" in schemas["ReservedResourcesResponse"]["properties"]
+
+
+@pytest.mark.unit
+def test_capacity_queue_blocked_reason_counts_describes_fifo_frontiers(
+    openapi_spec: dict,
+) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+    blocked_reason_counts = schemas["CapacityQueueSummaryResponse"]["properties"][
+        "blocked_reason_counts"
+    ]
+    capacity_queue = schemas["ResourceSaturationSummaryResponse"]["properties"]["capacity_queue"]
+
+    assert "FIFO frontier" in blocked_reason_counts["description"]
+    assert "not every blocked workspace" in blocked_reason_counts["description"]
+    assert "blocked_reason_counts counts the first FIFO frontier" in capacity_queue["description"]
+
+
+@pytest.mark.unit
 def test_spec_round_trips_to_json_and_back(openapi_spec: dict) -> None:
     serialized = json.dumps(openapi_spec, sort_keys=True)
     deserialized = json.loads(serialized)

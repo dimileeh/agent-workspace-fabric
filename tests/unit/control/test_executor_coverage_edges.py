@@ -2868,6 +2868,42 @@ def test_digest_file_if_present_streams_file_bytes(
 
 
 @pytest.mark.unit
+def test_digest_file_and_operation_tier_helpers_cover_error_edges() -> None:
+    class UnreadablePath:
+        def is_file(self) -> bool:
+            return True
+
+        def open(self, *_args: object, **_kwargs: object) -> object:
+            raise OSError("cannot read")
+
+    assert executor_mod._digest_file_if_present(UnreadablePath()) is None  # type: ignore[arg-type]
+
+    workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.succeeded,
+                payload={"requested_tier": 1},
+                result={"requested_tier": 2},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"validation": {"requested_tier": 3}},
+            ),
+        ],
+    )
+
+    assert executor_mod._validate_operation_requested_tier(workspace) == 3  # noqa: SLF001
+    assert (
+        executor_mod._requested_tier_from_metadata(  # noqa: SLF001
+            {"validation": {"requested_tier": True}}
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) -> None:
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     adapter = _PlanningAdapter()

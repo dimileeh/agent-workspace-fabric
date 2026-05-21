@@ -23,6 +23,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import metrics as metrics_service
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -67,6 +68,8 @@ async def _workspace_with_reservation(
     peak_memory_gb: float,
     disk_mb: int | None = None,
     dind_slots: int = 0,
+    workspace_node_id: str | None = None,
+    reservation_node_id: str = "local",
 ) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -80,6 +83,7 @@ async def _workspace_with_reservation(
         )
         workspace.status = status.value
         workspace.updated_at = updated_at
+        workspace.node_id = workspace_node_id
         task = await TaskRepository(session).create_or_get(
             repo_url=workspace.repo_url,
             base_branch=workspace.branch_base,
@@ -97,7 +101,7 @@ async def _workspace_with_reservation(
         await ResourceReservationRepository(session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
-            node_id="local",
+            node_id=reservation_node_id,
             steady_cpu=steady_cpu,
             steady_memory_gb=steady_memory_gb,
             peak_cpu=peak_cpu,
@@ -176,6 +180,100 @@ async def metrics_app_and_client(
             yield app, c
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_active_latest_totals_for_workspace_scope_delegates_to_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[WorkspaceStatus | str, ...] | None, str | None]] = []
+    expected = {
+        "workspace_count": 7,
+        "steady_cpu": 1.0,
+        "steady_memory_gb": 2.0,
+        "peak_cpu": 3.0,
+        "peak_memory_gb": 4.0,
+        "disk_mb": 5,
+        "dind_slots": 6,
+    }
+
+    async def _fake_totals(
+        self: ResourceReservationRepository,
+        *,
+        statuses: tuple[WorkspaceStatus | str, ...] | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, float | int]:
+        del self
+        calls.append((statuses, node_id))
+        return expected
+
+    class _NoSqlSession:
+        async def execute(self, statement: object) -> object:
+            del statement
+            raise AssertionError("metrics should delegate aggregation to repository")
+
+    monkeypatch.setattr(
+        ResourceReservationRepository,
+        "active_latest_totals_for_workspace_scope",
+        _fake_totals,
+        raising=False,
+    )
+
+    totals = await metrics_service._active_latest_totals_for_workspace_scope(  # noqa: SLF001
+        _NoSqlSession(),  # type: ignore[arg-type]
+        statuses=(WorkspaceStatus.requested,),
+        node_id="worker-node-a",
+    )
+
+    assert totals == expected
+    assert calls == [((WorkspaceStatus.requested,), "worker-node-a")]
+
+
+@pytest.mark.unit
+async def test_active_latest_totals_for_scheduler_allocation_scope_delegates_to_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[WorkspaceStatus | str, ...], str]] = []
+    expected = {
+        "workspace_count": 2,
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 5.0,
+        "peak_memory_gb": 6.0,
+        "disk_mb": 7,
+        "dind_slots": 1,
+    }
+
+    async def _fake_totals(
+        self: ResourceReservationRepository,
+        *,
+        statuses: tuple[WorkspaceStatus | str, ...],
+        node_id: str,
+    ) -> dict[str, float | int]:
+        del self
+        calls.append((statuses, node_id))
+        return expected
+
+    class _NoSqlSession:
+        async def execute(self, statement: object) -> object:
+            del statement
+            raise AssertionError("metrics should delegate aggregation to repository")
+
+    monkeypatch.setattr(
+        ResourceReservationRepository,
+        "active_latest_totals_for_scheduler_allocation_scope",
+        _fake_totals,
+        raising=False,
+    )
+
+    totals = await metrics_service._active_latest_totals_for_scheduler_allocation_scope(  # noqa: SLF001
+        _NoSqlSession(),  # type: ignore[arg-type]
+        statuses=(WorkspaceStatus.running,),
+        node_id="worker-node-a",
+    )
+
+    assert totals == expected
+    assert calls == [((WorkspaceStatus.running,), "worker-node-a")]
 
 
 @pytest.mark.unit
@@ -319,6 +417,192 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
     assert body["admission"]["ok"] is True
     assert body["admission"]["status"] == "saturated"
     assert body["admission"]["reason"] == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_reports_allocated_capacity_and_queue_pressure(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        local_capacity_cpu_cores=8.0,
+        local_capacity_memory_gb=24.0,
+        local_capacity_dind_slots=1,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
+    )
+    now = datetime.now(UTC)
+    running_id = await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=5),
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        dind_slots=1,
+    )
+    requested_id = await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.requested,
+        updated_at=now - timedelta(minutes=4),
+        steady_cpu=3.0,
+        steady_memory_gb=8.0,
+        peak_cpu=6.0,
+        peak_memory_gb=16.0,
+        dind_slots=1,
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reserved_resources"]["active_workspace_count"] == 2
+    assert body["allocated_resources"] == {
+        "active_workspace_count": 1,
+        "steady_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 4.0,
+        "peak_memory_gb": 8.0,
+        "disk_mb": 0,
+        "dind_slots": 1,
+    }
+    assert body["allocated_capacity"]["peak_cpu"]["reserved"] == 4.0
+    assert body["allocated_capacity"]["peak_cpu"]["available"] == 4.0
+    assert body["capacity_queue"]["queued_workspace_count"] == 1
+    assert body["capacity_queue"]["oldest_workspace_id"] == requested_id
+    assert body["capacity_queue"]["oldest_wait_seconds"] >= 0
+    assert body["capacity_queue"]["planned_resources"] == {
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 8.0,
+        "peak_cpu": 6.0,
+        "peak_memory_gb": 16.0,
+        "disk_mb": 0,
+        "dind_slots": 1,
+    }
+    assert body["capacity_queue"]["blocked_reason_counts"] == {
+        "DIND_CAPACITY_SATURATED": 1,
+        "PEAK_CPU_CAPACITY_SATURATED": 1,
+    }
+    assert running_id != requested_id
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_scopes_reservations_by_workspace_routing(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        worker_node_id="worker-node-a",
+        local_capacity_cpu_cores=16.0,
+        local_capacity_memory_gb=48.0,
+        local_capacity_dind_slots=3,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
+    )
+    now = datetime.now(UTC)
+    await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=6),
+        workspace_node_id="worker-node-a",
+        reservation_node_id="worker-node-b",
+        steady_cpu=2.0,
+        steady_memory_gb=4.0,
+        peak_cpu=6.0,
+        peak_memory_gb=12.0,
+        disk_mb=2048,
+        dind_slots=1,
+    )
+    await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=5),
+        workspace_node_id="worker-node-b",
+        reservation_node_id="worker-node-a",
+        steady_cpu=20.0,
+        steady_memory_gb=40.0,
+        peak_cpu=30.0,
+        peak_memory_gb=60.0,
+        disk_mb=8192,
+        dind_slots=2,
+    )
+    requested_id = await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.requested,
+        updated_at=now - timedelta(minutes=4),
+        workspace_node_id="worker-node-a",
+        reservation_node_id="worker-node-b",
+        steady_cpu=3.0,
+        steady_memory_gb=5.0,
+        peak_cpu=4.0,
+        peak_memory_gb=8.0,
+        disk_mb=512,
+        dind_slots=1,
+    )
+    await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.requested,
+        updated_at=now - timedelta(minutes=3),
+        workspace_node_id="worker-node-b",
+        reservation_node_id="worker-node-a",
+        steady_cpu=10.0,
+        steady_memory_gb=20.0,
+        peak_cpu=12.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+        dind_slots=1,
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_counts"]["active_total"] == 2
+    assert body["reserved_resources"] == {
+        "active_workspace_count": 2,
+        "steady_cpu": 5.0,
+        "steady_memory_gb": 9.0,
+        "peak_cpu": 10.0,
+        "peak_memory_gb": 20.0,
+        "disk_mb": 2560,
+        "dind_slots": 2,
+    }
+    assert body["allocated_resources"] == {
+        "active_workspace_count": 1,
+        "steady_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_cpu": 6.0,
+        "peak_memory_gb": 12.0,
+        "disk_mb": 2048,
+        "dind_slots": 1,
+    }
+    assert body["capacity_queue"]["queued_workspace_count"] == 1
+    assert body["capacity_queue"]["oldest_workspace_id"] == requested_id
+    assert body["capacity_queue"]["planned_resources"] == {
+        "steady_cpu": 3.0,
+        "steady_memory_gb": 5.0,
+        "peak_cpu": 4.0,
+        "peak_memory_gb": 8.0,
+        "disk_mb": 512,
+        "dind_slots": 1,
+    }
 
 
 @pytest.mark.unit

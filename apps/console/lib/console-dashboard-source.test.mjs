@@ -17,6 +17,25 @@ test("task details modal locks body scroll in a layout effect", () => {
   );
 });
 
+test("capacity panel only shows oldest queued fact when the queue is populated", () => {
+  const panelSource = extractFunctionSource("ResourceCapacityPanel");
+
+  assert.match(
+    panelSource,
+    /saturation\.capacity_queue\.queued_workspace_count > 0 &&\s*saturation\.capacity_queue\.oldest_wait_seconds !== null/,
+  );
+});
+
+test("capacity panel falls back to full reserved pressure reasons", () => {
+  const panelSource = extractFunctionSource("ResourceCapacityPanel");
+
+  assert.match(
+    panelSource,
+    /saturation\.allocated_capacity\.pressure_reasons\.length > 0\s*\?\s*saturation\.allocated_capacity\.pressure_reasons\s*:\s*saturation\.capacity\.pressure_reasons/,
+  );
+  assert.match(panelSource, /pressureReasons\.map\(\(reason\) =>/);
+});
+
 function extractFunctionSource(functionName) {
   const marker = `function ${functionName}(`;
   const start = dashboardSource.indexOf(marker);
