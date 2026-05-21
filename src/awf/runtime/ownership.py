@@ -38,6 +38,40 @@ def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
         ) from exc
 
 
+def _validate_linked_git_dir_backref(linked_git_dir: Path, worktree_path: Path) -> None:
+    """Validate Git's reciprocal metadata pointer for suffixed worktree dirs."""
+    metadata_gitdir = linked_git_dir / "gitdir"
+    expected_git_file = worktree_path / ".git"
+    try:
+        raw_gitdir = metadata_gitdir.read_text(encoding="utf-8").strip()
+        if not raw_gitdir:
+            raise ValueError(
+                "refusing ownership repair: linked-worktree metadata has an empty "
+                f"gitdir back-reference at {metadata_gitdir}"
+            )
+        git_file = Path(raw_gitdir)
+        if not git_file.is_absolute():
+            git_file = linked_git_dir / git_file
+        resolved_git_file = git_file.resolve()
+        resolved_expected_git_file = expected_git_file.resolve()
+    except OSError as exc:
+        raise ValueError(
+            "refusing ownership repair: cannot read linked-worktree metadata "
+            f"gitdir back-reference at {metadata_gitdir}"
+        ) from exc
+    except RuntimeError as exc:
+        raise ValueError(
+            "refusing ownership repair: cannot resolve linked-worktree metadata "
+            f"gitdir back-reference at {metadata_gitdir}"
+        ) from exc
+
+    if resolved_git_file != resolved_expected_git_file:
+        raise ValueError(
+            "refusing ownership repair: linked-worktree metadata points to another "
+            f"workspace. expected gitdir {resolved_expected_git_file}, got {resolved_git_file}"
+        )
+
+
 def _validated_layout_mirror_for_worktree(
     worktree_path: Path, workspace_id: str
 ) -> tuple[Path, Path]:
@@ -73,10 +107,13 @@ def _validated_layout_mirror_for_worktree(
         )
 
     if linked_git_dir.name != workspace_id:
-        raise ValueError(
-            "refusing ownership repair: linked-worktree metadata points to another "
-            f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
-        )
+        linked_git_dir_suffix = linked_git_dir.name.removeprefix(workspace_id)
+        if not linked_git_dir.name.startswith(workspace_id) or not linked_git_dir_suffix.isdigit():
+            raise ValueError(
+                "refusing ownership repair: linked-worktree metadata points to another "
+                f"workspace. expected workspace id {workspace_id}, got {linked_git_dir.name}"
+            )
+        _validate_linked_git_dir_backref(linked_git_dir, worktree_path)
 
     return mirror_path, linked_git_dir
 
