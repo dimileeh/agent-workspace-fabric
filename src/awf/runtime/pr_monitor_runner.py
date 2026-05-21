@@ -1671,6 +1671,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
@@ -2067,6 +2074,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
@@ -2212,6 +2226,13 @@ class PullRequestMonitorRunner:
                     error_code=reason_code,
                     error_message=push_result.error_message,
                 )
+                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,

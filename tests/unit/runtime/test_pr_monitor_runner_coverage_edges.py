@@ -3424,6 +3424,65 @@ async def test_execute_sync_base_push_failure_records_failed_audit(
 
 
 @pytest.mark.unit
+async def test_execute_sync_base_ownership_repair_failure_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    async def _run_sync_base_ownership_repair_failed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
+
+    monkeypatch.setattr(runner, "_run_sync_base", _run_sync_base_ownership_repair_failed)
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert sync_operation.error_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert sync_operation.result is not None
+    assert sync_operation.result["status"] == "failed"
+    assert sync_operation.result["reason_code"] == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
 async def test_execute_sync_base_protected_scope_block_is_terminal(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
