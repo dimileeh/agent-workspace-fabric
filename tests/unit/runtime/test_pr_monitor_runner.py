@@ -2740,6 +2740,7 @@ def test_changed_review_comment_body_requeues_private_verdict() -> None:
 
 @pytest.mark.unit
 def test_pending_review_feedback_count_excludes_blocking_reviews_and_honors_state_hash() -> None:
+    """Verify resolved, stale, and merge-blocking feedback is handled when counting pending triage items."""
     state = MonitorState()
     pending_comment = ReviewComment(
         comment_id="issue:pending",
@@ -2806,6 +2807,7 @@ def test_pending_review_feedback_count_excludes_blocking_reviews_and_honors_stat
 
 @pytest.mark.unit
 def test_pending_review_feedback_count_includes_triageable_blocking_issue_comment() -> None:
+    """Verify merge-blocking issue comments from bots can still count as pending feedback."""
     state = MonitorState()
     triageable_blocker = ReviewComment(
         comment_id="issue:blocked-bot",
