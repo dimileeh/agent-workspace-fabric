@@ -2805,6 +2805,32 @@ def test_pending_review_feedback_count_excludes_blocking_reviews_and_honors_stat
 
 
 @pytest.mark.unit
+def test_pending_review_feedback_count_includes_triageable_blocking_issue_comment() -> None:
+    state = MonitorState()
+    triageable_blocker = ReviewComment(
+        comment_id="issue:blocked-bot",
+        body_excerpt="Please update required checks",
+        body="Please update required checks",
+        author="coderabbitai[bot]",
+        source_kind="issue",
+        blocks_merge=True,
+    )
+
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(triageable_blocker,),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    assert _pending_review_feedback_count(status, state) == 1
+
+
+@pytest.mark.unit
 def test_changed_review_thread_history_requeues_private_verdict() -> None:
     state = MonitorState()
     original = ReviewThread(
