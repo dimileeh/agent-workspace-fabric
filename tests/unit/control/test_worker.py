@@ -8318,6 +8318,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
     @pytest.mark.parametrize(
         ("status", "operation_type", "operation_status"),
         [
+            (WorkspaceStatus.running, OperationType.validate, OperationStatus.pending),
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.pending),
             (WorkspaceStatus.validating, OperationType.validate, OperationStatus.running),
             (WorkspaceStatus.validating, OperationType.rebase, OperationStatus.running),
