@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Protocol
 
@@ -155,6 +156,8 @@ async def repair_agent_runtime_ownership(
     reason_code: str = AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
 ) -> bool:
     """Attempt to repair runtime ownership for an agent worktree."""
+    if os.geteuid() != 0:
+        return True
     try:
         await asyncio.to_thread(
             _repair_agent_runtime_ownership_in_thread,

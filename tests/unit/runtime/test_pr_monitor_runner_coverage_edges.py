@@ -4531,10 +4531,12 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted ci fix")
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
+        adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )

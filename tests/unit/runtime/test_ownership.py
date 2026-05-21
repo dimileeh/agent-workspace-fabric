@@ -36,6 +36,52 @@ class _RecordingLogger:
         )
 
 
+@pytest.fixture(autouse=True)
+def _run_ownership_repair_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 0)
+
+
+@pytest.mark.unit
+async def test_repair_agent_runtime_ownership_noops_when_not_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws"
+    worktree_path = tmp_path / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    called = False
+
+    def _repair_agent_writable_worktree(
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
+    ) -> None:
+        _ = linked_git_dir
+        nonlocal called
+        called = True
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(ownership.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    ok = await ownership.repair_agent_runtime_ownership(
+        logger=logger,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pytest",
+        event_name="monitor.event",
+        reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+    )
+
+    assert ok is True
+    assert called is False
+    assert logger.exception_calls == []
+
+
 @pytest.mark.unit
 async def test_repair_agent_runtime_ownership_uses_mirror_from_worktree(tmp_path: Path) -> None:
     workspace_id = "ws"

@@ -4603,21 +4603,30 @@ class PullRequestMonitorRunner:
             remote_push_url=remote_push_url,
         )
         if protected_scope_block is not None:
-            return await self._repair_protected_scope_commits_before_push(
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                protected_scope_block=protected_scope_block,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                operation_id=operation_id,
-                operation_type=operation_type,
-                monitor_log=monitor_log,
-            )
+            try:
+                return await self._repair_protected_scope_commits_before_push(
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    protected_scope_block=protected_scope_block,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                )
+            except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
