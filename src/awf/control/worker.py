@@ -142,7 +142,7 @@ _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
 _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
-_REQUESTED_CAPACITY_QUEUE_SIGNATURE_SQLITE_LIMIT = 500
+_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT = 500
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -3539,7 +3539,7 @@ async def _requested_capacity_queue_signature(
             .where(Workspace.status == WorkspaceStatus.requested.value)
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
             .order_by(Workspace.id)
-            .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_SQLITE_LIMIT)
+            .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
         )
         count = 0
         latest_updated_at: datetime | None = None
@@ -3586,36 +3586,51 @@ async def _requested_capacity_queue_signature(
             digest.hexdigest(),
         )
 
-    stmt = (
+    requested_queue_frontier = (
         select(
-            func.count(Workspace.id),
-            func.max(Workspace.updated_at),
-            func.max(Workspace.created_at),
-            func.max(Workspace.id),
-            func.md5(
-                func.coalesce(
-                    func.string_agg(
-                        func.md5(
-                            sql_cast(
-                                func.jsonb_build_array(
-                                    Workspace.id,
-                                    Workspace.created_at,
-                                    Workspace.task_class,
-                                    Workspace.agent,
-                                    sql_cast(Workspace.task_policy, JSONB),
-                                    sql_cast(Workspace.resolved_profile, JSONB),
-                                ),
-                                String(),
-                            )
-                        ),
-                        aggregate_order_by(literal(","), Workspace.id),
-                    ),
-                    literal(""),
-                )
-            ),
+            Workspace.id.label("id"),
+            Workspace.updated_at.label("updated_at"),
+            Workspace.created_at.label("created_at"),
+            Workspace.task_class.label("task_class"),
+            Workspace.agent.label("agent"),
+            Workspace.task_policy.label("task_policy"),
+            Workspace.resolved_profile.label("resolved_profile"),
         )
         .where(Workspace.status == WorkspaceStatus.requested.value)
         .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        .order_by(Workspace.id)
+        .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT)
+        .subquery()
+    )
+    stmt = select(
+        func.count(requested_queue_frontier.c.id),
+        func.max(requested_queue_frontier.c.updated_at),
+        func.max(requested_queue_frontier.c.created_at),
+        func.max(requested_queue_frontier.c.id),
+        func.md5(
+            func.coalesce(
+                func.string_agg(
+                    func.md5(
+                        sql_cast(
+                            func.jsonb_build_array(
+                                requested_queue_frontier.c.id,
+                                requested_queue_frontier.c.created_at,
+                                requested_queue_frontier.c.task_class,
+                                requested_queue_frontier.c.agent,
+                                sql_cast(requested_queue_frontier.c.task_policy, JSONB),
+                                sql_cast(
+                                    requested_queue_frontier.c.resolved_profile,
+                                    JSONB,
+                                ),
+                            ),
+                            String(),
+                        )
+                    ),
+                    aggregate_order_by(literal(","), requested_queue_frontier.c.id),
+                ),
+                literal(""),
+            )
+        ),
     )
     count, latest_updated_at, latest_created_at, max_workspace_id, ids_digest = (
         await session.execute(stmt)

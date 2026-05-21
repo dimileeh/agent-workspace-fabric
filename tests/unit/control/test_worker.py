@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import structlog
 from sqlalchemy import event, select, update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1250,6 +1251,41 @@ class TestRunOnce:
         )
 
         assert signature == (0, None, None, None, "")
+
+    @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_postgres_bounds_aggregate_scan(
+        self,
+    ) -> None:
+        class AggregateResult:
+            def one(self) -> tuple[int, None, None, None, str]:
+                return (0, None, None, None, "")
+
+        class AggregateSession:
+            def __init__(self) -> None:
+                self.compiled_statement = ""
+
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+            async def execute(self, stmt: object) -> AggregateResult:
+                self.compiled_statement = str(
+                    stmt.compile(  # type: ignore[attr-defined]
+                        dialect=postgresql.dialect(),
+                        compile_kwargs={"literal_binds": True},
+                    )
+                )
+                return AggregateResult()
+
+        session = AggregateSession()
+
+        signature = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+            session,  # type: ignore[arg-type]
+            node_id="local",
+        )
+
+        assert signature == (0, None, None, None, "")
+        assert "FROM (SELECT" in session.compiled_statement
+        assert "LIMIT 500" in session.compiled_statement
 
     @pytest.mark.unit
     async def test_claim_requested_ids_short_circuits_without_database(
