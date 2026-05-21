@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 from collections import deque
 from collections.abc import Sequence
+from pathlib import Path
+from types import ModuleType
 
-from scripts import ci_docker_build_retry
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_retry_helper() -> ModuleType:
+    helper_path = REPO_ROOT / ".github" / "scripts" / "ci_docker_build_retry.py"
+    spec = importlib.util.spec_from_file_location("ci_docker_build_retry", helper_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ci_docker_build_retry = _load_retry_helper()
 
 
 def test_run_with_retries_preserves_failed_attempt_output_before_success(capsys) -> None:
