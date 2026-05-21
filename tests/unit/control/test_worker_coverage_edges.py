@@ -1197,6 +1197,87 @@ async def test_stale_active_execution_can_fail_ignores_salvage_for_other_status(
 
 
 @pytest.mark.unit
+async def test_stale_active_execution_can_fail_normalizes_latest_preserved_floor(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_status(
+        factory, WorkspaceStatus.running, title="normalizes-preserved-floor"
+    )
+    now = datetime.now(UTC)
+    status_started_at = now - timedelta(minutes=10)
+    claim_expires_at = now - timedelta(minutes=5)
+    latest_preserved_at = (now - timedelta(minutes=4)).replace(tzinfo=None)
+    stale_at = now - timedelta(minutes=2)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.execution_claimed_by = "stale-worker"
+        ws.execution_claim_expires_at = claim_expires_at
+        state_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+        )
+        running_started = next(
+            event for event in state_events if event.new_state == WorkspaceStatus.running.value
+        )
+        running_started.occurred_at = status_started_at
+        stale = await repo.add_event(
+            ws,
+            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+            payload={"workspace_status": WorkspaceStatus.running.value},
+        )
+        stale.occurred_at = stale_at
+        await session.commit()
+
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(active_execution_preservation_grace_seconds=0.0),
+    )
+    observed_floors: list[datetime] = []
+
+    async def latest_preserved(
+        session: AsyncSession,
+        workspace_id: str,
+        status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+        match_active_execution_statuses: bool = False,
+    ) -> datetime:
+        del session, workspace_id, status, event_floor, match_active_execution_statuses
+        return latest_preserved_at
+
+    async def has_current_salvage_event(
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        event_type: str,
+        reason_code: str,
+        event_floor: datetime,
+        workspace_status: WorkspaceStatus,
+    ) -> bool:
+        del session, workspace_id, event_type, reason_code, workspace_status
+        observed_floors.append(event_floor)
+        return event_floor == _utc_datetime(latest_preserved_at)
+
+    monkeypatch.setattr(worker, "_latest_preserved_active_execution_at", latest_preserved)
+    monkeypatch.setattr(worker, "_has_current_salvage_event", has_current_salvage_event)
+
+    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_{workspace_id}",
+        )
+    )
+    assert observed_floors == [_utc_datetime(latest_preserved_at)]
+
+
+@pytest.mark.unit
 def test_monitor_claim_staleness_and_json_datetime_handle_naive_datetimes() -> None:
     cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 

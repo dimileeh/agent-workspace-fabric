@@ -3690,6 +3690,7 @@ class ControlWorker:
                 match_active_execution_statuses=True,
             )
             if latest_preserved is not None:
+                latest_preserved = _utc_datetime(latest_preserved)
                 for (
                     event_type,
                     reason_code,
