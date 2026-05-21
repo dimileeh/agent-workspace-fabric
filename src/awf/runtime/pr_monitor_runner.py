@@ -521,6 +521,7 @@ class _MonitorAgentRuntimeOwnershipRepairFailed(RuntimeError):
 
     @property
     def reason_code(self) -> str:
+        """Return the fixed reason code for ownership repair failures."""
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 
 

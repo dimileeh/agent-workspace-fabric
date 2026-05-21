@@ -21,6 +21,8 @@ MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
 
 
 class _LoggerProtocol(Protocol):
+    """Protocol contract for ownership-repair logging callsites."""
+
     def exception(
         self,
         event: str,
@@ -29,7 +31,9 @@ class _LoggerProtocol(Protocol):
         worktree_path: str,
         reason: str,
         reason_code: str,
-    ) -> None: ...
+    ) -> None:
+        """Emit a structured exception event for ownership-repair failures."""
+        ...
 
 
 async def repair_agent_runtime_ownership(
