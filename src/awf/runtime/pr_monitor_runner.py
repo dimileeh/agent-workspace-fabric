@@ -2499,6 +2499,8 @@ class PullRequestMonitorRunner:
                                 fresh_action=type(checked_action).__name__,
                                 head_sha=checked_status.head_sha[:10],
                                 unresolved_threads=len(checked_status.unresolved_inline_threads),
+                                # compatibility alias retained for downstream consumers of
+                                # historical monitor logs.
                                 unresolved_reviews=review_feedback,
                                 review_feedback=review_feedback,
                                 pending_review_feedback=pending_review_feedback,
