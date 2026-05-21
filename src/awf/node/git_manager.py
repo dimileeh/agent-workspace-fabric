@@ -603,6 +603,8 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
         seen.add(key)
         if target.recursive:
             _chown_tree(target.path, uid, gid, directories_only=target.directories_only)
+        elif target.path.is_symlink():
+            os.lchown(target.path, uid, gid)
         else:
             os.chown(target.path, uid, gid)
 

@@ -419,6 +419,39 @@ def test_chown_targets_skips_duplicates_and_missing_paths(
 
 
 @pytest.mark.unit
+def test_chown_targets_uses_lchown_for_non_recursive_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "outside-target"
+    target.mkdir()
+    linked = tmp_path / "mirror-worktrees"
+    linked.symlink_to(target, target_is_directory=True)
+    chowned: list[Path] = []
+    lchowned: list[Path] = []
+
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, _uid, _gid: chowned.append(Path(path)),
+    )
+    monkeypatch.setattr(
+        os,
+        "lchown",
+        lambda path, _uid, _gid: lchowned.append(Path(path)),
+    )
+
+    git_manager._chown_targets(  # noqa: SLF001
+        (git_manager._ChownTarget(linked, recursive=False),),  # noqa: SLF001
+        1000,
+        1000,
+    )
+
+    assert chowned == []
+    assert lchowned == [linked]
+
+
+@pytest.mark.unit
 def test_chown_tree_returns_after_chowning_plain_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
