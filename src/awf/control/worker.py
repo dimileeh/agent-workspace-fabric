@@ -142,6 +142,7 @@ _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
 _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
+_REQUESTED_CAPACITY_QUEUE_SIGNATURE_SQLITE_LIMIT = 500
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -3513,6 +3514,7 @@ async def _requested_capacity_queue_signature(
             .where(Workspace.status == WorkspaceStatus.requested.value)
             .where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
             .order_by(Workspace.id)
+            .limit(_REQUESTED_CAPACITY_QUEUE_SIGNATURE_SQLITE_LIMIT)
         )
         count = 0
         latest_updated_at: datetime | None = None
@@ -3598,7 +3600,7 @@ async def _requested_capacity_queue_signature(
         _utc_datetime(latest_updated_at) if isinstance(latest_updated_at, datetime) else None,
         _utc_datetime(latest_created_at) if isinstance(latest_created_at, datetime) else None,
         str(max_workspace_id) if max_workspace_id is not None else None,
-        str(ids_digest),
+        str(ids_digest or ""),
     )
 
 

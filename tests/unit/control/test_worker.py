@@ -1199,6 +1199,59 @@ class TestRunOnce:
         )
 
     @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_sqlite_bounds_snapshot_scan(
+        self,
+    ) -> None:
+        class EmptyReadResult:
+            def __iter__(self) -> object:
+                return iter(())
+
+        class BoundedReadSession:
+            def __init__(self) -> None:
+                self.compiled_statement = ""
+
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+            async def execute(self, stmt: object) -> EmptyReadResult:
+                self.compiled_statement = str(
+                    stmt.compile(compile_kwargs={"literal_binds": True})  # type: ignore[attr-defined]
+                )
+                return EmptyReadResult()
+
+        session = BoundedReadSession()
+
+        signature = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+            session,  # type: ignore[arg-type]
+            node_id="local",
+        )
+
+        assert signature == (0, None, None, None, hashlib.sha256().hexdigest())
+        assert "LIMIT 500" in session.compiled_statement
+
+    @pytest.mark.unit
+    async def test_requested_capacity_queue_signature_postgres_null_digest_uses_empty_string(
+        self,
+    ) -> None:
+        class AggregateResult:
+            def one(self) -> tuple[int, None, None, None, None]:
+                return (0, None, None, None, None)
+
+        class AggregateSession:
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+            async def execute(self, _stmt: object) -> AggregateResult:
+                return AggregateResult()
+
+        signature = await worker_module._requested_capacity_queue_signature(  # noqa: SLF001
+            AggregateSession(),  # type: ignore[arg-type]
+            node_id="local",
+        )
+
+        assert signature == (0, None, None, None, "")
+
+    @pytest.mark.unit
     async def test_requested_capacity_gate_defers_when_allocated_capacity_full(
         self,
         session_factory: async_sessionmaker[AsyncSession],
