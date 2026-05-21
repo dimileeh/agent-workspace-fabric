@@ -616,8 +616,11 @@ async def test_repair_agent_runtime_ownership_blocks_numeric_suffix_for_other_wo
     called = False
 
     def _repair_agent_writable_worktree(
-        _layout_mirror: Path | None, _path: Path, _linked_git_dir: Path | None = None
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
     ) -> None:
+        _ = linked_git_dir
         nonlocal called
         called = True
 
@@ -665,8 +668,11 @@ async def test_repair_agent_runtime_ownership_blocks_mirrors_outside_workspace_m
     called = False
 
     def _repair_agent_writable_worktree(
-        _layout_mirror: Path | None, _path: Path, _linked_git_dir: Path | None = None
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
     ) -> None:
+        _ = linked_git_dir
         nonlocal called
         called = True
 
@@ -716,8 +722,11 @@ async def test_repair_agent_runtime_ownership_blocks_wrong_workspace_mirror(
     called = False
 
     def _repair_agent_writable_worktree(
-        _layout_mirror: Path | None, _path: Path, _linked_git_dir: Path | None = None
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
     ) -> None:
+        _ = linked_git_dir
         nonlocal called
         called = True
 
@@ -766,8 +775,11 @@ async def test_repair_agent_runtime_ownership_blocks_numeric_worktree_without_wo
     called = False
 
     def _repair_agent_writable_worktree(
-        _layout_mirror: Path | None, _path: Path, _linked_git_dir: Path | None = None
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
     ) -> None:
+        _ = linked_git_dir
         nonlocal called
         called = True
 
