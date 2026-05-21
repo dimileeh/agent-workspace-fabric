@@ -1645,6 +1645,9 @@ async def _capacity_queue_blocked_reason_counts(
     if not candidates:
         return {}
 
+    # SQL normally emits the same scheduler order, but keep this bounded
+    # Python pass as a diagnostic guard if a dialect or future expression
+    # change diverges from ``scheduler_order_key``.
     ordered_candidates = sorted(
         candidates,
         key=lambda candidate: scheduler_order_key(

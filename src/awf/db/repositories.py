@@ -1367,6 +1367,9 @@ def _active_latest_resource_reservation_totals_stmt(
             or_(
                 latest_active_reservations.c.node_id == scheduler_allocation_node_id,
                 latest_active_reservations.c.workspace_node_id == scheduler_allocation_node_id,
+                # Legacy single-node rows may predate persisted node ownership
+                # on both tables. Count them conservatively for scheduler
+                # gates until a multi-node rollout can backfill or claim them.
                 and_(
                     latest_active_reservations.c.node_id.is_(None),
                     latest_active_reservations.c.workspace_node_id.is_(None),
@@ -1381,6 +1384,10 @@ def _active_latest_resource_reservation_totals_stmt(
                     latest_active_reservations.c.workspace_node_id.is_(None),
                     latest_active_reservations.c.node_id == metrics_allocation_node_id,
                 ),
+                # Mirrors scheduler allocation for legacy single-node
+                # reservations that have no persisted owner. Multi-node
+                # deployments must stamp or backfill node IDs to avoid treating
+                # these ambiguous rows as precise per-node metrics.
                 and_(
                     latest_active_reservations.c.workspace_node_id.is_(None),
                     latest_active_reservations.c.node_id.is_(None),
