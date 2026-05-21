@@ -2077,11 +2077,24 @@ class ControlWorker:
                 branch_pr_lookup=failed_branch_lookup.payload,
             )
             return True
-        if attempt_id is None or task_id is None:
-            missing_lineage_reason = (
-                "missing_task_attempt_lineage" if attempt_id is None else "missing_task_lineage"
-            )
-            if preservation_expired:
+        missing_lineage_reason: str | None = None
+        if attempt_id is None:
+            missing_lineage_reason = "missing_task_attempt_lineage"
+        elif task_id is None:
+            missing_lineage_reason = "missing_task_lineage"
+        if missing_lineage_reason is not None:
+            if not preservation_expired:
+                if not record_lineage_blocked_before_grace:
+                    return True
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                )
+                return True
+            if failed_branch_lookup is None:
                 await self._record_preserved_active_salvage_blocked(
                     candidate,
                     preserved_event=preserved_event,
@@ -2099,16 +2112,6 @@ class ControlWorker:
                     reason=missing_lineage_reason,
                 )
                 return False
-            if not record_lineage_blocked_before_grace:
-                return True
-            await self._record_preserved_active_salvage_blocked(
-                candidate,
-                preserved_event=preserved_event,
-                reason=missing_lineage_reason,
-                attempt_id=attempt_id,
-                task_id=task_id,
-            )
-            return True
 
         classification = await self._classify_preserved_active_worktree(
             workspace_id=workspace_id,
@@ -2116,6 +2119,21 @@ class ControlWorker:
             base_commit=base_commit,
         )
         if classification.state == "committed":
+            if missing_lineage_reason is not None:
+                await self._record_preserved_active_operator_required(
+                    candidate,
+                    preserved_event=preserved_event,
+                    classification=classification,
+                    ambiguity_reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    branch_pr_lookup=(
+                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
+                    ),
+                )
+                return True
+            assert attempt_id is not None
+            assert task_id is not None
             if self._executor is None:
                 await self._record_preserved_active_salvage_blocked(
                     candidate,
@@ -2151,6 +2169,27 @@ class ControlWorker:
                     classification=classification,
                 )
                 return True
+            if missing_lineage_reason is not None:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                    preservation_expired=True,
+                    branch_pr_lookup=(
+                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
+                    ),
+                )
+                await self._record_preserved_active_salvage_not_possible(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                )
+                return False
+            assert attempt_id is not None
+            assert task_id is not None
             await self._create_preserved_active_replacement(
                 candidate,
                 preserved_event=preserved_event,
