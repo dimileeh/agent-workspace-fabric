@@ -2110,9 +2110,6 @@ class ControlWorker:
                     attempt_id=attempt_id,
                     task_id=task_id,
                     preservation_expired=True,
-                    branch_pr_lookup=(
-                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
-                    ),
                 )
                 await self._record_preserved_active_salvage_not_possible(
                     candidate,
@@ -2142,19 +2139,6 @@ class ControlWorker:
             )
             return True
         if classification.state == "committed":
-            if missing_lineage_reason is not None:
-                await self._record_preserved_active_operator_required(
-                    candidate,
-                    preserved_event=preserved_event,
-                    classification=classification,
-                    ambiguity_reason=missing_lineage_reason,
-                    attempt_id=attempt_id,
-                    task_id=task_id,
-                    branch_pr_lookup=(
-                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
-                    ),
-                )
-                return True
             assert attempt_id is not None
             assert task_id is not None
             if self._executor is None:
@@ -2174,9 +2158,6 @@ class ControlWorker:
                 classification=classification,
                 attempt_id=attempt_id,
                 task_id=task_id,
-                branch_pr_lookup=(
-                    failed_branch_lookup.payload if failed_branch_lookup is not None else None
-                ),
             )
             if validation_requested:
                 dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
@@ -2206,25 +2187,6 @@ class ControlWorker:
                     classification=classification,
                 )
                 return True
-            if missing_lineage_reason is not None:
-                await self._record_preserved_active_salvage_blocked(
-                    candidate,
-                    preserved_event=preserved_event,
-                    reason=missing_lineage_reason,
-                    attempt_id=attempt_id,
-                    task_id=task_id,
-                    classification=classification,
-                    preservation_expired=True,
-                    branch_pr_lookup=(
-                        failed_branch_lookup.payload if failed_branch_lookup is not None else None
-                    ),
-                )
-                await self._record_preserved_active_salvage_not_possible(
-                    candidate,
-                    preserved_event=preserved_event,
-                    reason=missing_lineage_reason,
-                )
-                return False
             assert attempt_id is not None
             assert task_id is not None
             return await self._create_preserved_active_replacement(

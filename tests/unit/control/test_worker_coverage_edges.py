@@ -1792,8 +1792,9 @@ async def test_preserved_active_branch_lookup_covers_invalid_empty_and_multiple_
         base_branch="main",
     )
     assert invalid is not None
-    assert invalid.state == "ambiguous"
+    assert invalid.state == "failed"
     assert invalid.ambiguity_reason == "open_pr_lookup_invalid"
+    assert invalid.payload["source"] == "open_pr_resolver"
 
     worker._open_pr_resolver = _StaticResolver([])  # type: ignore[assignment]
     empty = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001

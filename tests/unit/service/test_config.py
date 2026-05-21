@@ -457,6 +457,57 @@ def test_default_compose_env_lookup_ignores_unrelated_git_root_before_module_fal
 
 
 @pytest.mark.unit
+def test_default_compose_env_lookup_skips_duplicate_missing_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout, fake_module = _write_awf_source_checkout(tmp_path)
+    monkeypatch.chdir(checkout)
+    monkeypatch.setattr(service_config, "__file__", str(fake_module))
+
+    assert service_config.resolve_local_service_compose_env_file() is None
+
+
+@pytest.mark.unit
+def test_provider_env_file_accepts_trusted_custom_adjacent_env(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_POSTGRES_HOST_PORT=15433\n", encoding="utf-8")
+
+    assert (
+        service_config._provider_env_file_from_compose_file(  # noqa: SLF001
+            compose_file,
+            allow_custom_adjacent=True,
+        )
+        == env_file
+    )
+    assert service_config._can_use_adjacent_provider_env_file(  # noqa: SLF001
+        env_file,
+        compose_file,
+    )
+    assert not service_config._can_use_adjacent_provider_env_file(  # noqa: SLF001
+        env_file,
+        LOCAL_SERVICE_COMPOSE_FILE,
+    )
+
+
+@pytest.mark.unit
+def test_project_dotenv_ancestor_candidates_allows_unrelated_root(tmp_path: Path) -> None:
+    nested = tmp_path / "project" / "src" / "pkg"
+    nested.mkdir(parents=True)
+    unrelated_root = tmp_path / "other"
+
+    candidates = service_config._project_dotenv_ancestor_candidates(  # noqa: SLF001
+        nested,
+        unrelated_root,
+    )
+
+    assert candidates[0] == nested / ".env"
+    assert candidates[-1] == Path("/") / ".env"
+
+
+@pytest.mark.unit
 def test_module_path_sourced_default_database_url_uses_compose_postgres_host_port(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
