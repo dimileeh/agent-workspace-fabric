@@ -139,7 +139,7 @@ async def test_asyncio_runner_ignores_child_that_closes_stdin_early() -> None:
 
     assert result.returncode == 0
     assert result.stdout == "closed\n"
-    assert stdout == ["closed\n"]
+    assert "".join(stdout) == "closed\n"
 
 
 @pytest.mark.unit

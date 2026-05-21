@@ -258,7 +258,7 @@ _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
     OperationStatus.running.value,
 }
-_VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
+_VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api", "worker_restart"}
 _VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
 _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS = (
     "source",
@@ -5562,9 +5562,33 @@ class WorkspaceExecutor:
                 await session.commit()
                 return ws
 
-            current = await repo.get(workspace_id)
+            current: Workspace | None = None
+            if execution_owner_id is not None and execution_lease_expires_at is not None:
+                current = await repo.claim_worker_restart_recovery_execution(
+                    workspace_id,
+                    owner_id=execution_owner_id,
+                    lease_expires_at=execution_lease_expires_at,
+                    claim_cutoff=datetime.now(UTC),
+                )
+                if current is not None:
+                    await session.commit()
+                    return current
+
+            current = await repo.get_with_operations(workspace_id)
             if current is None:
                 _log.warning("executor.skip_unknown", workspace_id=workspace_id)
+                return None
+            recovery = _get_active_recovery_payload(current)
+            if (
+                current.status == WorkspaceStatus.running.value
+                and recovery is not None
+                and recovery.get("source") == "worker_restart"
+            ):
+                _log.info(
+                    "executor.skip_active_execution_claim",
+                    workspace_id=workspace_id,
+                    execution_claimed_by=current.execution_claimed_by,
+                )
                 return None
             _log.info(
                 "executor.skip_not_ready",
@@ -7486,7 +7510,7 @@ def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
     }
 
 
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
 
 
 def _extract_pr_number(pr_url: str) -> int | None:

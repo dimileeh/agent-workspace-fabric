@@ -85,6 +85,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         def __init__(self, runner: object) -> None:
             created["github_runner"] = runner
 
+    class _BranchOpenPullRequestResolver:
+        def __init__(self, runner: object) -> None:
+            created["open_pr_resolver_runner"] = runner
+
     class _GitManager:
         def __init__(
             self,
@@ -175,12 +179,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            open_pr_resolver: object,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_open_pr_resolver"] = open_pr_resolver
             created["worker_config"] = config
 
     engine = _Engine()
@@ -193,6 +199,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "ValidationRunner", _ValidationRunner)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _PullRequestCreator)
     monkeypatch.setattr(worker_mod, "GitHubClient", _GitHubClient)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _BranchOpenPullRequestResolver)
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
     monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
     monkeypatch.setattr(worker_mod, "LocalSecretLeaseMountResolver", _LocalSecretLeaseMountResolver)
@@ -233,6 +240,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["validation_runner"] is created["executor_runner"]
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
+    assert created["open_pr_resolver_runner"] is created["executor_runner"]
+    assert created["worker_open_pr_resolver"].__class__ is _BranchOpenPullRequestResolver
     git_env = created["git_env"]
     assert git_env["HOME"] == str(Path(settings.host_home).resolve())
     assert git_env["GIT_CONFIG_COUNT"] == "1"
@@ -373,6 +382,25 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         ) -> dict[str, object]:
             return {"status": "clean"}
 
+    class _FakeTargetBranchStateProvider:
+        def __init__(self, *, runner: object, checkout_path: Path) -> None:
+            created["state_provider_runner"] = runner
+            created["state_provider_checkout_path"] = checkout_path
+
+        async def fetch(
+            self,
+            *,
+            repo_url: str,
+            branch: str,
+            base_sha: str,
+        ) -> dict[str, str]:
+            called_with["target_state_fetch"] = {
+                "repo_url": repo_url,
+                "branch": branch,
+                "base_sha": base_sha,
+            }
+            return {"base_sha": base_sha}
+
     async def _fake_reconcile_and_refresh(
         *,
         reconcile_fn: Callable[..., Awaitable[object]],
@@ -384,6 +412,7 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         dry_run: bool = False,
     ) -> object:
         called_with["exclude_workspace_ids"] = exclude_workspace_ids
+        called_with["target_state"] = await target_state_for_base_sha("base-sha")
         return {"status": "clean"}
 
     class _FakeFeatureMonitor:
@@ -398,6 +427,9 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         worker_mod, "reconcile_and_refresh_stale_candidates", _fake_reconcile_and_refresh
     )
     monkeypatch.setattr(worker_mod, "TargetBranchReconcileMonitor", _FakeReconciler)
+    monkeypatch.setattr(
+        worker_mod, "GitCheckoutTargetBranchStateProvider", _FakeTargetBranchStateProvider
+    )
     monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", _FakeFeatureMonitor)
     monkeypatch.setattr(worker_mod, "build_release_pr_monitor", _FakeFeatureMonitor)
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _FakeWorkspaceExecutor)
@@ -473,6 +505,13 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         )
     )
     assert called_with.get("exclude_workspace_ids") == {"ws-123"}
+    assert called_with.get("target_state") == {"base_sha": "base-sha"}
+    assert called_with.get("target_state_fetch") == {
+        "repo_url": "https://github.com/org/repo.git",
+        "branch": "main",
+        "base_sha": "base-sha",
+    }
+    assert created["state_provider_checkout_path"] == tmp_path / "checkout"
 
     del runtime
 
@@ -587,10 +626,12 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            open_pr_resolver: object,
             config: object,
         ) -> None:
             created["worker_config"] = config
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_open_pr_resolver"] = open_pr_resolver
 
     engine = _Engine()
     session_factory = object()
@@ -602,6 +643,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
     monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _AnyInit)
     monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
     monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
@@ -632,6 +674,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
 
     assert created["provisioner_config"].node_id == "local"
     assert created["worker_config"].node_id == "local"
+    assert isinstance(created["worker_open_pr_resolver"], _AnyInit)
 
 
 @pytest.mark.unit

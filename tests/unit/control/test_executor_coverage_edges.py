@@ -2868,7 +2868,10 @@ def test_digest_file_if_present_streams_file_bytes(
 
 
 @pytest.mark.unit
-def test_digest_file_and_operation_tier_helpers_cover_error_edges() -> None:
+def test_executor_metadata_helpers_cover_unreadable_and_invalid_edges(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     class UnreadablePath:
         def is_file(self) -> bool:
             return True
@@ -2878,7 +2881,53 @@ def test_digest_file_and_operation_tier_helpers_cover_error_edges() -> None:
 
     assert executor_mod._digest_file_if_present(UnreadablePath()) is None  # type: ignore[arg-type]
 
+    unreadable = tmp_path / "unreadable.md"
+    unreadable.write_text("content", encoding="utf-8")
+    original_open = Path.open
+
+    def _raise_for_unreadable(self: Path, *args: object, **kwargs: object) -> object:
+        if self == unreadable:
+            raise OSError("permission denied")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _raise_for_unreadable)
+
+    assert executor_mod._digest_file_if_present(unreadable) is None  # noqa: SLF001
+    assert (
+        executor_mod._requested_tier_from_metadata(  # noqa: SLF001
+            {"validation": {"requested_tier": 0}}
+        )
+        is None
+    )
+    assert (
+        executor_mod._requested_tier_from_metadata(  # noqa: SLF001
+            {"validation": {"requested_tier": True}}
+        )
+        is None
+    )
+
+    profile = WorkspaceProfile.model_validate({"name": "tier", "validation": {"requested_tier": 1}})
     workspace = SimpleNamespace(
+        task_class=TaskClass.build_config_task.value,
+        operations=[
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.succeeded,
+                payload={"requested_tier": 2},
+                result={"validation": {"requested_tier": 4}},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"validation": {"requested_tier": 3}},
+            ),
+        ],
+    )
+
+    assert _validation_tier_for_workspace(workspace, profile) == 4  # type: ignore[arg-type]
+    assert executor_mod._validate_operation_requested_tier(workspace) == 4  # noqa: SLF001
+
+    active_tier_workspace = SimpleNamespace(
         operations=[
             SimpleNamespace(
                 type=OperationType.validate,
@@ -2894,13 +2943,216 @@ def test_digest_file_and_operation_tier_helpers_cover_error_edges() -> None:
         ],
     )
 
-    assert executor_mod._validate_operation_requested_tier(workspace) == 3  # noqa: SLF001
-    assert (
-        executor_mod._requested_tier_from_metadata(  # noqa: SLF001
-            {"validation": {"requested_tier": True}}
-        )
-        is None
+    assert executor_mod._validate_operation_requested_tier(active_tier_workspace) == 3  # noqa: SLF001
+    assert _validation_tier_for_workspace(workspace, profile) == 4  # type: ignore[arg-type]
+
+    coverage = executor_mod._coverage_result_from_metadata(  # noqa: SLF001
+        {
+            "provider": "",
+            "percent": "99.0",
+            "minimum_percent": "99",
+            "enforce": "yes",
+            "status": "",
+            "reason_code": "",
+            "gaps": [{"file": "src/awf/control/executor.py"}, "ignored"],
+            "failing_test_node_ids": ["tests/test_a.py::test_one", 42],
+            "failing_test_evidence": [object(), "AssertionError"],
+            "provider_failure_evidence": ["provider down", None],
+            "parallel_workers_requested": "8",
+            "parallel_workers_effective": 8,
+            "parallel_distribution": 5,
+        }
     )
+
+    assert coverage.provider == "python"
+    assert coverage.percent is None
+    assert coverage.minimum_percent == 0.0
+    assert coverage.enforce is True
+    assert coverage.status == "passed"
+    assert coverage.reason_code == "COVERAGE_OK"
+    assert coverage.gaps == [{"file": "src/awf/control/executor.py"}]
+    assert coverage.failing_test_node_ids == ["tests/test_a.py::test_one"]
+    assert coverage.failing_test_evidence == ["AssertionError"]
+    assert coverage.provider_failure_evidence == ["provider down"]
+    assert coverage.parallel_workers_requested is None
+    assert coverage.parallel_workers_effective == 8
+    assert coverage.parallel_distribution is None
+
+
+@pytest.mark.unit
+async def test_planning_conformance_reraises_non_timeout_agent_error(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # baseline HEAD
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_non_timeout.md\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths
+    runner.queue_result(returncode=0, stdout="sha1\n")  # implementation baseline
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_non_timeout.md\n")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    class _NonTimeoutConformanceAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            if len(self.prompts) == 2:
+                prompt = kwargs.get("prompt")
+                assert isinstance(prompt, str)
+                self.prompts.append(prompt)
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(returncode=2, stdout="", stderr="tool failed"),
+                    reason_code="AGENT_CLI_FAILED",
+                )
+            return await super().run(**kwargs)
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-non-timeout",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+    adapter = _NonTimeoutConformanceAdapter("plan", "implementation")
+
+    with pytest.raises(AgentRunError, match="AGENT_CLI_FAILED"):
+        await executor._run_agent_task_with_optional_planning(
+            adapter=adapter,  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_non_timeout", task_prompt="do it"),  # type: ignore[arg-type]
+            profile=profile,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path / "worktree",
+            model=None,
+        )
+
+
+@pytest.mark.unit
+async def test_planning_conformance_timeout_uses_fresh_report_file(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    report_file = worktree / "docs" / "awf-plans" / "ws_timeout.json"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # baseline HEAD
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_timeout.md\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths
+    runner.queue_result(returncode=0, stdout="sha1\n")  # implementation baseline
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_timeout.md\n")
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_timeout.md\n?? docs/awf-plans/ws_timeout.json\n",
+    )
+    runner.queue_result(returncode=0, stdout="sha1\n")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    class _TimeoutConformanceAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            if len(self.prompts) == 2:
+                prompt = kwargs.get("prompt")
+                assert isinstance(prompt, str)
+                self.prompts.append(prompt)
+                report_file.parent.mkdir(parents=True, exist_ok=True)
+                report_file.write_text(
+                    '{"status":"needs_iteration","summary":"still missing","gaps":["gap"]}',
+                    encoding="utf-8",
+                )
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(returncode=124, stdout="", stderr="timeout"),
+                    reason_code="AGENT_TIMEOUT",
+                )
+            return await super().run(**kwargs)
+
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-timeout",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+    adapter = _TimeoutConformanceAdapter("plan", "implementation")
+
+    failure = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_timeout", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+
+    assert failure is not None
+    assert not isinstance(failure, str)
+    assert failure.reason_code == executor_mod.AGENT_STALLED_IN_CONFORMANCE  # noqa: SLF001
+    assert failure.details is not None
+    assert failure.details["conformance"]["gaps"] == ["gap"]
+
+
+@pytest.mark.unit
+async def test_conformance_stall_failure_records_diff_and_event_failures(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._git_rev_parse_head = AsyncMock(return_value="h" * 40)  # type: ignore[method-assign]
+    executor._git_commit_count_since = AsyncMock(return_value=2)  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("diff failed")
+    )
+
+    class _RaisingSessionContext:
+        async def __aenter__(self) -> object:
+            raise RuntimeError("database unavailable")
+
+        async def __aexit__(
+            self,
+            exc_type: object,
+            exc: object,
+            traceback: object,
+        ) -> None:
+            del exc_type, exc, traceback
+
+    executor._session_factory = lambda: _RaisingSessionContext()  # type: ignore[method-assign]
+    stall = executor_mod.ConformanceStallEvidence(  # noqa: SLF001
+        kind=executor_mod.ConformanceStallKind.no_output,  # noqa: SLF001
+        iteration_index=1,
+        elapsed_seconds=700.0,
+        no_output_seconds=700.0,
+        repeated_output_count=0,
+        last_report_digest=None,
+        plan_path="docs/plan.md",
+        report_path="docs/report.json",
+    )
+    last_report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="still missing validation",
+        gaps=("rerun tests",),
+    )
+
+    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
+        workspace=SimpleNamespace(id="ws_stall"),  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        baseline_sha="b" * 40,
+        last_report=last_report,
+        stall=stall,
+        iterations_used=2,
+        max_iterations=3,
+        plan_path=Path("docs/plan.md"),
+        report_path=Path("docs/report.json"),
+        recovery_action="notify",
+    )
+
+    assert failure.reason_code == executor_mod.AGENT_STALLED_IN_CONFORMANCE  # noqa: SLF001
+    assert failure.details is not None
+    salvage_hint = failure.details["conformance_stall"]["salvage_hint"]
+    assert salvage_hint["implementation_commit_count"] == 2
+    assert salvage_hint["changed_paths"] == []
+    assert failure.details["conformance"]["gaps"] == ["rerun tests"]
 
 
 @pytest.mark.unit

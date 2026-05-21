@@ -752,31 +752,24 @@ async def test_egress_audit_summary_retries_transient_connection_error(
 
 
 @pytest.mark.unit
-async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
-    ready_app_and_client: tuple[Any, AsyncClient],
+async def test_egress_audit_summary_timeout_not_delayed_by_session_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client = ready_app_and_client
-    runner = FakeCommandRunner()
-    _queue_all_ok(runner)
-    app.state.command_runner = runner
-    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(health_route, "_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.001)
+    close_started = asyncio.Event()
+    close_released = asyncio.Event()
 
     class _Session:
         slow_close = False
 
-        async def __aenter__(self) -> _Session:
-            return self
-
-        async def __aexit__(self, *_exc_info: object) -> None:
-            await self.close()
-
-        async def execute(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
         async def close(self) -> None:
             if self.slow_close:
-                await asyncio.Event().wait()
+                close_started.set()
+                try:
+                    await close_released.wait()
+                except asyncio.CancelledError:
+                    await close_released.wait()
 
     class _TimeoutEgressAuditRepository:
         def __init__(self, session: _Session) -> None:
@@ -786,23 +779,21 @@ async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
             raise TimeoutError("egress audit timed out")
 
     monkeypatch.setattr(health_route, "EgressAuditRepository", _TimeoutEgressAuditRepository)
-    app.state.db_session_factory = _Session
+    state = SimpleNamespace()
 
-    response = await asyncio.wait_for(client.get("/readyz"), timeout=1.0)
-    body = response.json()
+    try:
+        with pytest.raises(TimeoutError, match="egress audit summary timed out"):
+            await asyncio.wait_for(
+                health_route._egress_audit_summary_counts_with_timeout(_Session, state),
+                timeout=1.0,
+            )
 
-    assert response.status_code == 200
-    assert set(body) == {"service", "version", "status", "checks", "agent_readiness"}
-    assert body["service"] == "awf"
-    assert body["version"] == __version__
-    assert body["status"] == "ok"
-    assert body["agent_readiness"]["status"] == "ok"
-    checks = body["checks"]
-    assert "egress_audit" in checks
-    egress_audit = checks["egress_audit"]
-    assert egress_audit["ok"] is True
-    assert egress_audit["status"] == "unknown"
-    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+        assert close_started.is_set()
+    finally:
+        close_released.set()
+        task = getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
+        if task is not None:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1.0)
 
 
 @pytest.mark.unit

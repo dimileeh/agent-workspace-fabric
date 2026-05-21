@@ -17,13 +17,16 @@ import shlex
 import pytest
 import structlog
 
+from awf.common import github_client as github_client_module
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
+    BranchOpenPullRequestResolver,
     GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
     RepoRef,
     fetch_pull_request_adoption_metadata,
+    list_open_pull_requests_for_branch,
     parse_github_pull_request_url,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
@@ -120,6 +123,11 @@ class TestPullRequestUrlParsing:
     def test_rejects_non_pr_url(self) -> None:
         with pytest.raises(ValueError):
             parse_github_pull_request_url("https://github.com/dimileeh/aira-web/issues/277")
+
+    @pytest.mark.unit
+    def test_rejects_non_github_pr_url(self) -> None:
+        with pytest.raises(ValueError):
+            parse_github_pull_request_url("https://gitlab.com/dimileeh/aira-web/pull/277")
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -359,8 +367,487 @@ class TestFetchPullRequestAdoptionMetadata:
                 pr_number=277,
             )
 
+            assert excinfo.value.reason_code == "PR_METADATA_INVALID"
+            assert expected_field in excinfo.value.message
+
+    @pytest.mark.unit
+    async def test_invalid_head_repository_name_with_owner_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        payload = json.loads(_adoption_pr_payload(head_repo_slug="contributor/aira-web"))
+        payload["headRepository"] = {"nameWithOwner": "not a repo"}
+        fake.queue_result(returncode=0, stdout=json.dumps(payload))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
         assert excinfo.value.reason_code == "PR_METADATA_INVALID"
-        assert expected_field in excinfo.value.message
+        assert excinfo.value.detail["field"] == "headRepository.nameWithOwner"
+
+    @pytest.mark.unit
+    async def test_cross_repository_pr_without_head_repository_identity_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        payload = json.loads(_adoption_pr_payload(head_repo_slug="contributor/aira-web"))
+        payload["headRepository"] = None
+        fake.queue_result(returncode=0, stdout=json.dumps(payload))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == "PR_METADATA_INVALID"
+        assert excinfo.value.detail["field"] == "headRepository"
+
+    @pytest.mark.unit
+    async def test_non_cross_repository_pr_without_head_repository_uses_base_repo(self) -> None:
+        fake = FakeCommandRunner()
+        payload = json.loads(_adoption_pr_payload())
+        payload["headRepository"] = None
+        payload["isCrossRepository"] = False
+        fake.queue_result(returncode=0, stdout=json.dumps(payload))
+
+        metadata = await fetch_pull_request_adoption_metadata(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=277,
+        )
+
+        assert metadata.head_repo_slug == "dimileeh/aira-web"
+
+
+class TestListOpenPullRequestsForBranch:
+    @pytest.mark.unit
+    async def test_requests_explicit_limit_above_default_page_size(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+
+        await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="feature/head",
+        )
+
+        args = fake.calls[0].args
+        assert int(args[args.index("--limit") + 1]) > 30
+
+    @pytest.mark.unit
+    async def test_returns_head_repository_identity_for_branch_matches(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                        "headRepository": {
+                            "name": "aira-web",
+                            "nameWithOwner": "dimileeh/aira-web",
+                        },
+                        "headRepositoryOwner": {"login": "dimileeh"},
+                    }
+                ]
+            ),
+        )
+
+        matches = await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="feature/head",
+            base_branch="development",
+        )
+
+        assert len(matches) == 1
+        assert matches[0].head_repo_slug == "dimileeh/aira-web"
+        json_fields = fake.calls[0].args[fake.calls[0].args.index("--json") + 1]
+        assert "headRepository" in json_fields
+        assert "headRepositoryOwner" in json_fields
+
+    @pytest.mark.unit
+    async def test_blank_branch_returns_no_matches_without_gh_call(self) -> None:
+        fake = FakeCommandRunner()
+
+        matches = await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="  ",
+        )
+
+        assert matches == []
+        assert fake.calls == []
+
+    @pytest.mark.unit
+    async def test_gh_pr_list_failure_raises_lookup_failed(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="rate limit")
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+                base_branch=" main ",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_FAILED"
+        assert excinfo.value.detail["base_branch"] == " main "
+
+    @pytest.mark.unit
+    async def test_gh_pr_list_invalid_json_raises_lookup_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="{not json")
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+
+    @pytest.mark.unit
+    async def test_gh_pr_list_non_list_json_raises_lookup_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps({"items": []}))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+
+    @pytest.mark.unit
+    async def test_non_object_pr_list_item_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps(["not-object"]))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "number": 0,
+                "url": "https://github.com/dimileeh/aira-web/pull/277",
+                "headRepository": {"nameWithOwner": "dimileeh/aira-web"},
+            },
+            {
+                "number": 277,
+                "url": " ",
+                "headRepository": {"nameWithOwner": "dimileeh/aira-web"},
+            },
+        ],
+    )
+    async def test_invalid_pr_list_number_or_url_is_invalid(
+        self, payload: dict[str, object]
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=json.dumps([payload]))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+
+    @pytest.mark.unit
+    async def test_all_malformed_pr_list_items_raise_aggregated_parse_context(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRepository": None,
+                    },
+                    {
+                        "number": 278,
+                        "url": None,
+                        "headRepository": {"nameWithOwner": "dimileeh/aira-web"},
+                    },
+                ]
+            ),
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(PullRequestMetadataError) as excinfo,
+        ):
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["failure_count"] == 2
+        assert excinfo.value.detail["failures"] == [
+            {
+                "item_index": 0,
+                "reason_code": "OPEN_PR_LOOKUP_INVALID",
+                "error": "gh pr list payload missing required headRepository identity.",
+            },
+            {
+                "item_index": 1,
+                "reason_code": "OPEN_PR_LOOKUP_INVALID",
+                "error": "gh pr list payload missing required field: url",
+            },
+        ]
+        aggregate_event = next(
+            (item for item in captured if item.get("event") == "github.open_pr_batch_parse_failed"),
+            None,
+        )
+        assert aggregate_event is not None
+        assert aggregate_event.get("log_level") == "warning"
+        assert aggregate_event.get("failure_count") == 2
+        assert aggregate_event.get("failures") == excinfo.value.detail["failures"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "owner_payload",
+        [
+            {"headRepositoryOwner": {"login": "contributor"}},
+            {"headRepositoryOwner": "contributor"},
+            {"headRepository": {"owner": {"login": "contributor"}}},
+        ],
+    )
+    async def test_head_repository_slug_falls_back_to_owner_and_name(
+        self,
+        owner_payload: dict[str, object],
+    ) -> None:
+        fake = FakeCommandRunner()
+        payload = {
+            "number": 277,
+            "url": "https://github.com/dimileeh/aira-web/pull/277",
+            "headRepository": {"name": "aira-web"},
+        }
+        if "headRepository" in owner_payload:
+            payload["headRepository"] = {
+                **payload["headRepository"],  # type: ignore[arg-type]
+                **owner_payload["headRepository"],  # type: ignore[index]
+            }
+        else:
+            payload.update(owner_payload)
+        fake.queue_result(returncode=0, stdout=json.dumps([payload]))
+
+        matches = await list_open_pull_requests_for_branch(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            branch_name="feature/head",
+        )
+
+        assert matches[0].head_repo_slug == "contributor/aira-web"
+
+    @pytest.mark.unit
+    async def test_invalid_pr_list_head_repository_slug_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRepository": {"nameWithOwner": "not a repo"},
+                    }
+                ]
+            ),
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert excinfo.value.detail["field"] == "headRepository.nameWithOwner"
+
+    @pytest.mark.unit
+    async def test_mixed_malformed_and_parseable_items_returns_parseable_matches(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                        "headRepository": None,
+                    },
+                    {
+                        "number": 278,
+                        "url": "https://github.com/dimileeh/aira-web/pull/278",
+                        "headRefName": "feature/head",
+                        "headRefOid": "g" * 40,
+                        "headRepository": {
+                            "name": "aira-web",
+                            "nameWithOwner": "dimileeh/aira-web",
+                        },
+                    },
+                ]
+            ),
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            matches = await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert len(matches) == 1
+        assert matches[0].number == 278
+        assert matches[0].url == "https://github.com/dimileeh/aira-web/pull/278"
+        assert matches[0].head_ref == "feature/head"
+        assert matches[0].head_repo_slug == "dimileeh/aira-web"
+        event = next(
+            (item for item in captured if item.get("event") == "github.open_pr_item_parse_failed"),
+            None,
+        )
+        assert event is not None
+        assert event.get("log_level") == "warning"
+        assert event.get("repo_slug") == "dimileeh/aira-web"
+        assert event.get("branch_name") == "feature/head"
+
+    @pytest.mark.unit
+    async def test_missing_head_repository_identity_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": "https://github.com/dimileeh/aira-web/pull/277",
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                    }
+                ]
+            ),
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "headRepository" in excinfo.value.message
+
+    @pytest.mark.unit
+    async def test_non_string_url_is_invalid(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 277,
+                        "url": None,
+                        "headRefName": "feature/head",
+                        "headRefOid": "h" * 40,
+                    }
+                ]
+            ),
+        )
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await list_open_pull_requests_for_branch(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                branch_name="feature/head",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "url" in excinfo.value.message
+
+
+class TestBranchOpenPullRequestResolver:
+    @pytest.mark.unit
+    async def test_valid_repo_url_delegates_to_branch_lookup(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        resolver = BranchOpenPullRequestResolver(fake)
+
+        resolved = await resolver.resolve(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_name="feature/head",
+            base_branch="main",
+        )
+
+        assert resolved == []
+        assert fake.calls[0].args[:3] == ["gh", "pr", "list"]
+
+    @pytest.mark.unit
+    async def test_invalid_repo_url_raises_lookup_invalid_and_warns(self) -> None:
+        fake = FakeCommandRunner()
+        resolver = BranchOpenPullRequestResolver(fake)
+        repo_url = "https://x-access-token:secret-token@github.com/dimileeh"
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(PullRequestMetadataError) as excinfo,
+        ):
+            await resolver.resolve(
+                repo_url=repo_url,
+                branch_name="feature/head",
+                base_branch="main",
+            )
+
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "secret-token" not in excinfo.value.message
+        assert excinfo.value.detail == {
+            "repo_url": "https://[redacted]@github.com/dimileeh",
+            "branch_name": "feature/head",
+            "base_branch": "main",
+        }
+        assert fake.calls == []
+        event = next(
+            (
+                item
+                for item in captured
+                if item.get("event") == "github.open_pr_lookup_skipped_invalid_repo_url"
+            ),
+            None,
+        )
+        assert event is not None
+        assert event.get("log_level") == "warning"
+        assert event.get("repo_url") == "https://[redacted]@github.com/dimileeh"
+        assert event.get("branch_name") == "feature/head"
+        assert "github.com/dimileeh" in str(event.get("error"))
+        assert "secret-token" not in str(event)
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────
@@ -2865,3 +3352,64 @@ class TestMutations:
         client = GitHubClient(fake)
         sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         assert sha == ""
+
+
+class TestPrivateCoverageEdges:
+    @pytest.mark.unit
+    async def test_gh_json_and_run_gh_raise_on_strict_failures(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="boom")
+        fake.queue_result(returncode=1, stderr="strict boom")
+        fake.queue_result(returncode=1, stderr="non-strict")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as json_exc:
+            await client._gh_json(["gh", "api", "repos/o/r"], operation="gh api")  # noqa: SLF001
+        with pytest.raises(GitHubClientError) as run_exc:
+            await client._run_gh(  # noqa: SLF001
+                ["gh", "pr", "view"],
+                operation="gh pr view",
+                strict=True,
+            )
+        result = await client._run_gh(  # noqa: SLF001
+            ["gh", "pr", "view"],
+            operation="gh pr view",
+            strict=False,
+        )
+
+        assert json_exc.value.operation == "gh api"
+        assert run_exc.value.operation == "gh pr view"
+        assert result.returncode == 1
+
+    @pytest.mark.unit
+    def test_private_nested_payload_and_review_helpers_cover_fallbacks(self) -> None:
+        assert github_client_module._dig([{"name": "first"}], 1, "name") is None  # noqa: SLF001
+        assert github_client_module._dig("not-dict", "name") is None  # noqa: SLF001
+        assert (
+            github_client_module._reviewer_effective_state_key(  # noqa: SLF001
+                {"databaseId": 42},
+                fetch_index=7,
+            )
+            == "review:42"
+        )
+        assert (
+            github_client_module._reviewer_effective_state_key({}, fetch_index=7)  # noqa: SLF001
+            == "review-fetch-index:7"
+        )
+
+        older = github_client_module._parse_fetched_review(  # noqa: SLF001
+            {"state": "CHANGES_REQUESTED", "databaseId": 1},
+            fetch_index=1,
+        )
+        newer = github_client_module._parse_fetched_review(  # noqa: SLF001
+            {"state": "CHANGES_REQUESTED", "databaseId": 1},
+            fetch_index=2,
+        )
+
+        assert github_client_module._review_is_later(newer, older)  # noqa: SLF001
+        assert github_client_module._effective_blocking_reviews((older,)) == (  # noqa: SLF001
+            github_client_module.replace(older.comment, blocks_merge=True),
+        )
+        assert github_client_module._connection_nodes(  # noqa: SLF001
+            {"nodes": [{"id": "1"}, None, "bad", {"id": "2"}]}
+        ) == [{"id": "1"}, {"id": "2"}]

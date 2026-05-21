@@ -15,6 +15,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast
@@ -141,6 +142,17 @@ ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.failed.value,
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
+)
+_ACTIVE_RECOVERY_OPERATION_STATUSES: Final[tuple[str, ...]] = (
+    OperationStatus.pending.value,
+    OperationStatus.running.value,
+)
+_VALIDATE_ONLY_RECOVERY_MODES: Final[tuple[str, ...]] = ("validate_only", "rebase_only")
+# Preserved validating/pushing workspace recovery rewinds to running before the
+# executor is dispatched, so worker-restart execution claims intentionally only
+# match running workspaces.
+_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.running.value,
 )
 ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.provisioning.value,
@@ -2863,6 +2875,47 @@ class WorkspaceRepository:
         await self._session.flush()
         return workspace
 
+    async def create_replacement_from(
+        self,
+        source: Workspace,
+        *,
+        idempotency_key: str | None = None,
+        task_prompt: str | None = None,
+        task_policy: Mapping[str, Any] | None = None,
+        agent: str | None = None,
+        remote_push_branch: str | None = None,
+    ) -> Workspace:
+        """Create a fresh requested workspace from another workspace's request contract.
+
+        Runtime, PR-monitor, and resolved profile fields stay on the source.
+        Pass ``remote_push_branch`` only for replacement flows that must
+        preserve an existing external target branch.
+        """
+        return await self.create(
+            repo_url=source.repo_url,
+            branch_base=source.branch_base,
+            task_title=source.task_title,
+            task_prompt=source.task_prompt if task_prompt is None else task_prompt,
+            task_external_id=source.task_external_id,
+            task_class=source.task_class,
+            owned_paths=list(source.owned_paths),
+            task_policy=deepcopy(
+                dict(task_policy if task_policy is not None else source.task_policy)
+            ),
+            auto_merge=source.auto_merge,
+            initial_review_grace_period_seconds=source.initial_review_grace_period_seconds,
+            agent=source.agent if agent is None else agent,
+            env_profile=source.env_profile,
+            profile_ref=source.profile_ref,
+            requested_profile=deepcopy(source.requested_profile),
+            resolved_profile=None,
+            test_commands=list(source.test_commands),
+            requires_database=source.requires_database,
+            idempotency_key=idempotency_key,
+            task_kind=source.task_kind,
+            remote_push_branch=remote_push_branch,
+        )
+
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
         stmt = (
             update(Workspace)
@@ -3659,6 +3712,69 @@ class WorkspaceRepository:
             .execution_options(synchronize_session=False)
         )
         return result.scalar_one_or_none() is not None
+
+    async def claim_worker_restart_recovery_execution(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+        claim_cutoff: datetime,
+    ) -> Workspace | None:
+        """Atomically adopt a worker-restart execution recovery lease."""
+        recovery_mode = Operation.payload["recovery_mode"].as_string()
+        active_worker_restart_recovery = (
+            select(literal(1))
+            .select_from(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.status.in_(_ACTIVE_RECOVERY_OPERATION_STATUSES),
+                Operation.payload["source"].as_string() == "worker_restart",
+                or_(
+                    and_(
+                        Operation.type == OperationType.validate.value,
+                        recovery_mode.in_(_VALIDATE_ONLY_RECOVERY_MODES),
+                    ),
+                    and_(
+                        Operation.type == OperationType.rebase.value,
+                        recovery_mode == "rebase_only",
+                    ),
+                ),
+            )
+            .exists()
+        )
+        claim_available = or_(
+            Workspace.execution_claimed_by.is_(None),
+            Workspace.execution_claim_expires_at.is_(None),
+            Workspace.execution_claim_expires_at <= claim_cutoff,
+            Workspace.execution_claimed_by == owner_id,
+        )
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status.in_(_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES),
+                active_worker_restart_recovery,
+                claim_available,
+            )
+            .values(
+                execution_claimed_by=owner_id,
+                execution_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .options(selectinload(Workspace.operations))
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def refresh_monitoring_pr_claim(
         self,

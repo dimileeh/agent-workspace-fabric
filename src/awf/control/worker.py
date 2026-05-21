@@ -19,11 +19,14 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import re
+import subprocess
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from inspect import getattr_static
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
@@ -35,10 +38,19 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
+from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.github_client import BranchOpenPullRequest, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
-from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import QueueDecision, ResourceReservation, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskKind, WorkspaceStatus
+from awf.db.models import (
+    Operation,
+    QueueDecision,
+    ResourceReservation,
+    TaskAttempt,
+    Workspace,
+    WorkspaceEvent,
+)
 from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     SCHEDULER_SQL_AGE_BOOST_DIALECTS,
@@ -48,6 +60,7 @@ from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    TaskRepository,
     WorkspaceRepository,
     scheduler_order_expressions,
 )
@@ -59,7 +72,6 @@ from awf.db.resilience import (
 )
 from awf.db.session import session_scope
 from awf.node.cleanup import WorkspaceCleanupResult
-from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
@@ -138,6 +150,92 @@ _ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_PRESERVED_REASON_CODE = (
 _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
+_ACTIVE_EXECUTION_SALVAGE_OWNER = "control_worker"
+_ACTIVE_EXECUTION_SALVAGE_SOURCE = "worker_restart"
+_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS = 30.0
+_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE = (
+    "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED"
+)
+_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE = (
+    "workspace.active_execution_salvage_validation_requested"
+)
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED"
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE = (
+    "workspace.active_execution_salvage_monitor_attached"
+)
+_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE = (
+    "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED"
+)
+_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE = (
+    "workspace.active_execution_salvage_replacement_created"
+)
+_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE = (
+    "ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED"
+)
+_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE = (
+    "workspace.active_execution_salvage_operator_required"
+)
+_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE"
+_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE = (
+    "workspace.active_execution_salvage_not_possible"
+)
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE = "ACTIVE_EXECUTION_SALVAGE_BLOCKED"
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE = "workspace.active_execution_salvage_blocked"
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE = (
+    "ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN"
+)
+_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE = (
+    "workspace.active_execution_salvage_monitor_resume_cooldown"
+)
+_ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE = "runtime_preserved_operator_recovery_required"
+_ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
+_ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
+_PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
+    {
+        TaskKind.monitor_release_pr.value,
+        TaskKind.sync_release_pr.value,
+        TaskKind.sync_feature_pr.value,
+    }
+)
+# SALVAGE_BLOCKED and SALVAGE_NOT_POSSIBLE are intentionally absent:
+# _recover_preserved_active_execution returns True while SALVAGE_BLOCKED is
+# active, gating stale-active cleanup without needing an entry here.
+# SALVAGE_NOT_POSSIBLE is written immediately before returning False to open
+# the stale-active path; adding it here would create a livelock.
+_ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS: tuple[tuple[str, str], ...] = (
+    (
+        _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    ),
+)
+_ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS: tuple[tuple[str, str], ...] = (
+    (
+        ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    ),
+    *_ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS,
+    (
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+    ),
+    (
+        _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+        _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+    ),
+)
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -154,6 +252,8 @@ _MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = "NO_EXECUTION_CLAIM_DURING_MO
 _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
     "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
+_ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT = 1024
+_ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT = 1024
 QUEUE_DECISION_ORDERED = "ordered"
 QUEUE_DECISION_DEFERRED = "deferred"
 ORDERED_REQUESTED_PROVISIONING_REASON = "ORDERED_REQUESTED_PROVISIONING"
@@ -187,6 +287,31 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.completed,
     WorkspaceStatus.destroyed,
 )
+
+
+def _salvage_workspace_status_values(
+    workspace_status: WorkspaceStatus,
+    *,
+    event_type: str,
+    reason_code: str,
+) -> tuple[str, ...]:
+    if (
+        workspace_status in _ACTIVE_EXECUTION_STATUSES
+        and event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE
+        and reason_code == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+    ):
+        return tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
+    return (workspace_status.value,)
+
+
+def _preserved_active_execution_status_values(
+    workspace_status: WorkspaceStatus,
+    *,
+    match_active_execution_statuses: bool = False,
+) -> tuple[str, ...]:
+    if match_active_execution_statuses and workspace_status in _ACTIVE_EXECUTION_STATUSES:
+        return tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
+    return (workspace_status.value,)
 
 
 @dataclass(frozen=True)
@@ -317,6 +442,63 @@ class _OrderedDecisionCandidate:
 type _OrderedDecisionKey = tuple[str, str, str]
 
 
+@dataclass(frozen=True)
+class _PreservedWorktreeClassification:
+    state: str
+    reason: str
+    worktree_path: str | None = None
+    branch_name: str | None = None
+    expected_branch_name: str | None = None
+    base_commit: str | None = None
+    head_sha: str | None = None
+    commit_count: int | None = None
+    status_porcelain: str | None = None
+    error: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "reason": self.reason,
+            "worktree_path": self.worktree_path,
+            "branch_name": self.branch_name,
+            "expected_branch_name": self.expected_branch_name,
+            "base_commit": self.base_commit,
+            "head_sha": self.head_sha,
+            "commit_count": self.commit_count,
+            "status_porcelain": self.status_porcelain,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class _OpenPullRequestSummary:
+    pr_url: str
+    pr_number: int
+    head_ref: str | None
+    head_sha: str | None
+    head_repo_slug: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = {
+            "pr_url": self.pr_url,
+            "pr_number": self.pr_number,
+            "head_ref": self.head_ref,
+            "head_sha": self.head_sha,
+        }
+        if self.head_repo_slug is not None:
+            payload["head_repo_slug"] = self.head_repo_slug
+        return payload
+
+
+@dataclass(frozen=True)
+class _BranchOpenPRLookup:
+    branch_name: str
+    state: str
+    payload: dict[str, Any]
+    match: _OpenPullRequestSummary | None = None
+    ambiguity_reason: str | None = None
+
+
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(  # pragma: no cover - Protocol method declaration only.
         self,
@@ -330,6 +512,33 @@ class WorkspaceExecutorProtocol(Protocol):
         self,
         workspace_id: str,
     ) -> None: ...
+
+
+class ProvisionerProtocol(Protocol):
+    async def provision(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> None: ...
+
+    async def provision_claimed(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> None: ...
+
+    def get_worktree_path(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> Path | None: ...
+
+
+class BranchOpenPullRequestResolverProtocol(Protocol):
+    async def resolve(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> Sequence[BranchOpenPullRequest]: ...
 
 
 class RuntimeInspectorProtocol(Protocol):
@@ -360,10 +569,11 @@ class ControlWorker:
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        provisioner: Provisioner,
+        provisioner: ProvisionerProtocol,
         executor: WorkspaceExecutorProtocol | None = None,
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
+        open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -371,10 +581,14 @@ class ControlWorker:
         self._executor = executor
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._runtime_cleaner = runtime_cleaner
+        self._open_pr_resolver = open_pr_resolver
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
         self._monitor_recovery_operation_ids: dict[str, str] = {}
+        # Session-local advisory state; reset on restart and bounded below.
+        self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
+        self._active_salvage_monitor_resume_cooldowns: dict[str, float] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
@@ -1616,7 +1830,12 @@ class ControlWorker:
                 reason_code="PROVIDER_RECOVERY_MONITOR_RESUME_PENDING",
             )
             return
-        if await self._has_current_preserved_active_execution(candidate):
+        attempted_preserved_active_recovery = False
+        if await self._has_preserved_active_recovery_evidence(candidate):
+            attempted_preserved_active_recovery = True
+            if await self._recover_preserved_active_execution(candidate):
+                return
+        if not await self._stale_active_candidate_is_current(candidate):
             return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
@@ -1685,6 +1904,11 @@ class ControlWorker:
             return
         if candidate.status in _ACTIVE_EXECUTION_STATUSES and _has_running_agent_runtime(snapshot):
             if await self._has_expired_preserved_active_execution(candidate):
+                if (
+                    not attempted_preserved_active_recovery
+                    and await self._recover_preserved_active_execution(candidate)
+                ):
+                    return
                 if not await self._record_stale_active_execution_detected(
                     candidate,
                     snapshot,
@@ -1693,6 +1917,10 @@ class ControlWorker:
                 return
             if not await self._has_operator_refresh_after_latest_preservation(candidate):
                 await self._record_preserved_active_execution_after_restart(candidate, snapshot)
+                await self._recover_preserved_active_execution(
+                    candidate,
+                    record_lineage_blocked_before_grace=False,
+                )
                 return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             if not await self._record_stale_active_execution_detected(
@@ -1701,6 +1929,483 @@ class ControlWorker:
             ):
                 await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
             return
+
+    async def _stale_active_candidate_is_current(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            return ws is not None and ws.status == candidate.status.value
+
+    async def _has_preserved_active_recovery_evidence(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        event_filters = [
+            and_(
+                WorkspaceEvent.event_type == event_type,
+                WorkspaceEvent.reason_code == reason_code,
+            )
+            for event_type, reason_code in _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS
+        ]
+        preserved_event_exists = (
+            select(literal(1))
+            .select_from(WorkspaceEvent)
+            .where(
+                WorkspaceEvent.workspace_id == candidate.workspace_id,
+                or_(*event_filters),
+            )
+            .limit(1)
+            .exists()
+        )
+        active_recovery_operation_exists = (
+            select(literal(1))
+            .select_from(Operation)
+            .where(
+                Operation.workspace_id == candidate.workspace_id,
+                Operation.status.in_(
+                    (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                ),
+                Operation.payload["source"].as_string() == _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                Operation.payload["reason_code"].as_string()
+                == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+            )
+            .limit(1)
+            .exists()
+        )
+        stmt = select(literal(1)).where(
+            or_(preserved_event_exists, active_recovery_operation_exists)
+        )
+
+        async with self._session_factory() as session:
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _recover_preserved_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        record_lineage_blocked_before_grace: bool = True,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            # A validation rewind is part of the same active recovery cycle; do
+            # not let its new running state-change hide earlier salvage evidence.
+            event_floor_status = candidate.status
+            has_active_validation_recovery = candidate.status in (
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+                WorkspaceStatus.pushing,
+            ) and await self._has_active_preserved_validation_recovery(
+                session,
+                candidate.workspace_id,
+            )
+            if has_active_validation_recovery:
+                committed_validation_rewind = False
+                can_continue_validation = self._preserved_active_validation_can_continue(
+                    candidate.workspace_id
+                )
+                if can_continue_validation and candidate.status != WorkspaceStatus.running:
+                    previous_claim = _workspace_claim_snapshot(ws)
+                    ws.execution_claimed_by = None
+                    ws.execution_claim_expires_at = None
+                    ws.subphase = "runtime_preserved_validation_requested"
+                    await repo.transition(
+                        ws,
+                        to=WorkspaceStatus.running,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                        payload={
+                            "source": _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                            "reason_code": (
+                                _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+                            ),
+                            "decision": "redispatch_active_validation_recovery",
+                            "workspace_status": candidate.status.value,
+                            "previous_claim": previous_claim,
+                        },
+                    )
+                    await session.commit()
+                    committed_validation_rewind = True
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                can_continue_validation = self._preserved_active_validation_can_continue(
+                    candidate.workspace_id
+                )
+                _log.info(
+                    "worker.preserved_active_validation_redispatch",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    dispatched=dispatched,
+                )
+                if dispatched or can_continue_validation:
+                    return True
+                if committed_validation_rewind:
+                    await session.refresh(ws)
+                    refreshed_status = WorkspaceStatus(ws.status)
+                    if refreshed_status not in _ACTIVE_EXECUTION_STATUSES:
+                        return False
+                    if refreshed_status != candidate.status:
+                        candidate = replace(candidate, status=refreshed_status)
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                event_floor_status,
+            )
+            preserved_event = await self._latest_preserved_active_execution_event(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            )
+            if preserved_event is None and candidate.status in _ACTIVE_EXECUTION_STATUSES:
+                salvage_event_floor = await self._active_execution_preservation_salvage_event_floor(
+                    session,
+                    ws,
+                    candidate.status,
+                )
+                active_preserved_event = await self._latest_preserved_active_execution_event(
+                    session,
+                    candidate.workspace_id,
+                    candidate.status,
+                    event_floor=salvage_event_floor,
+                    match_active_execution_statuses=True,
+                )
+                if active_preserved_event is not None and await self._has_current_salvage_event(
+                    session,
+                    candidate.workspace_id,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    event_floor=active_preserved_event.occurred_at,
+                    workspace_status=candidate.status,
+                ):
+                    preserved_event = active_preserved_event
+            if preserved_event is None:
+                return (
+                    event_floor is not None
+                    and has_active_validation_recovery
+                    and await self._has_current_salvage_event(
+                        session,
+                        candidate.workspace_id,
+                        event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                        event_floor=event_floor,
+                        workspace_status=candidate.status,
+                    )
+                )
+
+            preservation_expired = self._active_execution_preservation_is_expired(
+                preserved_event.occurred_at
+            )
+            attempt = ws.task_attempt
+            attempt_id = attempt.id if attempt is not None else None
+            task_id = attempt.task_id if attempt is not None else None
+
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return True
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return True
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return True
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                if dispatched or candidate.workspace_id in self._execution_tasks:
+                    return True
+                if self._executor is None:
+                    await session.commit()
+                    await self._record_preserved_active_salvage_blocked(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_executor_unavailable",
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        preservation_expired=preservation_expired,
+                    )
+                    return True
+                if self._available_execution_slots() <= 0:
+                    if (
+                        not preservation_expired
+                        or self._can_dispatch_execution_when_slot_available()
+                    ):
+                        return True
+                    await session.commit()
+                    await self._record_preserved_active_salvage_not_possible(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_execution_slots_disabled",
+                    )
+                    return False
+                return True
+
+            extracted_pr_number = (
+                _extract_pr_number(ws.pr_url)
+                if ws.pr_url and ws.pr_number is None
+                else ws.pr_number
+            )
+            attach_existing_pr_monitor = bool(ws.pr_url and extracted_pr_number is not None)
+            branch_recovery_context: (
+                tuple[
+                    str,
+                    str,
+                    str | None,
+                    str | None,
+                    str | None,
+                    str | None,
+                ]
+                | None
+            ) = None
+            if not attach_existing_pr_monitor:
+                branch_recovery_context = (
+                    ws.repo_url,
+                    ws.id,
+                    ws.branch_name,
+                    ws.remote_push_branch,
+                    ws.base_commit,
+                    _pr_adoption_expected_head_repo_slug(ws),
+                )
+            await session.commit()
+
+        if attach_existing_pr_monitor:
+            await self._attach_preserved_active_pr_monitor(
+                candidate,
+                preserved_event=preserved_event,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+            return True
+
+        assert branch_recovery_context is not None
+        (
+            repo_url,
+            workspace_id,
+            branch_name,
+            remote_push_branch,
+            base_commit,
+            expected_head_repo_slug,
+        ) = branch_recovery_context
+        lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
+        branch_lookup = await self._resolve_preserved_active_branch_open_pr(
+            repo_url=repo_url,
+            branch_name=lookup_branch_name,
+            expected_head_repo_slug=expected_head_repo_slug,
+            # A preserved branch PR may have been retargeted after creation.
+            # Recover by head branch and let match/ambiguity checks below guard safety.
+            base_branch=None,
+        )
+        if branch_lookup is not None and branch_lookup.state == "matched":
+            await self._attach_preserved_active_pr_monitor(
+                candidate,
+                preserved_event=preserved_event,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                open_pr=branch_lookup.match,
+                branch_pr_lookup=branch_lookup.payload,
+            )
+            return True
+        if branch_lookup is not None and branch_lookup.state == "ambiguous":
+            await self._record_preserved_active_operator_required(
+                candidate,
+                preserved_event=preserved_event,
+                classification=None,
+                ambiguity_reason=branch_lookup.ambiguity_reason or "open_pr_lookup_ambiguous",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=branch_lookup.payload,
+            )
+            return True
+
+        failed_branch_lookup = (
+            branch_lookup if branch_lookup is not None and branch_lookup.state == "failed" else None
+        )
+        branch_lookup_failure_reason = (
+            failed_branch_lookup.ambiguity_reason or "open_pr_lookup_failed"
+            if failed_branch_lookup is not None
+            else None
+        )
+        if failed_branch_lookup is not None and not preservation_expired:
+            await self._record_preserved_active_salvage_blocked(
+                candidate,
+                preserved_event=preserved_event,
+                reason=branch_lookup_failure_reason or "open_pr_lookup_failed",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=failed_branch_lookup.payload,
+            )
+            return True
+        missing_lineage_reason: str | None = None
+        if attempt_id is None:
+            missing_lineage_reason = "missing_task_attempt_lineage"
+        elif task_id is None:
+            missing_lineage_reason = "missing_task_lineage"
+        if missing_lineage_reason is not None:
+            if not preservation_expired:
+                if not record_lineage_blocked_before_grace:
+                    return True
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                )
+                return True
+            if failed_branch_lookup is None:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    preservation_expired=True,
+                )
+                await self._record_preserved_active_salvage_not_possible(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=missing_lineage_reason,
+                )
+                return False
+
+        classification = await self._classify_preserved_active_worktree(
+            workspace_id=workspace_id,
+            expected_branch_name=lookup_branch_name,
+            base_commit=base_commit,
+        )
+        if failed_branch_lookup is not None:
+            await self._record_preserved_active_operator_required(
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                ambiguity_reason=(
+                    missing_lineage_reason
+                    or branch_lookup_failure_reason
+                    or "open_pr_lookup_failed"
+                ),
+                attempt_id=attempt_id,
+                task_id=task_id,
+                branch_pr_lookup=failed_branch_lookup.payload,
+            )
+            return True
+        if classification.state == "committed":
+            assert attempt_id is not None
+            assert task_id is not None
+            if self._executor is None:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason="validation_executor_unavailable",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                    preservation_expired=preservation_expired,
+                )
+                return True
+            validation_requested = await self._request_preserved_active_validation(
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+            if validation_requested:
+                dispatched = self._dispatch_preserved_active_validation(candidate.workspace_id)
+                if dispatched or candidate.workspace_id in self._execution_tasks:
+                    return True
+                if self._available_execution_slots() <= 0:
+                    if (
+                        not preservation_expired
+                        or self._can_dispatch_execution_when_slot_available()
+                    ):
+                        return True
+                    await self._record_preserved_active_salvage_not_possible(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_execution_slots_disabled",
+                    )
+                    return False
+            return True
+        if classification.state == "no_work":
+            if not preservation_expired:
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason=classification.reason,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                )
+                return True
+            assert attempt_id is not None
+            assert task_id is not None
+            return await self._create_preserved_active_replacement(
+                candidate,
+                preserved_event=preserved_event,
+                classification=classification,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        if classification.state == "failed" and not preservation_expired:
+            await self._record_preserved_active_salvage_blocked(
+                candidate,
+                preserved_event=preserved_event,
+                reason=classification.reason,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                classification=classification,
+            )
+            return True
+
+        await self._record_preserved_active_operator_required(
+            candidate,
+            preserved_event=preserved_event,
+            classification=classification,
+            ambiguity_reason=classification.reason,
+            attempt_id=attempt_id,
+            task_id=task_id,
+            branch_pr_lookup=(
+                failed_branch_lookup.payload if failed_branch_lookup is not None else None
+            ),
+        )
+        return True
 
     async def _record_stale_active_execution_detected(
         self,
@@ -1856,6 +2561,737 @@ class ControlWorker:
             reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
         )
 
+    async def _attach_preserved_active_pr_monitor(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        attempt_id: str | None,
+        task_id: str | None,
+        open_pr: _OpenPullRequestSummary | None = None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
+            if open_pr is not None and (not ws.pr_url or ws.pr_number is None):
+                ws.pr_url = open_pr.pr_url
+                ws.pr_number = open_pr.pr_number
+                ws.remote_push_branch = open_pr.head_ref or ws.remote_push_branch or ws.branch_name
+                if open_pr.head_sha:
+                    ws.monitor_last_commit_sha = open_pr.head_sha
+            if ws.pr_url and ws.pr_number is None:
+                ws.pr_number = _extract_pr_number(ws.pr_url)
+            if not ws.pr_url or ws.pr_number is None:
+                return
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return
+
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=claim_cutoff,
+            )
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.subphase = None
+            extra: dict[str, Any] = {
+                "pr_url": ws.pr_url,
+                "pr_number": ws.pr_number,
+                "remote_push_branch": ws.remote_push_branch,
+                "monitor_last_commit_sha": ws.monitor_last_commit_sha,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                decision="attach_pr_monitor",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                extra=extra,
+            )
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=None,
+                        preservation_event_id=preserved_event.id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                        requested_action=OperationType.remonitor,
+                        preserve_current_salvage_operation=False,
+                        error_message=(
+                            "Cancelled superseded active operation before worker-restart "
+                            "PR monitor attachment."
+                        ),
+                    )
+                )
+                if cancelled_active_operations:
+                    payload["cancelled_active_operations"] = cancelled_active_operations
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                payload=payload,
+            )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+    async def _request_preserved_active_validation(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        classification: _PreservedWorktreeClassification,
+        attempt_id: str,
+        task_id: str,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
+    ) -> bool:
+        idempotency_key = _active_execution_salvage_idempotency_key(
+            "validate",
+            candidate.workspace_id,
+            preserved_event.id,
+        )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return False
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return False
+
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=claim_cutoff,
+            )
+            extra: dict[str, Any] = {
+                "action": "validate_only",
+                "requested_action": OperationType.validate.value,
+                "recovery_mode": "validate_only",
+                "source_workspace_id": ws.id,
+                "source_head_sha": classification.head_sha,
+                "source_base_sha": ws.base_commit,
+                "base_commit": ws.base_commit,
+                "head_sha": classification.head_sha,
+                "branch_name": ws.branch_name,
+                "remote_branch": ws.remote_push_branch or ws.branch_name,
+                "target_branch": ws.branch_base,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                decision="validate_committed_work",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                classification=classification,
+                extra=extra,
+            )
+            operation, _created = await OperationRepository(session).create_idempotent(
+                workspace_id=ws.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+            payload_with_operation = {**payload, "operation_id": operation.id}
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=operation.id,
+                        preservation_event_id=preserved_event.id,
+                    )
+                )
+                if cancelled_active_operations:
+                    payload_with_operation["cancelled_active_operations"] = (
+                        cancelled_active_operations
+                    )
+            if operation.payload != payload_with_operation:
+                operation.payload = payload_with_operation
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.subphase = "runtime_preserved_validation_requested"
+            if candidate.status == WorkspaceStatus.running:
+                await repo.advance_workspace_version(ws)
+            else:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.running,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                    payload=payload_with_operation,
+                )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+                payload=payload_with_operation,
+            )
+            await session.commit()
+            return True
+
+    async def _cancel_superseded_active_execution_operations(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        replacement_operation_id: str | None,
+        preservation_event_id: str,
+        reason_code: str = _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+        requested_action: OperationType = OperationType.validate,
+        preserve_current_salvage_operation: bool = True,
+        error_message: str = (
+            "Cancelled superseded active operation before worker-restart validation recovery."
+        ),
+    ) -> list[dict[str, object]]:
+        operation_repo = OperationRepository(session)
+        active_operations: list[Operation] = []
+        for status in (OperationStatus.pending, OperationStatus.running):
+            active_operations.extend(
+                await operation_repo.list_for_workspace(
+                    workspace_id,
+                    status=status,
+                    limit=100,
+                )
+            )
+
+        cancelled: list[dict[str, object]] = []
+        for operation in active_operations:
+            if replacement_operation_id is not None and operation.id == replacement_operation_id:
+                continue
+            if operation.type not in {
+                OperationType.validate.value,
+                OperationType.push.value,
+                OperationType.rebase.value,
+            }:
+                continue
+            payload = operation.payload if isinstance(operation.payload, Mapping) else {}
+            if (
+                preserve_current_salvage_operation
+                and payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
+                and _payload_preservation_event_id(payload) == preservation_event_id
+            ):
+                continue
+
+            detail: dict[str, object] = {
+                "operation_id": operation.id,
+                "operation_type": operation.type,
+                "previous_status": operation.status,
+            }
+            cancelled.append(detail)
+            result: dict[str, object] = {
+                "status": OperationStatus.cancelled.value,
+                "reason_code": reason_code,
+                "requested_action": requested_action.value,
+            }
+            if replacement_operation_id is not None:
+                result["replacement_operation_id"] = replacement_operation_id
+            await operation_repo.finish(
+                operation,
+                status=OperationStatus.cancelled,
+                result=result,
+                error_code=reason_code,
+                error_message=error_message,
+            )
+        return cancelled
+
+    async def _create_preserved_active_replacement(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        classification: _PreservedWorktreeClassification,
+        attempt_id: str,
+        task_id: str,
+    ) -> bool:
+        idempotency_key = _active_execution_salvage_idempotency_key(
+            "replacement",
+            candidate.workspace_id,
+            preserved_event.id,
+        )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            await repo.acquire_idempotency_key_lock(idempotency_key)
+            existing = await repo.get_by_idempotency_key(idempotency_key)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return True
+            original_attempt = await TaskAttemptRepository(session).get_by_workspace_id(ws.id)
+            if original_attempt is None or original_attempt.id != attempt_id:
+                current_attempt_id = original_attempt.id if original_attempt is not None else None
+                mismatch_reason = (
+                    "missing_task_attempt_lineage"
+                    if original_attempt is None
+                    else "attempt_lineage_mismatch"
+                )
+                _log.warning(
+                    "worker.preserved_active_replacement_attempt_mismatch",
+                    workspace_id=ws.id,
+                    expected_attempt_id=attempt_id,
+                    current_attempt_id=current_attempt_id,
+                    reason=mismatch_reason,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                )
+                if not await self._has_current_salvage_event(
+                    session,
+                    ws.id,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                    event_floor=preserved_event.occurred_at,
+                    workspace_status=candidate.status,
+                ):
+                    payload = _active_execution_salvage_payload(
+                        candidate,
+                        preserved_event=preserved_event,
+                        worker_id=self._worker_id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                        decision="allow_stale_active_failure",
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        previous_claim=_workspace_claim_snapshot(ws),
+                        claim_cleanup=_active_execution_preservation_claim_cleanup_payload(
+                            ws,
+                            claim_cutoff=claim_cutoff,
+                        ),
+                        classification=classification,
+                        extra={
+                            "unrecoverable_reason": mismatch_reason,
+                            "source_workspace_id": ws.id,
+                            "current_attempt_id": current_attempt_id,
+                        },
+                    )
+                    await repo.add_event(
+                        ws,
+                        event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                        payload=payload,
+                    )
+                    await session.commit()
+                return False
+            if await self._has_current_salvage_event(
+                session,
+                ws.id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return True
+
+            replacement = existing
+            replacement_attempt = (
+                await TaskAttemptRepository(session).get_by_workspace_id(replacement.id)
+                if replacement is not None
+                else None
+            )
+            if replacement is None:
+                replacement = await repo.create_replacement_from(
+                    ws,
+                    idempotency_key=idempotency_key,
+                    remote_push_branch=_preserved_active_replacement_remote_push_branch(ws),
+                )
+                task = await TaskRepository(session).get(task_id)
+                if task is None:
+                    task = await TaskRepository(session).create_or_get(
+                        repo_url=ws.repo_url,
+                        base_branch=ws.branch_base,
+                        title=ws.task_title,
+                        prompt=ws.task_prompt,
+                        external_id=ws.task_external_id,
+                        idempotency_key=None,
+                        task_class=ws.task_class,
+                        owned_paths=list(ws.owned_paths),
+                    )
+                replacement_attempt = await TaskAttemptRepository(session).create_for_workspace(
+                    task=task,
+                    workspace=replacement,
+                    parent_attempt_id=original_attempt.id,
+                    redispatch_from_attempt_id=original_attempt.id,
+                )
+                reservations = [
+                    reservation
+                    for reservation in ws.resource_reservations
+                    if reservation.released_at is None
+                ]
+                reservation_repo = ResourceReservationRepository(session)
+                for reservation in reservations:
+                    await reservation_repo.create(
+                        workspace_id=replacement.id,
+                        attempt_id=replacement_attempt.id,
+                        node_id=reservation.node_id,
+                        steady_cpu=reservation.steady_cpu,
+                        steady_memory_gb=reservation.steady_memory_gb,
+                        peak_cpu=reservation.peak_cpu,
+                        peak_memory_gb=reservation.peak_memory_gb,
+                        disk_mb=reservation.disk_mb,
+                        dind_slots=reservation.dind_slots,
+                        phase=reservation.phase,
+                    )
+
+            if replacement_attempt is None:
+                _log.warning(
+                    "worker.preserved_active_replacement_attempt_missing",
+                    workspace_id=ws.id,
+                    replacement_workspace_id=replacement.id,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                )
+                await session.commit()
+                await self._record_preserved_active_salvage_blocked(
+                    candidate,
+                    preserved_event=preserved_event,
+                    reason="replacement_attempt_missing",
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    classification=classification,
+                    preservation_expired=self._active_execution_preservation_is_expired(
+                        preserved_event.occurred_at
+                    ),
+                    additional_payload={"replacement_workspace_id": replacement.id},
+                )
+                return True
+            original_attempt.superseded_by_attempt_id = replacement_attempt.id
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=claim_cutoff,
+            )
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                decision="replacement_workspace_created",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                classification=classification,
+                extra={
+                    "replacement_workspace_id": replacement.id,
+                    "replacement_attempt_id": replacement_attempt.id,
+                    "source_workspace_id": ws.id,
+                },
+            )
+            operation, _created = await OperationRepository(session).create_idempotent(
+                workspace_id=ws.id,
+                operation_type=OperationType.retry,
+                status=OperationStatus.succeeded,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+            operation.result = {
+                "new_workspace_id": replacement.id,
+                "new_attempt_id": replacement_attempt.id,
+                "status": replacement.status,
+            }
+            payload_with_operation = {**payload, "operation_id": operation.id}
+            if candidate.status != WorkspaceStatus.running:
+                cancelled_active_operations = (
+                    await self._cancel_superseded_active_execution_operations(
+                        session,
+                        workspace_id=ws.id,
+                        replacement_operation_id=operation.id,
+                        preservation_event_id=preserved_event.id,
+                        reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                        requested_action=OperationType.retry,
+                        error_message=(
+                            "Cancelled superseded active operation before worker-restart "
+                            "replacement recovery."
+                        ),
+                    )
+                )
+                if cancelled_active_operations:
+                    payload_with_operation["cancelled_active_operations"] = (
+                        cancelled_active_operations
+                    )
+            operation.payload = payload_with_operation
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.cancelled,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                payload=payload_with_operation,
+            )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                payload=payload_with_operation,
+            )
+            await repo.add_event(
+                replacement,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+                payload={
+                    **payload_with_operation,
+                    "workspace_role": "replacement",
+                    "source_workspace_id": ws.id,
+                },
+            )
+            await session.commit()
+            return True
+
+    async def _record_preserved_active_operator_required(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        classification: _PreservedWorktreeClassification | None,
+        ambiguity_reason: str,
+        attempt_id: str | None,
+        task_id: str | None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
+    ) -> None:
+        idempotency_key = _active_execution_salvage_idempotency_key(
+            "operator",
+            candidate.workspace_id,
+            preserved_event.id,
+        )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=claim_cutoff,
+            )
+            extra: dict[str, Any] = {
+                "ambiguity_reason": ambiguity_reason,
+                "source_workspace_id": ws.id,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                decision="operator_recovery_required",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                classification=classification,
+                extra=extra,
+            )
+            operation, _created = await OperationRepository(session).create_idempotent(
+                workspace_id=ws.id,
+                operation_type=OperationType.refresh,
+                status=OperationStatus.succeeded,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+            payload_with_operation = {**payload, "operation_id": operation.id}
+            cancelled_active_operations = await self._cancel_superseded_active_execution_operations(
+                session,
+                workspace_id=ws.id,
+                replacement_operation_id=operation.id,
+                preservation_event_id=preserved_event.id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                requested_action=OperationType.refresh,
+                preserve_current_salvage_operation=False,
+                error_message=(
+                    "Cancelled superseded active operation before worker-restart "
+                    "operator-required recovery."
+                ),
+            )
+            if cancelled_active_operations:
+                payload_with_operation["cancelled_active_operations"] = cancelled_active_operations
+            operation.payload = payload_with_operation
+            operation.result = {
+                "decision": "operator_recovery_required",
+                "reason_code": _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+            }
+            if claim_cleanup["action"] == "cleared_stale":
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_OPERATOR_SUBPHASE
+            await repo.advance_workspace_version(ws)
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+                payload=payload_with_operation,
+            )
+            await session.commit()
+
+    async def _record_preserved_active_salvage_not_possible(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        reason: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
+            if await self._has_current_salvage_event(
+                session,
+                candidate.workspace_id,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            ):
+                return
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                decision="allow_stale_active_failure",
+                attempt_id=None,
+                task_id=None,
+                previous_claim=_workspace_claim_snapshot(ws),
+                claim_cleanup=_active_execution_preservation_claim_cleanup_payload(
+                    ws,
+                    claim_cutoff=claim_cutoff,
+                ),
+                extra={
+                    "unrecoverable_reason": reason,
+                    "source_workspace_id": ws.id,
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+    async def _record_preserved_active_salvage_blocked(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        *,
+        preserved_event: WorkspaceEvent,
+        reason: str,
+        attempt_id: str | None,
+        task_id: str | None,
+        classification: _PreservedWorktreeClassification | None = None,
+        branch_pr_lookup: Mapping[str, Any] | None = None,
+        preservation_expired: bool = False,
+        additional_payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            claim_cutoff = datetime.now(UTC)
+            if not _execution_claim_is_stale(ws, claim_cutoff):
+                return
+            latest_blocked_reason = await self._latest_current_salvage_blocked_reason(
+                session,
+                candidate.workspace_id,
+                event_floor=preserved_event.occurred_at,
+                workspace_status=candidate.status,
+            )
+            if latest_blocked_reason == reason:
+                return
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=claim_cutoff,
+            )
+            if claim_cleanup["action"] == "cleared_stale":
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE
+            await repo.advance_workspace_version(ws)
+            extra: dict[str, Any] = {
+                "blocked_reason": reason,
+                "source_workspace_id": ws.id,
+                "preservation_expired": preservation_expired,
+            }
+            if branch_pr_lookup is not None:
+                extra["branch_pr_lookup"] = dict(branch_pr_lookup)
+            if additional_payload is not None:
+                extra.update(dict(additional_payload))
+            payload = _active_execution_salvage_payload(
+                candidate,
+                preserved_event=preserved_event,
+                worker_id=self._worker_id,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                decision="wait_for_preservation_grace",
+                attempt_id=attempt_id,
+                task_id=task_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+                classification=classification,
+                extra=extra,
+            )
+            await repo.add_event(
+                ws,
+                event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+                reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
     async def _has_operator_refresh_after_latest_preservation(
         self,
         candidate: _ActiveExecutionCandidate,
@@ -1988,14 +3424,19 @@ class ControlWorker:
         status: WorkspaceStatus,
         *,
         event_floor: datetime | None = None,
+        match_active_execution_statuses: bool = False,
     ) -> datetime | None:
+        status_values = _preserved_active_execution_status_values(
+            status,
+            match_active_execution_statuses=match_active_execution_statuses,
+        )
         stmt = (
             select(WorkspaceEvent.occurred_at)
             .where(
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
                 WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(status_values),
             )
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
@@ -2003,6 +3444,139 @@ class ControlWorker:
         if event_floor is not None:
             stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _latest_preserved_active_execution_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+        match_active_execution_statuses: bool = False,
+    ) -> WorkspaceEvent | None:
+        status_values = _preserved_active_execution_status_values(
+            status,
+            match_active_execution_statuses=match_active_execution_statuses,
+        )
+        stmt = (
+            select(WorkspaceEvent)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(status_values),
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _has_current_salvage_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        event_type: str,
+        reason_code: str,
+        event_floor: datetime,
+        workspace_status: WorkspaceStatus,
+    ) -> bool:
+        workspace_status_values = _salvage_workspace_status_values(
+            workspace_status,
+            event_type=event_type,
+            reason_code=reason_code,
+        )
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == event_type,
+                WorkspaceEvent.reason_code == reason_code,
+                WorkspaceEvent.occurred_at >= event_floor,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(workspace_status_values),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _latest_current_salvage_blocked_reason(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        event_floor: datetime,
+        workspace_status: WorkspaceStatus,
+    ) -> str | None:
+        workspace_status_values = _salvage_workspace_status_values(
+            workspace_status,
+            event_type=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+            reason_code=_ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+        )
+        blocked_reason = WorkspaceEvent.payload["blocked_reason"].as_string()
+        stmt = (
+            select(blocked_reason)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+                WorkspaceEvent.occurred_at >= event_floor,
+                WorkspaceEvent.payload["workspace_status"].as_string().in_(workspace_status_values),
+            )
+            .order_by(
+                WorkspaceEvent.event_order.desc().nullslast(),
+                WorkspaceEvent.occurred_at.desc(),
+                WorkspaceEvent.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _has_active_preserved_validation_recovery(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        preservation_event_id: str | None = None,
+    ) -> bool:
+        recovery_mode = Operation.payload["recovery_mode"].as_string()
+        stmt = (
+            select(literal(1))
+            .select_from(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.status.in_(
+                    (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                ),
+                Operation.payload["source"].as_string() == _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                or_(
+                    and_(
+                        Operation.type == OperationType.validate.value,
+                        recovery_mode.in_(("validate_only", "rebase_only")),
+                    ),
+                    and_(
+                        Operation.type == OperationType.rebase.value,
+                        recovery_mode == "rebase_only",
+                    ),
+                ),
+                Operation.payload["reason_code"].as_string()
+                == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+            )
+        )
+        if preservation_event_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Operation.payload["preservation_event_id"].as_string() == preservation_event_id,
+                    Operation.payload["preservation_event"]["id"].as_string()
+                    == preservation_event_id,
+                )
+            )
+        exists_stmt = stmt.limit(1).exists()
+        return bool((await session.execute(select(exists_stmt))).scalar_one())
 
     async def _latest_operator_refresh_requested_at(
         self,
@@ -2066,6 +3640,393 @@ class ControlWorker:
 
         return max(floors) if floors else None
 
+    async def _active_execution_preservation_salvage_event_floor(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+    ) -> datetime | None:
+        if status not in _ACTIVE_EXECUTION_STATUSES:
+            return await self._active_execution_preservation_event_floor(
+                session,
+                workspace,
+                status,
+            )
+
+        floors: list[datetime] = []
+        active_status_values = tuple(status.value for status in _ACTIVE_EXECUTION_STATUSES)
+        inactive_state_stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace.id,
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                ~WorkspaceEvent.new_state.in_(active_status_values),
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        inactive_state_at = (await session.execute(inactive_state_stmt)).scalar_one_or_none()
+        if inactive_state_at is not None:
+            floors.append(_utc_datetime(inactive_state_at))
+
+        refresh_requested_at = await self._latest_operator_refresh_requested_at(
+            session,
+            workspace.id,
+        )
+        if refresh_requested_at is not None:
+            floors.append(_utc_datetime(refresh_requested_at))
+
+        return max(floors) if floors else None
+
+    async def _resolve_preserved_active_branch_open_pr(
+        self,
+        *,
+        repo_url: str | None,
+        branch_name: str | None,
+        base_branch: str | None,
+        expected_head_repo_slug: str | None = None,
+    ) -> _BranchOpenPRLookup | None:
+        if self._open_pr_resolver is None:
+            return None
+        if repo_url is None or not repo_url.strip():
+            return None
+        if branch_name is None or not branch_name.strip():
+            return None
+
+        lookup_branch = branch_name.strip()
+        try:
+            matches = await self._open_pr_resolver.resolve(
+                repo_url=repo_url,
+                branch_name=lookup_branch,
+                base_branch=base_branch,
+            )
+        except Exception as exc:
+            _log.warning(
+                "worker.preserved_active_open_pr_lookup_failed",
+                branch_name=lookup_branch,
+                base_branch=base_branch,
+                error_type=type(exc).__name__,
+            )
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="failed",
+                ambiguity_reason="open_pr_lookup_failed",
+                payload={
+                    "branch_name": lookup_branch,
+                    "error_type": type(exc).__name__,
+                    "failure": "resolver_exception",
+                    "source": "open_pr_resolver",
+                },
+            )
+
+        try:
+            summaries = [
+                _open_pull_request_summary(match, branch_name=lookup_branch) for match in matches
+            ]
+        except ValueError as exc:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="failed",
+                ambiguity_reason="open_pr_lookup_invalid",
+                payload={
+                    "branch_name": lookup_branch,
+                    "error": str(exc),
+                    "source": "open_pr_resolver",
+                },
+            )
+
+        explicit_expected_head_repo_slug = (
+            expected_head_repo_slug.strip()
+            if isinstance(expected_head_repo_slug, str) and expected_head_repo_slug.strip()
+            else None
+        )
+        resolved_expected_head_repo_slug = explicit_expected_head_repo_slug or (
+            _expected_open_pr_head_repo_slug(repo_url)
+        )
+        if resolved_expected_head_repo_slug is not None and summaries:
+            head_repo_matches = [
+                summary
+                for summary in summaries
+                if summary.head_repo_slug is not None
+                and summary.head_repo_slug.lower() == resolved_expected_head_repo_slug.lower()
+            ]
+            if not head_repo_matches:
+                return _BranchOpenPRLookup(
+                    branch_name=lookup_branch,
+                    state="ambiguous",
+                    ambiguity_reason="open_pr_head_repo_mismatch",
+                    payload={
+                        "branch_name": lookup_branch,
+                        "expected_head_repo_slug": resolved_expected_head_repo_slug,
+                        "match_count": len(summaries),
+                        "matches": [summary.to_payload() for summary in summaries],
+                        "source": "open_pr_resolver",
+                    },
+                )
+            summaries = head_repo_matches
+
+        if not summaries:
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="none",
+                payload={
+                    "branch_name": lookup_branch,
+                    "match_count": 0,
+                    "source": "open_pr_resolver",
+                },
+            )
+        if len(summaries) == 1:
+            payload: dict[str, Any] = {
+                "branch_name": lookup_branch,
+                "match_count": 1,
+                "source": "open_pr_resolver",
+            }
+            if explicit_expected_head_repo_slug is not None:
+                payload["expected_head_repo_slug"] = explicit_expected_head_repo_slug
+            return _BranchOpenPRLookup(
+                branch_name=lookup_branch,
+                state="matched",
+                match=summaries[0],
+                payload=payload,
+            )
+        return _BranchOpenPRLookup(
+            branch_name=lookup_branch,
+            state="ambiguous",
+            ambiguity_reason="multiple_open_prs_for_branch",
+            payload={
+                "branch_name": lookup_branch,
+                "match_count": len(summaries),
+                "matches": [summary.to_payload() for summary in summaries],
+                "source": "open_pr_resolver",
+            },
+        )
+
+    async def _classify_preserved_active_worktree(
+        self,
+        *,
+        workspace_id: str,
+        expected_branch_name: str | None,
+        base_commit: str | None,
+    ) -> _PreservedWorktreeClassification:
+        worktree_path = self._preserved_active_worktree_path(workspace_id)
+        if worktree_path is None:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="worktree_root_unavailable",
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+        if not worktree_path.exists():
+            return _PreservedWorktreeClassification(
+                state="no_work",
+                reason="worktree_missing",
+                worktree_path=str(worktree_path),
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+        if base_commit is None or not base_commit.strip():
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="missing_base_commit",
+                worktree_path=str(worktree_path),
+                expected_branch_name=expected_branch_name,
+            )
+
+        branch = await self._run_preserved_active_git(worktree_path, "branch", "--show-current")
+        if not branch[0]:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="branch_unavailable",
+                worktree_path=str(worktree_path),
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                error=branch[2],
+            )
+        branch_name = branch[1].strip()
+        if not branch_name:
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="detached_head",
+                worktree_path=str(worktree_path),
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+        if expected_branch_name is None:
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="missing_branch_name",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+        if branch_name != expected_branch_name:
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="branch_mismatch",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+            )
+
+        head = await self._run_preserved_active_git(worktree_path, "rev-parse", "HEAD")
+        if not head[0]:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="head_unavailable",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                error=head[2],
+            )
+        head_sha = head[1].strip()
+        status = await self._run_preserved_active_git(
+            worktree_path,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+        if not status[0]:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="status_unavailable",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                head_sha=head_sha,
+                error=status[2],
+            )
+        status_porcelain = status[1].strip()
+        if status_porcelain:
+            return _PreservedWorktreeClassification(
+                state="ambiguous",
+                reason="dirty_worktree",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                head_sha=head_sha,
+                status_porcelain=status_porcelain,
+            )
+
+        count = await self._run_preserved_active_git(
+            worktree_path,
+            "rev-list",
+            "--count",
+            f"{base_commit}..HEAD",
+        )
+        if not count[0]:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="ahead_count_unavailable",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                head_sha=head_sha,
+                error=count[2],
+            )
+        try:
+            commit_count = int(count[1].strip())
+        except ValueError:
+            return _PreservedWorktreeClassification(
+                state="failed",
+                reason="ahead_count_invalid",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                head_sha=head_sha,
+                error=count[1],
+            )
+        if commit_count > 0:
+            return _PreservedWorktreeClassification(
+                state="committed",
+                reason="clean_branch_ahead",
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                expected_branch_name=expected_branch_name,
+                base_commit=base_commit,
+                head_sha=head_sha,
+                commit_count=commit_count,
+                status_porcelain=status_porcelain,
+            )
+        return _PreservedWorktreeClassification(
+            state="no_work",
+            reason="clean_branch_not_ahead",
+            worktree_path=str(worktree_path),
+            branch_name=branch_name,
+            expected_branch_name=expected_branch_name,
+            base_commit=base_commit,
+            head_sha=head_sha,
+            commit_count=commit_count,
+            status_porcelain=status_porcelain,
+        )
+
+    def _preserved_active_worktree_path(self, workspace_id: str) -> Path | None:
+        try:
+            getattr_static(self._provisioner, "get_worktree_path")
+        except AttributeError as exc:
+            _log.warning(
+                "worker.preserved_active_worktree_path_unavailable",
+                workspace_id=workspace_id,
+                reason_code="PRESERVED_ACTIVE_WORKTREE_ROOT_UNAVAILABLE",
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+            return None
+        worktree_path = self._provisioner.get_worktree_path(workspace_id)
+        return worktree_path if isinstance(worktree_path, Path) else None
+
+    async def _run_preserved_active_git(
+        self,
+        worktree_path: Path,
+        *args: str,
+    ) -> tuple[bool, str, str]:
+        command = [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            *args,
+        ]
+
+        def _timeout_output(value: str | bytes | None) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value
+
+        def _run() -> subprocess.CompletedProcess[str]:
+            try:
+                return subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stderr = _timeout_output(exc.stderr).rstrip()
+                git_args = " ".join(args)
+                git_command = f"git {git_args}" if git_args else "git"
+                timeout_message = (
+                    f"{git_command} timed out after {_PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS:g}s"
+                )
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=124,
+                    stdout=_timeout_output(exc.stdout),
+                    stderr=f"{stderr}\n{timeout_message}" if stderr else timeout_message,
+                )
+
+        result = await asyncio.to_thread(_run)
+        return result.returncode == 0, result.stdout, result.stderr
+
     async def _cleanup_and_fail_stale_active_execution(
         self,
         candidate: _ActiveExecutionCandidate,
@@ -2118,21 +4079,78 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
+            if (
+                candidate.status
+                in (
+                    WorkspaceStatus.running,
+                    WorkspaceStatus.validating,
+                    WorkspaceStatus.pushing,
+                )
+                and await self._has_active_preserved_validation_recovery(
+                    session,
+                    candidate.workspace_id,
+                )
+                and self._preserved_active_validation_can_continue(candidate.workspace_id)
+            ):
+                return False
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
                 candidate.status,
             )
+            preservation_event_floor = (
+                await self._active_execution_preservation_salvage_event_floor(
+                    session,
+                    ws,
+                    candidate.status,
+                )
+            )
             latest_preserved = await self._latest_preserved_active_execution_at(
                 session,
                 candidate.workspace_id,
                 candidate.status,
-                event_floor=event_floor,
+                event_floor=preservation_event_floor,
+                match_active_execution_statuses=True,
             )
-            if latest_preserved is not None and not self._active_execution_preservation_is_expired(
-                latest_preserved
-            ):
-                return False
+            if latest_preserved is not None:
+                latest_preserved = _utc_datetime(latest_preserved)
+                for (
+                    event_type,
+                    reason_code,
+                ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
+                    if event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE:
+                        if not await self._has_current_salvage_event(
+                            session,
+                            candidate.workspace_id,
+                            event_type=event_type,
+                            reason_code=reason_code,
+                            event_floor=latest_preserved,
+                            workspace_status=candidate.status,
+                        ):
+                            continue
+                        if self._preserved_active_validation_can_continue(candidate.workspace_id):
+                            return False
+                        if await self._has_current_salvage_event(
+                            session,
+                            candidate.workspace_id,
+                            event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                            reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                            event_floor=latest_preserved,
+                            workspace_status=candidate.status,
+                        ):
+                            continue
+                        return False
+                    if await self._has_current_salvage_event(
+                        session,
+                        candidate.workspace_id,
+                        event_type=event_type,
+                        reason_code=reason_code,
+                        event_floor=latest_preserved,
+                        workspace_status=candidate.status,
+                    ):
+                        return False
+                if not self._active_execution_preservation_is_expired(latest_preserved):
+                    return False
             return await self._has_stale_active_execution_event(
                 session,
                 candidate.workspace_id,
@@ -2414,6 +4432,15 @@ class ControlWorker:
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
 
+    def _can_dispatch_execution_when_slot_available(self) -> bool:
+        return self._executor is not None and self._config.max_concurrent_executions > 0
+
+    def _preserved_active_validation_can_continue(self, workspace_id: str) -> bool:
+        return self._executor is not None and (
+            workspace_id in self._execution_tasks
+            or self._can_dispatch_execution_when_slot_available()
+        )
+
     def _dispatchable_execution_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
         dispatchable: list[str] = []
         for workspace_id in workspace_ids:
@@ -2462,6 +4489,21 @@ class ControlWorker:
             dispatched.add(workspace_id)
         return dispatched
 
+    def _dispatch_preserved_active_validation(self, workspace_id: str) -> bool:
+        if self._executor is None:
+            return False
+        if self._available_execution_slots() <= 0:
+            return False
+        if workspace_id in self._execution_tasks:
+            return False
+        task = asyncio.create_task(
+            self._safely_execute_claimed(workspace_id),
+            name=f"awf-preserved-active-validate-{workspace_id}",
+        )
+        self._execution_tasks[workspace_id] = task
+        task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+        return True
+
     def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
         self._execution_tasks.pop(workspace_id, None)
 
@@ -2506,7 +4548,7 @@ class ControlWorker:
         workspace_id: str,
         *,
         recovery_operation_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self._executor is None:
             await self._finish_monitor_recovery_operation(
                 workspace_id,
@@ -2515,7 +4557,7 @@ class ControlWorker:
                 error_code="MONITOR_RECOVERY_NO_EXECUTOR",
                 error_message="Worker has no executor configured.",
             )
-            return
+            return False
         try:
             await self._executor.resume_pr_monitor(workspace_id)
         except Exception as exc:
@@ -2530,13 +4572,14 @@ class ControlWorker:
                 error_code="MONITOR_RECOVERY_FAILED",
                 error_message=repr(exc)[:2000],
             )
-            return
+            return False
 
         await self._finish_monitor_recovery_operation(
             workspace_id,
             operation_id=recovery_operation_id,
             status=OperationStatus.succeeded,
         )
+        return True
 
     async def _claim_requested_ids(self, workspace_ids: list[str] | None = None) -> list[str]:
         if self._config.max_concurrent_provisions <= 0:
@@ -2845,6 +4888,8 @@ class ControlWorker:
                 break
             if workspace_id in self._execution_tasks:
                 continue
+            if await self._active_salvage_monitor_resume_cooldown_blocks_claim(workspace_id):
+                continue
             if await self._claim_monitoring_pr(workspace_id):
                 claimed.append(workspace_id)
         return claimed
@@ -2852,6 +4897,7 @@ class ControlWorker:
     async def _claim_monitoring_pr(self, workspace_id: str) -> bool:
         now = datetime.now(UTC)
         lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
+        active_salvage_monitor_recovery_operation_id: str | None = None
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -2901,6 +4947,11 @@ class ControlWorker:
                     status=OperationStatus.running,
                     payload=operation_payload,
                 )
+                if (
+                    operation_payload.get("active_execution_salvage_reason_code")
+                    == _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                ):
+                    active_salvage_monitor_recovery_operation_id = operation.id
                 await repo.add_event(
                     ws,
                     event_type=_MONITOR_RECOVERY_EVENT_TYPE,
@@ -2912,6 +4963,10 @@ class ControlWorker:
                 )
                 self._monitor_recovery_operation_ids[workspace_id] = operation.id
             await session.commit()
+            if active_salvage_monitor_recovery_operation_id is not None:
+                self._remember_active_salvage_monitor_recovery_operation_id(
+                    active_salvage_monitor_recovery_operation_id
+                )
             return claimed
 
     async def _safely_resume_claimed_pr_monitor(
@@ -2924,8 +4979,9 @@ class ControlWorker:
             self._refresh_monitoring_pr_claim_loop(workspace_id),
             name=f"awf-monitor-claim-{workspace_id}",
         )
+        resume_succeeded = False
         try:
-            await self._safely_resume_pr_monitor(
+            resume_succeeded = await self._safely_resume_pr_monitor(
                 workspace_id,
                 recovery_operation_id=recovery_operation_id,
             )
@@ -2933,8 +4989,154 @@ class ControlWorker:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
+            if (
+                resume_succeeded
+                and recovery_operation_id is not None
+                and recovery_operation_id in self._active_salvage_monitor_recovery_operation_ids
+            ):
+                cooldown_seconds = max(0.0, self._config.monitor_claim_lease_seconds)
+                self._remember_active_salvage_monitor_resume_cooldown(
+                    workspace_id,
+                    monotonic() + cooldown_seconds,
+                )
+                if cooldown_seconds > 0:
+                    await self._record_active_salvage_monitor_resume_cooldown(
+                        workspace_id,
+                        recovery_operation_id=recovery_operation_id,
+                        cooldown_until=datetime.now(UTC) + timedelta(seconds=cooldown_seconds),
+                    )
             await self._release_monitoring_pr_claim(workspace_id)
             self._monitor_recovery_operation_ids.pop(workspace_id, None)
+            if recovery_operation_id is not None:
+                self._forget_active_salvage_monitor_recovery_operation_id(recovery_operation_id)
+
+    def _remember_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
+        self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
+        self._active_salvage_monitor_recovery_operation_ids[operation_id] = None
+        while (
+            len(self._active_salvage_monitor_recovery_operation_ids)
+            > _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT
+        ):
+            oldest_operation_id = next(iter(self._active_salvage_monitor_recovery_operation_ids))
+            self._active_salvage_monitor_recovery_operation_ids.pop(oldest_operation_id, None)
+
+    def _forget_active_salvage_monitor_recovery_operation_id(self, operation_id: str) -> None:
+        self._active_salvage_monitor_recovery_operation_ids.pop(operation_id, None)
+
+    async def _active_salvage_monitor_resume_cooldown_blocks_claim(
+        self,
+        workspace_id: str,
+    ) -> bool:
+        if self._active_salvage_monitor_resume_cooldown_active(workspace_id):
+            return True
+        return await self._persisted_active_salvage_monitor_resume_cooldown_active(workspace_id)
+
+    async def _persisted_active_salvage_monitor_resume_cooldown_active(
+        self,
+        workspace_id: str,
+    ) -> bool:
+        if max(0.0, self._config.monitor_claim_lease_seconds) <= 0:
+            return False
+
+        stmt = (
+            select(WorkspaceEvent)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type
+                == _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE,
+                WorkspaceEvent.reason_code
+                == _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        async with self._session_factory() as session:
+            event = (await session.execute(stmt)).scalar_one_or_none()
+        if event is None:
+            return False
+
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        cooldown_until = _datetime_from_json(payload.get("cooldown_until"))
+        if cooldown_until is None:
+            cooldown_until = _utc_datetime(event.occurred_at) + timedelta(
+                seconds=max(0.0, self._config.monitor_claim_lease_seconds)
+            )
+        return datetime.now(UTC) < cooldown_until
+
+    async def _record_active_salvage_monitor_resume_cooldown(
+        self,
+        workspace_id: str,
+        *,
+        recovery_operation_id: str,
+        cooldown_until: datetime,
+    ) -> None:
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(workspace_id)
+                if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+                    return
+                await repo.add_event(
+                    ws,
+                    event_type=_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE,
+                    reason_code=_ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE,
+                    payload={
+                        "source": _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+                        "owner": _ACTIVE_EXECUTION_SALVAGE_OWNER,
+                        "reason_code": (
+                            _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE
+                        ),
+                        "workspace_status": ws.status,
+                        "operation_id": recovery_operation_id,
+                        "worker_id": self._worker_id,
+                        "cooldown_until": _json_datetime(cooldown_until),
+                        "salvage_reason_code": (
+                            _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE
+                        ),
+                    },
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.active_salvage_monitor_resume_cooldown_record_failed",
+                workspace_id=workspace_id,
+                operation_id=recovery_operation_id,
+            )
+
+    def _remember_active_salvage_monitor_resume_cooldown(
+        self,
+        workspace_id: str,
+        cooldown_until: float,
+    ) -> None:
+        self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        self._active_salvage_monitor_resume_cooldowns[workspace_id] = cooldown_until
+        self._evict_expired_salvage_monitor_cooldowns()
+
+    def _evict_expired_salvage_monitor_cooldowns(self) -> None:
+        now = monotonic()
+        expired_workspace_ids = [
+            workspace_id
+            for workspace_id, cooldown_until in self._active_salvage_monitor_resume_cooldowns.items()
+            if cooldown_until <= now
+        ]
+        for workspace_id in expired_workspace_ids:
+            self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        while (
+            len(self._active_salvage_monitor_resume_cooldowns)
+            > _ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT
+        ):
+            oldest_workspace_id = next(iter(self._active_salvage_monitor_resume_cooldowns))
+            self._active_salvage_monitor_resume_cooldowns.pop(oldest_workspace_id, None)
+
+    def _active_salvage_monitor_resume_cooldown_active(self, workspace_id: str) -> bool:
+        self._evict_expired_salvage_monitor_cooldowns()
+        cooldown_until = self._active_salvage_monitor_resume_cooldowns.get(workspace_id)
+        if cooldown_until is None:
+            return False
+        if monotonic() < cooldown_until:
+            return True
+        self._active_salvage_monitor_resume_cooldowns.pop(workspace_id, None)
+        return False
 
     async def _finish_monitor_recovery_operation(
         self,
@@ -4032,6 +6234,12 @@ def _workspace_claim_snapshot(workspace: Workspace) -> dict[str, str | None]:
     }
 
 
+def _preserved_active_replacement_remote_push_branch(workspace: Workspace) -> str | None:
+    if workspace.task_kind in _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS:
+        return workspace.remote_push_branch
+    return None
+
+
 def _active_execution_preservation_claim_cleanup_payload(
     workspace: Workspace,
     *,
@@ -4146,6 +6354,10 @@ def _monitor_recovery_payload(
         "previous_claim": previous_claim,
         "claim_cleanup": claim_cleanup,
         "runtime_stranding_reason": runtime_stranding_reason,
+        "active_execution_salvage_reason_code": _latest_active_execution_salvage_reason(
+            workspace.events,
+            event_floor=_monitor_recovery_salvage_event_floor(workspace.events),
+        ),
         "monitor_state": {
             "monitor_started_at": _json_datetime(workspace.monitor_started_at),
             "monitor_iter_count": workspace.monitor_iter_count,
@@ -4161,6 +6373,15 @@ def _json_datetime(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.isoformat()
+
+
+def _datetime_from_json(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return _utc_datetime(datetime.fromisoformat(value.strip()))
+    except ValueError:
+        return None
 
 
 def _utc_datetime(value: datetime) -> datetime:
@@ -4235,6 +6456,219 @@ def _active_execution_preservation_payload(
         "claim_cleanup": claim_cleanup,
         "runtime": _runtime_snapshot_payload(snapshot),
     }
+
+
+def _open_pull_request_summary(
+    metadata: object,
+    *,
+    branch_name: str,
+) -> _OpenPullRequestSummary:
+    pr_url = _metadata_nonempty_str(metadata, "pr_url", "url")
+    if pr_url is None:
+        raise ValueError("open PR lookup result is missing pr_url")
+    pr_number_value = _metadata_value(metadata, "pr_number", "number")
+    try:
+        if isinstance(pr_number_value, int) and not isinstance(pr_number_value, bool):
+            pr_number = pr_number_value
+        elif isinstance(pr_number_value, str):
+            pr_number = int(pr_number_value)
+        else:
+            raise TypeError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("open PR lookup result is missing pr_number") from exc
+    if pr_number <= 0:
+        raise ValueError("open PR lookup result has invalid pr_number")
+    head_ref = _metadata_nonempty_str(metadata, "head_ref", "headRefName") or branch_name
+    head_sha = _metadata_nonempty_str(metadata, "head_sha", "headRefOid")
+    head_repo_slug = _metadata_nonempty_str(
+        metadata, "head_repo_slug", "headRepositoryNameWithOwner"
+    )
+    return _OpenPullRequestSummary(
+        pr_url=pr_url,
+        pr_number=pr_number,
+        head_ref=head_ref,
+        head_sha=head_sha,
+        head_repo_slug=head_repo_slug,
+    )
+
+
+def _expected_open_pr_head_repo_slug(repo_url: str) -> str | None:
+    try:
+        return RepoRef.from_url(repo_url).slug()
+    except ValueError:
+        return None
+
+
+def _pr_adoption_expected_head_repo_slug(workspace: Workspace) -> str | None:
+    policy = workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption")
+    if not isinstance(adoption, Mapping):
+        return None
+    head_repo_slug = adoption.get("head_repo_slug")
+    if not isinstance(head_repo_slug, str) or not head_repo_slug.strip():
+        return None
+    return head_repo_slug.strip()
+
+
+def _extract_pr_number(pr_url: str) -> int | None:
+    match = _PR_NUMBER_RE.search(pr_url)
+    if match is None:
+        return None
+    pr_number = int(match.group(1))
+    return pr_number if pr_number > 0 else None
+
+
+def _metadata_value(metadata: object, *names: str) -> object:
+    for name in names:
+        if isinstance(metadata, Mapping) and name in metadata:
+            return metadata[name]
+        if hasattr(metadata, name):
+            return getattr(metadata, name)
+    return None
+
+
+def _metadata_nonempty_str(metadata: object, *names: str) -> str | None:
+    value = _metadata_value(metadata, *names)
+    return _nonempty_str(value)
+
+
+def _nonempty_str(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _active_execution_salvage_idempotency_key(
+    action: str,
+    workspace_id: str,
+    preservation_event_id: str,
+) -> str:
+    return f"active-salvage-{action}:{workspace_id}:{preservation_event_id}"
+
+
+def _active_execution_salvage_payload(
+    candidate: _ActiveExecutionCandidate,
+    *,
+    preserved_event: WorkspaceEvent,
+    worker_id: str,
+    reason_code: str,
+    decision: str,
+    attempt_id: str | None,
+    task_id: str | None,
+    previous_claim: dict[str, str | None],
+    claim_cleanup: dict[str, str | None],
+    classification: _PreservedWorktreeClassification | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "owner": _ACTIVE_EXECUTION_SALVAGE_OWNER,
+        "source": _ACTIVE_EXECUTION_SALVAGE_SOURCE,
+        "reason_code": reason_code,
+        "decision": decision,
+        "workspace_status": candidate.status.value,
+        "source_workspace_id": candidate.workspace_id,
+        "attempt_id": attempt_id,
+        "task_id": task_id,
+        "compose_project_name": candidate.compose_project_name,
+        "compose_file_path": candidate.compose_file_path,
+        "worker_id": worker_id,
+        "previous_claim": previous_claim,
+        "claim_cleanup": claim_cleanup,
+        "preservation_event_id": preserved_event.id,
+        "preservation_event": _preserved_active_event_reference(preserved_event),
+    }
+    if classification is not None:
+        payload["classification"] = classification.to_payload()
+        payload["base_commit"] = classification.base_commit
+        payload["head_sha"] = classification.head_sha
+        payload["branch_name"] = classification.branch_name
+    if extra:
+        payload.update(dict(extra))
+    return payload
+
+
+def _is_active_execution_salvage_validation_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("source") == _ACTIVE_EXECUTION_SALVAGE_SOURCE
+        and payload.get("recovery_mode") == "validate_only"
+        and payload.get("reason_code") == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE
+    )
+
+
+def _payload_preservation_event_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("preservation_event_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    event = payload.get("preservation_event")
+    if isinstance(event, Mapping):
+        event_id = event.get("id")
+        if isinstance(event_id, str) and event_id.strip():
+            return event_id.strip()
+    return None
+
+
+def _preserved_active_event_reference(event: WorkspaceEvent) -> dict[str, Any]:
+    event_payload = event.payload if isinstance(event.payload, dict) else {}
+    return {
+        "id": event.id,
+        "occurred_at": _json_datetime(event.occurred_at),
+        "event_type": event.event_type,
+        "reason_code": event.reason_code,
+        "operation_id": event_payload.get("operation_id"),
+    }
+
+
+def _monitor_recovery_salvage_event_floor(
+    events: list[WorkspaceEvent],
+) -> WorkspaceEvent | None:
+    floor: WorkspaceEvent | None = None
+    for event in events:
+        if _is_monitor_recovery_salvage_floor_event(event) and (
+            floor is None or _workspace_event_is_after(event, floor)
+        ):
+            floor = event
+    return floor
+
+
+def _is_monitor_recovery_salvage_floor_event(event: WorkspaceEvent) -> bool:
+    return (
+        event.event_type == _MONITOR_RECOVERY_EVENT_TYPE
+        and event.reason_code == _MONITOR_RECOVERY_REASON_CODE
+    ) or (
+        event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.monitoring_pr.value
+    )
+
+
+def _workspace_event_is_after(event: WorkspaceEvent, floor: WorkspaceEvent) -> bool:
+    event_order = event.event_order
+    floor_order = floor.event_order
+    if isinstance(event_order, int) and isinstance(floor_order, int):
+        return event_order > floor_order
+    return _utc_datetime(event.occurred_at) > _utc_datetime(floor.occurred_at)
+
+
+def _latest_active_execution_salvage_reason(
+    events: list[WorkspaceEvent],
+    *,
+    event_floor: WorkspaceEvent | None = None,
+) -> str | None:
+    salvage_reason_codes = {
+        _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+        _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
+    }
+    latest_event: WorkspaceEvent | None = None
+    for event in events:
+        if event_floor is not None and not _workspace_event_is_after(event, event_floor):
+            continue
+        if event.reason_code in salvage_reason_codes and (
+            latest_event is None or _workspace_event_is_after(event, latest_event)
+        ):
+            latest_event = event
+    return latest_event.reason_code if latest_event is not None else None
 
 
 def _runtime_stranding_event_payload(

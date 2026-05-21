@@ -2,6 +2,13 @@
 
 This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.
 
+### ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED
+**Problem:** AWF rewound a preserved active execution to run validate-only recovery.
+**Likely Cause:** A worker restart found a stale active execution with recoverable committed work and created a validation recovery operation instead of failing the workspace.
+**Operator Fix:** Let the worker dispatch the recovery validation. If it does not progress, inspect workspace events and active operations for the preserved execution.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#active_execution_salvage_validation_requested](#active_execution_salvage_validation_requested)
+
 ### API_UNREACHABLE
 **Problem:** AWF API is not reachable.
 **Likely Cause:** The local AWF service container is not running or port 8000 is blocked.

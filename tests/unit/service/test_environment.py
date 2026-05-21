@@ -41,3 +41,161 @@ def test_env_lookup_fallback_uses_stable_case_variant_priority() -> None:
         {"Docker_Host": "mixedcase", "docker_host": "lowercase"},
         "DOCKER_HOST",
     ) == (True, "mixedcase")
+
+
+@pytest.mark.unit
+def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_interpolation_keys
+
+    missing_file = tmp_path / "missing-compose.yml"
+    invalid_file = tmp_path / "invalid-compose.yml"
+    invalid_file.write_bytes(b"\xff\xfe\x00")
+
+    assert compose_interpolation_keys(missing_file) == ()
+    assert compose_interpolation_keys(invalid_file) == ()
+
+
+@pytest.mark.unit
+def test_compose_interpolation_environ_skips_unset_and_collects_sequence_values(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.environment import (
+        cleared_docker_cli_client_keys,
+        compose_interpolation_environ,
+        compose_interpolation_keys,
+    )
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  api:
+    environment:
+      - TOKEN=${AWF_SEQUENCE_TOKEN}
+      - ESCAPED=$$AWF_ESCAPED_TOKEN
+      - EMPTY=${}
+      - PLAIN=$AWF_PLAIN_TOKEN
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    assert cleared_docker_cli_client_keys({"DOCKER_CONTEXT": ""}) == frozenset()
+    assert compose_interpolation_keys(compose_file) == (
+        "AWF_PLAIN_TOKEN",
+        "AWF_SEQUENCE_TOKEN",
+    )
+    assert compose_interpolation_environ(
+        {"AWF_SEQUENCE_TOKEN": "service-value"},
+        compose_file=compose_file,
+        compose_env_file=None,
+    ) == {"AWF_SEQUENCE_TOKEN": "service-value"}
+
+
+@pytest.mark.unit
+def test_compose_interpolation_cache_evicts_old_successes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from awf.service import environment as service_environment
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+    monkeypatch.setattr(
+        service_environment,
+        "_parse_compose_interpolation_keys",
+        lambda contents: (contents,),
+    )
+
+    try:
+        for index in range(service_environment._COMPOSE_INTERPOLATION_CACHE_MAX_SIZE + 1):
+            assert service_environment._cached_compose_interpolation_keys(  # noqa: SLF001
+                f"/tmp/compose-{index}.yml",
+                f"digest-{index}",
+                index,
+                f"KEY_{index}",
+            ) == (f"KEY_{index}",)
+
+        cache_keys = service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE  # noqa: SLF001
+        assert len(cache_keys) == service_environment._COMPOSE_INTERPOLATION_CACHE_MAX_SIZE
+        assert ("/tmp/compose-0.yml", "digest-0", 0) not in cache_keys
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+        service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_compose_interpolation_cache_evicts_old_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from awf.service import environment as service_environment
+
+    def _raise_runtime(_contents: str) -> tuple[str, ...]:
+        raise RuntimeError("parse failed")
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+    monkeypatch.setattr(service_environment, "_parse_compose_interpolation_keys", _raise_runtime)
+
+    try:
+        for index in range(service_environment._COMPOSE_INTERPOLATION_CACHE_MAX_SIZE + 1):
+            with pytest.raises(RuntimeError, match="parse failed"):
+                service_environment._cached_compose_interpolation_keys(  # noqa: SLF001
+                    f"/tmp/failing-compose-{index}.yml",
+                    f"failing-digest-{index}",
+                    index,
+                    f"KEY_{index}",
+                )
+
+        cache_keys = service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE  # noqa: SLF001
+        assert len(cache_keys) == service_environment._COMPOSE_INTERPOLATION_CACHE_MAX_SIZE
+        assert ("/tmp/failing-compose-0.yml", "failing-digest-0", 0) not in cache_keys
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+        service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_compose_interpolation_cache_clears_inflight_after_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import environment as service_environment
+
+    def _raise_keyboard_interrupt(_contents: str) -> tuple[str, ...]:
+        raise KeyboardInterrupt
+
+    service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+    service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+    monkeypatch.setattr(
+        service_environment,
+        "_parse_compose_interpolation_keys",
+        _raise_keyboard_interrupt,
+    )
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            service_environment._cached_compose_interpolation_keys(  # noqa: SLF001
+                "/tmp/interrupt-compose.yml",
+                "interrupt-digest",
+                1,
+                "KEY",
+            )
+        assert service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT == {}  # noqa: SLF001
+    finally:
+        service_environment._COMPOSE_INTERPOLATION_KEYS_CACHE.clear()  # noqa: SLF001
+        service_environment._COMPOSE_INTERPOLATION_KEYS_INFLIGHT.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_raise_compose_interpolation_cache_failure_wraps_unconstructable_exception() -> None:
+    from awf.service import environment as service_environment
+
+    class _NeedsTwoArgsError(Exception):
+        def __init__(self, first: str, second: str) -> None:
+            super().__init__(first, second)
+
+    with pytest.raises(RuntimeError, match="cached parser failure"):
+        service_environment._raise_compose_interpolation_cache_failure(  # noqa: SLF001
+            service_environment._ComposeInterpolationKeysCacheFailure(  # noqa: SLF001
+                _NeedsTwoArgsError,
+                "cached parser failure",
+            )
+        )
