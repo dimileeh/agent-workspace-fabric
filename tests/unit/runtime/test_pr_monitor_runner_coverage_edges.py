@@ -2787,8 +2787,7 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
         raise PermissionError("cannot repair .venv")
 
     monkeypatch.setattr(
-        pr_monitor_runner,
-        "repair_agent_runtime_ownership",
+        "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
         _raise_repair,
     )
 
