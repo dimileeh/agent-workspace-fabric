@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import pytest_mock
@@ -77,8 +78,8 @@ from awf.runtime.pr_monitor_runner import (
     _is_transient_base_fetch_error,
     _is_transient_github_client_error,
     _merge_rejection_reason,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
-    _MonitorAgentRuntimeOwnershipRepairFailed,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
@@ -1962,7 +1963,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_ownership_repa
     )
 
     async def _ownership_repair_failed(**_kwargs: object) -> str:
-        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
 
@@ -2729,13 +2730,15 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
         _repair_agent_runtime_ownership,
     )
 
-    with structlog.testing.capture_logs() as captured:
-        result = await runner._commit_dirty_worktree(
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError),
+    ):
+        await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
             message="fix: dirty",
         )
 
-    assert result is True
     assert repair_reasons == ["dirty_worktree_pre_commit", "dirty_worktree_post_commit"]
     assert any(
         event.get("event") == "monitor.dirty_worktree_committed"
@@ -2773,7 +2776,7 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
         raising=False,
     )
 
-    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailed):
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
         await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
             message="fix: dirty",
@@ -3765,16 +3768,14 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         reason_code: str,
     ) -> bool:
         repair_reasons.append(reason)
-        if reason == "dirty_worktree_pre_commit":
-            return True
-        return False
+        return reason == "dirty_worktree_pre_commit"
 
     monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
 
-    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailed):
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
         await runner._invoke_cli_for_verdict(
             workspace_id=workspace_id,
             prompt="fix it",
@@ -3938,7 +3939,7 @@ async def test_sync_base_conflict_ownership_repair_failure_blocks_push(
     )
 
     async def _ownership_repair_failed(**_kwargs: object) -> None:
-        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
 
@@ -4403,7 +4404,7 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
         )
 
     async def _repair_ownership_failed(**_kwargs: object) -> _GitPushResult:
-        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
 
@@ -4417,9 +4418,7 @@ async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_fa
     push_result = await runner._run_ci_fix(
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        failures=(
-            CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),
-        ),
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
         compose_project=f"awf_{workspace_id}",
         compose_file=tmp_path / "compose.yml",
         workspace_id=workspace_id,
@@ -4451,7 +4450,7 @@ async def test_ci_fix_ownership_repair_failure_blocks_push(
     )
 
     async def _ownership_repair_failed(**_kwargs: object) -> bool:
-        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
 
@@ -4850,7 +4849,7 @@ async def test_protected_scope_commit_repair_returns_failed_push_when_ownership_
     )
 
     async def _ownership_repair_failed(**_kwargs: object) -> object:
-        raise _MonitorAgentRuntimeOwnershipRepairFailed(
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
             AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
         )
 
