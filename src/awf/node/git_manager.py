@@ -602,13 +602,26 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
 
 
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
+    if path.is_symlink():
+        os.lchown(path, uid, gid)
+        return
+
     os.chown(path, uid, gid)
     if not path.is_dir():
         return
-    for root, dirs, files in os.walk(path):
+
+    for root, dirs, files in os.walk(path, followlinks=False):
         for name in dirs:
-            os.chown(Path(root) / name, uid, gid)
+            child = Path(root) / name
+            if child.is_symlink():
+                os.lchown(child, uid, gid)
+            else:
+                os.chown(child, uid, gid)
         if directories_only:
             continue
         for name in files:
-            os.chown(Path(root) / name, uid, gid)
+            child = Path(root) / name
+            if child.is_symlink():
+                os.lchown(child, uid, gid)
+            else:
+                os.chown(child, uid, gid)
