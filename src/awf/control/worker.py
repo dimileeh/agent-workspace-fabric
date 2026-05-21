@@ -21,7 +21,7 @@ import re
 import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from inspect import getattr_static
@@ -1815,6 +1815,9 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
+            # A validation rewind is part of the same active recovery cycle; do
+            # not let its new running state-change hide earlier salvage evidence.
+            event_floor_status = candidate.status
             has_active_validation_recovery = candidate.status in (
                 WorkspaceStatus.running,
                 WorkspaceStatus.validating,
@@ -1864,10 +1867,15 @@ class ControlWorker:
                     return True
                 if committed_validation_rewind:
                     await session.refresh(ws)
+                    refreshed_status = WorkspaceStatus(ws.status)
+                    if refreshed_status not in _ACTIVE_EXECUTION_STATUSES:
+                        return False
+                    if refreshed_status != candidate.status:
+                        candidate = replace(candidate, status=refreshed_status)
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
-                candidate.status,
+                event_floor_status,
             )
             preserved_event = await self._latest_preserved_active_execution_event(
                 session,

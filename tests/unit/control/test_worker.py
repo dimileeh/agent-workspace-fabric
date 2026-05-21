@@ -8143,6 +8143,134 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws.execution_claim_expires_at is None
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("salvage_event_type", "salvage_reason_code"),
+        [
+            (
+                "workspace.active_execution_salvage_operator_required",
+                "ACTIVE_EXECUTION_SALVAGE_OPERATOR_REQUIRED",
+            ),
+            (
+                "workspace.active_execution_salvage_replacement_created",
+                "ACTIVE_EXECUTION_SALVAGE_REPLACEMENT_CREATED",
+            ),
+            (
+                "workspace.active_execution_salvage_monitor_attached",
+                "ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED",
+            ),
+        ],
+    )
+    async def test_non_running_validation_rewind_uses_refreshed_status_for_salvage_checks(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        salvage_event_type: str,
+        salvage_reason_code: str,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-refresh-status-salvage-check",
+            WorkspaceStatus.validating,
+            compose_project_name="awf_preserved_refresh_status_salvage_check",
+            create_task_attempt=True,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "stale-recovery-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.active_execution_salvage_validation_requested",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type=salvage_event_type,
+                reason_code=salvage_reason_code,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "reason_code": salvage_reason_code,
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_refresh_status_salvage_check": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        dispatch_calls = 0
+
+        def _dispatch_fails_after_rewind(workspace_id_arg: str) -> bool:
+            nonlocal dispatch_calls
+            assert workspace_id_arg == workspace_id
+            dispatch_calls += 1
+            if dispatch_calls > 1:
+                raise AssertionError(
+                    "running salvage events should be found before validation fallback"
+                )
+            worker._executor = None  # noqa: SLF001
+            return False
+
+        monkeypatch.setattr(
+            worker,
+            "_dispatch_preserved_active_validation",
+            _dispatch_fails_after_rewind,
+        )
+
+        recovered = await worker._recover_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.validating,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_refresh_status_salvage_check",
+            )
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+
+        assert recovered
+        assert dispatch_calls == 1
+        assert ws.status == WorkspaceStatus.running.value
+
+    @pytest.mark.unit
     async def test_preserved_active_validation_recovery_lookup_uses_single_active_query(
         self,
         session_factory: async_sessionmaker[AsyncSession],
