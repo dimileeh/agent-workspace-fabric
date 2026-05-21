@@ -312,6 +312,21 @@ def test_capacity_queue_planned_resources_uses_queue_specific_schema(
 
 
 @pytest.mark.unit
+def test_capacity_queue_blocked_reason_counts_describes_fifo_frontiers(
+    openapi_spec: dict,
+) -> None:
+    schemas = openapi_spec["components"]["schemas"]
+    blocked_reason_counts = schemas["CapacityQueueSummaryResponse"]["properties"][
+        "blocked_reason_counts"
+    ]
+    capacity_queue = schemas["ResourceSaturationSummaryResponse"]["properties"]["capacity_queue"]
+
+    assert "FIFO frontier" in blocked_reason_counts["description"]
+    assert "not every blocked workspace" in blocked_reason_counts["description"]
+    assert "blocked_reason_counts counts the first FIFO frontier" in capacity_queue["description"]
+
+
+@pytest.mark.unit
 def test_spec_round_trips_to_json_and_back(openapi_spec: dict) -> None:
     serialized = json.dumps(openapi_spec, sort_keys=True)
     deserialized = json.loads(serialized)

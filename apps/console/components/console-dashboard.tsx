@@ -2542,8 +2542,9 @@ function ResourceCapacityPanel({
                   className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
                     "bad",
                   )}`}
+                  title="Deferred blockers count the first FIFO frontier per constraint; unsatisfiable requests count each workspace."
                 >
-                  {reason}: {count}
+                  {reason}: {count} frontier-counted blocker{count === 1 ? "" : "s"}
                 </span>
               ))}
             </div>

@@ -3857,9 +3857,8 @@ async def _acquire_local_capacity_scheduler_lock(
 
 def _postgres_advisory_lock_key(value: str) -> int:
     raw = int.from_bytes(hashlib.sha256(value.encode("utf-8")).digest()[:8], "big")
-    if raw >= 2**63:
-        return raw - 2**64
-    return raw
+    # Wrap unsigned 8-byte value into PostgreSQL's signed int8 range.
+    return raw if raw < 2**63 else raw - 2**64
 
 
 def _order_scheduler_workspaces(

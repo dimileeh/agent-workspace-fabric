@@ -351,7 +351,13 @@ class CapacityQueueSummaryResponse(BaseModel):
     oldest_workspace_id: str | None = None
     oldest_wait_seconds: int | None = None
     planned_resources: QueuePlannedResourcesResponse
-    blocked_reason_counts: dict[str, int]
+    blocked_reason_counts: dict[str, int] = Field(
+        description=(
+            "Capacity blocker reason counts for queued work. Deferred blockers count the first "
+            "FIFO frontier per constraint, not every blocked workspace behind it; unsatisfiable "
+            "requests count each workspace because they do not depend on allocated capacity."
+        ),
+    )
 
 
 class ProviderCircuitBreakerSummaryResponse(BaseModel):
@@ -446,7 +452,11 @@ class ResourceSaturationSummaryResponse(BaseModel):
         description="Available local capacity after allocated runtime reservations only.",
     )
     capacity_queue: CapacityQueueSummaryResponse = Field(
-        description="Requested workspace demand and local capacity blockers for queued work.",
+        description=(
+            "Requested workspace demand and local capacity blockers for queued work. "
+            "blocked_reason_counts counts the first FIFO frontier per constraint, "
+            "not every blocked workspace behind it."
+        ),
     )
     concurrency: ResourceConcurrencyResponse = Field(
         description="Provisioning and execution worker lane saturation.",

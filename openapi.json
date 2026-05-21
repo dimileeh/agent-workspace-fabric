@@ -313,6 +313,7 @@
             "additionalProperties": {
               "type": "integer"
             },
+            "description": "Capacity blocker reason counts for queued work. Deferred blockers count the first FIFO frontier per constraint, not every blocked workspace behind it; unsatisfiable requests count each workspace because they do not depend on allocated capacity.",
             "title": "Blocked Reason Counts",
             "type": "object"
           },
@@ -4592,7 +4593,7 @@
           },
           "capacity_queue": {
             "$ref": "#/components/schemas/CapacityQueueSummaryResponse",
-            "description": "Requested workspace demand and local capacity blockers for queued work."
+            "description": "Requested workspace demand and local capacity blockers for queued work. blocked_reason_counts counts the first FIFO frontier per constraint, not every blocked workspace behind it."
           },
           "concurrency": {
             "$ref": "#/components/schemas/ResourceConcurrencyResponse",
