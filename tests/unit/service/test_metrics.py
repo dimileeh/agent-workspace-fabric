@@ -2381,6 +2381,91 @@ async def test_capacity_queue_blocked_reason_counts_refills_after_provider_suppr
 
 
 @pytest.mark.unit
+async def test_capacity_queue_blocked_reason_counts_caps_provider_suppression_refill_pages(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import metrics
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+    from awf.service.resource_capacity import ReservedResources, WorkspaceResourceDefaults
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(metrics, "DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT", 2)
+    monkeypatch.setattr(
+        metrics,
+        "DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT",
+        2,
+        raising=False,
+    )
+    for index in range(5):
+        await create_workspace(
+            session_factory,
+            status=WorkspaceStatus.requested,
+            updated_at=now,
+            created_at=now + timedelta(seconds=index),
+            task_policy={
+                "scheduler": {"base_priority": 100 - index},
+                PROVIDER_RECOVERY_STATE_KEY: {
+                    "not_before": (now + timedelta(minutes=5)).isoformat(),
+                },
+            },
+        )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async with session_factory() as session:
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await metrics._capacity_queue_blocked_reason_counts(
+                session,
+                settings=Settings(
+                    _env_file=None,
+                    local_capacity_dind_slots=1,
+                ),
+                node_id="local",
+                allocated_resources=ReservedResources(
+                    active_workspace_count=1,
+                    steady_cpu=0.0,
+                    steady_memory_gb=0.0,
+                    peak_cpu=0.0,
+                    peak_memory_gb=0.0,
+                    disk_mb=0,
+                    dind_slots=1,
+                ),
+                resource_defaults=WorkspaceResourceDefaults(
+                    steady_cpu=1.0,
+                    steady_memory_gb=2.0,
+                    peak_cpu=1.0,
+                    peak_memory_gb=2.0,
+                ),
+                detected_local_capacity=None,
+                scoring_at=now,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    queue_page_reads = [
+        statement
+        for statement in statements
+        if "select workspaces.id as queue_workspace_id" in statement
+    ]
+    assert counts == {}
+    assert len(queue_page_reads) == 2
+
+
+@pytest.mark.unit
 async def test_resource_saturation_defaulted_dind_profiles_are_counted_everywhere(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

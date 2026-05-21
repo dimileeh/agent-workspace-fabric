@@ -87,6 +87,7 @@ MIN_FAILURE_EXAMPLE_LIMIT = 1
 MAX_FAILURE_EXAMPLE_LIMIT = 25
 DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT = 5
 DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT = 500
+DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT = 3
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -1640,6 +1641,7 @@ async def _capacity_queue_blocked_reason_counts(
         node_id=node_id,
         resource_defaults=resource_defaults,
         limit=DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT,
+        max_refill_pages=DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT,
         scoring_at=scoring_time,
     )
     if not candidates:
@@ -1688,18 +1690,22 @@ async def _provider_recovery_eligible_capacity_queue_scan_candidates(
     node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
     limit: int,
+    max_refill_pages: int,
     scoring_at: datetime,
 ) -> list[_CapacityQueueCandidate]:
-    if limit <= 0:
+    if limit <= 0 or max_refill_pages <= 0:
         return []
 
     # Blocker counts are a bounded scheduler-frontier diagnostic on the hot
     # metrics path; the queue totals above remain whole-queue aggregates. The
     # bound applies after provider-recovery suppression so cooldown/circuit
-    # rows do not shrink the analyzed scheduler frontier.
+    # rows do not shrink the analyzed scheduler frontier. Refill is still
+    # truncated after ``limit * max_refill_pages`` scanned rows so suppression-
+    # heavy queues cannot turn the diagnostic into a whole-queue scan.
     eligible_candidates: list[_CapacityQueueCandidate] = []
     offset = 0
-    while len(eligible_candidates) < limit:
+    pages_scanned = 0
+    while len(eligible_candidates) < limit and pages_scanned < max_refill_pages:
         candidates = await _capacity_queue_candidates(
             session,
             node_id=node_id,
@@ -1710,6 +1716,7 @@ async def _provider_recovery_eligible_capacity_queue_scan_candidates(
         )
         if not candidates:
             break
+        pages_scanned += 1
         eligible_candidates.extend(
             await _provider_recovery_eligible_capacity_queue_candidates(
                 session,
