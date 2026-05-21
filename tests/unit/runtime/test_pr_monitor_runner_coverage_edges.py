@@ -3862,7 +3862,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         )
     assert repair_reasons == [
         "dirty_worktree_pre_commit",
-        "dirty_worktree_post_commit_failed",
+        "dirty_worktree_post_commit_succeeded",
     ]
     assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
 
