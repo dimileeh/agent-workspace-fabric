@@ -9275,10 +9275,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
             await worker.wait_for_execution_tasks()
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("remote_push_branch", [None, "   "])
     async def test_preserved_active_pushed_branch_lookup_falls_back_to_branch_name(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        remote_push_branch: str | None,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -9292,7 +9294,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
-            ws.remote_push_branch = None
+            ws.remote_push_branch = remote_push_branch
             await s.commit()
 
         resolver = _RecordingBranchOpenPRResolver(

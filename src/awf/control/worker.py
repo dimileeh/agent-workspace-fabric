@@ -2020,9 +2020,10 @@ class ControlWorker:
             base_commit,
             expected_head_repo_slug,
         ) = branch_recovery_context
+        lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
         branch_lookup = await self._resolve_preserved_active_branch_open_pr(
             repo_url=repo_url,
-            branch_name=remote_push_branch or branch_name,
+            branch_name=lookup_branch_name,
             expected_head_repo_slug=expected_head_repo_slug,
             # A preserved branch PR may have been retargeted after creation.
             # Recover by head branch and let match/ambiguity checks below guard safety.
@@ -5348,6 +5349,10 @@ def _metadata_value(metadata: object, *names: str) -> object:
 
 def _metadata_nonempty_str(metadata: object, *names: str) -> str | None:
     value = _metadata_value(metadata, *names)
+    return _nonempty_str(value)
+
+
+def _nonempty_str(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
