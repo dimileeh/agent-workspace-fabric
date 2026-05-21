@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from awf.common.config import Settings
@@ -9,6 +10,115 @@ from awf.service.disk import DiskCheck
 
 _MIB = 1024 * 1024
 type Number = int | float
+
+_CPU_LIMIT_SOURCE = "cpu"
+_MEMORY_LIMIT_SOURCE = "memory"
+_DIND_LIMIT_SOURCE = "dind_slots"
+
+
+@dataclass(frozen=True)
+class LocalCapacityConstraint:
+    dimension: str
+    reason_code: str
+    limit_source: str
+
+
+@dataclass(frozen=True)
+class LocalCapacityBlocker:
+    dimension: str
+    reason_code: str
+    limit: Number
+    allocated: Number
+    requested: Number
+    after: Number
+    unsatisfiable: bool
+
+
+LOCAL_CAPACITY_CONSTRAINTS: tuple[LocalCapacityConstraint, ...] = (
+    LocalCapacityConstraint(
+        dimension="steady_cpu",
+        reason_code="STEADY_CPU_CAPACITY_SATURATED",
+        limit_source=_CPU_LIMIT_SOURCE,
+    ),
+    LocalCapacityConstraint(
+        dimension="peak_cpu",
+        reason_code="PEAK_CPU_CAPACITY_SATURATED",
+        limit_source=_CPU_LIMIT_SOURCE,
+    ),
+    LocalCapacityConstraint(
+        dimension="steady_memory_gb",
+        reason_code="STEADY_MEMORY_CAPACITY_SATURATED",
+        limit_source=_MEMORY_LIMIT_SOURCE,
+    ),
+    LocalCapacityConstraint(
+        dimension="peak_memory_gb",
+        reason_code="PEAK_MEMORY_CAPACITY_SATURATED",
+        limit_source=_MEMORY_LIMIT_SOURCE,
+    ),
+    LocalCapacityConstraint(
+        dimension="dind_slots",
+        reason_code="DIND_CAPACITY_SATURATED",
+        limit_source=_DIND_LIMIT_SOURCE,
+    ),
+)
+
+
+def default_dind_slots_from_profile(profile: object) -> int:
+    if not isinstance(profile, Mapping):
+        return 0
+    docker = profile.get("docker")
+    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
+        return 1
+    return 0
+
+
+def local_capacity_limit(
+    constraint: LocalCapacityConstraint,
+    *,
+    cpu_limit: Number | None,
+    memory_limit: Number | None,
+    dind_slots: Number | None,
+) -> Number | None:
+    if constraint.limit_source == _CPU_LIMIT_SOURCE:
+        return cpu_limit
+    if constraint.limit_source == _MEMORY_LIMIT_SOURCE:
+        return memory_limit
+    if constraint.limit_source == _DIND_LIMIT_SOURCE:
+        return dind_slots
+    raise ValueError(f"unknown local capacity limit source: {constraint.limit_source}")
+
+
+def local_capacity_blocker(
+    *,
+    constraint: LocalCapacityConstraint,
+    limit: Number | None,
+    allocated: Number,
+    requested: Number,
+) -> LocalCapacityBlocker | None:
+    if limit is None:
+        return None
+    after = allocated + requested
+    if requested > limit:
+        return LocalCapacityBlocker(
+            dimension=constraint.dimension,
+            reason_code=constraint.reason_code,
+            limit=limit,
+            allocated=allocated,
+            requested=requested,
+            after=after,
+            unsatisfiable=True,
+        )
+    if after > limit:
+        return LocalCapacityBlocker(
+            dimension=constraint.dimension,
+            reason_code=constraint.reason_code,
+            limit=limit,
+            allocated=allocated,
+            requested=requested,
+            after=after,
+            unsatisfiable=False,
+        )
+    return None
 
 
 @dataclass(frozen=True)

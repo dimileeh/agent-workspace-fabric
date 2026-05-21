@@ -212,6 +212,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
             max_concurrent_executions=settings.worker_max_concurrent_executions,
             node_id=node_id,
+            local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
+            local_capacity_memory_gb=settings.local_capacity_memory_gb,
+            local_capacity_dind_slots=settings.local_capacity_dind_slots,
+            workspace_steady_cpu=settings.workspace_steady_cpu,
+            workspace_steady_memory_gb=settings.workspace_steady_memory_gb,
+            workspace_peak_cpu=settings.workspace_peak_cpu,
+            workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)

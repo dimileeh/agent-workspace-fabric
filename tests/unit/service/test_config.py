@@ -124,6 +124,29 @@ def test_compose_env_file_sentinel_is_public_service_contract() -> None:
 
 
 @pytest.mark.unit
+def test_custom_adjacent_provider_env_file_is_used_for_non_local_compose(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=from-env-file\n", encoding="utf-8")
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={},
+        compose_file=compose_file,
+    )
+
+    assert environ["OPENAI_API_KEY"] == "from-env-file"
+    assert service_config._can_use_adjacent_provider_env_file(env_file, compose_file)  # noqa: SLF001
+    assert service_config._can_use_adjacent_provider_env_file(  # noqa: SLF001
+        LOCAL_SERVICE_COMPOSE_FILE.parent / ".env",
+        LOCAL_SERVICE_COMPOSE_FILE,
+    )
+
+
+@pytest.mark.unit
 def test_local_service_environ_preserves_host_port_overrides(tmp_path: Path) -> None:
     env_file = tmp_path / "docker" / "compose" / ".env"
     env_file.parent.mkdir(parents=True, exist_ok=True)

@@ -3,38 +3,55 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import ProviderModelCircuitBreakerRepository, ResourceReservationRepository
+from awf.db.models import Operation, ResourceReservation, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+    ProviderModelCircuitBreakerRepository,
+    ResourceReservationRepository,
+    resolve_session_dialect_name,
+    scheduler_order_expressions,
+)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
 )
+from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_NO_LOOP_REASON,
     PROVIDER_RECOVERY_STATE_KEY,
+    provider_cooldown_not_before,
+    provider_for_agent_model,
 )
 from awf.service.resource_capacity import (
+    LOCAL_CAPACITY_CONSTRAINTS,
     LocalCapacityLimits,
     ReservedResources,
     ResourceCapacitySummary,
     WorkspaceResourceDefaults,
+    default_dind_slots_from_profile,
+    local_capacity_blocker,
+    local_capacity_limit,
     resource_capacity_summary,
 )
+from awf.service.scheduler import scheduler_order_key, scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import workspace_failure_details_payload
 
@@ -69,6 +86,8 @@ DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
 MIN_FAILURE_EXAMPLE_LIMIT = 1
 MAX_FAILURE_EXAMPLE_LIMIT = 25
 DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT = 5
+DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT = 500
+DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT = 3
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -255,6 +274,69 @@ class AdmissionSummary:
 
 
 @dataclass(frozen=True)
+class CapacityQueueSummary:
+    queued_workspace_count: int
+    oldest_workspace_id: str | None
+    oldest_wait_seconds: int | None
+    planned_resources: ReservedResources
+    blocked_reason_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _AllocatedResourceAuxiliaryCounts:
+    unreserved_workspace_count: int
+    defaulted_dind_slots: int
+
+
+@dataclass(frozen=True)
+class _CapacityQueueWorkspace:
+    id: str
+    agent: str
+    task_class: str | None
+    task_policy: dict[str, Any]
+    created_at: datetime
+    resolved_profile: object
+
+
+@dataclass(frozen=True)
+class _CapacityQueueCandidate:
+    workspace: _CapacityQueueWorkspace
+    demand: ReservedResources
+
+
+@dataclass
+class _CapacityQueueAllocated:
+    active_workspace_count: int
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int = 0
+    dind_slots: int = 0
+
+    @classmethod
+    def from_reserved(cls, resources: ReservedResources) -> _CapacityQueueAllocated:
+        return cls(
+            active_workspace_count=resources.active_workspace_count,
+            steady_cpu=resources.steady_cpu,
+            steady_memory_gb=resources.steady_memory_gb,
+            peak_cpu=resources.peak_cpu,
+            peak_memory_gb=resources.peak_memory_gb,
+            disk_mb=resources.disk_mb,
+            dind_slots=resources.dind_slots,
+        )
+
+    def add(self, demand: ReservedResources) -> None:
+        self.active_workspace_count += demand.active_workspace_count
+        self.steady_cpu += demand.steady_cpu
+        self.steady_memory_gb += demand.steady_memory_gb
+        self.peak_cpu += demand.peak_cpu
+        self.peak_memory_gb += demand.peak_memory_gb
+        self.disk_mb += demand.disk_mb
+        self.dind_slots += demand.dind_slots
+
+
+@dataclass(frozen=True)
 class ProviderCircuitBreakerSummary:
     provider: str
     model: str
@@ -283,6 +365,9 @@ class ResourceSaturationSummary:
     resource_defaults: WorkspaceResourceDefaults
     reserved_resources: ReservedResources
     capacity: ResourceCapacitySummary
+    allocated_resources: ReservedResources
+    allocated_capacity: ResourceCapacitySummary
+    capacity_queue: CapacityQueueSummary
     concurrency: ResourceConcurrency
     disk: DiskCheck
     orphan_resources: OrphanResourceSummary
@@ -652,7 +737,10 @@ async def summarize_resource_saturation_for_session(
     """Build the resource saturation payload for local console capacity views."""
 
     generated_at = _to_utc(now or datetime.now(UTC))
-    status_counts = await _count_current_by_status(session)
+    # Status counts are scoped to the local node so workspace_counts,
+    # reserved_resources, and concurrency metrics describe this node's workload.
+    node_id = _local_capacity_node_id(settings)
+    status_counts = await _count_current_by_status(session, node_id=node_id)
     workspace_counts = _workspace_saturation_counts(status_counts)
     worker = WorkerConcurrencySettings(
         max_concurrent_provisions=settings.worker_max_concurrent_provisions,
@@ -667,7 +755,18 @@ async def summarize_resource_saturation_for_session(
     reserved_resources = await _reserved_resources_for_session(
         session,
         workspace_counts.active_total,
+        node_id=node_id,
         resource_defaults=resource_defaults,
+    )
+    allocation_auxiliary_counts = await _allocated_resource_auxiliary_counts_for_session(
+        session,
+        node_id=node_id,
+    )
+    allocated_resources = await _allocated_resources_for_session(
+        session,
+        node_id=node_id,
+        resource_defaults=resource_defaults,
+        auxiliary_counts=allocation_auxiliary_counts,
     )
     concurrency = _resource_concurrency(status_counts, worker=worker)
     resolved_disk_check = disk_check
@@ -684,6 +783,22 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
         disk_check=resolved_disk_check,
         detected_local_capacity=detected_local_capacity,
+    )
+    allocated_capacity = resource_capacity_summary(
+        settings=settings,
+        reserved=allocated_resources,
+        resource_defaults=resource_defaults,
+        disk_check=resolved_disk_check,
+        detected_local_capacity=detected_local_capacity,
+    )
+    capacity_queue = await _capacity_queue_summary(
+        session,
+        settings=settings,
+        node_id=node_id,
+        resource_defaults=resource_defaults,
+        detected_local_capacity=detected_local_capacity,
+        allocation_auxiliary_counts=allocation_auxiliary_counts,
+        now=generated_at,
     )
     admission = _resource_admission_summary(
         disk_check=resolved_disk_check,
@@ -722,6 +837,9 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
         reserved_resources=reserved_resources,
         capacity=capacity,
+        allocated_resources=allocated_resources,
+        allocated_capacity=allocated_capacity,
+        capacity_queue=capacity_queue,
         concurrency=concurrency,
         disk=resolved_disk_check,
         orphan_resources=resolved_orphan_resources,
@@ -749,9 +867,15 @@ async def _count_by_status(
     return counts
 
 
-async def _count_current_by_status(session: AsyncSession) -> dict[str, int]:
+async def _count_current_by_status(
+    session: AsyncSession,
+    *,
+    node_id: str | None = None,
+) -> dict[str, int]:
     counts = {status.value: 0 for status in WorkspaceStatus}
     stmt = select(Workspace.status, func.count()).group_by(Workspace.status)
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
     rows = await session.execute(stmt)
     for status, count in rows.all():
         counts[str(status)] = int(count)
@@ -1169,12 +1293,144 @@ async def _reserved_resources_for_session(
     session: AsyncSession,
     active_workspace_count: int,
     *,
+    node_id: str,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await ResourceReservationRepository(session).active_latest_totals()
-    fallback_count = max(0, active_workspace_count - persisted["workspace_count"])
+    persisted = await _active_latest_totals_for_workspace_scope(session, node_id=node_id)
+    defaulted_dind_slots = await _defaulted_dind_slots_for_session(session, node_id=node_id)
+    return _reserved_resources_from_totals(
+        persisted,
+        active_workspace_count,
+        resource_defaults=resource_defaults,
+        defaulted_dind_slots=defaulted_dind_slots,
+    )
+
+
+async def _allocated_resources_for_session(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
+) -> ReservedResources:
+    persisted = await _active_latest_totals_for_metrics_allocation_scope(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
+    )
+    counts = auxiliary_counts
+    if counts is None:
+        counts = await _allocated_resource_auxiliary_counts_for_session(
+            session,
+            node_id=node_id,
+        )
+    return _reserved_resources_from_totals(
+        persisted,
+        int(persisted["workspace_count"]) + counts.unreserved_workspace_count,
+        resource_defaults=resource_defaults,
+        defaulted_dind_slots=counts.defaulted_dind_slots,
+    )
+
+
+async def _scheduler_allocated_resources_for_session(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
+) -> ReservedResources:
+    persisted = await _active_latest_totals_for_scheduler_allocation_scope(
+        session,
+        statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+        node_id=node_id,
+    )
+    counts = auxiliary_counts
+    if counts is None:
+        counts = await _allocated_resource_auxiliary_counts_for_session(
+            session,
+            node_id=node_id,
+        )
+    return _reserved_resources_from_totals(
+        persisted,
+        int(persisted["workspace_count"]) + counts.unreserved_workspace_count,
+        resource_defaults=resource_defaults,
+        defaulted_dind_slots=counts.defaulted_dind_slots,
+    )
+
+
+async def _allocated_resource_auxiliary_counts_for_session(
+    session: AsyncSession,
+    *,
+    node_id: str,
+) -> _AllocatedResourceAuxiliaryCounts:
+    return _AllocatedResourceAuxiliaryCounts(
+        unreserved_workspace_count=await _unreserved_workspace_count_for_session(
+            session,
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        ),
+        defaulted_dind_slots=await _defaulted_dind_slots_for_session(
+            session,
+            statuses=ALLOCATED_RESOURCE_RESERVATION_STATUSES,
+            node_id=node_id,
+        ),
+    )
+
+
+async def _active_latest_totals_for_workspace_scope(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+    node_id: str | None = None,
+) -> dict[str, float | int]:
+    """Sum latest active reservations for workspaces routed to this metrics scope."""
+
+    return await ResourceReservationRepository(session).active_latest_totals_for_workspace_scope(
+        statuses=statuses,
+        node_id=node_id,
+    )
+
+
+async def _active_latest_totals_for_scheduler_allocation_scope(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str],
+    node_id: str,
+) -> dict[str, float | int]:
+    """Sum latest active reservations using the scheduler's local allocation scope."""
+
+    repo = ResourceReservationRepository(session)
+    return await repo.active_latest_totals_for_scheduler_allocation_scope(
+        statuses=statuses,
+        node_id=node_id,
+    )
+
+
+async def _active_latest_totals_for_metrics_allocation_scope(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str],
+    node_id: str,
+) -> dict[str, float | int]:
+    """Sum latest active reservations in the local metrics allocation lane."""
+
+    repo = ResourceReservationRepository(session)
+    return await repo.active_latest_totals_for_metrics_allocation_scope(
+        statuses=statuses,
+        node_id=node_id,
+    )
+
+
+def _reserved_resources_from_totals(
+    persisted: dict[str, float | int],
+    workspace_count: int,
+    *,
+    resource_defaults: WorkspaceResourceDefaults,
+    defaulted_dind_slots: int = 0,
+) -> ReservedResources:
+    fallback_count = max(0, workspace_count - int(persisted["workspace_count"]))
     return ReservedResources(
-        active_workspace_count=active_workspace_count,
+        active_workspace_count=workspace_count,
         steady_cpu=persisted["steady_cpu"] + fallback_count * resource_defaults.steady_cpu,
         steady_memory_gb=(
             persisted["steady_memory_gb"] + fallback_count * resource_defaults.steady_memory_gb
@@ -1184,8 +1440,484 @@ async def _reserved_resources_for_session(
             persisted["peak_memory_gb"] + fallback_count * resource_defaults.peak_memory_gb
         ),
         disk_mb=int(persisted["disk_mb"]),
-        dind_slots=int(persisted["dind_slots"]),
+        dind_slots=int(persisted["dind_slots"]) + defaulted_dind_slots,
     )
+
+
+async def _defaulted_dind_slots_for_session(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+    node_id: str | None = None,
+) -> int:
+    status_filter = _workspace_status_filter(statuses)
+    if status_filter is None:
+        return 0
+    active_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .exists()
+    )
+    stmt = select(func.coalesce(func.sum(_defaulted_dind_slots_sql_expression()), 0)).where(
+        status_filter,
+        ~active_reservation_exists,
+    )
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
+    return int(await session.scalar(stmt) or 0)
+
+
+def _defaulted_dind_slots_sql_expression() -> Any:
+    resolved_profile: Any = Workspace.resolved_profile
+    return case(
+        (resolved_profile["docker"]["mode"].as_string() == "dind", 1),
+        else_=0,
+    )
+
+
+async def _unreserved_workspace_count_for_session(
+    session: AsyncSession,
+    *,
+    statuses: Iterable[WorkspaceStatus | str] | None = None,
+    node_id: str | None = None,
+) -> int:
+    status_filter = _workspace_status_filter(statuses)
+    if status_filter is None:
+        return 0
+    active_reservation_exists = (
+        select(ResourceReservation.id)
+        .where(
+            ResourceReservation.workspace_id == Workspace.id,
+            ResourceReservation.released_at.is_(None),
+        )
+        .exists()
+    )
+    stmt = select(func.count(Workspace.id)).where(
+        status_filter,
+        ~active_reservation_exists,
+    )
+    if node_id is not None:
+        stmt = stmt.where(_workspace_node_scope_filter(node_id))
+    return int(await session.scalar(stmt) or 0)
+
+
+def _workspace_status_filter(
+    statuses: Iterable[WorkspaceStatus | str] | None,
+) -> Any | None:
+    if statuses is None:
+        return ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
+    status_values = tuple(
+        status.value if isinstance(status, WorkspaceStatus) else str(status) for status in statuses
+    )
+    if not status_values:
+        return None
+    return Workspace.status.in_(status_values)
+
+
+async def _capacity_queue_summary(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    detected_local_capacity: LocalCapacityLimits | None,
+    now: datetime,
+    allocation_auxiliary_counts: _AllocatedResourceAuxiliaryCounts | None = None,
+) -> CapacityQueueSummary:
+    requested_filter = and_(
+        Workspace.status == WorkspaceStatus.requested.value,
+        _workspace_node_scope_filter(node_id),
+    )
+    queued_count = await session.scalar(select(func.count(Workspace.id)).where(requested_filter))
+    requested_count = int(queued_count or 0)
+    planned_totals = await _active_latest_totals_for_workspace_scope(
+        session,
+        statuses=(WorkspaceStatus.requested,),
+        node_id=node_id,
+    )
+    planned_resources = _reserved_resources_from_totals(
+        planned_totals,
+        requested_count,
+        resource_defaults=resource_defaults,
+        defaulted_dind_slots=await _defaulted_dind_slots_for_session(
+            session,
+            statuses=(WorkspaceStatus.requested,),
+            node_id=node_id,
+        ),
+    )
+    oldest_row = (
+        await session.execute(
+            select(Workspace.id, Workspace.created_at)
+            .where(requested_filter)
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+            .limit(1)
+        )
+    ).one_or_none()
+    oldest_workspace_id: str | None = None
+    oldest_wait_seconds: int | None = None
+    if oldest_row is not None:
+        oldest_workspace_id = oldest_row.id
+        oldest_wait_seconds = max(
+            0,
+            int((_to_utc(now) - _to_utc(oldest_row.created_at)).total_seconds()),
+        )
+    has_configured_constraints = any(
+        local_capacity_limit(
+            constraint,
+            cpu_limit=settings.local_capacity_cpu_cores,
+            memory_limit=settings.local_capacity_memory_gb,
+            dind_slots=settings.local_capacity_dind_slots,
+        )
+        is not None
+        for constraint in LOCAL_CAPACITY_CONSTRAINTS
+    )
+    if has_configured_constraints:
+        allocated_for_gate = await _scheduler_allocated_resources_for_session(
+            session,
+            node_id=node_id,
+            resource_defaults=resource_defaults,
+            auxiliary_counts=allocation_auxiliary_counts,
+        )
+    else:
+        allocated_for_gate = ReservedResources(
+            active_workspace_count=0,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=0.0,
+            peak_memory_gb=0.0,
+        )
+    blockers = await _capacity_queue_blocked_reason_counts(
+        session,
+        settings=settings,
+        node_id=node_id,
+        allocated_resources=allocated_for_gate,
+        resource_defaults=resource_defaults,
+        detected_local_capacity=detected_local_capacity,
+        scoring_at=now,
+    )
+    return CapacityQueueSummary(
+        queued_workspace_count=requested_count,
+        oldest_workspace_id=oldest_workspace_id,
+        oldest_wait_seconds=oldest_wait_seconds,
+        planned_resources=planned_resources,
+        blocked_reason_counts=blockers,
+    )
+
+
+async def _capacity_queue_blocked_reason_counts(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    node_id: str,
+    allocated_resources: ReservedResources,
+    resource_defaults: WorkspaceResourceDefaults,
+    detected_local_capacity: LocalCapacityLimits | None,
+    scoring_at: datetime | None = None,
+) -> dict[str, int]:
+    # Queue blockers must mirror scheduler enforcement, which only gates on
+    # explicitly configured local capacity limits.
+    del detected_local_capacity
+    cpu_limit = settings.local_capacity_cpu_cores
+    memory_limit = settings.local_capacity_memory_gb
+    configured_constraints = []
+    for constraint in LOCAL_CAPACITY_CONSTRAINTS:
+        limit = local_capacity_limit(
+            constraint,
+            cpu_limit=cpu_limit,
+            memory_limit=memory_limit,
+            dind_slots=settings.local_capacity_dind_slots,
+        )
+        if limit is not None:
+            configured_constraints.append((constraint, limit))
+    if not configured_constraints:
+        return {}
+
+    scoring_time = scoring_at or datetime.now(UTC)
+    candidates = await _provider_recovery_eligible_capacity_queue_scan_candidates(
+        session,
+        node_id=node_id,
+        resource_defaults=resource_defaults,
+        limit=DEFAULT_CAPACITY_QUEUE_BLOCKER_SCAN_LIMIT,
+        max_refill_pages=DEFAULT_CAPACITY_QUEUE_BLOCKER_REFILL_PAGE_LIMIT,
+        scoring_at=scoring_time,
+    )
+    if not candidates:
+        return {}
+
+    # SQL normally emits the same scheduler order, but keep this bounded
+    # Python pass as a diagnostic guard if a dialect or future expression
+    # change diverges from ``scheduler_order_key``.
+    ordered_candidates = sorted(
+        candidates,
+        key=lambda candidate: scheduler_order_key(
+            scheduler_score_from_workspace(candidate.workspace, now=scoring_time)
+        ),
+    )
+    allocated = _CapacityQueueAllocated.from_reserved(allocated_resources)
+    counts: dict[str, int] = {}
+    # These counts are FIFO saturation frontiers, not every workspace waiting
+    # behind a frontier. Unsatisfiable requests are counted individually because
+    # they are independent of current allocated capacity.
+    deferred_frontiers: set[str] = set()
+    for candidate in ordered_candidates:
+        blockers = []
+        for constraint, limit in configured_constraints:
+            blocker = local_capacity_blocker(
+                constraint=constraint,
+                limit=limit,
+                allocated=getattr(allocated, constraint.dimension),
+                requested=getattr(candidate.demand, constraint.dimension),
+            )
+            if blocker is not None:
+                blockers.append(blocker)
+        if blockers:
+            for blocker in blockers:
+                if blocker.unsatisfiable or blocker.reason_code not in deferred_frontiers:
+                    counts[blocker.reason_code] = counts.get(blocker.reason_code, 0) + 1
+                if not blocker.unsatisfiable:
+                    deferred_frontiers.add(blocker.reason_code)
+            continue
+        allocated.add(candidate.demand)
+    return dict(sorted(counts.items()))
+
+
+async def _provider_recovery_eligible_capacity_queue_scan_candidates(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    limit: int,
+    max_refill_pages: int,
+    scoring_at: datetime,
+) -> list[_CapacityQueueCandidate]:
+    if limit <= 0 or max_refill_pages <= 0:
+        return []
+
+    # Blocker counts are a bounded scheduler-frontier diagnostic on the hot
+    # metrics path; the queue totals above remain whole-queue aggregates. The
+    # bound applies after provider-recovery suppression so cooldown/circuit
+    # rows do not shrink the analyzed scheduler frontier. Refill is still
+    # truncated after ``limit * max_refill_pages`` scanned rows so suppression-
+    # heavy queues cannot turn the diagnostic into a whole-queue scan.
+    eligible_candidates: list[_CapacityQueueCandidate] = []
+    offset = 0
+    pages_scanned = 0
+    while len(eligible_candidates) < limit and pages_scanned < max_refill_pages:
+        candidates = await _capacity_queue_candidates(
+            session,
+            node_id=node_id,
+            resource_defaults=resource_defaults,
+            limit=limit,
+            offset=offset,
+            scoring_at=scoring_at,
+        )
+        if not candidates:
+            break
+        pages_scanned += 1
+        eligible_candidates.extend(
+            await _provider_recovery_eligible_capacity_queue_candidates(
+                session,
+                candidates,
+                scoring_at=scoring_at,
+            )
+        )
+        if len(candidates) < limit:
+            break
+        offset += len(candidates)
+    return eligible_candidates[:limit]
+
+
+async def _provider_recovery_eligible_capacity_queue_candidates(
+    session: AsyncSession,
+    candidates: list[_CapacityQueueCandidate],
+    *,
+    scoring_at: datetime,
+) -> list[_CapacityQueueCandidate]:
+    if not candidates:
+        return []
+
+    cooldown_eligible: list[_CapacityQueueCandidate] = []
+    circuit_candidate_pairs: dict[str, tuple[str, str]] = {}
+    for candidate in candidates:
+        workspace = candidate.workspace
+        not_before = provider_cooldown_not_before(workspace.task_policy)
+        if not_before is not None and not_before > scoring_at:
+            continue
+        model = agent_model_from_task_policy(workspace.task_policy)
+        provider = provider_for_agent_model(workspace.agent, model)
+        if provider is not None and model is not None:
+            circuit_candidate_pairs[workspace.id] = (provider, model)
+        cooldown_eligible.append(candidate)
+
+    if not circuit_candidate_pairs:
+        return cooldown_eligible
+
+    open_breakers = await ProviderModelCircuitBreakerRepository(session).open_breakers_for_pairs(
+        pairs=circuit_candidate_pairs.values(),
+        now=scoring_at,
+    )
+    return [
+        candidate
+        for candidate in cooldown_eligible
+        if circuit_candidate_pairs.get(candidate.workspace.id) not in open_breakers
+    ]
+
+
+async def _capacity_queue_candidates(
+    session: AsyncSession,
+    *,
+    node_id: str,
+    resource_defaults: WorkspaceResourceDefaults,
+    limit: int,
+    scoring_at: datetime,
+    offset: int = 0,
+) -> list[_CapacityQueueCandidate]:
+    order_expressions = scheduler_order_expressions(
+        scoring_at=scoring_at,
+        dialect_name=resolve_session_dialect_name(session, None),
+    )
+    requested_reservation_workspace = aliased(Workspace, name="requested_reservation_workspace")
+    latest_active_reservations = (
+        select(
+            ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.steady_cpu.label("reservation_steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("reservation_steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("reservation_peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("reservation_peak_memory_gb"),
+            ResourceReservation.disk_mb.label("reservation_disk_mb"),
+            ResourceReservation.dind_slots.label("reservation_dind_slots"),
+            func.row_number()
+            .over(
+                partition_by=ResourceReservation.workspace_id,
+                order_by=(
+                    ResourceReservation.reserved_at.desc(),
+                    ResourceReservation.id.desc(),
+                ),
+            )
+            .label("reservation_rank"),
+        )
+        .join(
+            requested_reservation_workspace,
+            ResourceReservation.workspace_id == requested_reservation_workspace.id,
+        )
+        .where(
+            ResourceReservation.released_at.is_(None),
+            requested_reservation_workspace.status == WorkspaceStatus.requested.value,
+            or_(
+                requested_reservation_workspace.node_id == node_id,
+                requested_reservation_workspace.node_id.is_(None),
+            ),
+        )
+        .subquery()
+    )
+    stmt = (
+        select(
+            Workspace.id.label("queue_workspace_id"),
+            Workspace.agent.label("queue_agent"),
+            Workspace.task_class.label("queue_task_class"),
+            Workspace.task_policy.label("queue_task_policy"),
+            Workspace.created_at.label("queue_created_at"),
+            Workspace.resolved_profile.label("queue_resolved_profile"),
+            latest_active_reservations.c.reservation_steady_cpu,
+            latest_active_reservations.c.reservation_steady_memory_gb,
+            latest_active_reservations.c.reservation_peak_cpu,
+            latest_active_reservations.c.reservation_peak_memory_gb,
+            latest_active_reservations.c.reservation_disk_mb,
+            latest_active_reservations.c.reservation_dind_slots,
+        )
+        # Workspace routing defines the local queue scope; reservation node_id can lag
+        # during reassignment/backfill, but scheduler demand still uses this row.
+        .outerjoin(
+            latest_active_reservations,
+            and_(
+                latest_active_reservations.c.workspace_id == Workspace.id,
+                latest_active_reservations.c.reservation_rank == 1,
+            ),
+        )
+        .where(
+            Workspace.status == WorkspaceStatus.requested.value,
+            _workspace_node_scope_filter(node_id),
+        )
+        .order_by(
+            order_expressions.class_priority.desc(),
+            order_expressions.effective_score.desc(),
+            Workspace.created_at.asc(),
+            Workspace.id.asc(),
+        )
+        .limit(limit)
+    )
+    if offset > 0:
+        stmt = stmt.offset(offset)
+    rows = (await session.execute(stmt)).all()
+    return [
+        _CapacityQueueCandidate(
+            workspace=_capacity_queue_workspace_from_row(row._mapping),
+            demand=_capacity_queue_demand_from_row(
+                values=row._mapping,
+                resource_defaults=resource_defaults,
+            ),
+        )
+        for row in rows
+    ]
+
+
+def _capacity_queue_workspace_from_row(values: Any) -> _CapacityQueueWorkspace:
+    return _CapacityQueueWorkspace(
+        id=str(values["queue_workspace_id"]),
+        agent=values["queue_agent"],
+        task_class=values["queue_task_class"],
+        task_policy=dict(values["queue_task_policy"] or {}),
+        created_at=values["queue_created_at"],
+        resolved_profile=values["queue_resolved_profile"],
+    )
+
+
+def _capacity_queue_demand_from_row(
+    *,
+    values: Any,
+    resource_defaults: WorkspaceResourceDefaults,
+) -> ReservedResources:
+    return ReservedResources(
+        active_workspace_count=1,
+        steady_cpu=_float_or_default(
+            values["reservation_steady_cpu"],
+            resource_defaults.steady_cpu,
+        ),
+        steady_memory_gb=_float_or_default(
+            values["reservation_steady_memory_gb"],
+            resource_defaults.steady_memory_gb,
+        ),
+        peak_cpu=_float_or_default(
+            values["reservation_peak_cpu"],
+            resource_defaults.peak_cpu,
+        ),
+        peak_memory_gb=_float_or_default(
+            values["reservation_peak_memory_gb"],
+            resource_defaults.peak_memory_gb,
+        ),
+        disk_mb=int(values["reservation_disk_mb"] or 0),
+        dind_slots=(
+            int(values["reservation_dind_slots"])
+            if values["reservation_dind_slots"] is not None
+            else default_dind_slots_from_profile(values["queue_resolved_profile"])
+        ),
+    )
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    return default if value is None else float(value)
+
+
+def _local_capacity_node_id(settings: Settings) -> str:
+    configured = settings.worker_node_id.strip() if settings.worker_node_id else ""
+    return configured or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
+
+
+def _workspace_node_scope_filter(node_id: str) -> Any:
+    return or_(Workspace.node_id == node_id, Workspace.node_id.is_(None))
 
 
 def _resource_concurrency(
@@ -1270,7 +2002,7 @@ def _resource_admission_summary(
     return AdmissionSummary(ok=True, status="ok", reason=ADMISSION_OK_REASON)
 
 
-def _sum_status_counts(status_counts: dict[str, int], statuses: frozenset[str]) -> int:
+def _sum_status_counts(status_counts: dict[str, int], statuses: Iterable[str]) -> int:
     return sum(status_counts[status] for status in statuses)
 
 

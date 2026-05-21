@@ -2872,6 +2872,15 @@ def test_executor_metadata_helpers_cover_unreadable_and_invalid_edges(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    class UnreadablePath:
+        def is_file(self) -> bool:
+            return True
+
+        def open(self, *_args: object, **_kwargs: object) -> object:
+            raise OSError("cannot read")
+
+    assert executor_mod._digest_file_if_present(UnreadablePath()) is None  # type: ignore[arg-type]
+
     unreadable = tmp_path / "unreadable.md"
     unreadable.write_text("content", encoding="utf-8")
     original_open = Path.open
@@ -2887,6 +2896,12 @@ def test_executor_metadata_helpers_cover_unreadable_and_invalid_edges(
     assert (
         executor_mod._requested_tier_from_metadata(  # noqa: SLF001
             {"validation": {"requested_tier": 0}}
+        )
+        is None
+    )
+    assert (
+        executor_mod._requested_tier_from_metadata(  # noqa: SLF001
+            {"validation": {"requested_tier": True}}
         )
         is None
     )
@@ -2909,6 +2924,26 @@ def test_executor_metadata_helpers_cover_unreadable_and_invalid_edges(
         ],
     )
 
+    assert _validation_tier_for_workspace(workspace, profile) == 4  # type: ignore[arg-type]
+    assert executor_mod._validate_operation_requested_tier(workspace) == 4  # noqa: SLF001
+
+    active_tier_workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.succeeded,
+                payload={"requested_tier": 1},
+                result={"requested_tier": 2},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"validation": {"requested_tier": 3}},
+            ),
+        ],
+    )
+
+    assert executor_mod._validate_operation_requested_tier(active_tier_workspace) == 3  # noqa: SLF001
     assert _validation_tier_for_workspace(workspace, profile) == 4  # type: ignore[arg-type]
 
     coverage = executor_mod._coverage_result_from_metadata(  # noqa: SLF001

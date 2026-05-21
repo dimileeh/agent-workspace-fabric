@@ -652,6 +652,15 @@ export interface ReservedResources {
   dind_slots: number;
 }
 
+export interface QueuePlannedResources {
+  steady_cpu: number;
+  steady_memory_gb: number;
+  peak_cpu: number;
+  peak_memory_gb: number;
+  disk_mb: number;
+  dind_slots: number;
+}
+
 export interface CapacityDimension {
   limit: number | null;
   reserved: number;
@@ -703,6 +712,14 @@ export interface AdmissionSummary {
   detail: string | null;
 }
 
+export interface CapacityQueueSummary {
+  queued_workspace_count: number;
+  oldest_workspace_id: string | null;
+  oldest_wait_seconds: number | null;
+  planned_resources: QueuePlannedResources;
+  blocked_reason_counts: Record<string, number>;
+}
+
 export interface ResourceSaturationSummary {
   generated_at: string;
   workspace_counts: WorkspaceSaturationCounts;
@@ -710,6 +727,9 @@ export interface ResourceSaturationSummary {
   resource_defaults: WorkspaceResourceDefaults;
   reserved_resources: ReservedResources;
   capacity: ResourceCapacitySummary;
+  allocated_resources: ReservedResources;
+  allocated_capacity: ResourceCapacitySummary;
+  capacity_queue: CapacityQueueSummary;
   concurrency: ResourceConcurrency;
   disk: DiskCheck;
   admission: AdmissionSummary;
