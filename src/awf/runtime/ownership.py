@@ -6,7 +6,11 @@ import asyncio
 from pathlib import Path
 from typing import Protocol
 
-from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
+from awf.node.git_manager import (
+    _linked_worktree_git_dir,
+    mirror_path_for_worktree,
+    repair_agent_writable_worktree,
+)
 
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 
@@ -14,29 +18,6 @@ EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
     "executor.agent_runtime_ownership_repair_failed"
 )
 MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
-
-
-def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
-    """Return the `.git` file target for a linked worktree, when readable."""
-    git_file = worktree_path / ".git"
-    if not git_file.is_file():
-        return None
-
-    try:
-        content = git_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-
-    prefix = "gitdir: "
-    if not content.startswith(prefix):
-        return None
-
-    linked_git_dir = Path(content.removeprefix(prefix).strip())
-    if not linked_git_dir.is_absolute():
-        linked_git_dir = (worktree_path / linked_git_dir).resolve()
-    else:
-        linked_git_dir = linked_git_dir.resolve()
-    return linked_git_dir
 
 
 def _validated_layout_mirror_for_worktree(
