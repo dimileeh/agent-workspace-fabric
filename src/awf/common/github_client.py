@@ -637,14 +637,24 @@ class BranchOpenPullRequestResolver:
         try:
             repo = RepoRef.from_url(repo_url)
         except ValueError as exc:
+            redacted_repo_url = redact_audit_text(repo_url)
+            redacted_error = redact_audit_text(str(exc))
             _log.warning(
                 "github.open_pr_lookup_skipped_invalid_repo_url",
-                repo_url=redact_audit_text(repo_url),
+                repo_url=redacted_repo_url,
                 branch_name=branch_name,
                 base_branch=base_branch,
-                error=redact_audit_text(str(exc)),
+                error=redacted_error,
             )
-            return []
+            raise PullRequestMetadataError(
+                reason_code="OPEN_PR_LOOKUP_INVALID",
+                message=f"cannot parse repo_url for open PR lookup: {redacted_error}",
+                detail={
+                    "repo_url": redacted_repo_url,
+                    "branch_name": branch_name,
+                    "base_branch": base_branch,
+                },
+            ) from exc
         return await list_open_pull_requests_for_branch(
             runner=self._runner,
             repo=repo,

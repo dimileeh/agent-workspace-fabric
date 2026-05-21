@@ -811,19 +811,28 @@ class TestBranchOpenPullRequestResolver:
         assert fake.calls[0].args[:3] == ["gh", "pr", "list"]
 
     @pytest.mark.unit
-    async def test_invalid_repo_url_returns_empty_list_and_warns(self) -> None:
+    async def test_invalid_repo_url_raises_lookup_invalid_and_warns(self) -> None:
         fake = FakeCommandRunner()
         resolver = BranchOpenPullRequestResolver(fake)
         repo_url = "https://x-access-token:secret-token@github.com/dimileeh"
 
-        with structlog.testing.capture_logs() as captured:
-            resolved = await resolver.resolve(
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(PullRequestMetadataError) as excinfo,
+        ):
+            await resolver.resolve(
                 repo_url=repo_url,
                 branch_name="feature/head",
                 base_branch="main",
             )
 
-        assert resolved == []
+        assert excinfo.value.reason_code == "OPEN_PR_LOOKUP_INVALID"
+        assert "secret-token" not in excinfo.value.message
+        assert excinfo.value.detail == {
+            "repo_url": "https://[redacted]@github.com/dimileeh",
+            "branch_name": "feature/head",
+            "base_branch": "main",
+        }
         assert fake.calls == []
         event = next(
             (

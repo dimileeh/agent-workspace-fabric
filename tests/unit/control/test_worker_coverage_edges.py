@@ -16,6 +16,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.worker as worker_module
+from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.control.worker import (
     _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
     _STALE_ACTIVE_EXECUTION_REASON_CODE,
@@ -1745,6 +1747,29 @@ async def test_preserved_active_branch_lookup_reports_resolver_failures(
     assert lookup.ambiguity_reason == "open_pr_lookup_failed"
     assert lookup.payload["failure"] == "resolver_exception"
     assert lookup.payload["error_type"] == "RuntimeError"
+
+
+@pytest.mark.unit
+async def test_preserved_active_branch_lookup_treats_invalid_repo_url_as_failure(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    fake = FakeCommandRunner()
+    worker._open_pr_resolver = BranchOpenPullRequestResolver(fake)  # type: ignore[assignment]
+
+    lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+        repo_url="https://x-access-token:secret-token@github.com/example",
+        branch_name="feature/retry",
+        base_branch="main",
+    )
+
+    assert lookup is not None
+    assert lookup.state == "failed"
+    assert lookup.branch_name == "feature/retry"
+    assert lookup.ambiguity_reason == "open_pr_lookup_failed"
+    assert lookup.payload["failure"] == "resolver_exception"
+    assert lookup.payload["error_type"] == "PullRequestMetadataError"
+    assert fake.calls == []
 
 
 @pytest.mark.unit
