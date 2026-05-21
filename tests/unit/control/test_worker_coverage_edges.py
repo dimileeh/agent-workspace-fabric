@@ -239,6 +239,38 @@ async def test_preserved_active_git_timeout_returns_failed_result(
     assert "git status --porcelain=v1 timed out" in stderr
 
 
+@pytest.mark.unit
+async def test_preserved_active_git_timeout_handles_missing_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd=args,
+            timeout=kwargs["timeout"],
+            output=None,
+            stderr=None,
+        )
+
+    monkeypatch.setattr(worker_module.subprocess, "run", _run)
+
+    ok, stdout, stderr = await worker._run_preserved_active_git(  # noqa: SLF001
+        tmp_path,
+        "rev-parse",
+        "HEAD",
+    )
+
+    assert not ok
+    assert stdout == ""
+    assert "git rev-parse HEAD timed out" in stderr
+
+
 class _RefreshLoopWorker(ControlWorker):
     def __init__(self, *, raises: bool, refreshed: bool) -> None:
         super().__init__(
@@ -1476,3 +1508,386 @@ async def test_fail_stale_active_execution_restores_primary_failure_row_fields(
     assert latest_failed.payload is not None
     assert latest_failed.payload["primary_failure"] == primary_failure
     assert latest_failed.payload["secondary_failure"]["reason_code"] == ("STALE_ACTIVE_EXECUTION")
+
+
+@pytest.mark.unit
+def test_open_pull_request_summary_helpers_cover_invalid_and_fallback_edges() -> None:
+    summary = worker_module._open_pull_request_summary(  # noqa: SLF001
+        {
+            "url": " https://github.com/example/repo/pull/12 ",
+            "number": "12",
+            "headRefOid": "h" * 40,
+            "headRepositoryNameWithOwner": "example/repo",
+        },
+        branch_name="feature/fallback",
+    )
+
+    assert summary.pr_url == "https://github.com/example/repo/pull/12"
+    assert summary.pr_number == 12
+    assert summary.head_ref == "feature/fallback"
+    assert summary.head_sha == "h" * 40
+    assert summary.head_repo_slug == "example/repo"
+
+    object_summary = worker_module._open_pull_request_summary(  # noqa: SLF001
+        SimpleNamespace(
+            pr_url="https://github.com/example/repo/pull/13",
+            pr_number=13,
+            head_ref="feature/object",
+        ),
+        branch_name="feature/fallback",
+    )
+    assert object_summary.pr_number == 13
+    assert object_summary.head_ref == "feature/object"
+
+    for metadata, match in (
+        ({"number": 12}, "missing pr_url"),
+        ({"url": "https://github.com/example/repo/pull/12", "number": object()}, "pr_number"),
+        ({"url": "https://github.com/example/repo/pull/12", "number": "not-int"}, "pr_number"),
+        ({"url": "https://github.com/example/repo/pull/12", "number": 0}, "invalid"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            worker_module._open_pull_request_summary(  # noqa: SLF001
+                metadata,
+                branch_name="feature/fallback",
+            )
+
+
+@pytest.mark.unit
+def test_pr_adoption_and_salvage_payload_helpers_cover_edges() -> None:
+    assert (
+        worker_module._expected_open_pr_head_repo_slug(  # noqa: SLF001
+            "https://github.com/example/repo.git"
+        )
+        == "example/repo"
+    )
+    assert worker_module._expected_open_pr_head_repo_slug("not a github repo") is None  # noqa: SLF001
+
+    workspace = Workspace(id="ws_policy")
+    assert worker_module._pr_adoption_expected_head_repo_slug(workspace) is None  # noqa: SLF001
+    workspace.task_policy = {"pr_adoption": {"head_repo_slug": " example/fork "}}
+    assert (
+        worker_module._pr_adoption_expected_head_repo_slug(workspace)  # noqa: SLF001
+        == "example/fork"
+    )
+    workspace.task_policy = {"pr_adoption": {"head_repo_slug": "  "}}
+    assert worker_module._pr_adoption_expected_head_repo_slug(workspace) is None  # noqa: SLF001
+
+    assert worker_module._extract_pr_number("https://github.com/example/repo/pull/42") == 42  # noqa: SLF001
+    assert worker_module._extract_pr_number("https://github.com/example/repo/issues/42") is None  # noqa: SLF001
+    assert worker_module._extract_pr_number("https://github.com/example/repo/pull/0") is None  # noqa: SLF001
+    assert worker_module._metadata_value({"number": 1}, "number") == 1  # noqa: SLF001
+    assert worker_module._metadata_value(SimpleNamespace(number=2), "number") == 2  # noqa: SLF001
+    assert worker_module._metadata_nonempty_str({"head": " value "}, "head") == "value"  # noqa: SLF001
+    assert worker_module._metadata_nonempty_str({"head": " "}, "head") is None  # noqa: SLF001
+    assert (
+        worker_module._active_execution_salvage_idempotency_key(  # noqa: SLF001
+            "validate",
+            "ws_policy",
+            "event-1",
+        )
+        == "active-salvage-validate:ws_policy:event-1"
+    )
+
+    candidate = _ActiveExecutionCandidate(
+        workspace_id="ws_policy",
+        status=WorkspaceStatus.validating,
+        compose_project_name="awf_ws_policy",
+        compose_file_path="/tmp/ws_policy/compose.yml",
+    )
+    preserved_event = SimpleNamespace(
+        id="event-1",
+        occurred_at=datetime(2026, 5, 21, 12, 0, tzinfo=UTC),
+        event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        payload={"operation_id": "op-1"},
+    )
+    classification = worker_module._PreservedWorktreeClassification(  # noqa: SLF001
+        state="salvageable",
+        reason="clean branch",
+        branch_name="feature/ws",
+        base_commit="b" * 40,
+        head_sha="h" * 40,
+    )
+
+    payload = worker_module._active_execution_salvage_payload(  # noqa: SLF001
+        candidate,
+        preserved_event=preserved_event,
+        worker_id="worker-1",
+        reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+        decision="validate",
+        attempt_id="attempt-1",
+        task_id="task-1",
+        previous_claim={"execution_claimed_by": "old-worker"},
+        claim_cleanup={"action": "cleared_stale"},
+        classification=classification,
+        extra={"recovery_mode": "validate_only"},
+    )
+
+    assert payload["preservation_event_id"] == "event-1"
+    assert payload["classification"]["state"] == "salvageable"
+    assert payload["base_commit"] == "b" * 40
+    assert payload["head_sha"] == "h" * 40
+    assert payload["recovery_mode"] == "validate_only"
+    assert worker_module._is_active_execution_salvage_validation_payload(payload)  # noqa: SLF001
+    assert not worker_module._is_active_execution_salvage_validation_payload({})  # noqa: SLF001
+    assert worker_module._payload_preservation_event_id(payload) == "event-1"  # noqa: SLF001
+    assert (
+        worker_module._payload_preservation_event_id(  # noqa: SLF001
+            {"preservation_event": {"id": " nested-event "}}
+        )
+        == "nested-event"
+    )
+    assert worker_module._payload_preservation_event_id({"preservation_event": {}}) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_preserved_active_branch_lookup_reports_resolver_failures(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    class _FailingResolver:
+        async def resolve(self, **_kwargs: object) -> list[object]:
+            raise RuntimeError("github unavailable")
+
+    worker._open_pr_resolver = _FailingResolver()  # type: ignore[assignment]
+
+    lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+        repo_url="https://github.com/example/repo.git",
+        branch_name=" feature/retry ",
+        base_branch="main",
+    )
+
+    assert lookup is not None
+    assert lookup.state == "failed"
+    assert lookup.branch_name == "feature/retry"
+    assert lookup.ambiguity_reason == "open_pr_lookup_failed"
+    assert lookup.payload["failure"] == "resolver_exception"
+    assert lookup.payload["error_type"] == "RuntimeError"
+
+
+@pytest.mark.unit
+async def test_preserved_active_branch_lookup_covers_invalid_empty_and_multiple_results(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    class _StaticResolver:
+        def __init__(self, matches: list[object]) -> None:
+            self.matches = matches
+
+        async def resolve(self, **_kwargs: object) -> list[object]:
+            return self.matches
+
+    worker._open_pr_resolver = _StaticResolver([{"number": "bad"}])  # type: ignore[assignment]
+    invalid = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+        repo_url="https://github.com/example/repo.git",
+        branch_name="feature/invalid",
+        base_branch="main",
+    )
+    assert invalid is not None
+    assert invalid.state == "ambiguous"
+    assert invalid.ambiguity_reason == "open_pr_lookup_invalid"
+
+    worker._open_pr_resolver = _StaticResolver([])  # type: ignore[assignment]
+    empty = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+        repo_url="https://github.com/example/repo.git",
+        branch_name="feature/none",
+        base_branch="main",
+    )
+    assert empty is not None
+    assert empty.state == "none"
+    assert empty.payload["match_count"] == 0
+
+    worker._open_pr_resolver = _StaticResolver(  # type: ignore[assignment]
+        [
+            {
+                "url": "https://github.com/example/repo/pull/1",
+                "number": 1,
+                "headRefName": "feature/many",
+            },
+            {
+                "url": "https://github.com/example/repo/pull/2",
+                "number": 2,
+                "headRefName": "feature/many",
+            },
+        ]
+    )
+    multiple = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+        repo_url="not a github url",
+        branch_name="feature/many",
+        base_branch="main",
+    )
+    assert multiple is not None
+    assert multiple.state == "ambiguous"
+    assert multiple.ambiguity_reason == "multiple_open_prs_for_branch"
+    assert multiple.payload["match_count"] == 2
+
+
+@pytest.mark.unit
+async def test_preserved_active_worktree_classification_covers_mismatch_and_count_edges(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=_PublicWorktreePathProvisioner(tmp_path),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+    (tmp_path / "ws_mismatch").mkdir()
+    (tmp_path / "ws_invalid_count").mkdir()
+
+    async def _branch_mismatch_git(_path: Path, *args: str) -> tuple[bool, str, str]:
+        assert args == ("branch", "--show-current")
+        return (True, "actual-branch\n", "")
+
+    monkeypatch.setattr(worker, "_run_preserved_active_git", _branch_mismatch_git)
+
+    mismatch = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_mismatch",
+        expected_branch_name="expected-branch",
+        base_commit="b" * 40,
+    )
+
+    assert mismatch.state == "ambiguous"
+    assert mismatch.reason == "branch_mismatch"
+    assert mismatch.branch_name == "actual-branch"
+
+    responses = iter(
+        [
+            (True, "expected-branch\n", ""),
+            (True, "h" * 40 + "\n", ""),
+            (True, "", ""),
+            (True, "not-a-number\n", ""),
+        ]
+    )
+
+    async def _invalid_count_git(_path: Path, *args: str) -> tuple[bool, str, str]:
+        del args
+        return next(responses)
+
+    monkeypatch.setattr(worker, "_run_preserved_active_git", _invalid_count_git)
+
+    invalid_count = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_invalid_count",
+        expected_branch_name="expected-branch",
+        base_commit="b" * 40,
+    )
+
+    assert invalid_count.state == "ambiguous"
+    assert invalid_count.reason == "ahead_count_invalid"
+    assert invalid_count.error == "not-a-number\n"
+
+    missing_base = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_mismatch",
+        expected_branch_name="expected-branch",
+        base_commit=" ",
+    )
+    assert missing_base.state == "ambiguous"
+    assert missing_base.reason == "missing_base_commit"
+
+    async def _branch_unavailable_git(_path: Path, *args: str) -> tuple[bool, str, str]:
+        assert args == ("branch", "--show-current")
+        return (False, "", "fatal: branch unavailable")
+
+    monkeypatch.setattr(worker, "_run_preserved_active_git", _branch_unavailable_git)
+    branch_unavailable = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_mismatch",
+        expected_branch_name="expected-branch",
+        base_commit="b" * 40,
+    )
+    assert branch_unavailable.state == "failed"
+    assert branch_unavailable.reason == "branch_unavailable"
+
+    async def _detached_head_git(_path: Path, *args: str) -> tuple[bool, str, str]:
+        assert args == ("branch", "--show-current")
+        return (True, "\n", "")
+
+    monkeypatch.setattr(worker, "_run_preserved_active_git", _detached_head_git)
+    detached = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_mismatch",
+        expected_branch_name="expected-branch",
+        base_commit="b" * 40,
+    )
+    assert detached.state == "ambiguous"
+    assert detached.reason == "detached_head"
+
+    count_failure_responses = iter(
+        [
+            (True, "expected-branch\n", ""),
+            (True, "h" * 40 + "\n", ""),
+            (True, "", ""),
+            (False, "", "rev-list failed"),
+        ]
+    )
+
+    async def _count_failure_git(_path: Path, *args: str) -> tuple[bool, str, str]:
+        del args
+        return next(count_failure_responses)
+
+    monkeypatch.setattr(worker, "_run_preserved_active_git", _count_failure_git)
+    count_failure = await worker._classify_preserved_active_worktree(  # noqa: SLF001
+        workspace_id="ws_invalid_count",
+        expected_branch_name="expected-branch",
+        base_commit="b" * 40,
+    )
+    assert count_failure.state == "failed"
+    assert count_failure.reason == "ahead_count_unavailable"
+
+
+@pytest.mark.unit
+async def test_provider_recovery_candidate_blocker_edges(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+        factory,
+        _ActiveExecutionCandidate(
+            workspace_id="ws_running",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_running",
+            task_policy={},
+        ),
+    )
+    assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+        factory,
+        _ActiveExecutionCandidate(
+            workspace_id="ws_unknown_action",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name="awf_ws_unknown_action",
+            task_policy={worker_module.PROVIDER_RECOVERY_STATE_KEY: {"action": "other"}},
+        ),
+    )
+    assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+        factory,
+        _ActiveExecutionCandidate(
+            workspace_id="ws_missing_agent",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name="awf_ws_missing_agent",
+            task_policy={worker_module.PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+            agent=None,
+        ),
+    )
+    assert not await worker_module._monitor_provider_recovery_resume_pending(  # noqa: SLF001
+        factory,
+        _ActiveExecutionCandidate(
+            workspace_id="ws_unknown_provider",
+            status=WorkspaceStatus.monitoring_pr,
+            compose_project_name="awf_ws_unknown_provider",
+            task_policy={worker_module.PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+            agent="custom-agent",
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_salvage_monitor_cooldown_active_evicts_expired_entries(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    worker._active_salvage_monitor_resume_cooldowns["ws_expired"] = (  # noqa: SLF001
+        worker_module.monotonic() - 1
+    )
+
+    assert not worker._active_salvage_monitor_resume_cooldown_active("ws_expired")  # noqa: SLF001
+    assert "ws_expired" not in worker._active_salvage_monitor_resume_cooldowns  # noqa: SLF001

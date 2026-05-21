@@ -6195,3 +6195,347 @@ def test_private_uses_ref_helpers_cover_invalid_and_short_version_edges() -> Non
     assert quality_gate_module._workflow_version_ref_sort_key("main") is None
     assert quality_gate_module._workflow_version_ref_sort_key("v1")[0] == (1, 0, 0)
     assert quality_gate_module._uses_action("actions/checkout") is None
+
+
+@pytest.mark.unit
+def test_private_pyproject_policy_helpers_cover_generic_policy_edges() -> None:
+    old_text = """
+[tool.ruff]
+line-length = 100
+""".strip()
+    new_text = """
+[tool.ruff]
+line-length = 88
+""".strip()
+
+    violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text=old_text,
+                new_text=new_text,
+            )
+        },
+    )
+
+    assert len(violations) == 1
+    assert violations[0].section == "tool.ruff"
+    assert violations[0].line == 1
+
+    coverage_violations = find_protected_quality_gate_changes(
+        changed_paths=["pyproject.toml"],
+        owned_paths=[],
+        protected_file_diffs={
+            "pyproject.toml": ProtectedFileDiff(
+                path="pyproject.toml",
+                old_text="[tool.coverage.run]\nbranch = true\n",
+                new_text="[tool.coverage.run]\nbranch = false\n",
+            )
+        },
+    )
+
+    assert len(coverage_violations) == 1
+    assert coverage_violations[0].section == "tool.coverage"
+    assert quality_gate_module._format_toml_policy_value(None) == "unset"
+    assert quality_gate_module._coverage_policy_without_fail_under({"report": "strict"}) == {
+        "report": "strict"
+    }
+    assert (
+        quality_gate_module._dependency_group_entry_unsupported_reason(
+            section="dependency-groups.dev",
+            value=[{"include-group": "test"}],
+        )
+        == "dependency section contains PEP 735 include-group entries that "
+        "require ownership of pyproject.toml for evaluation: dependency-groups.dev"
+    )
+
+
+@pytest.mark.unit
+def test_private_workflow_job_key_helpers_cover_fail_closed_edges() -> None:
+    class _DuplicateStringKey:
+        def __str__(self) -> str:
+            return "duplicate"
+
+    assert (
+        quality_gate_module._workflow_jobs(
+            {"jobs": {_DuplicateStringKey(): {}, _DuplicateStringKey(): {}}},
+            "jobs: {}\n",
+        )
+        is None
+    )
+    assert quality_gate_module._workflow_jobs({"jobs": []}, "jobs: []\n") is None
+    assert quality_gate_module._workflow_job_id(object(), "jobs: {}\n").startswith("<object")
+    assert quality_gate_module._workflow_source_scalar_key_name(True, ("yes", "on")) is None
+    assert quality_gate_module._workflow_job_key_source_names("name: CI\n") == ()
+    assert quality_gate_module._workflow_jobs_mapping_node("jobs:\n  - test\n") is None
+    assert quality_gate_module._workflow_jobs_mapping_node("- test\n") is None
+    assert not quality_gate_module._yaml_scalar_key_matches_loaded_key("[bad", object())
+    assert not quality_gate_module._yaml_scalar_key_matches_loaded_key("a: b", "a")
+
+
+@pytest.mark.unit
+def test_private_informational_safety_helpers_cover_rejected_edges() -> None:
+    assert not quality_gate_module._informational_job_permissions_are_safe(["read"])
+    assert quality_gate_module._safe_informational_env_names("bad") is None
+    assert quality_gate_module._safe_informational_env_names({1: "value"}) is None
+    assert quality_gate_module._safe_informational_env_names({"PATH": "value"}) is None
+    assert quality_gate_module._safe_informational_env_names({"OK": object()}) is None
+    assert not quality_gate_module._is_safe_informational_env_value(object())
+    assert quality_gate_module._informational_shell_tokens_are_safe(()) is True
+    assert quality_gate_module._informational_shell_tokens_are_safe(("echo", "ok")) is True
+
+    safe_env_names: set[str] = set()
+    quality_gate_module._remember_safe_informational_assignments(
+        ("SUMMARY=value",),
+        safe_env_names,
+    )
+    quality_gate_module._remember_safe_informational_assignments(
+        ("TOKEN=value",),
+        safe_env_names,
+    )
+    assert safe_env_names == {"SUMMARY"}
+    assert quality_gate_module._has_unsafe_informational_parameter_expansion(
+        ("$SUMMARY",),
+        {"PATH"},
+    )
+    assert quality_gate_module._has_unsafe_github_actions_expression(
+        ('echo "${{ github.sha }} ${{"',)
+    )
+    assert quality_gate_module._is_validation_command("'unterminated pytest")
+    assert not quality_gate_module._is_validation_command("'unterminated docs")
+    assert quality_gate_module._raw_validation_command_match("python -m unittest")
+
+
+@pytest.mark.unit
+def test_private_validation_command_helpers_cover_wrapper_edges() -> None:
+    assert quality_gate_module._shell_command_tokens_are_validation(("env", "CI=true", "pytest"))
+    assert not quality_gate_module._run_wrapper_runs_validation_command(("--python", "3.12"))
+    assert not quality_gate_module._command_words_start_validation_command(())
+    assert quality_gate_module._command_words_start_validation_command(
+        ("python", "-I", "tests/unit")
+    )
+    assert quality_gate_module._command_words_start_validation_command(
+        ("npm", "--prefix", "apps/console", "run", "test")
+    )
+    assert quality_gate_module._command_words_start_validation_command(("make", "lint"))
+    assert quality_gate_module._python_runs_validation_command(("-I", "-m", "unittest"))
+    assert not quality_gate_module._python_runs_validation_command(("-I", "script.py"))
+    assert not quality_gate_module._package_manager_runs_any_validation_command(
+        ("--prefix", "apps/console", "run")
+    )
+    assert not quality_gate_module._package_manager_runs_any_validation_command(
+        ("--prefix", "apps/console")
+    )
+    assert quality_gate_module._package_manager_runs_any_validation_command(("exec", "pytest"))
+    assert quality_gate_module._validation_run_append_commands("\\") is None
+    assert quality_gate_module._validation_run_append_commands("&& 'unterminated") is None
+    assert quality_gate_module._validation_run_append_commands("ruff check") is None
+    assert quality_gate_module._validation_run_append_commands("") is None
+    assert quality_gate_module._validation_run_append_commands(
+        "&& ruff check\npytest tests/unit"
+    ) == (("ruff", "check"), ("pytest", "tests/unit"))
+    assert not quality_gate_module._validation_run_append_command_is_safe(())
+    assert not quality_gate_module._validation_run_append_command_is_safe(("echo", "ok"))
+    assert not quality_gate_module._validation_run_append_command_is_safe(("python", "script.py"))
+    assert quality_gate_module._validation_run_append_command_is_safe(("tox", "test"))
+    assert not quality_gate_module._package_manager_runs_validation_command(("exec", "--prefix"))
+    assert quality_gate_module._package_manager_runs_validation_command(("exec", "coverage", "xml"))
+    assert quality_gate_module._package_manager_runs_validation_command(("exec", "pytest"))
+    assert not quality_gate_module._coverage_runs_safe_report_command(())
+    assert quality_gate_module._coverage_runs_safe_report_command(
+        ("--rcfile", "pyproject.toml", "xml")
+    )
+    assert quality_gate_module._coverage_runs_safe_report_command(
+        ("--rcfile=pyproject.toml", "xml")
+    )
+    assert quality_gate_module._strip_run_wrapper_options(("--extra=dev", "pytest")) == ("pytest",)
+
+
+@pytest.mark.unit
+def test_private_broad_command_helpers_cover_fallback_and_negative_edges() -> None:
+    assert quality_gate_module._has_broad_validation_command_invocation("build 'unterminated")
+    assert quality_gate_module._shell_command_word_segments("'unterminated") is None
+    assert quality_gate_module._shell_words("   ") == ()
+    assert quality_gate_module._shell_words("'unterminated build") == ("'unterminated", "build")
+    assert not quality_gate_module._words_start_broad_validation_command(())
+    assert not quality_gate_module._words_start_broad_validation_command(
+        ("python", "-I", "noop.py")
+    )
+    assert not quality_gate_module._words_start_broad_validation_command(("bash",))
+    assert quality_gate_module._strip_shell_command_prefixes(
+        (
+            "env",
+            "-i",
+            "CI=true",
+            "uv",
+            "run",
+            "--python",
+            "3.12",
+            "pytest",
+        )
+    ) == ("pytest",)
+    assert not quality_gate_module._package_manager_runs_broad_validation_command(
+        ("run", "--prefix", "apps/console")
+    )
+    assert not quality_gate_module._package_manager_runs_broad_validation_command(("run",))
+    assert not quality_gate_module._python_runs_broad_validation_module(("-I", "script.py"))
+    assert not quality_gate_module._docker_runs_broad_validation_command(("run", "image"))
+    assert not quality_gate_module._known_broad_validation_command_pair("gh", ())
+    assert not quality_gate_module._known_broad_validation_command_pair("gcloud", ("run",))
+    assert not quality_gate_module._known_broad_validation_command_pair(
+        "netlify",
+        ("build",),
+    )
+    assert not quality_gate_module._known_broad_validation_command_pair("twine", ("check",))
+    assert not quality_gate_module._known_broad_validation_command_pair("custom", ("deploy",))
+
+
+@pytest.mark.unit
+def test_private_comment_notify_input_helpers_cover_invalid_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = "peter-evans/create-or-update-comment"
+    assert not quality_gate_module._comment_notify_action_with_inputs_are_safe(action, "bad")
+    assert not quality_gate_module._comment_notify_action_with_inputs_are_safe(action, {1: "body"})
+    assert not quality_gate_module._comment_notify_action_with_inputs_are_safe(
+        action,
+        {"unknown": "body"},
+    )
+    assert not quality_gate_module._comment_notify_action_with_inputs_are_safe(
+        action,
+        {"body": "${{ secrets.GITHUB_TOKEN }}"},
+    )
+    assert quality_gate_module._comment_notify_action_with_inputs_are_safe(
+        action,
+        {"body": "ok", "comment-id": 123},
+    )
+    assert quality_gate_module._is_comment_or_notify_capable_step_uses(
+        {"name": "Post PR comment", "uses": "peter-evans/create-or-update-comment@v4"},
+        "peter-evans/create-or-update-comment@v4",
+    )
+    monkeypatch.setattr(
+        quality_gate_module,
+        "_COMMENT_NOTIFY_CAPABLE_ACTION_USES",
+        frozenset({"example/commenter"}),
+    )
+    assert quality_gate_module._is_comment_or_notify_capable_step_uses(
+        {"name": "Post PR comment", "uses": "example/commenter@v1"},
+        "example/commenter@v1",
+    )
+
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe(None)
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe("bad")
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe({1: "script"})
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe(
+        {"unknown": "script"}
+    )
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe({"script": 1})
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe(
+        {"script": "${{ secrets.GITHUB_TOKEN }}"}
+    )
+    assert not quality_gate_module._github_script_comment_notify_inputs_are_safe(
+        {
+            "debug": "${{ secrets.GITHUB_TOKEN }}",
+            "script": "github.rest.issues.createComment({})",
+        }
+    )
+    assert not quality_gate_module._github_script_comment_notify_script_is_safe("core.info('x')")
+    assert not quality_gate_module._github_script_comment_notify_script_is_safe("console.log('x')")
+    assert not quality_gate_module._github_script_comment_notify_script_is_safe(
+        "github.rest.repos.listForOrg({})"
+    )
+    assert quality_gate_module._comment_notify_action_with_value_is_safe(None)
+    assert quality_gate_module._comment_notify_action_with_value_is_safe(True)
+
+
+@pytest.mark.unit
+def test_private_workflow_with_input_helpers_cover_invalid_and_safe_shapes() -> None:
+    assert not quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses=None,
+        old_inputs={},
+        new_inputs={},
+    )
+    assert not quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses="actions/setup-python@v5",
+        old_inputs="bad",
+        new_inputs={},
+    )
+    assert quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses="actions/setup-python@v5",
+        old_inputs={"python-version": "3.12"},
+        new_inputs={"python-version": "3.12"},
+    )
+    assert not quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses="actions/setup-python@v5",
+        old_inputs={"cache": "pip"},
+        new_inputs={"cache": "uv"},
+    )
+    assert not quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses="actions/setup-python@v5",
+        old_inputs={},
+        new_inputs={"python-version": "3.12"},
+    )
+    assert not quality_gate_module._workflow_pinned_bump_with_inputs_are_safe(
+        new_uses="actions/setup-python@v5",
+        old_inputs={"python-version": "3.11"},
+        new_inputs={"python-version": "${{ secrets.PYTHON_VERSION }}"},
+    )
+    assert quality_gate_module._workflow_pinned_bump_allowed_with_keys("bad") == frozenset()
+    assert quality_gate_module._normalized_workflow_with_inputs(None) == {}
+    assert quality_gate_module._normalized_workflow_with_inputs("bad") is None
+    assert quality_gate_module._normalized_workflow_with_inputs({1: "value"}) is None
+    assert quality_gate_module._normalized_workflow_with_inputs({" ": "value"}) is None
+    assert (
+        quality_gate_module._normalized_workflow_with_inputs(
+            {"python_version": "3.12", "python-version": "3.13"}
+        )
+        is None
+    )
+    assert quality_gate_module._workflow_with_inputs_have_safe_names_and_values(None)
+    assert not quality_gate_module._workflow_with_inputs_have_safe_names_and_values("bad")
+    assert not quality_gate_module._workflow_with_inputs_have_safe_names_and_values({1: "value"})
+    assert not quality_gate_module._workflow_with_inputs_have_safe_names_and_values(
+        {"token": "value"}
+    )
+    assert not quality_gate_module._workflow_with_inputs_have_safe_names_and_values(
+        {"body": "${{ secrets.GITHUB_TOKEN }}"}
+    )
+    assert not quality_gate_module._workflow_with_inputs_have_safe_names_and_values(
+        {"count": object()}
+    )
+    assert quality_gate_module._workflow_with_input_value_is_safe(None)
+    assert quality_gate_module._workflow_with_input_value_is_safe(1)
+    assert not quality_gate_module._workflow_with_input_value_is_safe(object())
+    assert not quality_gate_module._workflow_with_input_value_is_safe("${{ secrets.GITHUB_TOKEN }}")
+
+
+@pytest.mark.unit
+def test_private_line_lookup_helpers_cover_marker_scan_and_yaml_errors() -> None:
+    workflow_text = """
+steps:
+  - name: Build
+    id: actual
+    run: pytest
+  - name: Comment
+    run: echo ok
+""".strip()
+
+    assert (
+        quality_gate_module._line_for_workflow_step_key(
+            workflow_text,
+            {"name": "Build", "id": "expected"},
+            key="run",
+        )
+        == 4
+    )
+    assert (
+        quality_gate_module._line_for_workflow_step_key_from_yaml_nodes(
+            "name: [\n",
+            {"name": "Build"},
+            key="run",
+        )
+        is None
+    )
+    assert quality_gate_module._compose_workflow_yaml_document("name: [\n") is None
