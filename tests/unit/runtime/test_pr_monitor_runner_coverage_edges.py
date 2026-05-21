@@ -2787,7 +2787,7 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
     ) -> bool:
         del logger, workspace_id, event_name, reason_code
         assert worktree_path == worktree
-        raise PermissionError("cannot repair .venv")
+        return False
 
     monkeypatch.setattr(
         "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
