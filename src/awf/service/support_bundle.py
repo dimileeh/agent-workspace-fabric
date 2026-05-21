@@ -9,11 +9,18 @@ import os
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from awf import __version__
 from awf.db.session import make_engine, make_session_factory
-from awf.service.config import ServiceSettings, service_config_payload
+from awf.service.config import (
+    COMPOSE_ENV_FILE_OMITTED,
+    ComposeEnvFileInput,
+    ComposeEnvFileOmitted,
+    ServiceSettings,
+    resolve_local_service_provider_environ,
+    service_config_payload,
+)
 from awf.service.doctor import _redact_text, _secret_values, collect_doctor_report
 from awf.service.metrics import summarize_failure_analysis
 from awf.service.status import collect_service_status
@@ -25,6 +32,21 @@ _SAFE_EXAMPLE_KEYS = frozenset(
     {"workspace_id", "failure_reason", "reason_code", "status", "updated_at", "count"}
 )
 _SAFE_CLUSTER_KEYS = frozenset({"failure_reason", "reason_code", "count", "sample_workspace_ids"})
+
+
+class _DoctorCollectorKwargs(TypedDict, total=False):
+    """Optional path context forwarded to the doctor collector."""
+
+    compose_file: Path
+    compose_env_file: ComposeEnvFileInput
+
+
+class _StatusCollectorKwargs(TypedDict, total=False):
+    """Optional environment and path context forwarded to the status collector."""
+
+    environ: Mapping[str, str]
+    compose_file: Path
+    compose_env_file: ComposeEnvFileInput
 
 
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:
@@ -48,6 +70,8 @@ async def collect_support_bundle(
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
+    compose_file: Path | None = None,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     failure_window_hours: int = 24,
     status_collector: Any = None,
     doctor_collector: Any = None,
@@ -55,7 +79,12 @@ async def collect_support_bundle(
 ) -> dict[str, object]:
     """Collect a telemetry-free, redacted support bundle."""
     env = os.environ if environ is None else environ
-    provider_env = env if provider_environ is None else provider_environ
+    provider_env = resolve_local_service_provider_environ(
+        provider_environ=provider_environ,
+        environ=env,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     secrets = _secret_values(settings, env, provider_env)
 
     _status_collector = status_collector or collect_service_status
@@ -63,19 +92,30 @@ async def collect_support_bundle(
 
     service_status_result: dict[str, object] | BaseException
     doctor_result: dict[str, object] | BaseException | Any
+    status_kwargs: _StatusCollectorKwargs = {"environ": env}
+    doctor_kwargs: _DoctorCollectorKwargs = {}
+    if compose_file is not None:
+        status_kwargs["compose_file"] = compose_file
+        doctor_kwargs["compose_file"] = compose_file
+    if not isinstance(compose_env_file, ComposeEnvFileOmitted):
+        status_kwargs["compose_env_file"] = compose_env_file
+        doctor_kwargs["compose_env_file"] = compose_env_file
+    doctor_task = _doctor_collector(
+        settings,
+        strict_providers=strict_providers,
+        provider_environ=provider_env,
+        environ=env,
+        **doctor_kwargs,
+    )
 
     service_status_result, doctor_result = await asyncio.gather(
         _status_collector(
             settings,
             strict_providers=strict_providers,
             provider_environ=provider_env,
+            **status_kwargs,
         ),
-        _doctor_collector(
-            settings,
-            strict_providers=strict_providers,
-            provider_environ=provider_env,
-            environ=env,
-        ),
+        doctor_task,
         return_exceptions=True,
     )
 

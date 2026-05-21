@@ -64,6 +64,10 @@ def _action_entries(records: list[dict]) -> list[dict]:
     return [r for r in records if r.get("event") == "monitor.action"]
 
 
+def _name_status_z(*paths: str) -> str:
+    return "".join(f"M\0{path}\0" for path in paths)
+
+
 class TestMonitorActionLogging:
     @pytest.mark.unit
     async def test_merge_action_emits_log_line(
@@ -973,7 +977,10 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
         cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
-        cmd.queue_result(returncode=0, stdout="src/foo.py\n")  # pre-push protected-scope diff
+        cmd.queue_result(
+            returncode=0,
+            stdout=_name_status_z("src/foo.py"),
+        )  # pre-push protected-scope diff
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
@@ -1049,6 +1056,8 @@ class TestMonitorDirtyWorktreeSalvage:
                 " M tests/integration/test_workspace_agent_git_in_workspace.py\n"
             ),
         )  # dirty check after first repair
+        cmd.queue_result(returncode=128, stderr="path missing")  # git show protected workflow
+        cmd.queue_result(returncode=0)  # ls-tree confirms protected workflow is absent
         adapter.queue(stdout="removed workflow edit; fixed test instead")
         cmd.queue_result(
             returncode=0,
@@ -1062,7 +1071,7 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
         cmd.queue_result(
             returncode=0,
-            stdout="tests/integration/test_workspace_agent_git_in_workspace.py\n",
+            stdout=_name_status_z("tests/integration/test_workspace_agent_git_in_workspace.py"),
         )  # pre-push protected-scope diff
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse

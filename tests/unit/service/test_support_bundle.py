@@ -205,6 +205,146 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_support_bundle_forwards_compose_context_to_collectors(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_env_file = tmp_path / ".env"
+    base_environ = {"PATH": "/usr/bin", "AWF_CUSTOM_SERVICE_VALUE": "from-compose-env"}
+    captured_status: dict[str, object] = {}
+    captured_doctor: dict[str, object] = {}
+
+    async def _status_collector(_: ServiceSettings, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **kwargs: object) -> DoctorReportProxy:
+        captured_doctor.update(kwargs)
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ=base_environ,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    assert captured_status["environ"] == base_environ
+    assert captured_status["compose_file"] == compose_file
+    assert captured_status["compose_env_file"] == compose_env_file
+    assert captured_doctor["environ"] == base_environ
+    assert captured_doctor["compose_file"] == compose_file
+    assert captured_doctor["compose_env_file"] == compose_env_file
+
+
+@pytest.mark.unit
+def test_support_bundle_forwards_explicit_null_compose_env_file(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    captured_status: dict[str, object] = {}
+    captured_doctor: dict[str, object] = {}
+
+    async def _status_collector(_: ServiceSettings, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **kwargs: object) -> DoctorReportProxy:
+        captured_doctor.update(kwargs)
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            compose_file=compose_file,
+            compose_env_file=None,
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    assert captured_status["compose_file"] == compose_file
+    assert captured_status["compose_env_file"] is None
+    assert captured_doctor["compose_file"] == compose_file
+    assert captured_doctor["compose_env_file"] is None
+
+
+@pytest.mark.unit
+def test_support_bundle_resolves_provider_environment_from_compose_env_file(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    compose_env_file = tmp_path / ".env"
+    compose_token = "ghp_compose_bundle_token"
+    compose_env_file.write_text(
+        f"AWF_GITHUB_TOKEN={compose_token}\nGH_TOKEN=ghp_standard_compose_token\n",
+        encoding="utf-8",
+    )
+    base_environ = {"PATH": "/usr/bin"}
+    captured_status: dict[str, object] = {}
+    captured_doctor: dict[str, object] = {}
+
+    async def _status_collector(_: ServiceSettings, **kwargs: object) -> dict[str, object]:
+        captured_status.update(kwargs)
+        status = _green_status()
+        checks = status["checks"]
+        assert isinstance(checks, dict)
+        checks["api"] = {
+            "ok": False,
+            "status": "fail",
+            "reason": "API_UNREACHABLE",
+            "detail": f"compose token {compose_token}",
+        }
+        return status
+
+    async def _doctor_collector(_: ServiceSettings, **kwargs: object) -> DoctorReportProxy:
+        captured_doctor.update(kwargs)
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset({"github"}),
+            environ=base_environ,
+            compose_env_file=compose_env_file,
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    status_provider_env = captured_status["provider_environ"]
+    doctor_provider_env = captured_doctor["provider_environ"]
+    assert isinstance(status_provider_env, dict)
+    assert isinstance(doctor_provider_env, dict)
+    assert status_provider_env["AWF_GITHUB_TOKEN"] == compose_token
+    assert doctor_provider_env["AWF_GITHUB_TOKEN"] == compose_token
+    assert status_provider_env["PATH"] == "/usr/bin"
+    assert doctor_provider_env["PATH"] == "/usr/bin"
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert compose_token not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
 def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
     api_secret = "awf-api-bundle-secret"
     github_secret = "ghp_bundlesecret123456"

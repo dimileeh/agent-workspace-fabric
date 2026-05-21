@@ -102,9 +102,10 @@ def executor(
 
 
 def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
-    """Queue the three canned git results ``PullRequestCreator`` reads
-    for its pre-push diagnostic log line (``rev-parse HEAD``,
-    ``rev-parse --abbrev-ref HEAD``, ``git log origin/<base>..HEAD``).
+    """Queue executor's committed-diff policy check plus the three canned
+    git results ``PullRequestCreator`` reads for its pre-push diagnostic
+    log line (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
+    ``git log origin/<base>..HEAD``).
 
     Every test that drives the executor through the PR-creation step
     must call this immediately before queueing the ``git push`` result,
@@ -116,6 +117,7 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
     realistic enough that the log line reads sanely if a test prints
     captured output.
     """
+    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base

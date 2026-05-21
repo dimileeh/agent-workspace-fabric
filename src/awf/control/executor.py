@@ -52,9 +52,16 @@ from awf.common.compose_exec import (
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
+from awf.control.protected_file_diffs import (
+    committed_changed_paths_since,
+    git_show_text,
+    protected_file_diffs_for_committed_paths,
+)
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
+    ProtectedFileDiff,
     changed_paths_are_only_internal_plan_artifacts,
+    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     plan_only_output_message,
     quality_gate_violation_message,
@@ -2244,9 +2251,15 @@ class WorkspaceExecutor:
                         ):
                             return
                     has_known_non_plan_output = True
+                    protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
+                        worktree_path=worktree_path,
+                        base_ref=base_commit,
+                        changed_paths=staged_paths,
+                    )
                     violations = find_protected_quality_gate_changes(
                         changed_paths=staged_paths,
                         owned_paths=list(ws.owned_paths),
+                        protected_file_diffs=protected_file_diffs,
                     )
                     if violations:
                         await self._mark_failed(
@@ -2288,6 +2301,7 @@ class WorkspaceExecutor:
                             await self._run_post_agent_commit_repair(
                                 workspace_id=workspace_id,
                                 worktree_path=worktree_path,
+                                base_commit=base_commit,
                                 commit_result=commit_result,
                                 classification=classification,
                                 staged_paths=staged_paths,
@@ -3239,9 +3253,15 @@ class WorkspaceExecutor:
                     )
                     return
                 has_known_non_plan_output = True
+                protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
+                    worktree_path=worktree_path,
+                    base_ref=base_commit,
+                    changed_paths=fix_staged_paths,
+                )
                 violations = find_protected_quality_gate_changes(
                     changed_paths=fix_staged_paths,
                     owned_paths=list(ws.owned_paths),
+                    protected_file_diffs=protected_file_diffs,
                 )
                 if violations:
                     message = quality_gate_violation_message(violations)
@@ -3419,13 +3439,21 @@ class WorkspaceExecutor:
                 expected_status=WorkspaceStatus.validating,
             ):
                 return
+            if await self._fail_if_protected_quality_gate_committed_output(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                owned_paths=list(ws.owned_paths),
+                expected_status=WorkspaceStatus.validating,
+            ):
+                return
         except Exception as exc:
-            _log.exception("executor.plan_only_output_check_failed", workspace_id=workspace_id)
+            _log.exception("executor.pre_push_policy_check_failed", workspace_id=workspace_id)
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"plan-only output check failed: {exc!r}"[:2000],
+                message=f"pre-push policy check failed: {exc!r}"[:2000],
             )
             return
 
@@ -5292,6 +5320,32 @@ class WorkspaceExecutor:
             )
         return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
 
+    async def _protected_file_diffs_for_staged_paths(
+        self,
+        *,
+        worktree_path: Path,
+        base_ref: str,
+        changed_paths: Sequence[str],
+    ) -> dict[str, ProtectedFileDiff]:
+        diffs: dict[str, ProtectedFileDiff] = {}
+        for path in diff_classified_protected_paths(changed_paths):
+            old_text = await git_show_text(
+                self._runner,
+                worktree_path=worktree_path,
+                refspec=f"{base_ref}:{path}",
+            )
+            new_text = await git_show_text(
+                self._runner,
+                worktree_path=worktree_path,
+                refspec=f":{path}",
+            )
+            diffs[path] = ProtectedFileDiff(
+                path=path,
+                old_text=old_text,
+                new_text=new_text,
+            )
+        return diffs
+
     async def _verify_recovered_post_agent_commit(
         self,
         *,
@@ -5302,8 +5356,11 @@ class WorkspaceExecutor:
         expected_status: WorkspaceStatus,
     ) -> bool:
         changed_paths = sorted(
-            path.as_posix()
-            for path in await self._committed_paths_since(worktree_path, base_commit)
+            await committed_changed_paths_since(
+                self._runner,
+                worktree_path=worktree_path,
+                base_ref=base_commit,
+            )
         )
         if not changed_paths:
             await self._mark_failed(
@@ -5324,9 +5381,16 @@ class WorkspaceExecutor:
             expected_status=expected_status,
         ):
             return False
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._runner,
+            worktree_path=worktree_path,
+            base_ref=base_commit,
+            changed_paths=changed_paths,
+        )
         violations = find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
         )
         if violations:
             await self._mark_failed(
@@ -5435,6 +5499,46 @@ class WorkspaceExecutor:
             changed_paths=changed_paths,
             expected_status=expected_status,
         )
+
+    async def _fail_if_protected_quality_gate_committed_output(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str,
+        owned_paths: list[str],
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        changed_paths = sorted(
+            await committed_changed_paths_since(
+                self._runner,
+                worktree_path=worktree_path,
+                base_ref=base_commit,
+            )
+        )
+        if not changed_paths:
+            return False
+        protected_file_diffs = await protected_file_diffs_for_committed_paths(
+            self._runner,
+            worktree_path=worktree_path,
+            base_ref=base_commit,
+            changed_paths=changed_paths,
+        )
+        violations = find_protected_quality_gate_changes(
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+            protected_file_diffs=protected_file_diffs,
+        )
+        if not violations:
+            return False
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=expected_status,
+            failure_reason=FailureReason.policy_failure,
+            reason_code="QUALITY_GATE_POLICY_CHANGED",
+            message=quality_gate_violation_message(violations)[:2000],
+        )
+        return True
 
     async def _claim_ready(
         self,
@@ -5654,6 +5758,7 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         worktree_path: Path,
+        base_commit: str,
         commit_result: CommandResult,
         classification: _PostAgentCommitClassification,
         staged_paths: Sequence[str],
@@ -5697,6 +5802,7 @@ class WorkspaceExecutor:
             await self._run_post_agent_semantic_precommit_repair(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
+                base_commit=base_commit,
                 commit_result=commit_result,
                 classification=classification,
                 staged_paths=staged_paths,
@@ -6019,6 +6125,7 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         worktree_path: Path,
+        base_commit: str,
         commit_result: CommandResult,
         classification: _PostAgentCommitClassification,
         staged_paths: Sequence[str],
@@ -6176,6 +6283,11 @@ class WorkspaceExecutor:
         violations = find_protected_quality_gate_changes(
             changed_paths=repair_staged_paths,
             owned_paths=list(ws.owned_paths),
+            protected_file_diffs=await self._protected_file_diffs_for_staged_paths(
+                worktree_path=worktree_path,
+                base_ref=base_commit,
+                changed_paths=repair_staged_paths,
+            ),
         )
         if violations:
             result = CommandResult(

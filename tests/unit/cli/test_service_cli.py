@@ -30,6 +30,20 @@ from tests.postgres import postgres_test_url_sync
 
 _runner = CliRunner()
 _POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+_DOCKER_COMPOSE_CALLER_ENV_KEYS = frozenset(
+    {
+        "AWF_DOCKER_HOST",
+        "COMPOSE_PROFILES",
+        "COMPOSE_PROJECT_NAME",
+        "DOCKER_API_VERSION",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+    }
+)
 
 
 def _combined_output(result: Any) -> str:
@@ -49,6 +63,12 @@ def _ok_disk_usage(_path: Path) -> _FakeDiskUsage:
 def _write_gc_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _clear_docker_compose_caller_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.upper() in _DOCKER_COMPOSE_CALLER_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
 
 
 def _create_gc_cli_workspace(
@@ -119,10 +139,25 @@ def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
     compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
     compose_file.parent.mkdir(parents=True)
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    _clear_docker_compose_caller_env(monkeypatch)
+
+
+def _write_non_source_compose_env(tmp_path: Path, contents: str) -> Path:
+    profile_dir = tmp_path / ".awf"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "workspace.yml").write_text("version: 1\n", encoding="utf-8")
+    compose_env = tmp_path / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True)
+    (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text(contents, encoding="utf-8")
+    return compose_env
 
 
 @pytest.mark.unit
@@ -132,6 +167,7 @@ def test_service_readiness_emits_json_scorecard(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     settings = SimpleNamespace(service_name="awf-local")
     report = CoreReadinessReport(
@@ -154,8 +190,14 @@ def test_service_readiness_emits_json_scorecard(
         return report
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
-    monkeypatch.setattr(config_module, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(
+        config_module,
+        "resolve_service_settings",
+        lambda *_args, **_kwargs: settings,
+    )
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(
         app,
@@ -189,10 +231,141 @@ def test_service_readiness_emits_json_scorecard(
             "strict_providers": frozenset({"codex"}),
             "provider_environ": os.environ,
             "environ": os.environ,
+            "compose_file": Path("docker/compose/local-service.yml"),
+            "compose_env_file": None,
             "allow_generic_failures": False,
             "allow_slo_breach": False,
         }
     ]
+
+
+@pytest.mark.unit
+def test_service_readiness_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    github_token = "ghp_compose_token"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+                f"AWF_GITHUB_TOKEN={github_token}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    for key in (
+        "AWF_DATABASE_URL",
+        "AWF_DOCKER_HOST",
+        "AWF_API_BASE_URL",
+        "AWF_GITHUB_TOKEN",
+        "AWF_POSTGRES_PASSWORD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _collect(**kwargs: object) -> CoreReadinessReport:
+        captured.update(kwargs)
+        return CoreReadinessReport(
+            status="ok",
+            checks=(
+                CoreReadinessCheck(
+                    name="service_status",
+                    status="ok",
+                    reason_code="SERVICE_STATUS_OK",
+                    message="service dependencies are ready",
+                    evidence={"status": "ok"},
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+
+    result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    assert settings.github_token == github_token
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert provider_environ["AWF_GITHUB_TOKEN"] == github_token
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+    assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == compose_file
+    assert captured["compose_env_file"] == compose / ".env"
+
+
+@pytest.mark.unit
+def test_service_readiness_ignores_compose_env_without_verified_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
+
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    _write_non_source_compose_env(
+        tmp_path,
+        f"AWF_DATABASE_URL={database_url}\nAWF_API_BASE_URL=http://api.internal:9000\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    captured: dict[str, object] = {}
+
+    async def _collect(**kwargs: object) -> CoreReadinessReport:
+        captured.update(kwargs)
+        return CoreReadinessReport(
+            status="ok",
+            checks=(
+                CoreReadinessCheck(
+                    name="service_status",
+                    status="ok",
+                    reason_code="SERVICE_STATUS_OK",
+                    message="service dependencies are ready",
+                    evidence={"status": "ok"},
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+
+    result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url != database_url
+    assert captured["compose_env_file"] is None
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert "AWF_DATABASE_URL" not in provider_environ
+    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
 
 
 @pytest.mark.unit
@@ -201,6 +374,7 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -218,10 +392,11 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
 
     result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
@@ -238,6 +413,7 @@ def test_service_readiness_pretty_labels_release_gate_and_summarizes_checks(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -270,12 +446,13 @@ def test_service_readiness_pretty_labels_release_gate_and_summarizes_checks(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(app, ["service", "readiness", "--format", "pretty"])
 
@@ -293,6 +470,7 @@ def test_service_release_readiness_alias_matches_readiness_json(
 ) -> None:
     import awf.service.config as config_module
     import awf.service.readiness as readiness_module
+    from awf.service import bootstrap as bootstrap_mod
 
     async def _collect(**_kwargs: object) -> CoreReadinessReport:
         return CoreReadinessReport(
@@ -309,12 +487,13 @@ def test_service_release_readiness_alias_matches_readiness_json(
         )
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
     monkeypatch.setattr(
         config_module,
         "resolve_service_settings",
-        lambda: SimpleNamespace(service_name="awf-local"),
+        lambda *_args, **_kwargs: SimpleNamespace(service_name="awf-local"),
     )
-    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(config_module, "local_service_environ", lambda **_kwargs: os.environ)
 
     result = _runner.invoke(app, ["service", "release-readiness", "--format", "json"])
 
@@ -358,6 +537,255 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
             {"check": False, "capture_output": True, "text": True},
         )
     ]
+
+
+@pytest.mark.unit
+def test_service_logs_passes_source_checkout_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(compose_env),
+            "-f",
+            str(compose_file),
+            "logs",
+            "--tail",
+            "100",
+            "api",
+            "worker",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_reuses_resolved_asset_root_for_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text("AWF_API_TOKEN=from-compose-env\n", encoding="utf-8")
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    root_lookups = 0
+
+    def _asset_root() -> Path:
+        nonlocal root_lookups
+        root_lookups += 1
+        return workspace_root
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", _asset_root)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "api"])
+
+    assert result.exit_code == 0, result.output
+    assert root_lookups == 1
+
+
+@pytest.mark.unit
+def test_service_logs_ignores_compose_env_without_verified_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    _write_non_source_compose_env(tmp_path, "AWF_API_TOKEN=from-compose-env\n")
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            str((tmp_path / "docker" / "compose" / "local-service.yml").resolve()),
+            "logs",
+            "--tail",
+            "100",
+            "worker",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_ignores_ancestor_compose_env_without_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    project_root = tmp_path / "project"
+    _write_non_source_compose_env(project_root, "AWF_API_TOKEN=from-ancestor\n")
+    project_subdir = project_root / "subdir"
+    project_subdir.mkdir()
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            str((project_root / "docker" / "compose" / "local-service.yml").resolve()),
+            "logs",
+            "--tail",
+            "100",
+            "worker",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_mirrors_compose_awf_docker_host_into_subprocess_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    compose_env = compose / ".env"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///stale-docker.sock")
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "api"])
+
+    assert result.exit_code == 0, result.output
+    args, kwargs = calls[0]
+    assert args == [
+        "docker",
+        "compose",
+        "--env-file",
+        str(compose_env),
+        "-f",
+        str(compose_file),
+        "logs",
+        "--tail",
+        "100",
+        "api",
+    ]
+    env = kwargs["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert "AWF_DOCKER_HOST" not in env
+
+
+@pytest.mark.unit
+def test_service_logs_omits_root_env_file_when_compose_env_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    compose_file = compose / "local-service.yml"
+    root_env = workspace_root / ".env"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    root_env.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_file),
+        "logs",
+        "--tail",
+        "100",
+        "worker",
+    ]
+    env = calls[0][1]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == docker_host
+    assert "AWF_DOCKER_HOST" not in env
 
 
 @pytest.mark.unit
@@ -497,6 +925,7 @@ def test_service_logs_docker_compose_failure_is_clean_typer_error(
 @pytest.mark.unit
 def test_service_bootstrap_cli_invokes_helper_and_emits_json(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
@@ -504,7 +933,9 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
 
     settings = object()
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _bootstrap(received: object, **kwargs: object) -> ServiceBootstrapResult:
         captured["settings"] = received
@@ -523,11 +954,185 @@ def test_service_bootstrap_cli_invokes_helper_and_emits_json(
     assert payload["status"] == "ok"
     assert payload["service_status"]["status"] == "ok"
     assert captured["settings"] is settings
+    assert captured["env_file"] is None
     options = captured["options"]
     assert options.timeout_seconds == 180
     assert options.poll_interval_seconds == 2
     assert options.skip_agent_runtime_build is False
     assert options.strict_providers == frozenset()
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(workspace_root)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _bootstrap(settings: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    assert captured["compose_file"] == compose / "local-service.yml"
+    assert captured["env_file"] == compose / ".env"
+    assert "provider_environ" not in captured
+    service_environ = captured["service_environ"]
+    assert service_environ["AWF_DATABASE_URL"] == database_url
+    assert service_environ["AWF_DOCKER_HOST"] == docker_host
+    assert service_environ["AWF_API_BASE_URL"] == api_base_url
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_ignores_compose_env_without_verified_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    _write_non_source_compose_env(
+        tmp_path,
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    for key in ("AWF_DATABASE_URL", "AWF_DOCKER_HOST", "AWF_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    captured: dict[str, object] = {}
+
+    async def _bootstrap(settings: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url != database_url
+    assert settings.docker_host != docker_host
+    assert settings.api_base_url != api_base_url
+    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
+    assert captured["env_file"] is None
+    service_environ = captured["service_environ"]
+    assert "AWF_DATABASE_URL" not in service_environ
+    assert "AWF_POSTGRES_PASSWORD" not in service_environ
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_resolves_settings_from_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    root_env = workspace_root / ".env"
+    database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://root-api:8123"
+    root_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(workspace_root)
+    for key in ("AWF_DATABASE_URL", "AWF_DOCKER_HOST", "AWF_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _bootstrap(settings: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    assert captured["compose_file"] == compose / "local-service.yml"
+    assert captured["env_file"] is None
+    assert "provider_environ" not in captured
+    service_environ = captured["service_environ"]
+    assert service_environ["AWF_DATABASE_URL"] == database_url
+    assert service_environ["AWF_DOCKER_HOST"] == docker_host
+    assert service_environ["AWF_API_BASE_URL"] == api_base_url
 
 
 @pytest.mark.unit
@@ -538,7 +1143,8 @@ def test_service_bootstrap_cli_pretty_output_uses_existing_emitter(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapResult
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> ServiceBootstrapResult:
         return ServiceBootstrapResult(
@@ -564,7 +1170,8 @@ def test_service_bootstrap_cli_passes_strict_provider_options(
     from awf.service.bootstrap import ServiceBootstrapResult
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **kwargs: object) -> ServiceBootstrapResult:
         captured.update(kwargs)
@@ -599,7 +1206,8 @@ def test_service_bootstrap_cli_helper_failures_exit_without_traceback(
     from awf.service import config as config_mod
     from awf.service.bootstrap import ServiceBootstrapError
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _bootstrap(_settings: object, **_kwargs: object) -> object:
         raise ServiceBootstrapError(
@@ -690,13 +1298,34 @@ def test_readme_documents_service_logs_command() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_service_bootstrap_command() -> None:
+    """Verify concepts docs keep the service bootstrap command discoverable."""
     readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
-    assert "docker compose -f docker/compose/local-service.yml up --build" in readme
+    assert (
+        "docker compose --env-file docker/compose/.env "
+        "-f docker/compose/local-service.yml up --build" in readme
+    )
     assert "safe to re-run" in readme
+    assert "docker/compose/.env" in readme
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "doc_path",
+    [
+        Path("docs/QUICKSTART.md"),
+        Path("docs/GETTING_STARTED.md"),
+    ],
+)
+def test_readme_documents_compose_env_bootstrap_path(doc_path: Path) -> None:
+    """Verify onboarding docs mention the compose env bootstrap target."""
+    document = doc_path.read_text(encoding="utf-8")
+
+    assert "docker/compose/.env" in document
+    assert "wrote .env" not in document
 
 
 @pytest.mark.unit
@@ -1323,6 +1952,162 @@ def test_service_config_command_prints_redacted_json(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.unit
+def test_service_status_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import status as status_mod
+    from awf.service.config import ServiceSettings
+
+    compose_env = tmp_path / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True)
+    (compose_env.parent / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    compose_database_url = "postgresql+asyncpg://awf:compose-secret@compose-db:5432/awf"
+    compose_api_base_url = "http://compose-api:8123"
+    compose_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={compose_database_url}",
+                f"AWF_API_BASE_URL={compose_api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: tmp_path)
+    for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return {"service": "awf", "status": "ok", "checks": {}}
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert isinstance(settings, ServiceSettings)
+    assert settings.database_url == compose_database_url
+    assert settings.api_base_url == compose_api_base_url
+    assert captured["compose_file"] == compose_env.parent / "local-service.yml"
+    assert captured["compose_env_file"] == compose_env
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert provider_environ["AWF_DATABASE_URL"] == compose_database_url
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "compose-secret"
+
+
+@pytest.mark.unit
+def test_service_status_ignores_compose_env_without_verified_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import status as status_mod
+    from awf.service.config import ServiceSettings
+
+    compose_database_url = "postgresql+asyncpg://awf:compose-secret@compose-db:5432/awf"
+    compose_api_base_url = "http://compose-api:8123"
+    _write_non_source_compose_env(
+        tmp_path,
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={compose_database_url}",
+                f"AWF_API_BASE_URL={compose_api_base_url}",
+            ]
+        )
+        + "\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return {"service": "awf", "status": "ok", "checks": {}}
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert isinstance(settings, ServiceSettings)
+    assert settings.database_url != compose_database_url
+    assert settings.api_base_url != compose_api_base_url
+    assert captured["compose_file"] == Path("docker/compose/local-service.yml")
+    assert captured["compose_env_file"] is None
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert "AWF_DATABASE_URL" not in provider_environ
+    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
+
+
+@pytest.mark.unit
+def test_service_status_resolves_settings_from_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import status as status_mod
+    from awf.service.config import ServiceSettings
+
+    compose = tmp_path / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    root_database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
+    root_api_base_url = "http://root-api:8123"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={root_database_url}",
+                f"AWF_API_BASE_URL={root_api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: tmp_path)
+    for key in ("AWF_DATABASE_URL", "AWF_API_BASE_URL", "AWF_POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def _collect(settings: object, **kwargs: object) -> dict[str, object]:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return {"service": "awf", "status": "ok", "checks": {}}
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert isinstance(settings, ServiceSettings)
+    assert settings.database_url == root_database_url
+    assert settings.api_base_url == root_api_base_url
+    assert captured["compose_file"] == compose / "local-service.yml"
+    assert captured["compose_env_file"] is None
+    provider_environ = captured["provider_environ"]
+    assert isinstance(provider_environ, dict)
+    assert provider_environ["AWF_DATABASE_URL"] == root_database_url
+    assert provider_environ["AWF_POSTGRES_PASSWORD"] == "root-secret"
+
+
+@pytest.mark.unit
 def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Path) -> None:
     from awf.service.config import ServiceSettings
     from awf.service.status import collect_service_status
@@ -1558,12 +2343,14 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
 def test_service_status_pretty_output_includes_disk_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: os.environ)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1594,11 +2381,13 @@ def test_service_status_pretty_output_includes_disk_check(
 def test_service_status_pretty_output_includes_network_posture_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1641,11 +2430,13 @@ def test_service_status_pretty_output_includes_network_posture_check(
 def test_service_status_pretty_output_includes_provider_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1679,13 +2470,15 @@ def test_service_status_pretty_output_includes_provider_reason(
 def test_service_status_provider_option_requests_strict_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
     service_env = {"AWF_GITHUB_TOKEN": "ghp_compose_token"}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: service_env)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: service_env)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1724,11 +2517,13 @@ def test_service_status_provider_option_requests_strict_provider(
 def test_service_status_provider_option_accepts_codex(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1772,12 +2567,14 @@ def test_service_status_provider_option_accepts_codex(
 def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
     settings = object()
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
-    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda **_kwargs: os.environ)
 
     report = SimpleNamespace(
         status="ok",
@@ -1817,13 +2614,282 @@ def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
 
 
 @pytest.mark.unit
+def test_service_doctor_resolves_settings_from_compose_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    (compose / ".env").write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DOCKER_HOST", raising=False)
+    monkeypatch.delenv("AWF_API_BASE_URL", raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        },
+    )
+
+    async def _collect(settings: object, **kwargs: object) -> object:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    provider_environ = captured["provider_environ"]
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
+    assert captured["compose_env_file"] == compose / ".env"
+
+
+@pytest.mark.unit
+def test_service_doctor_ignores_compose_env_without_verified_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+
+    database_url = "postgresql+asyncpg://awf:compose-secret@db.internal:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://api.internal:9000"
+    _write_non_source_compose_env(
+        tmp_path,
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    for key in ("AWF_DATABASE_URL", "AWF_DOCKER_HOST", "AWF_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    captured: dict[str, object] = {}
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        },
+    )
+
+    async def _collect(settings: object, **kwargs: object) -> object:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url != database_url
+    assert settings.docker_host != docker_host
+    assert settings.api_base_url != api_base_url
+    assert captured["compose_env_file"] is None
+    provider_environ = captured["provider_environ"]
+    assert "AWF_DATABASE_URL" not in provider_environ
+    assert "AWF_POSTGRES_PASSWORD" not in provider_environ
+
+
+@pytest.mark.unit
+def test_service_doctor_resolves_settings_from_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import doctor as doctor_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    root_env = workspace_root / ".env"
+    database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://root-api:8123"
+    root_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    for key in ("AWF_DATABASE_URL", "AWF_DOCKER_HOST", "AWF_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        },
+    )
+
+    async def _collect(settings: object, **kwargs: object) -> object:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    provider_environ = captured["provider_environ"]
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
+    assert captured["compose_env_file"] is None
+
+
+@pytest.mark.unit
+def test_service_doctor_bundle_resolves_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import support_bundle as bundle_mod
+
+    workspace_root = tmp_path / "workspace"
+    compose = workspace_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    root_env = workspace_root / ".env"
+    database_url = "postgresql+asyncpg://awf:root-secret@root-db:5432/awf"
+    docker_host = f"unix://{tmp_path / 'docker.sock'}"
+    api_base_url = "http://root-api:8123"
+    root_env.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                f"AWF_DOCKER_HOST={docker_host}",
+                f"AWF_API_BASE_URL={api_base_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_subdir = workspace_root / "project"
+    project_subdir.mkdir()
+    monkeypatch.chdir(project_subdir)
+    for key in ("AWF_DATABASE_URL", "AWF_DOCKER_HOST", "AWF_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: workspace_root)
+    captured: dict[str, object] = {}
+
+    async def _collect_support_bundle(settings: object, **kwargs: object) -> dict[str, object]:
+        captured["settings"] = settings
+        captured.update(kwargs)
+        return {
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "version": "0.1.0",
+            "service_status": {"status": "ok"},
+            "doctor_report": {"status": "ok"},
+            "provider_readiness_summary": {"status": "ok"},
+            "orphan_cleanup_posture": {},
+            "recent_failure_summary": {},
+            "config_fingerprint": {},
+            "log_pointers": [],
+            "issue_template_pointer": ".github/ISSUE_TEMPLATE/bug_report.yml",
+        }
+
+    monkeypatch.setattr(bundle_mod, "collect_support_bundle", _collect_support_bundle)
+    monkeypatch.setattr(
+        bundle_mod, "write_support_bundle", lambda _bundle: tmp_path / "bundle.json"
+    )
+
+    result = _runner.invoke(app, ["service", "doctor", "--bundle"])
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.database_url == database_url
+    assert settings.docker_host == docker_host
+    assert settings.api_base_url == api_base_url
+    provider_environ = captured["provider_environ"]
+    assert provider_environ["AWF_DATABASE_URL"] == database_url
+    assert provider_environ["AWF_DOCKER_HOST"] == docker_host
+    assert provider_environ["AWF_API_BASE_URL"] == api_base_url
+    assert captured["environ"] is provider_environ
+    assert captured["compose_file"] == workspace_root / "docker" / "compose" / "local-service.yml"
+    assert captured["compose_env_file"] is None
+
+
+@pytest.mark.unit
 def test_service_doctor_json_output_is_structured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="ok",
         to_dict=lambda: {
@@ -1849,10 +2915,12 @@ def test_service_doctor_json_output_is_structured(
 def test_service_doctor_failing_diagnostics_exit_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="fail",
         to_dict=lambda: {
@@ -1900,10 +2968,12 @@ def test_service_doctor_failing_diagnostics_exit_one(
 def test_service_doctor_preserves_typer_exit_from_collector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
         raise typer.Exit(code=7)
@@ -1920,10 +2990,12 @@ def test_service_doctor_preserves_typer_exit_from_collector(
 def test_service_doctor_does_not_mask_unexpected_collection_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
         raise RuntimeError("diagnostic collector exploded")
@@ -1941,11 +3013,13 @@ def test_service_doctor_does_not_mask_unexpected_collection_errors(
 def test_service_doctor_provider_options_are_validated_and_passed_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import doctor as doctor_mod
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
     report = SimpleNamespace(
         status="ok",
         to_dict=lambda: {
@@ -1986,10 +3060,12 @@ def test_service_doctor_unknown_provider_exits_two_without_traceback() -> None:
 def test_service_doctor_does_not_change_status_pretty_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from awf.service import bootstrap as bootstrap_mod
     from awf.service import config as config_mod
     from awf.service import status as status_mod
 
-    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda *_args, **_kwargs: object())
 
     async def _collect(_settings: object, **_kwargs: object) -> dict[str, object]:
         return {

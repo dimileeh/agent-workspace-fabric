@@ -379,7 +379,7 @@ workspace log store.
 Start from a clean checkout with the repeatable bootstrap command:
 
 ```bash
-cp .env.example .env
+cp .env.example docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
@@ -394,7 +394,7 @@ The lower-level Compose workflow remains supported:
 
 ```bash
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-docker compose -f docker/compose/local-service.yml up --build
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up --build
 ```
 
 On Linux, host Ollama is often bound only to `127.0.0.1:11434`, which Docker
@@ -503,12 +503,20 @@ version label after building them:
 
 ```bash
 export AWF_LOCAL_VERSION="$(git rev-parse --short HEAD)"
-docker compose -f docker/compose/local-service.yml build
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml build
 docker tag awf-control-plane:local "awf-control-plane:${AWF_LOCAL_VERSION}"
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
 docker tag awf-agent-runtime:latest "awf-agent-runtime:${AWF_LOCAL_VERSION}"
 docker image inspect "awf-control-plane:${AWF_LOCAL_VERSION}"
 docker image inspect "awf-agent-runtime:${AWF_LOCAL_VERSION}"
+```
+
+The explicit `--env-file docker/compose/.env` form is preferred for repeatable
+local operations. If the needed Compose variables are already exported in your
+shell, the equivalent control-plane image rebuild command is:
+
+```bash
+docker compose -f docker/compose/local-service.yml build
 ```
 
 The Compose stack still points at `awf-control-plane:local` by default, and
@@ -524,13 +532,13 @@ rerun migrations, and check health:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 mkdir -p "$AWF_HOST_WORK_DIR/backups"
-docker compose -f docker/compose/local-service.yml up -d postgres
-docker compose -f docker/compose/local-service.yml exec -T postgres \
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
   pg_dump -U awf -d awf -Fc \
   > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
 
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-docker compose -f docker/compose/local-service.yml build
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml build
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
@@ -558,11 +566,17 @@ Capture a custom-format backup into the service work directory:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 mkdir -p "$AWF_HOST_WORK_DIR/backups"
-docker compose -f docker/compose/local-service.yml up -d postgres
-docker compose -f docker/compose/local-service.yml exec -T postgres \
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
   pg_dump -U awf -d awf -Fc \
   > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ```
+
+The explicit env-file form avoids depending on shell state. If the needed
+Compose variables are already exported, the equivalent Postgres exec prefix is
+`docker compose -f docker/compose/local-service.yml exec -T postgres`.
+The equivalent pre-restore stop command is
+`docker compose -f docker/compose/local-service.yml stop api worker`.
 
 Restore only when the API and worker are stopped. This avoids live writes
 during restore and makes the backup the single source of control-plane truth.
@@ -570,16 +584,16 @@ Before restore, stop API and worker.
 
 ```bash
 export AWF_BACKUP="$HOME/.awf/service/backups/awf-control-plane-YYYYmmddTHHMMSSZ.dump"
-docker compose -f docker/compose/local-service.yml stop api worker
-docker compose -f docker/compose/local-service.yml up -d postgres
-docker compose -f docker/compose/local-service.yml exec -T postgres \
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d postgres
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
   dropdb -U awf --maintenance-db=postgres --if-exists awf
-docker compose -f docker/compose/local-service.yml exec -T postgres \
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
   createdb -U awf --maintenance-db=postgres awf
-docker compose -f docker/compose/local-service.yml exec -T postgres \
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml exec -T postgres \
   pg_restore -U awf -d awf --no-owner < "$AWF_BACKUP"
-docker compose -f docker/compose/local-service.yml up --build --force-recreate migrate
-docker compose -f docker/compose/local-service.yml up -d api worker
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up --build --force-recreate migrate
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d api worker
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
@@ -599,7 +613,7 @@ To roll back images to a saved local version:
 export AWF_ROLLBACK_VERSION=<previous-git-sha-or-local-label>
 docker tag "awf-control-plane:${AWF_ROLLBACK_VERSION}" awf-control-plane:local
 docker tag "awf-agent-runtime:${AWF_ROLLBACK_VERSION}" awf-agent-runtime:latest
-docker compose -f docker/compose/local-service.yml up -d --force-recreate api worker
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml up -d --force-recreate api worker
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
@@ -623,13 +637,17 @@ containers and networks. The default cleanup command below intentionally does
 not remove the Postgres volume:
 
 ```bash
-docker compose -f docker/compose/local-service.yml ps
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml ps
 uv run --python 3.12 --extra dev awf service logs --tail 200
-docker compose -f docker/compose/local-service.yml stop api worker migrate
-docker compose -f docker/compose/local-service.yml down --remove-orphans
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker migrate
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml down --remove-orphans
 uv run --python 3.12 --extra dev awf service bootstrap
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
+
+The explicit env-file form is preferred. If the needed Compose variables are
+already exported, the equivalent container/network cleanup command is
+`docker compose -f docker/compose/local-service.yml down --remove-orphans`.
 
 Use `down --volumes` only as a last resort after a verified control-plane
 backup exists. Removing the Compose volume destroys the local AWF
@@ -642,7 +660,7 @@ readable:
 ```bash
 export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
 export AWF_QUARANTINE="${AWF_HOST_WORK_DIR}.quarantine.$(date -u +%Y%m%dT%H%M%SZ)"
-docker compose -f docker/compose/local-service.yml stop api worker
+docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop api worker
 mv "$AWF_HOST_WORK_DIR" "$AWF_QUARANTINE"
 mkdir -p "$AWF_HOST_WORK_DIR"
 for name in backups logs artifacts auth; do

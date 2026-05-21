@@ -39,8 +39,9 @@ awf service status --format pretty
 ```
 
 `awf init` without a path checks local prerequisites, creates the host state
-directory, writes `.env` from `.env.example` when needed, and starts the local
-Postgres, migration, API, and worker stack.
+directory, writes `docker/compose/.env` from `.env.example` when the source
+checkout contains `docker/compose/local-service.yml` (or `.env` in package
+installs), and starts the local Postgres, migration, API, and worker stack.
 
 If you set or refresh the GitHub token after `awf init`, rerun the service
 bootstrap so Compose recreates the service containers with the updated

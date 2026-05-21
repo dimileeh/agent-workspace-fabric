@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import weakref
+
 import pytest
 from pydantic import ValidationError
 
+import awf.common.config as common_config
 from awf.common.callback_events import (
     callback_subscription_matches_event_type,
     is_valid_callback_subscription_event_type,
@@ -193,6 +196,24 @@ class TestSettings:
             match="callbacks_allowed_hosts must be a comma-separated string, list, or tuple",
         ):
             Settings(_env_file=None, callbacks_allowed_hosts=123)
+
+    @pytest.mark.unit
+    def test_settings_identity_ref_uses_object_identity(self) -> None:
+        settings = Settings(_env_file=None)
+        other_settings = Settings(_env_file=None)
+        reference = common_config._SettingsIdentityRef(settings)  # noqa: SLF001
+
+        assert reference.__eq__(object()) is False
+        assert reference == reference
+        assert reference.__eq__(common_config._SettingsIdentityRef(other_settings)) is False  # noqa: SLF001
+
+    @pytest.mark.unit
+    def test_discard_settings_constructor_fields_ignores_plain_weakrefs(self) -> None:
+        settings = Settings(_env_file=None)
+
+        common_config._discard_settings_constructor_fields(weakref.ref(settings))  # noqa: SLF001
+
+        assert common_config.settings_constructor_fields(settings) == frozenset()
 
 
 class TestRedaction:

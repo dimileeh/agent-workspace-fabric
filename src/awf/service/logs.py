@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
-LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
+import yaml
+
+from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
+from awf.service.environment import (
+    cleared_docker_cli_client_keys,
+    compose_cli_environ,
+    compose_interpolation_environ,
+    docker_cli_client_environ,
+    env_lookup,
+    non_empty_env_value,
+)
+
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
@@ -60,6 +72,8 @@ class CompletedProcessLike(Protocol):
 
 
 class SubprocessRun(Protocol):
+    """Callable protocol for invoking Docker log subprocess commands."""
+
     def __call__(
         self,
         args: list[str],
@@ -67,7 +81,10 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
-    ) -> CompletedProcessLike: ...  # pragma: no cover
+        env: Mapping[str, str] | None = None,
+    ) -> CompletedProcessLike:
+        """Run a logs command and return a completed-process-like object."""
+        ...  # pragma: no cover
 
 
 @dataclass(frozen=True)
@@ -89,17 +106,18 @@ def service_logs_command(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
 ) -> list[str]:
+    """Build the Docker Compose logs command for the selected services."""
+
     selected_services = [service.value for service in services] or list(DEFAULT_LOG_SERVICES)
     args = [
         "docker",
         "compose",
-        "-f",
-        str(compose_file),
-        "logs",
-        "--tail",
-        str(tail),
     ]
+    if compose_env_file is not None:
+        args.extend(["--env-file", str(compose_env_file)])
+    args.extend(["-f", str(compose_file), "logs", "--tail", str(tail)])
     if follow:
         args.append("--follow")
     args.extend(selected_services)
@@ -112,6 +130,8 @@ def run_service_logs(
     tail: int = DEFAULT_LOG_TAIL,
     follow: bool = False,
     compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: Path | None = None,
+    service_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ServiceLogsResult:
     """Run ``docker compose logs`` for the local service stack."""
@@ -124,16 +144,27 @@ def run_service_logs(
             returncode=1, detail=_local_service_compose_not_found_message(compose_file)
         )
     try:
+        docker_env = _docker_cli_environ(
+            service_environ,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+        )
+    except yaml.YAMLError as exc:
+        raise ServiceLogsError(returncode=1, detail=str(exc)) from exc
+    command = service_logs_command(
+        services=services,
+        tail=tail,
+        follow=follow,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
+    try:
         result = runner(
-            service_logs_command(
-                services=services,
-                tail=tail,
-                follow=follow,
-                compose_file=compose_file,
-            ),
+            command,
             check=False,
             capture_output=capture_output,
             text=True,
+            env=docker_env,
         )
     except FileNotFoundError as exc:
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
@@ -164,8 +195,69 @@ def _run_subprocess(
     check: bool,
     capture_output: bool,
     text: Literal[True],
+    env: Mapping[str, str] | None = None,
 ) -> CompletedProcessLike:
-    return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+    """Run the logs subprocess, omitting env when no override is needed."""
+
+    if env is None:
+        return subprocess.run(args, check=check, capture_output=capture_output, text=text)
+    return subprocess.run(args, check=check, capture_output=capture_output, text=text, env=env)
+
+
+def _docker_cli_environ(
+    environ: Mapping[str, str] | None,
+    *,
+    compose_file: Path,
+    compose_env_file: Path | None,
+) -> dict[str, str] | None:
+    """Return the minimal subprocess env needed by Docker Compose logs."""
+
+    if environ is None:
+        return None
+    awf_docker_host = non_empty_env_value(environ, "AWF_DOCKER_HOST")
+    docker_host_found, docker_host_value = env_lookup(environ, "DOCKER_HOST")
+    docker_host = awf_docker_host or (docker_host_value if docker_host_value else None)
+    caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
+    clears_docker_host = (
+        docker_host_found
+        and not docker_host_value
+        and caller_docker_host_found
+        and bool(caller_docker_host_value)
+    )
+    compose_env = compose_interpolation_environ(
+        environ,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
+    compose_cli_env = compose_cli_environ(environ)
+    docker_cli_env = docker_cli_client_environ(environ)
+    cleared_docker_cli_keys = cleared_docker_cli_client_keys(environ)
+    if (
+        not docker_host
+        and not compose_env
+        and not compose_cli_env
+        and not docker_cli_env
+        and not cleared_docker_cli_keys
+        and not clears_docker_host
+    ):
+        # Compose reads ordinary service values through --env-file; only pass an
+        # explicit subprocess environment when a resolved value must override the
+        # caller environment for Docker client selection, Compose interpolation,
+        # or Compose project/profile selection.
+        return None
+    resolved = dict(os.environ)
+    resolved.update(docker_cli_env)
+    resolved.update(compose_env)
+    resolved.update(compose_cli_env)
+    scrubbed_keys = {"AWF_DOCKER_HOST", *cleared_docker_cli_keys}
+    if docker_host or clears_docker_host:
+        scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
+    for key in list(resolved):
+        if key.upper() in scrubbed_keys:
+            del resolved[key]
+    if docker_host:
+        resolved["DOCKER_HOST"] = docker_host
+    return resolved
 
 
 def _failure_detail(*, stdout: str, stderr: str, follow: bool = False) -> str:

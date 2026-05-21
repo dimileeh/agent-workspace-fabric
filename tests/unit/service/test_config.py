@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import gc
 import inspect
 import json
@@ -11,9 +12,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import Field
+from pydantic import AliasChoices, AliasPath, Field
 
 import awf.common.config as common_config
+import awf.service.bootstrap as bootstrap
 import awf.service.config as service_config
 from awf.common.config import (
     DEFAULT_LOCAL_DATABASE_URL,
@@ -27,9 +29,11 @@ from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_API_BASE_URL,
     DEFAULT_LOCAL_SERVICE_DATABASE_URL,
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
+    LOCAL_SERVICE_COMPOSE_FILE,
     _redact_database_url,
     _resolve_service_work_dir,
     local_service_environ,
+    resolve_local_service_provider_environ,
     resolve_service_settings,
     service_config_payload,
 )
@@ -75,6 +79,48 @@ def _diagnostic_text(error: ProductionSettingsError) -> str:
         )
         for diagnostic in error.diagnostics
     )
+
+
+@pytest.mark.unit
+def test_compose_env_file_sentinel_is_public_service_contract() -> None:
+    assert isinstance(
+        service_config.COMPOSE_ENV_FILE_OMITTED,
+        service_config.ComposeEnvFileOmitted,
+    )
+    assert {
+        "COMPOSE_ENV_FILE_OMITTED",
+        "ComposeEnvFileInput",
+        "ComposeEnvFileOmitted",
+    }.issubset(service_config.__all__)
+
+    repo_root = Path(__file__).resolve().parents[3]
+    service_modules = (
+        repo_root / "src" / "awf" / "service" / "status.py",
+        repo_root / "src" / "awf" / "service" / "readiness.py",
+        repo_root / "src" / "awf" / "service" / "doctor" / "__init__.py",
+        repo_root / "src" / "awf" / "service" / "support_bundle.py",
+    )
+    private_sentinel_names = {
+        "_COMPOSE_ENV_FILE_OMITTED",
+        "_ComposeEnvFileInput",
+        "_ComposeEnvFileOmitted",
+    }
+    private_imports: list[tuple[str, str]] = []
+    for module_path in service_modules:
+        tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module != "awf.service.config":
+                continue
+            private_imports.extend(
+                (module_path.relative_to(repo_root).as_posix(), alias.name)
+                for alias in node.names
+                if alias.name in private_sentinel_names
+            )
+
+    assert private_imports == []
 
 
 @pytest.mark.unit
@@ -589,6 +635,107 @@ def test_database_url_env_explicit_treats_missing_host_value_as_non_explicit() -
 @pytest.mark.unit
 def test_api_base_url_env_explicit_treats_missing_host_value_as_non_explicit() -> None:
     assert service_config._api_base_url_env_is_explicit({}, {}) is False  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_common_settings_alias_detection_handles_choices_paths_and_unknown_aliases() -> None:
+    assert common_config._settings_alias_is_present(  # noqa: SLF001
+        AliasChoices("AWF_DATABASE_URL", "DATABASE_URL"),
+        {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"},
+    )
+    assert common_config._settings_alias_is_present(  # noqa: SLF001
+        AliasPath("AWF_NESTED", "DATABASE_URL"),
+        {"AWF_NESTED": {"DATABASE_URL": "postgresql+asyncpg://awf:pw@db:5432/awf"}},
+    )
+
+    class UnknownAlias:
+        choices = "not-a-choice-list"
+        path = ()
+
+    assert not common_config._settings_alias_is_present(UnknownAlias(), {})  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_populate_compose_postgres_password_ignores_unparseable_database_url() -> None:
+    environ = {"AWF_DATABASE_URL": "not a database url"}
+
+    service_config._populate_compose_postgres_password(environ)  # noqa: SLF001
+
+    assert "AWF_POSTGRES_PASSWORD" not in environ
+
+
+@pytest.mark.unit
+def test_populate_compose_postgres_password_ignores_urls_without_password() -> None:
+    environ = {"AWF_DATABASE_URL": "postgresql+asyncpg://awf@localhost:5432/awf"}
+
+    service_config._populate_compose_postgres_password(environ)  # noqa: SLF001
+
+    assert "AWF_POSTGRES_PASSWORD" not in environ
+
+
+@pytest.mark.unit
+def test_resolve_service_api_base_url_uses_explicit_service_environment_url() -> None:
+    settings = Settings(_env_file=None)
+
+    api_base_url = service_config._resolve_service_api_base_url(  # noqa: SLF001
+        settings,
+        environ={},
+        service_environ={"AWF_API_BASE_URL": "http://localhost:9200"},
+    )
+
+    assert api_base_url == "http://localhost:9200"
+
+
+@pytest.mark.unit
+def test_api_base_url_env_explicit_distinguishes_custom_and_derivable_defaults() -> None:
+    assert service_config._api_base_url_env_is_explicit(  # noqa: SLF001
+        {"AWF_API_BASE_URL": "https://awf.example.test"},
+        {},
+    )
+    assert not service_config._api_base_url_env_is_explicit(  # noqa: SLF001
+        {
+            "AWF_API_BASE_URL": DEFAULT_LOCAL_SERVICE_API_BASE_URL,
+            "AWF_API_HOST_PORT": "9100",
+        },
+        {},
+    )
+
+
+@pytest.mark.unit
+def test_project_dotenv_candidates_fall_back_to_awf_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout, _module = _write_awf_source_checkout(tmp_path)
+    nested = checkout / "src" / "awf"
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(service_config, "resolve_local_service_compose_env_file", lambda: None)
+
+    candidates = service_config._project_dotenv_candidates()  # noqa: SLF001
+
+    assert candidates == (
+        nested / ".env",
+        checkout / "src" / ".env",
+        checkout / ".env",
+    )
+
+
+@pytest.mark.unit
+def test_project_dotenv_ancestor_candidates_stop_at_root(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    nested = root / "src" / "awf"
+    nested.mkdir(parents=True)
+
+    candidates = service_config._project_dotenv_ancestor_candidates(  # noqa: SLF001
+        nested,
+        root,
+    )
+
+    assert candidates == (
+        nested / ".env",
+        root / "src" / ".env",
+        root / ".env",
+    )
 
 
 @pytest.mark.unit
@@ -1368,6 +1515,133 @@ def test_local_service_environ_preserves_explicit_compose_postgres_password(
     environ = local_service_environ({}, env_file=env_file)
 
     assert environ["AWF_POSTGRES_PASSWORD"] == "explicit-secret"
+
+
+@pytest.mark.unit
+def test_provider_environ_ignores_cwd_compose_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env = tmp_path / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True)
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-unrelated-project\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: None)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=None,
+    )
+
+    assert environ == {"PATH": "/usr/bin"}
+
+
+@pytest.mark.unit
+def test_provider_environ_ignores_absolute_default_compose_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env = compose_file.parent / ".env"
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-unrelated-project\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: None)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=compose_file,
+        compose_env_file=None,
+    )
+
+    assert environ == {"PATH": "/usr/bin"}
+
+
+@pytest.mark.unit
+def test_provider_environ_loads_default_compose_env_from_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "awf"
+    compose_env = asset_root / "docker" / "compose" / ".env"
+    compose_env.parent.mkdir(parents=True)
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-asset-root\n", encoding="utf-8")
+    monkeypatch.chdir(asset_root)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=None,
+    )
+
+    assert environ["AWF_GITHUB_TOKEN"] == "from-asset-root"
+    assert environ["PATH"] == "/usr/bin"
+
+
+@pytest.mark.unit
+def test_provider_environ_loads_absolute_default_compose_env_from_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "awf"
+    compose_file = asset_root / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    compose_env = compose_file.parent / ".env"
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-asset-root\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=compose_file,
+        compose_env_file=None,
+    )
+
+    assert environ["AWF_GITHUB_TOKEN"] == "from-asset-root"
+    assert environ["PATH"] == "/usr/bin"
+
+
+@pytest.mark.unit
+def test_local_service_asset_path_rejects_absolute_path_outside_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    asset_root = tmp_path / "awf"
+    asset_root.mkdir()
+    inside = asset_root / LOCAL_SERVICE_COMPOSE_FILE
+    outside = tmp_path / "outside" / LOCAL_SERVICE_COMPOSE_FILE
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: asset_root)
+
+    assert service_config._local_service_asset_path(inside) == inside.resolve()  # noqa: SLF001
+    assert service_config._local_service_asset_path(outside) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_provider_environ_uses_explicit_compose_env_without_asset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_env = tmp_path / "compose.env"
+    compose_env.write_text("AWF_GITHUB_TOKEN=from-explicit-env\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "get_bootstrap_asset_root", lambda: None)
+
+    environ = resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ={"PATH": "/usr/bin"},
+        compose_file=LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file=compose_env,
+    )
+
+    assert environ["AWF_GITHUB_TOKEN"] == "from-explicit-env"
+    assert environ["PATH"] == "/usr/bin"
 
 
 @pytest.mark.unit

@@ -8,11 +8,18 @@ from collections.abc import Awaitable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.onboarding import preview_project_onboarding
-from awf.service.config import ServiceSettings
+from awf.service.config import (
+    COMPOSE_ENV_FILE_OMITTED,
+    LOCAL_SERVICE_COMPOSE_FILE,
+    ComposeEnvFileInput,
+    ComposeEnvFileOmitted,
+    ServiceSettings,
+    resolve_local_service_provider_environ,
+)
 from awf.service.doctor import collect_doctor_report
 from awf.service.doctor.models import DoctorReport
 from awf.service.metrics import (
@@ -45,10 +52,15 @@ class StatusCollector(Protocol):
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     ) -> Awaitable[dict[str, object]]: ...
 
 
 class DoctorCollector(Protocol):
+    """Callable protocol for collecting doctor diagnostics during readiness."""
+
     def __call__(  # pragma: no cover - Protocol declaration only.
         self,
         settings: ServiceSettings,
@@ -57,7 +69,11 @@ class DoctorCollector(Protocol):
         provider_environ: Mapping[str, str] | None = None,
         environ: Mapping[str, str] | None = None,
         status_collector: StatusCollector | None = None,
-    ) -> Awaitable[DoctorReport]: ...
+        compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+        compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
+    ) -> Awaitable[DoctorReport]:
+        """Collect a doctor report using the readiness command context."""
+        ...  # pragma: no cover
 
 
 class FailureAnalysisCollector(Protocol):
@@ -74,6 +90,23 @@ class SloMetricsCollector(Protocol):
         *,
         since_hours: int,
     ) -> Awaitable[SloMetricsSummary | Mapping[str, object]]: ...
+
+
+class _StatusCollectorKwargs(TypedDict, total=False):
+    strict_providers: Iterable[str] | None
+    provider_environ: Mapping[str, str] | None
+    environ: Mapping[str, str] | None
+    compose_file: Path | None
+    compose_env_file: ComposeEnvFileInput
+
+
+class _DoctorCollectorKwargs(TypedDict, total=False):
+    strict_providers: Iterable[str] | None
+    provider_environ: Mapping[str, str] | None
+    environ: Mapping[str, str]
+    status_collector: StatusCollector | None
+    compose_file: Path
+    compose_env_file: ComposeEnvFileInput
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -161,6 +194,8 @@ async def collect_core_readiness_report(
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
+    compose_file: Path = LOCAL_SERVICE_COMPOSE_FILE,
+    compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     allow_generic_failures: bool = False,
     allow_slo_breach: bool = False,
     status_collector: StatusCollector = collect_service_status,
@@ -170,18 +205,27 @@ async def collect_core_readiness_report(
 ) -> CoreReadinessReport:
     """Collect the local open-source Core release gate from public service surfaces."""
 
-    provider_env = os.environ if provider_environ is None else provider_environ
     env = os.environ if environ is None else environ
+    provider_env = resolve_local_service_provider_environ(
+        provider_environ=provider_environ,
+        environ=env,
+        compose_file=compose_file,
+        compose_env_file=compose_env_file,
+    )
     strict = frozenset(strict_providers or ())
 
     checks: list[CoreReadinessCheck] = []
     status_payload: dict[str, object] | None = None
+    status_kwargs: _StatusCollectorKwargs = {
+        "strict_providers": strict,
+        "provider_environ": provider_env,
+        "environ": env,
+        "compose_file": compose_file,
+    }
+    if not isinstance(compose_env_file, ComposeEnvFileOmitted):
+        status_kwargs["compose_env_file"] = compose_env_file
     try:
-        status_payload = await status_collector(
-            settings,
-            strict_providers=strict,
-            provider_environ=provider_env,
-        )
+        status_payload = await status_collector(settings, **status_kwargs)
         checks.append(_service_status_check(status_payload))
         checks.append(_provider_readiness_check(status_payload))
         checks.append(_cleanup_posture_check(status_payload))
@@ -197,14 +241,17 @@ async def collect_core_readiness_report(
         )
 
     cached_status_collector = _cached_status_collector(status_payload)
+    doctor_kwargs: _DoctorCollectorKwargs = {
+        "strict_providers": strict,
+        "provider_environ": provider_env,
+        "environ": env,
+        "status_collector": cached_status_collector,
+        "compose_file": compose_file,
+    }
+    if not isinstance(compose_env_file, ComposeEnvFileOmitted):
+        doctor_kwargs["compose_env_file"] = compose_env_file
     try:
-        doctor_report = await doctor_collector(
-            settings,
-            strict_providers=strict,
-            provider_environ=provider_env,
-            environ=env,
-            status_collector=cached_status_collector,
-        )
+        doctor_report = await doctor_collector(settings, **doctor_kwargs)
         checks.append(_doctor_check(doctor_report))
     except Exception as exc:
         checks.append(
@@ -319,8 +366,11 @@ def _cached_status_collector(payload: dict[str, object] | None) -> StatusCollect
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+        compose_file: Path | None = None,
+        compose_env_file: ComposeEnvFileInput = COMPOSE_ENV_FILE_OMITTED,
     ) -> dict[str, object]:
-        del strict_providers, provider_environ
+        del strict_providers, provider_environ, environ, compose_file, compose_env_file
         return payload
 
     return cast(StatusCollector, _collect)
