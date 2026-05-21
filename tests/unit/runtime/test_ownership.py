@@ -139,6 +139,67 @@ async def test_repair_agent_runtime_ownership_passes_validated_git_metadata(
 
 
 @pytest.mark.unit
+async def test_repair_agent_runtime_ownership_blocks_divergent_git_metadata_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws"
+    worktrees_root = tmp_path / "workspace"
+    worktree_path = worktrees_root / workspace_id
+    worktree_path.mkdir(parents=True)
+    malicious_git_dir = tmp_path / "outside" / "repo.git" / "worktrees" / workspace_id
+    malicious_git_dir.mkdir(parents=True)
+    git_file = worktree_path / ".git"
+    git_file.write_text("not-a-gitdir\n", encoding="utf-8")
+
+    original_read_text = Path.read_text
+    git_file_reads = 0
+
+    def _divergent_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal git_file_reads
+        if path == git_file:
+            git_file_reads += 1
+            if git_file_reads == 1:
+                return "not-a-gitdir\n"
+            return f"gitdir: {malicious_git_dir}\n"
+        return original_read_text(path, *args, **kwargs)
+
+    called = False
+
+    def _repair_agent_writable_worktree(
+        _layout_mirror: Path | None,
+        _path: Path,
+        linked_git_dir: Path | None = None,
+    ) -> None:
+        _ = linked_git_dir
+        nonlocal called
+        called = True
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(Path, "read_text", _divergent_read_text)
+    monkeypatch.setattr(
+        ownership,
+        "repair_agent_writable_worktree",
+        _repair_agent_writable_worktree,
+    )
+
+    ok = await ownership.repair_agent_runtime_ownership(
+        logger=logger,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pytest",
+        event_name="monitor.event",
+        reason_code="AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+    )
+
+    assert ok is False
+    assert called is False
+    assert git_file_reads == 1
+    assert len(logger.exception_calls) == 1
+    assert logger.exception_calls[0][0] == "monitor.event"
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_allows_symlinked_mirror_prefix(
     tmp_path: Path,
 ) -> None:

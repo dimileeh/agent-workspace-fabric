@@ -8,7 +8,6 @@ from typing import Protocol
 
 from awf.node.git_manager import (
     linked_worktree_git_dir,
-    mirror_path_for_worktree,
     repair_agent_writable_worktree,
 )
 
@@ -20,9 +19,28 @@ EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
 MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
 
 
+def _mirror_path_from_linked_git_dir(linked_git_dir: Path) -> Path:
+    """Resolve a linked worktree's mirror from an already trusted gitdir read."""
+    commondir = linked_git_dir / "commondir"
+    try:
+        if commondir.is_file():
+            raw_common_dir = commondir.read_text(encoding="utf-8").strip()
+            if raw_common_dir:
+                common_dir = Path(raw_common_dir)
+                if not common_dir.is_absolute():
+                    common_dir = linked_git_dir / common_dir
+                return common_dir.resolve()
+        return linked_git_dir.parent.parent.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(
+            "refusing ownership repair: cannot resolve mirror path from linked-worktree "
+            f"git metadata {linked_git_dir}"
+        ) from exc
+
+
 def _validated_layout_mirror_for_worktree(
     worktree_path: Path, workspace_id: str
-) -> tuple[Path | None, Path | None]:
+) -> tuple[Path, Path]:
     """Resolve and validate the linked-worktree mirror and gitdir.
 
     Control-plane control over git pointers has been compromised during
@@ -30,11 +48,14 @@ def _validated_layout_mirror_for_worktree(
     the expected ``<worktrees_root>/../mirrors`` hierarchy for this
     worktree path and match this workspace's metadata entry.
     """
-    mirror_path = mirror_path_for_worktree(worktree_path)
     linked_git_dir = linked_worktree_git_dir(worktree_path)
-    if mirror_path is None:
-        return None, linked_git_dir
+    if linked_git_dir is None:
+        raise ValueError(
+            "refusing ownership repair: cannot read linked-worktree git metadata "
+            f"for workspace {worktree_path}"
+        )
 
+    mirror_path = _mirror_path_from_linked_git_dir(linked_git_dir)
     expected_mirror_root = worktree_path.parent.parent / "mirrors"
     resolved_expected_root = expected_mirror_root.resolve()
     resolved_mirror = mirror_path.resolve()
@@ -42,12 +63,6 @@ def _validated_layout_mirror_for_worktree(
         raise ValueError(
             "refusing ownership repair: mirror path is outside expected mirrors root "
             f"for workspace {worktree_path}: {resolved_mirror}"
-        )
-
-    if linked_git_dir is None:
-        raise ValueError(
-            "refusing ownership repair: cannot read linked-worktree git metadata "
-            f"for workspace {worktree_path}"
         )
 
     expected_worktree_git_root = resolved_mirror / "worktrees"
