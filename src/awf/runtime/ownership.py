@@ -16,13 +16,36 @@ EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = (
 MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME = "monitor.agent_runtime_ownership_repair_failed"
 
 
-def _validated_layout_mirror_for_worktree(worktree_path: Path) -> Path | None:
+def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    """Return the `.git` file target for a linked worktree, when readable."""
+    git_file = worktree_path / ".git"
+    if not git_file.is_file():
+        return None
+
+    try:
+        content = git_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+    prefix = "gitdir: "
+    if not content.startswith(prefix):
+        return None
+
+    linked_git_dir = Path(content.removeprefix(prefix).strip())
+    if not linked_git_dir.is_absolute():
+        linked_git_dir = (worktree_path / linked_git_dir).resolve()
+    else:
+        linked_git_dir = linked_git_dir.resolve()
+    return linked_git_dir
+
+
+def _validated_layout_mirror_for_worktree(worktree_path: Path, workspace_id: str) -> Path | None:
     """Resolve and validate the linked-worktree mirror path.
 
     Control-plane control over git pointers has been compromised during
     monitor recoveries; trust only mirrored worktree pointers that stay under
     the expected ``<worktrees_root>/../mirrors`` hierarchy for this
-    worktree path.
+    worktree path and match this workspace's metadata entry.
     """
     mirror_path = mirror_path_for_worktree(worktree_path)
     if mirror_path is None:
@@ -36,6 +59,21 @@ def _validated_layout_mirror_for_worktree(worktree_path: Path) -> Path | None:
             "refusing ownership repair: mirror path is outside expected mirrors root "
             f"for workspace {worktree_path}: {resolved_mirror}"
         )
+
+    linked_worktree_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_worktree_git_dir is None:
+        raise ValueError(
+            "refusing ownership repair: cannot read linked-worktree git metadata "
+            f"for workspace {worktree_path}"
+        )
+
+    expected_worktree_git_dir = resolved_mirror / "worktrees" / workspace_id
+    if linked_worktree_git_dir != expected_worktree_git_dir:
+        raise ValueError(
+            "refusing ownership repair: linked-worktree metadata points to another "
+            f"workspace. expected {expected_worktree_git_dir}, got {linked_worktree_git_dir}"
+        )
+
     return mirror_path
 
 
@@ -68,7 +106,7 @@ async def repair_agent_runtime_ownership(
     try:
         await asyncio.to_thread(
             repair_agent_writable_worktree,
-            _validated_layout_mirror_for_worktree(worktree_path),
+            _validated_layout_mirror_for_worktree(worktree_path, workspace_id),
             worktree_path,
         )
     except Exception:
