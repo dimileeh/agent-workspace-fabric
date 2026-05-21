@@ -7384,7 +7384,102 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
         assert not await worker._recover_preserved_active_execution(candidate)  # noqa: SLF001
+        async with session_factory() as s:
+            not_possible_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.active_execution_salvage_not_possible",
+            )
+
+        assert len(not_possible_events) == 1
+        assert not_possible_events[0].payload is not None
+        assert not_possible_events[0].payload["unrecoverable_reason"] == (
+            "validation_execution_slots_disabled"
+        )
         assert await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_preserved_active_validation_request_without_terminal_decision_blocks_stale_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-validation-request-without-terminal-decision",
+            WorkspaceStatus.running,
+            compose_project_name="awf_preserved_validation_request_pending",
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "stale-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=25)
+            preserved_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.active_execution_salvage_validation_requested",
+                reason_code="ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={
+                    "source": "worker_restart",
+                    "recovery_mode": "validate_only",
+                    "reason_code": "ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED",
+                    "preservation_event_id": preserved_event.id,
+                },
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {"awf_preserved_validation_request_pending": _live_agent_snapshot()}
+            ),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                active_execution_preservation_grace_seconds=0.0,
+            ),
+        )
+
+        assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name="awf_preserved_validation_request_pending",
+            )
+        )
 
     @pytest.mark.unit
     async def test_preserved_active_validation_busy_worker_blocks_stale_failure_after_grace(

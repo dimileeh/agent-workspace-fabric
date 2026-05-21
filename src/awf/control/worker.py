@@ -1976,10 +1976,18 @@ class ControlWorker:
                     )
                     return True
                 if self._available_execution_slots() <= 0:
-                    return (
+                    if (
                         not preservation_expired
                         or self._can_dispatch_execution_when_slot_available()
+                    ):
+                        return True
+                    await session.commit()
+                    await self._record_preserved_active_salvage_not_possible(
+                        candidate,
+                        preserved_event=preserved_event,
+                        reason="validation_execution_slots_disabled",
                     )
+                    return False
                 return True
 
             extracted_pr_number = (
@@ -3917,11 +3925,27 @@ class ControlWorker:
                     reason_code,
                 ) in _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS:
                     if event_type == _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE:
-                        can_dispatch_validation = self._preserved_active_validation_can_continue(
-                            candidate.workspace_id
-                        )
-                        if not can_dispatch_validation:
+                        if not await self._has_current_salvage_event(
+                            session,
+                            candidate.workspace_id,
+                            event_type=event_type,
+                            reason_code=reason_code,
+                            event_floor=latest_preserved,
+                            workspace_status=candidate.status,
+                        ):
                             continue
+                        if self._preserved_active_validation_can_continue(candidate.workspace_id):
+                            return False
+                        if await self._has_current_salvage_event(
+                            session,
+                            candidate.workspace_id,
+                            event_type=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
+                            reason_code=_ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
+                            event_floor=latest_preserved,
+                            workspace_status=candidate.status,
+                        ):
+                            continue
+                        return False
                     if await self._has_current_salvage_event(
                         session,
                         candidate.workspace_id,
