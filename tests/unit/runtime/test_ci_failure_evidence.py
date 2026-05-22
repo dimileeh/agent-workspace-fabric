@@ -184,6 +184,41 @@ def test_ci_failure_evidence_bounds_and_quotes_multiple_node_ids_with_known_comm
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_scans_noisy_malformed_pytest_lines_in_bounded_time() -> None:
+    valid_node_id = "tests/unit/runtime/test_prompt.py::test_keeps_working"
+    malformed_node = "tests/unit/runtime/test_prompt.py::" + ("case" * 2000)
+    noisy_line = f"Backend CI\tRun tests\tFAILED {malformed_node} " + " ".join(
+        f"package_{index}-1.0.0" for index in range(400)
+    )
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                noisy_line,
+                f"FAILED {valid_node_id} - AssertionError: boom",
+            ]
+        ),
+        check_name="Backend CI",
+    )
+
+    assert evidence.test_node_ids == (valid_node_id,)
+    assert evidence.suggested_repro_commands == (
+        f"uv run --python 3.12 --extra dev pytest {valid_node_id} -q",
+    )
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_linear_scanner_preserves_bracketed_parameters() -> None:
+    node_ids = [
+        "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        "pkg/tests/test_api.py::TestApi::test_nested[a - b]",
+    ]
+    line = " and ".join(f"`{node_id}`" for node_id in node_ids)
+
+    assert ci_failure_evidence._pytest_node_candidates(line) == node_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_pytest_repro_command_skips_unparseable_command_before_valid_pytest() -> None:
     command = ci_failure_evidence._pytest_repro_command(  # noqa: SLF001
         [
