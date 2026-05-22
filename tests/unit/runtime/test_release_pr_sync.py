@@ -77,6 +77,33 @@ def _fork_open_pr_list_payload(*, number: int = 555) -> str:
     )
 
 
+def _fork_and_same_repo_pr_list_payload(
+    *, fork_number: int = 555, same_repo_number: int = 99
+) -> str:
+    # The fork PR is listed first so the test proves selection filters by repo
+    # identity rather than list order.
+    return json.dumps(
+        [
+            {
+                "number": fork_number,
+                "url": f"https://github.com/o/r/pull/{fork_number}",
+                "headRefName": "development",
+                "headRefOid": "f" * 40,
+                "headRepository": {"name": "r", "nameWithOwner": "fork/r"},
+                "headRepositoryOwner": {"login": "fork"},
+            },
+            {
+                "number": same_repo_number,
+                "url": f"https://github.com/o/r/pull/{same_repo_number}",
+                "headRefName": "development",
+                "headRefOid": "h" * 40,
+                "headRepository": {"name": "r", "nameWithOwner": "o/r"},
+                "headRepositoryOwner": {"login": "o"},
+            },
+        ]
+    )
+
+
 class TestCountCommitsAhead:
     @pytest.mark.unit
     async def test_parses_positive_count(self) -> None:
@@ -250,6 +277,38 @@ class TestFindOrCreateReleasePr:
             ["gh", "pr", "create"],
             ["gh", "pr", "view"],
         ]
+
+    @pytest.mark.unit
+    async def test_prefers_same_repo_pr_over_fork_collision(self) -> None:
+        # When `gh pr list` returns both a fork PR and a same-repo PR sharing
+        # the head branch, the same-repo PR must be adopted (no create).
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_fork_and_same_repo_pr_list_payload(fork_number=555, same_repo_number=99),
+        )  # gh pr list
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=99))  # gh pr view
+        gh = GitHubClient(fake)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+        )
+
+        assert created is False
+        assert metadata.number == 99
+        # Only list + view of the same-repo PR ran; the fork PR is never viewed
+        # and no `gh pr create` is issued.
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+        ]
+        assert fake.calls[1].args[:4] == ["gh", "pr", "view", "99"]
 
     @pytest.mark.unit
     async def test_created_url_for_other_repo_raises(self) -> None:
