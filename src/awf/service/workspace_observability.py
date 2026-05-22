@@ -869,7 +869,14 @@ def lifecycle_payload(
 def usage_payload(workspace: Workspace) -> LlmUsagePayload:
     usage = workspace_usage_summary(workspace)
     pricing = workspace_pricing_metadata(workspace)
-    cost, reason = compute_cost_estimate(usage, pricing)
+    cost, cost_reason = compute_cost_estimate(usage, pricing)
+    if cost is None and usage.cost_estimate is not None:
+        # AWF pricing metadata could not derive a cost (commonly: pricing not
+        # configured), but the usage source already reported one — e.g. ccusage's
+        # locally-recorded billing total. Surface that figure instead of dropping
+        # it behind a pricing_* reason that would otherwise force cost_estimate=null.
+        cost = usage.cost_estimate
+        cost_reason = None
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -878,7 +885,7 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
         "currency": usage.currency or (pricing.currency if pricing is not None else None),
         "status": "available" if cost is not None else usage.status,
         "source": usage.source,
-        "reason": usage.reason or reason,
+        "reason": usage.reason or cost_reason,
     }
 
 

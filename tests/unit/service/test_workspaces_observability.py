@@ -3045,6 +3045,81 @@ def test_usage_payload_preserves_usage_not_reported_when_pricing_absent() -> Non
 
 
 @pytest.mark.unit
+def test_usage_payload_surfaces_reported_cost_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    # A ccusage snapshot reported a locally-recorded cost, but no AWF pricing
+    # metadata is configured (the common case). The reported cost must not be
+    # dropped behind a pricing_not_configured reason.
+    usage = LlmUsageSummary(
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+        cost_estimate=0.05,
+        currency="USD",
+        status="available",
+        source="ccusage",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["cost_estimate"] == pytest.approx(0.05)
+    assert result["currency"] == "USD"
+    assert result["status"] == "available"
+    assert result["reason"] is None
+    assert result["source"] == "ccusage"
+
+
+@pytest.mark.unit
+def test_usage_payload_prefers_configured_pricing_over_reported_cost() -> None:
+    from awf.profiles.pricing import PricingMetadata
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    # When AWF pricing metadata is configured and yields a cost, that
+    # operator-defined figure stays authoritative over the reported one.
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=0.05,
+        currency="USD",
+        status="available",
+        source="ccusage",
+        reason=None,
+    )
+    pricing = PricingMetadata(
+        provider="openai",
+        model="gpt-4",
+        currency="USD",
+        unit="per_1000_tokens",
+        price_per_unit=0.03,
+        timestamp=datetime.now(UTC),
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: pricing,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["cost_estimate"] == pytest.approx(0.045)
+    assert result["status"] == "available"
+
+
+@pytest.mark.unit
 def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     workspace = SimpleNamespace(
         id="ws_usage",
