@@ -229,6 +229,35 @@ def subtract_baseline(
     )
 
 
+# Strict typed accessors for deserializing a *persisted* snapshot. Unlike the
+# lenient ``_coerce_*`` helpers (which silently drop bad fields from untrusted
+# ccusage output), these raise ``TypeError`` on a wrong-typed field so a
+# corrupted snapshot file is rejected wholesale by ``read_latest_usage_snapshot``
+# rather than loaded as partially-bogus accounting data.
+def _require_str(value: Any) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError("expected string or null")
+
+
+def _require_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("expected int or null")
+    if isinstance(value, int):
+        return value
+    raise TypeError("expected int or null")
+
+
+def _require_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("expected float or null")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class UsageSnapshot:
     """A normalized, latest-wins usage snapshot for one workspace run."""
@@ -291,22 +320,25 @@ class UsageSnapshot:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> UsageSnapshot:
+        baseline = data.get("baseline")
+        if baseline is not None and not isinstance(baseline, dict):
+            raise TypeError("baseline must be an object or null")
         return cls(
             workspace_id=data["workspace_id"],
             provider=data["provider"],
-            ccusage_source=data.get("ccusage_source"),
+            ccusage_source=_require_str(data.get("ccusage_source")),
             status=data["status"],
             phase=data["phase"],
             captured_at=data["captured_at"],
-            reason=data.get("reason"),
-            run_status=data.get("run_status"),
-            model=data.get("model"),
-            input_tokens=data.get("input_tokens"),
-            output_tokens=data.get("output_tokens"),
-            total_tokens=data.get("total_tokens"),
-            cost_estimate=data.get("cost_estimate"),
-            currency=data.get("currency"),
-            baseline=data.get("baseline"),
+            reason=_require_str(data.get("reason")),
+            run_status=_require_str(data.get("run_status")),
+            model=_require_str(data.get("model")),
+            input_tokens=_require_int(data.get("input_tokens")),
+            output_tokens=_require_int(data.get("output_tokens")),
+            total_tokens=_require_int(data.get("total_tokens")),
+            cost_estimate=_require_float(data.get("cost_estimate")),
+            currency=_require_str(data.get("currency")),
+            baseline=baseline,
             schema_version=data.get("schema_version", SCHEMA_VERSION),
             source=data.get("source", USAGE_SOURCE),
         )

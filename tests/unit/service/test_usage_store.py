@@ -328,8 +328,9 @@ def test_write_and_read_snapshot_round_trip(tmp_path: Path) -> None:
         provider="codex",
         ccusage_source="codex",
         status="available",
-        phase="live",
+        phase="final",
         captured_at="2026-05-22T01:02:03+00:00",
+        run_status="timeout",
         model="gpt-5",
         input_tokens=12,
         output_tokens=8,
@@ -345,6 +346,9 @@ def test_write_and_read_snapshot_round_trip(tmp_path: Path) -> None:
     assert loaded == snapshot
     assert loaded is not None
     assert loaded.schema_version == SCHEMA_VERSION
+    # A concrete run_status must survive the write/read round-trip so accidental
+    # drops or misspellings of the field are caught.
+    assert loaded.run_status == "timeout"
 
 
 @pytest.mark.unit
@@ -405,6 +409,38 @@ def test_read_latest_usage_snapshot_malformed_file_returns_none(tmp_path: Path) 
     usage_dir.mkdir(parents=True)
     (usage_dir / "snapshot.json").write_text("{not json")
     assert read_latest_usage_snapshot("ws_bad", work_dir=tmp_path) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_field",
+    [
+        {"run_status": {}},
+        {"model": 5},
+        {"currency": ["USD"]},
+        {"total_tokens": "5"},
+        {"input_tokens": True},
+        {"cost_estimate": "free"},
+        {"baseline": []},
+    ],
+)
+def test_read_latest_usage_snapshot_rejects_malformed_field_types(
+    tmp_path: Path, bad_field: dict[str, object]
+) -> None:
+    # Valid JSON but a wrong-typed field must reject the whole snapshot (fall
+    # back to None) rather than leaking bogus accounting data downstream.
+    payload: dict[str, object] = {
+        "workspace_id": "ws_typed",
+        "provider": "codex",
+        "status": "available",
+        "phase": "final",
+        "captured_at": "2026-05-22T01:02:03+00:00",
+        **bad_field,
+    }
+    usage_dir = workspace_usage_dir(tmp_path, "ws_typed")
+    usage_dir.mkdir(parents=True)
+    (usage_dir / "snapshot.json").write_text(json.dumps(payload))
+    assert read_latest_usage_snapshot("ws_typed", work_dir=tmp_path) is None
 
 
 @pytest.mark.unit
