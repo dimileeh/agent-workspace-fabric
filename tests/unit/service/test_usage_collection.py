@@ -577,6 +577,9 @@ async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
         (CommandResult(returncode=127, stdout="", stderr=""), True),
         (CommandResult(returncode=1, stdout="", stderr="ccusage: not found"), True),
         (CommandResult(returncode=1, stdout="", stderr="boom"), False),
+        # App-level "not found" in stdout (non-127, clean stderr) is a command
+        # failure, not a missing binary.
+        (CommandResult(returncode=1, stdout="usage record not found", stderr=""), False),
     ],
 )
 def test_is_missing_binary(result: CommandResult, expected: bool) -> None:

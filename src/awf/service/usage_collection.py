@@ -71,8 +71,10 @@ class _RealClock:
 def _is_missing_binary(result: CommandResult) -> bool:
     if result.returncode == 127:
         return True
-    haystack = f"{result.stdout} {result.stderr}".lower()
-    return "not found" in haystack
+    # Only inspect stderr: a shell's "command not found" lands there, whereas
+    # ccusage's own stdout may legitimately contain "not found" for app-level
+    # reasons (e.g. "record not found"), which must stay REASON_COMMAND_FAILED.
+    return "not found" in result.stderr.lower()
 
 
 class CcusageCollector(UsageSampler):
