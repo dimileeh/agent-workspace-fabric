@@ -6598,6 +6598,67 @@ class TestRunOnceExecution:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
+    @pytest.mark.unit
+    async def test_recovery_redispatch_counts_as_execution_progress(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # A preserved-active-validation redispatch enqueued during stale-active
+        # recovery occupies the only execution slot but never flows through the
+        # monitor/ready dispatch paths. It is real execution progress, so a
+        # recovery-only cycle that fills the last slot must not tick saturation.
+        recovery_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "recovery-redispatch"
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        slot_task = asyncio.create_task(_pending_execution_task())
+
+        async def _recover_via_preserved_active_validation() -> None:
+            # Mirror _dispatch_preserved_active_validation: occupy the slot under
+            # a PRESERVED_ACTIVE task without going through the monitor/ready paths.
+            worker._track_execution_task(  # noqa: SLF001
+                recovery_id,
+                slot_task,
+                kind=worker_module._ExecutionTaskKind.PRESERVED_ACTIVE,  # noqa: SLF001
+            )
+
+        worker._maybe_recover_stale_active_executions = (  # type: ignore[method-assign]  # noqa: SLF001
+            _recover_via_preserved_active_validation
+        )
+
+        async def _empty_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            return []
+
+        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+
+        try:
+            await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            # The recovery dispatch was counted, so the cycle is not idle-saturated.
+            assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
+            assert recovery_id in worker._execution_tasks  # noqa: SLF001
+        finally:
+            worker._execution_tasks.pop(recovery_id, None)  # noqa: SLF001
+            worker._execution_task_kinds.pop(recovery_id, None)  # noqa: SLF001
+            slot_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
 
 class TestRunOnceMonitorRecovery:
     @pytest.mark.unit

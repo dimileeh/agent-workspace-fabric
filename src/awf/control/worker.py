@@ -643,7 +643,16 @@ class ControlWorker:
         await self._maybe_release_terminal_runtime()
 
         if self._executor is not None:
+            # Preserved-active-validation redispatches enqueued during recovery
+            # occupy execution slots but never flow through the monitor/ready
+            # dispatch paths below, so diff the tracked tasks to count them.
+            # Otherwise a recovery-only cycle that fills the last slot looks idle
+            # to _update_execution_slot_saturation and falsely ticks saturation.
+            tracked_execution_ids_before_recovery = set(self._execution_tasks)
             await self._maybe_recover_stale_active_executions()
+            execution_dispatched_ids.update(
+                set(self._execution_tasks) - tracked_execution_ids_before_recovery
+            )
 
         if _local_capacity_configured(self._config):
             requested_ids = await self._claim_requested_ids()
