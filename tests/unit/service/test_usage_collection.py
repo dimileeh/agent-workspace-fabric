@@ -217,6 +217,55 @@ async def test_prior_snapshot_without_baseline_captures_fresh(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+async def test_failed_baseline_does_not_leak_host_usage(tmp_path: Path) -> None:
+    # Baseline capture times out, then the final read succeeds with a large total
+    # that includes copied host history. Without a trustworthy baseline we must
+    # report unavailable rather than subtracting against nothing and leaking it.
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 999}}))
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_baseline_fail",
+        provider=AgentRuntime.claude_code,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_baseline_fail", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.phase == "final"
+    assert snap.status == "unavailable"
+    assert snap.reason == "ccusage_timeout"  # baseline failure reason, not "available"
+    assert snap.total_tokens is None  # host total is NOT leaked as workspace usage
+
+
+@pytest.mark.unit
+async def test_fresh_workspace_no_records_baseline_reports_full_usage(tmp_path: Path) -> None:
+    # ccusage runs cleanly at baseline but the fresh workspace has no prior usage,
+    # so the later total is genuine workspace usage and must be reported in full.
+    runner = _ccusage_runner(
+        json.dumps({}),  # baseline: valid JSON, no usage records (fresh)
+        json.dumps({"totals": {"totalTokens": 12}}),  # final: real workspace usage
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_fresh",
+        provider=AgentRuntime.claude_code,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_fresh", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.status == "available"
+    assert snap.total_tokens == 12  # full usage; no host history to subtract
+    assert snap.baseline is None  # nothing anchored, so the next run recaptures
+
+
+@pytest.mark.unit
 async def test_samples_at_sixty_second_interval_while_active(tmp_path: Path) -> None:
     clock = FakeClock()
     runner = _ccusage_runner(*[json.dumps({"totals": {"totalTokens": 1}})] * 8)

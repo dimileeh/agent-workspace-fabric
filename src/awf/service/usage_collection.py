@@ -34,6 +34,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.service.usage_store import (
     REASON_COMMAND_FAILED,
+    REASON_NO_RECORDS,
     REASON_SOURCE_UNSUPPORTED,
     REASON_TIMEOUT,
     REASON_UNAVAILABLE,
@@ -112,7 +113,7 @@ class CcusageCollector(UsageSampler):
             # Unsupported provider: record the reason once, no periodic loop.
             await ctx._safe_sample(phase="live", status="running")
             return ctx
-        ctx._baseline = await ctx._capture_baseline()
+        await ctx._capture_baseline()
         ctx._task = asyncio.create_task(ctx._run_loop())
         return ctx
 
@@ -137,6 +138,10 @@ class _CcusageSampleContext(UsageSampleContext):
         self._provider = provider
         self._source = source
         self._baseline: NormalizedUsage | None = None
+        # Set when baseline capture failed (vs. a fresh, legitimately empty one).
+        # While set, samples report unavailable instead of subtracting against a
+        # missing baseline and leaking copied host history into the totals.
+        self._baseline_unavailable_reason: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._finalized = False
 
@@ -168,24 +173,38 @@ class _CcusageSampleContext(UsageSampleContext):
             await self._collector._clock.sleep(self._collector._interval_seconds)
             await self._safe_sample(phase="live", status="running")
 
-    async def _capture_baseline(self) -> NormalizedUsage | None:
+    async def _capture_baseline(self) -> None:
         prior = read_latest_usage_snapshot(self._workspace_id, work_dir=self._collector._work_dir)
         if prior is not None:
             reused = prior.baseline_usage()
             if reused is not None:
-                return reused
+                self._baseline = reused
+                return
         try:
-            usage, _reason, _model = await self._run_ccusage()
+            usage, reason, _model = await self._run_ccusage()
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Unexpected runner failure: swallow-and-log so the agent outcome is
+            # never masked, but flag the baseline as unanchored so later samples
+            # don't subtract against nothing and leak copied host history.
             _log.warning(
                 "usage.collect.baseline_error",
                 workspace_id=self._workspace_id,
                 exc_info=True,
             )
-            return None
-        return usage
+            self._baseline_unavailable_reason = REASON_COMMAND_FAILED
+            return
+        if usage is not None:
+            self._baseline = usage
+            return
+        if reason == REASON_NO_RECORDS:
+            # Fresh workspace: ccusage ran cleanly with no prior host usage, so an
+            # empty baseline is correct and later totals are genuine workspace usage.
+            return
+        # ccusage failed for a classified reason (timeout / command error /
+        # unreadable output): we can't anchor a trustworthy baseline, so flag it.
+        self._baseline_unavailable_reason = reason or REASON_COMMAND_FAILED
 
     async def _safe_sample(self, *, phase: str, status: str) -> None:
         try:
@@ -217,6 +236,18 @@ class _CcusageSampleContext(UsageSampleContext):
                 phase=phase,
                 status_label="unavailable",
                 reason=reason,
+                metrics=NormalizedUsage(),
+                model=None,
+            )
+            return
+        if self._baseline_unavailable_reason is not None:
+            # We have a current reading but never anchored a baseline, so a delta
+            # would expose copied host history. Report unavailable with the
+            # baseline failure reason instead of an inflated total.
+            self._write(
+                phase=phase,
+                status_label="unavailable",
+                reason=self._baseline_unavailable_reason,
                 metrics=NormalizedUsage(),
                 model=None,
             )
