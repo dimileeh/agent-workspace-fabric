@@ -629,6 +629,7 @@ class ControlWorker:
         and should immediately loop again.
         """
         dispatched_ids: set[str] = set()
+        execution_dispatched_ids: set[str] = set()
 
         await self._reconcile_stale_monitor_execution_tasks()
 
@@ -694,6 +695,7 @@ class ControlWorker:
                     limit=execution_slots,
                 )
                 dispatched_ids.update(monitor_dispatched)
+                execution_dispatched_ids.update(monitor_dispatched)
 
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
@@ -719,8 +721,11 @@ class ControlWorker:
                     limit=execution_slots,
                 )
                 dispatched_ids.update(ready_dispatched)
+                execution_dispatched_ids.update(ready_dispatched)
 
-        self._update_execution_slot_saturation(dispatched=len(dispatched_ids))
+        # Saturation reflects execution slots only; provisioning dispatches must
+        # not mask a worker whose execution slots are wedged with stuck tasks.
+        self._update_execution_slot_saturation(dispatched=len(execution_dispatched_ids))
         return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self) -> None:

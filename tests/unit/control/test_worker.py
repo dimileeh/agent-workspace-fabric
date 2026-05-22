@@ -6452,6 +6452,65 @@ class TestRunOnceExecution:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
+    @pytest.mark.unit
+    async def test_provisioning_dispatch_does_not_mask_execution_saturation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # A worker whose only execution slot is wedged by a still-monitoring task is
+        # execution-saturated. Provisioning a fresh workspace in the same cycle is
+        # worker activity but not execution progress, so it must not reset the
+        # saturation counter nor silence the warning.
+        requested_id = await _create_requested(
+            session_factory, origin_repo, "provisioning-while-saturated"
+        )
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "wedged-monitor")
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=3,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        slot_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
+        worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
+            worker_module._ExecutionTaskKind.MONITOR_RESUME
+        )
+
+        async def _empty_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            return []
+
+        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+
+        try:
+            dispatched = await asyncio.wait_for(
+                worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+            # The provision dispatch is real worker activity (non-zero return) ...
+            assert dispatched == 1
+            assert requested_id in provisioner.calls
+            # ... but the execution slot was never freed, so saturation still ticks.
+            assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
+        finally:
+            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
+            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
+            slot_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
 
 class TestRunOnceMonitorRecovery:
     @pytest.mark.unit
