@@ -305,6 +305,13 @@ class _CcusageSampleContext(UsageSampleContext):
         await asyncio.to_thread(write_usage_snapshot, snapshot, work_dir=self._collector._work_dir)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
+        # Expected ccusage CLI contract (pinned at 20.0.3 in
+        # docker/agent-runtime.Dockerfile): ``ccusage <source> daily --json --offline``,
+        # where ``<source>`` is a positional provider sub-command ("claude" /
+        # "codex" / "gemini" / "opencode"; see ``provider_ccusage_source``). A future
+        # pin that moves the provider behind a flag (e.g. ``--source``) would make
+        # this positional invocation degrade to REASON_COMMAND_FAILED, so re-verify
+        # this argument order whenever the Dockerfile pin is bumped.
         invocation = build_tracked_compose_exec(
             compose_project=self._compose_project,
             compose_file=self._compose_file,
