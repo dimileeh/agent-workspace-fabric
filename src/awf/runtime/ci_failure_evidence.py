@@ -170,7 +170,7 @@ def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
     if char.isspace():
         rest = line[end:].lstrip()
         return not rest or rest.startswith("- ")
-    return False
+    raise AssertionError(f"unsupported pytest node boundary: {char!r}")
 
 
 def _looks_like_pytest_node(candidate: str) -> bool:

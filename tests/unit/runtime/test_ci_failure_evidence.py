@@ -243,6 +243,16 @@ def test_ci_failure_evidence_rejects_wrapped_pytest_node_ids() -> None:
 
 
 @pytest.mark.unit
+def test_pytest_node_boundary_rejects_unsupported_scanner_stop() -> None:
+    with pytest.raises(AssertionError, match="unsupported pytest node boundary"):
+        ci_failure_evidence._has_pytest_node_boundary(  # noqa: SLF001
+            "tests/unit/runtime/test_prompt.py::test_x/",
+            0,
+            len("tests/unit/runtime/test_prompt.py::test_x"),
+        )
+
+
+@pytest.mark.unit
 def test_pytest_repro_command_skips_unparseable_command_before_valid_pytest() -> None:
     command = ci_failure_evidence._pytest_repro_command(  # noqa: SLF001
         [
