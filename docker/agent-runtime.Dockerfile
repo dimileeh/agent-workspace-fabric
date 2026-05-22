@@ -132,7 +132,7 @@ RUN npm install -g --no-fund --no-audit \
     && claude --version || true \
     && gemini --version || true \
     && opencode --version || true \
-    && ccusage --version || true
+    && ccusage --version
 
 # ── Stage 6: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \
