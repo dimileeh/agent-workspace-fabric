@@ -6398,6 +6398,101 @@ class TestRunOnceExecution:
             )
 
     @pytest.mark.unit
+    async def test_stale_monitor_cancellation_finalizes_despite_second_cancel(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # The CancelledError finalize is itself a cancellable DB write. If a
+        # second cancellation (e.g. worker shutdown cancelling outstanding tasks)
+        # lands mid-write, the remonitor op must still reach cancelled rather than
+        # stay stuck in running once the caller's finally drops the recovery
+        # handle. The finalize is shielded, so it runs to completion across the
+        # second cancel.
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "double-cancel-monitor"
+        )
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        monitor_task: asyncio.Task[None] | None = None
+        try:
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+            )
+            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
+
+            async with session_factory() as s:
+                operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            remonitor_operations = [
+                operation
+                for operation in operations
+                if operation.type == OperationType.remonitor.value
+            ]
+            assert len(remonitor_operations) == 1
+            operation_id = remonitor_operations[0].id
+            assert remonitor_operations[0].status == OperationStatus.running.value
+
+            # Inject a second cancellation the instant the finalize DB write
+            # begins, reproducing a shutdown cancel arriving mid-write. Without
+            # the shield this would abort the write and orphan the op in running.
+            original_finish = worker._finish_monitor_recovery_operation  # noqa: SLF001
+            second_cancel_injected = False
+
+            async def _finish_with_second_cancel(*args: Any, **kwargs: Any) -> None:
+                nonlocal second_cancel_injected
+                if not second_cancel_injected and monitor_task is not None:
+                    second_cancel_injected = True
+                    monitor_task.cancel()
+                await original_finish(*args, **kwargs)
+
+            worker._finish_monitor_recovery_operation = _finish_with_second_cancel  # type: ignore[method-assign]  # noqa: SLF001
+
+            # Workspace leaves monitoring_pr, so the resume is stale and reconcile
+            # cancels it (the first cancellation).
+            async with session_factory() as s:
+                await s.execute(
+                    update(Workspace)
+                    .where(Workspace.id == monitor_id)
+                    .values(status=WorkspaceStatus.ready.value)
+                )
+                await s.commit()
+            await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+            assert monitor_task.cancelling() > 0
+
+            executor.release.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+            # The second cancel fired during finalize, but the shielded write
+            # still completed: the op is cancelled, not stuck in running.
+            assert second_cancel_injected
+            async with session_factory() as s:
+                finalized = await OperationRepository(s).get(operation_id)
+            assert finalized is not None
+            assert finalized.status == OperationStatus.cancelled.value
+            assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
+            assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+        finally:
+            executor.release.set()
+            if monitor_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+
+    @pytest.mark.unit
     async def test_draining_exclusion_is_capped_to_bound_in_flight_coroutines(
         self,
         session_factory: async_sessionmaker[AsyncSession],

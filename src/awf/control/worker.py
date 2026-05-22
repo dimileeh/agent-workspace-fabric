@@ -4734,9 +4734,10 @@ class ControlWorker:
             # the Exception handler below; without finalizing here the remonitor
             # operation stays stuck in running while the caller's finally drops
             # _monitor_recovery_operation_ids, losing the handle to finish it
-            # later. Mark it cancelled, then re-raise so the task still ends
-            # cancelled and the slot drains as usual.
-            await self._finish_monitor_recovery_operation(
+            # later. Finalize through the shielded helper so a second cancellation
+            # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
+            # re-raise so the task still ends cancelled and the slot drains.
+            await self._finish_monitor_recovery_operation_after_cancellation(
                 workspace_id,
                 operation_id=recovery_operation_id,
                 status=OperationStatus.cancelled,
@@ -5367,6 +5368,44 @@ class ControlWorker:
                 operation_id=operation_id,
                 status=status.value,
             )
+
+    async def _finish_monitor_recovery_operation_after_cancellation(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str | None,
+        status: OperationStatus,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Finalize the recovery operation even if cancelled again mid-write.
+
+        The CancelledError handler must persist this status before re-raising,
+        but the finalize is itself a cancellable DB write. A second cancellation
+        (e.g. worker shutdown cancelling outstanding tasks) landing mid-write
+        would leave the operation stuck in ``running`` once the caller's
+        ``finally`` drops its ``_monitor_recovery_operation_ids`` handle, with
+        nothing able to finish it later. Shield the write and re-await across
+        repeated cancellations so it always runs to completion, mirroring
+        ``cleanup_compose_exec_invocation_after_cancellation``.
+        """
+        finalize_task = asyncio.create_task(
+            self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            ),
+            name=f"awf-monitor-recovery-finalize-{workspace_id}",
+        )
+        while True:
+            try:
+                await asyncio.shield(finalize_task)
+                return
+            except asyncio.CancelledError:
+                if finalize_task.done():
+                    return
 
     async def _refresh_monitoring_pr_claim_loop(self, workspace_id: str) -> None:
         interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))
