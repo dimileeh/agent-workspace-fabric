@@ -6320,6 +6320,84 @@ class TestRunOnceExecution:
             )
 
     @pytest.mark.unit
+    async def test_stale_monitor_cancellation_finalizes_recovery_operation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # CancelledError is a BaseException, so a stale-monitor reconcile cancel
+        # skips the resume coroutine's Exception handler. Without an explicit
+        # CancelledError finalizer the remonitor operation would stay stuck in
+        # running while the caller's finally drops the recovery handle, leaving
+        # nothing able to finish it. The resume must mark it cancelled instead.
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "cancelled-monitor")
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        monitor_task: asyncio.Task[None] | None = None
+        try:
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+            )
+            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
+
+            # Claiming + dispatching the monitor records a running remonitor op.
+            async with session_factory() as s:
+                operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            remonitor_operations = [
+                operation
+                for operation in operations
+                if operation.type == OperationType.remonitor.value
+            ]
+            assert len(remonitor_operations) == 1
+            operation_id = remonitor_operations[0].id
+            assert remonitor_operations[0].status == OperationStatus.running.value
+
+            # The workspace leaves monitoring_pr, so the resume is now stale and
+            # reconcile cancels it.
+            async with session_factory() as s:
+                await s.execute(
+                    update(Workspace)
+                    .where(Workspace.id == monitor_id)
+                    .values(status=WorkspaceStatus.ready.value)
+                )
+                await s.commit()
+            await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+            assert monitor_task.cancelling() > 0
+
+            # Drain the cancelled resume coroutine to completion.
+            executor.release.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+            # The remonitor op is finalized as cancelled, not stuck in running.
+            async with session_factory() as s:
+                finalized = await OperationRepository(s).get(operation_id)
+            assert finalized is not None
+            assert finalized.status == OperationStatus.cancelled.value
+            assert finalized.error_code == "MONITOR_RECOVERY_CANCELLED"
+            # The recovery handle is dropped only after the op is finalized.
+            assert monitor_id not in worker._monitor_recovery_operation_ids  # noqa: SLF001
+        finally:
+            executor.release.set()
+            if monitor_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+
+    @pytest.mark.unit
     async def test_draining_exclusion_is_capped_to_bound_in_flight_coroutines(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -4716,6 +4716,22 @@ class ControlWorker:
             return False
         try:
             await self._executor.resume_pr_monitor(workspace_id)
+        except asyncio.CancelledError:
+            # A stale-monitor reconcile cancels this task once its workspace has
+            # left monitoring_pr. CancelledError is a BaseException, so it skips
+            # the Exception handler below; without finalizing here the remonitor
+            # operation stays stuck in running while the caller's finally drops
+            # _monitor_recovery_operation_ids, losing the handle to finish it
+            # later. Mark it cancelled, then re-raise so the task still ends
+            # cancelled and the slot drains as usual.
+            await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.cancelled,
+                error_code="MONITOR_RECOVERY_CANCELLED",
+                error_message="Monitor resume cancelled after workspace left monitoring_pr.",
+            )
+            raise
         except Exception as exc:
             # The monitor runner owns normal terminal transitions. Recovery
             # dispatch still must not take the service worker down if a single
