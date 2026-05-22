@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from inspect import getattr_static
 from pathlib import Path
@@ -314,6 +315,26 @@ def _preserved_active_execution_status_values(
     return (workspace_status.value,)
 
 
+class _ExecutionTaskKind(StrEnum):
+    """Kind of work tracked in ``ControlWorker._execution_tasks`` slot accounting."""
+
+    MONITOR_RESUME = "monitor_resume"
+    READY = "ready"
+    PRESERVED_ACTIVE = "preserved_active"
+    # A monitor resume that reconcile has cancelled but whose coroutine has not
+    # yet stopped. Cancellation is cooperative, so the task can keep running
+    # after ``cancel()`` returns. We keep it tracked under its workspace_id so a
+    # fresh dispatch for the *same* workspace stays blocked, but exclude it from
+    # the slot budget so it does not starve *other* workspaces.
+    MONITOR_DRAINING = "monitor_draining"
+
+
+# Emit ``worker.execution_slots_saturated`` every Nth consecutive idle cycle in
+# which every execution slot stays occupied. Keeps the signal low-noise while
+# still surfacing wedged-slot starvation for operators.
+_EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     poll_interval_seconds: float = 1.0
@@ -585,6 +606,8 @@ class ControlWorker:
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
+        self._execution_task_kinds: dict[str, _ExecutionTaskKind] = {}
+        self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
         # Session-local advisory state; reset on restart and bounded below.
         self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
@@ -612,12 +635,24 @@ class ControlWorker:
         and should immediately loop again.
         """
         dispatched_ids: set[str] = set()
+        execution_dispatched_ids: set[str] = set()
+
+        await self._reconcile_stale_monitor_execution_tasks()
 
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
 
         if self._executor is not None:
+            # Preserved-active-validation redispatches enqueued during recovery
+            # occupy execution slots but never flow through the monitor/ready
+            # dispatch paths below, so diff the tracked tasks to count them.
+            # Otherwise a recovery-only cycle that fills the last slot looks idle
+            # to _update_execution_slot_saturation and falsely ticks saturation.
+            tracked_execution_ids_before_recovery = set(self._execution_tasks)
             await self._maybe_recover_stale_active_executions()
+            execution_dispatched_ids.update(
+                set(self._execution_tasks) - tracked_execution_ids_before_recovery
+            )
 
         if _local_capacity_configured(self._config):
             requested_ids = await self._claim_requested_ids()
@@ -675,6 +710,7 @@ class ControlWorker:
                     limit=execution_slots,
                 )
                 dispatched_ids.update(monitor_dispatched)
+                execution_dispatched_ids.update(monitor_dispatched)
 
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
@@ -700,17 +736,35 @@ class ControlWorker:
                     limit=execution_slots,
                 )
                 dispatched_ids.update(ready_dispatched)
+                execution_dispatched_ids.update(ready_dispatched)
 
+        # Saturation reflects execution slots only; provisioning dispatches must
+        # not mask a worker whose execution slots are wedged with stuck tasks.
+        self._update_execution_slot_saturation(dispatched=len(execution_dispatched_ids))
         return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self) -> None:
         """Wait for ready execution or monitor-resume tasks started by this worker."""
         while self._execution_tasks:
             tasks = tuple(self._execution_tasks.values())
-            await asyncio.gather(*tasks)
+            # Wait for the FIRST task to finish instead of gather()-ing them all:
+            # a cancelled monitor can drain (or stay wedged) indefinitely, and
+            # gather() would block on it, so a genuine execution failure would
+            # never surface — wait_for_execution_tasks() would hang and once=True
+            # runs would exit as if successful. Inspecting tasks as they complete
+            # lets a real failure raise immediately while a draining monitor's
+            # CancelledError is still tolerated.
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for workspace_id, task in list(self._execution_tasks.items()):
-                if task.done():
+                if task in done:
                     self._execution_tasks.pop(workspace_id, None)
+                    self._execution_task_kinds.pop(workspace_id, None)
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
@@ -1145,6 +1199,24 @@ class ControlWorker:
             on_retry=self._log_transient_db_retry,
         )
 
+    async def _load_workspace_statuses(self, workspace_ids: list[str]) -> dict[str, str]:
+        """Bulk-read current ``status`` for the given workspace IDs.
+
+        Callers (``_filter_current_status`` and reconciliation) guard against an
+        empty list, so this is only invoked with at least one ID.
+        """
+
+        async def _operation(session: AsyncSession) -> dict[str, str]:
+            stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
+            result = await session.execute(stmt)
+            return {row[0]: row[1] for row in result.all()}
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
+
     async def _filter_current_status(
         self,
         workspace_ids: list[str],
@@ -1155,16 +1227,7 @@ class ControlWorker:
         if not workspace_ids:
             return []
 
-        async def _operation(session: AsyncSession) -> dict[str, str]:
-            stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
-            result = await session.execute(stmt)
-            return {row[0]: row[1] for row in result.all()}
-
-        statuses = await run_db_operation_with_retry(
-            self._session_factory,
-            _operation,
-            on_retry=self._log_transient_db_retry,
-        )
+        statuses = await self._load_workspace_statuses(workspace_ids)
 
         current_ids: list[str] = []
         for workspace_id in workspace_ids:
@@ -4429,8 +4492,29 @@ class ControlWorker:
         )
         return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    def _draining_execution_task_count(self) -> int:
+        return sum(
+            1
+            for kind in self._execution_task_kinds.values()
+            if kind is _ExecutionTaskKind.MONITOR_DRAINING
+        )
+
     def _available_execution_slots(self) -> int:
-        return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
+        # Draining tasks (cancelled monitors not yet stopped) stay tracked for
+        # same-workspace dedup but are excluded from the slot budget so a wedged
+        # monitor does not keep starving other workspaces (issue #276).
+        #
+        # That exclusion is capped, though: cancel() is cooperative, so a steady
+        # supply of stale-and-wedged monitors could otherwise accumulate draining
+        # coroutines without bound and let dispatch run arbitrarily far past the
+        # budget, exhausting runtime resources. Excluding at most
+        # max_concurrent_executions draining tasks bounds total in-flight
+        # coroutines at 2x the budget; beyond that, surplus draining tasks count
+        # as occupied and throttle fresh dispatch until they truly stop.
+        max_executions = self._config.max_concurrent_executions
+        excluded_draining = min(self._draining_execution_task_count(), max_executions)
+        occupied = len(self._execution_tasks) - excluded_draining
+        return max(0, max_executions - occupied)
 
     def _can_dispatch_execution_when_slot_available(self) -> bool:
         return self._executor is not None and self._config.max_concurrent_executions > 0
@@ -4463,8 +4547,7 @@ class ControlWorker:
                 self._safely_execute_claimed(workspace_id),
                 name=f"awf-execute-{workspace_id}",
             )
-            self._execution_tasks[workspace_id] = task
-            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.READY)
             dispatched.add(workspace_id)
         return dispatched
 
@@ -4484,8 +4567,7 @@ class ControlWorker:
                 ),
                 name=f"awf-monitor-{workspace_id}",
             )
-            self._execution_tasks[workspace_id] = task
-            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.MONITOR_RESUME)
             dispatched.add(workspace_id)
         return dispatched
 
@@ -4500,12 +4582,98 @@ class ControlWorker:
             self._safely_execute_claimed(workspace_id),
             name=f"awf-preserved-active-validate-{workspace_id}",
         )
-        self._execution_tasks[workspace_id] = task
-        task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+        self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.PRESERVED_ACTIVE)
         return True
 
-    def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
-        self._execution_tasks.pop(workspace_id, None)
+    def _track_execution_task(
+        self,
+        workspace_id: str,
+        task: asyncio.Task[None],
+        *,
+        kind: _ExecutionTaskKind,
+    ) -> None:
+        self._execution_tasks[workspace_id] = task
+        self._execution_task_kinds[workspace_id] = kind
+        task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+
+    def _forget_execution_task(self, workspace_id: str, task: asyncio.Task[None]) -> None:
+        # Identity-guarded: a reconcile-driven cancel can free a slot and re-dispatch
+        # the same workspace within one run_once, so only forget the task we tracked.
+        if self._execution_tasks.get(workspace_id) is task:
+            self._execution_tasks.pop(workspace_id, None)
+            self._execution_task_kinds.pop(workspace_id, None)
+
+    def _tracked_monitor_workspace_ids(self) -> list[str]:
+        return [
+            workspace_id
+            for workspace_id, kind in self._execution_task_kinds.items()
+            if kind is _ExecutionTaskKind.MONITOR_RESUME
+        ]
+
+    def _tracked_draining_workspace_ids(self) -> list[str]:
+        return [
+            workspace_id
+            for workspace_id, kind in self._execution_task_kinds.items()
+            if kind is _ExecutionTaskKind.MONITOR_DRAINING
+        ]
+
+    async def _reconcile_stale_monitor_execution_tasks(self) -> None:
+        """Cancel tracked PR-monitor tasks whose workspace has left ``monitoring_pr``.
+
+        A wedged monitor resume coroutine keeps occupying an execution slot
+        forever. Once its workspace row is gone or has transitioned away from
+        ``monitoring_pr`` the resume is stale, so we cancel it and reclassify it
+        as ``MONITOR_DRAINING``. Reclassifying frees its slot for *other*
+        workspaces synchronously in the current ``run_once`` (the slot budget
+        excludes draining tasks) while keeping the task tracked under its
+        workspace_id. ``cancel()`` is cooperative, so the coroutine can keep
+        running afterwards; retaining the tracking reference keeps slot dedup
+        blocking a fresh dispatch for the *same* workspace until it truly stops,
+        and the existing done-callback drops it once it does. Only
+        ``MONITOR_RESUME`` tasks are inspected, so ready/preserved-active and
+        already-draining executions are never touched here.
+        """
+        monitor_ids = self._tracked_monitor_workspace_ids()
+        if not monitor_ids:
+            return
+        statuses = await self._load_workspace_statuses(monitor_ids)
+        for workspace_id in monitor_ids:
+            status = statuses.get(workspace_id)
+            if status == WorkspaceStatus.monitoring_pr.value:
+                continue
+            task = self._execution_tasks.get(workspace_id)
+            if task is None:
+                self._execution_task_kinds.pop(workspace_id, None)
+                continue
+            _log.warning(
+                "worker.stale_monitor_execution_task_cancelled",
+                workspace_id=workspace_id,
+                status=status,
+            )
+            task.cancel()
+            self._execution_task_kinds[workspace_id] = _ExecutionTaskKind.MONITOR_DRAINING
+
+    def _update_execution_slot_saturation(self, *, dispatched: int) -> None:
+        saturated = (
+            self._can_dispatch_execution_when_slot_available()
+            and dispatched == 0
+            and self._available_execution_slots() <= 0
+        )
+        if not saturated:
+            self._consecutive_saturated_cycles = 0
+            return
+        self._consecutive_saturated_cycles += 1
+        if self._consecutive_saturated_cycles % _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL != 0:
+            return
+        _log.warning(
+            "worker.execution_slots_saturated",
+            slot_limit=self._config.max_concurrent_executions,
+            tracked_count=len(self._execution_tasks),
+            tracked_workspace_ids=sorted(self._execution_tasks),
+            tracked_monitor_ids=sorted(self._tracked_monitor_workspace_ids()),
+            tracked_draining_ids=sorted(self._tracked_draining_workspace_ids()),
+            consecutive_saturated_cycles=self._consecutive_saturated_cycles,
+        )
 
     async def _safely_provision_claimed(self, workspace_id: str) -> None:
         try:
@@ -4560,6 +4728,23 @@ class ControlWorker:
             return False
         try:
             await self._executor.resume_pr_monitor(workspace_id)
+        except asyncio.CancelledError:
+            # A stale-monitor reconcile cancels this task once its workspace has
+            # left monitoring_pr. CancelledError is a BaseException, so it skips
+            # the Exception handler below; without finalizing here the remonitor
+            # operation stays stuck in running while the caller's finally drops
+            # _monitor_recovery_operation_ids, losing the handle to finish it
+            # later. Finalize through the shielded helper so a second cancellation
+            # (e.g. worker shutdown) landing mid-write cannot re-orphan it, then
+            # re-raise so the task still ends cancelled and the slot drains.
+            await self._finish_monitor_recovery_operation_after_cancellation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.cancelled,
+                error_code="MONITOR_RECOVERY_CANCELLED",
+                error_message="Monitor resume cancelled after workspace left monitoring_pr.",
+            )
+            raise
         except Exception as exc:
             # The monitor runner owns normal terminal transitions. Recovery
             # dispatch still must not take the service worker down if a single
@@ -5183,6 +5368,44 @@ class ControlWorker:
                 operation_id=operation_id,
                 status=status.value,
             )
+
+    async def _finish_monitor_recovery_operation_after_cancellation(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str | None,
+        status: OperationStatus,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Finalize the recovery operation even if cancelled again mid-write.
+
+        The CancelledError handler must persist this status before re-raising,
+        but the finalize is itself a cancellable DB write. A second cancellation
+        (e.g. worker shutdown cancelling outstanding tasks) landing mid-write
+        would leave the operation stuck in ``running`` once the caller's
+        ``finally`` drops its ``_monitor_recovery_operation_ids`` handle, with
+        nothing able to finish it later. Shield the write and re-await across
+        repeated cancellations so it always runs to completion, mirroring
+        ``cleanup_compose_exec_invocation_after_cancellation``.
+        """
+        finalize_task = asyncio.create_task(
+            self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=operation_id,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+            ),
+            name=f"awf-monitor-recovery-finalize-{workspace_id}",
+        )
+        while True:
+            try:
+                await asyncio.shield(finalize_task)
+                return
+            except asyncio.CancelledError:
+                if finalize_task.done():
+                    return
 
     async def _refresh_monitoring_pr_claim_loop(self, workspace_id: str) -> None:
         interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))

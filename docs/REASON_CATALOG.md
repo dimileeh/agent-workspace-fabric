@@ -226,6 +226,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#mcp_egress_audit_error](#mcp_egress_audit_error)
 
+### MONITOR_RECOVERY_CANCELLED
+**Problem:** AWF cancelled a PR-monitor recovery (remonitor) operation before it finished resuming the monitor.
+**Likely Cause:** A stale-monitor reconcile cancelled the resume task because the workspace left the monitoring_pr state while recovery was still dispatching. This is the expected outcome of normal reconciliation, not a runtime error.
+**Operator Fix:** No action is usually required. If the workspace should still be monitored, remonitor it and confirm it is in monitoring_pr.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_cancelled](#monitor_recovery_cancelled)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.
