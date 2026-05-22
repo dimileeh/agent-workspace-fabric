@@ -119,6 +119,18 @@ async def count_commits_ahead(
         ) from exc
 
 
+def _is_duplicate_pull_request_error(exc: GitHubClientError) -> bool:
+    """True when ``gh pr create`` failed because the PR already exists.
+
+    ``gh`` exits 1 with stderr like ``a pull request for branch "X" into
+    branch "Y" already exists`` when a concurrent run or a human opened the
+    source→target PR first. Only this signal is treated as a recoverable
+    TOCTOU race; auth/network/branch-protection failures must propagate.
+    """
+
+    return exc.returncode == 1 and "already exists" in exc.stderr.lower()
+
+
 async def _find_open_same_repo_pr_number(
     *,
     runner: AsyncCommandRunner,
@@ -179,12 +191,16 @@ async def find_or_create_release_pr(
                 title=title,
                 body=body,
             )
-        except GitHubClientError:
+        except GitHubClientError as exc:
             # TOCTOU: the list above can race a concurrent sync run or a human
             # opening the same source→target PR before this create. GitHub
-            # rejects the duplicate, so re-check and adopt the now-existing PR
-            # instead of failing the workspace; a genuine create failure (no
-            # PR appeared) re-raises.
+            # rejects the duplicate with a recognisable "already exists" error,
+            # so only then re-check and adopt the now-existing PR instead of
+            # failing the workspace. Any other failure (auth, network, branch
+            # protection) re-raises immediately with its original context
+            # rather than being masked by a second, unrelated list call.
+            if not _is_duplicate_pull_request_error(exc):
+                raise
             raced_number = await _find_open_same_repo_pr_number(
                 runner=runner,
                 repo=repo,

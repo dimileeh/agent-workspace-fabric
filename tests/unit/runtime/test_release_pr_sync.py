@@ -373,12 +373,45 @@ class TestFindOrCreateReleasePr:
         ]
 
     @pytest.mark.unit
-    async def test_create_failure_without_existing_pr_reraises(self) -> None:
-        # A create failure that is not a lost race (no PR appears on re-check)
-        # must surface the original gh error rather than being swallowed.
+    async def test_non_duplicate_create_failure_reraises_without_recheck(self) -> None:
+        # A create failure that is not a duplicate-PR rejection (auth, network,
+        # branch protection, HTTP 5xx) is not a lost race. It must surface the
+        # original gh error immediately, without a second `gh pr list` whose own
+        # failure could mask the real cause.
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
         fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create -> fails
+        gh = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
+        assert exc.value.operation == "gh pr create"
+        # Only the initial list + the failed create ran: no re-check, no view.
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+        ]
+
+    @pytest.mark.unit
+    async def test_duplicate_signal_recheck_finds_nothing_reraises(self) -> None:
+        # The create fails with a duplicate-PR signal, so the re-check runs, but
+        # no same-repo PR materialises (e.g. the raced PR was closed). The
+        # original gh error must surface rather than being swallowed.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(
+            returncode=1,
+            stderr='a pull request for branch "development" into branch "main" already exists',
+        )  # gh pr create -> duplicate rejected
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list (re-check) -> still none
         gh = GitHubClient(fake)
 
@@ -394,8 +427,12 @@ class TestFindOrCreateReleasePr:
             )
 
         assert exc.value.operation == "gh pr create"
-        # No `gh pr view` runs when the create failure is genuine.
-        assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
+        # The duplicate signal triggers a re-check list, but no `gh pr view`.
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+        ]
 
     @pytest.mark.unit
     async def test_race_recheck_ignores_fork_collision(self) -> None:
