@@ -1929,6 +1929,18 @@ class ControlWorker:
             and snapshot.stack_state == "running"
         ):
             return
+        if (
+            candidate.status == WorkspaceStatus.monitoring_pr
+            and has_open_pr_for_remonitor(candidate.status.value, candidate.pr_url)
+            and finding is None
+            and snapshot.stack_state == "running"
+        ):
+            await self._record_recoverable_runtime_stranding(
+                candidate,
+                snapshot,
+                _running_monitoring_pr_recovery_finding(candidate),
+            )
+            return
         if finding is not None and finding.status == "unavailable":
             if has_open_pr_for_remonitor(candidate.status, candidate.pr_url):
                 recoverable_finding = WorkspaceRuntimeFinding(
@@ -6436,6 +6448,24 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
         compose_file_path=candidate.compose_file_path,
         pr_url=candidate.pr_url,
         retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(candidate.task_policy),
+    )
+
+
+def _running_monitoring_pr_recovery_finding(
+    candidate: _ActiveExecutionCandidate,
+) -> WorkspaceRuntimeFinding:
+    return WorkspaceRuntimeFinding(
+        workspace_id=candidate.workspace_id,
+        workspace_status=candidate.status.value,
+        status="stranded",
+        reason_code="STRANDED_WORKSPACE",
+        decision="remonitor_workspace",
+        message=(
+            "Worker lost its in-process PR monitor after restart while the old "
+            "workspace runtime still reports running; the open PR is the durable "
+            "recovery point, so the workspace can be remonitored."
+        ),
+        compose_project_name=candidate.compose_project_name,
     )
 
 
