@@ -43,6 +43,7 @@ from awf.api.schemas import (
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -223,6 +224,18 @@ def build_mcp_server(
             max_length=256,
             description="Legacy alias for base_branch.",
         ),
+        source_branch: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            json_schema_extra={"default": DEFAULT_RELEASE_SYNC_SOURCE_BRANCH},
+            description=(
+                "Source branch for sync_release_pr: the release PR is opened "
+                f"source_branch -> base_branch. Defaults to "
+                f"{DEFAULT_RELEASE_SYNC_SOURCE_BRANCH} when omitted. Ignored for "
+                "feature_branch_pr."
+            ),
+        ),
         task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
         task_kind: str = Field(
@@ -389,7 +402,11 @@ def build_mcp_server(
         )
         effective_profile_ref = "aira" if requires_database else env_profile or profile_ref
         req = WorkspaceCreateRequest(
-            repo={"url": repo_url, "base_branch": effective_base_branch},
+            repo={
+                "url": repo_url,
+                "base_branch": effective_base_branch,
+                "source_branch": source_branch,
+            },
             task={
                 k: v
                 for k, v in {
