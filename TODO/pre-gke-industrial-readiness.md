@@ -78,9 +78,7 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_986a024640994f17a0f39897` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_6b8303d60f8949d78b1237e7`. |
-| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_0367e5e1266d4acdbd13441a` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_285b5bf215fd4b329eb1af65`. |
-| P0 AWF Dogfood Stability | Automate preserved-active restart recovery | `ws_53702c4210de4ec59e9ec059` | Codex / `gpt-5.5` / `xhigh` | monitoring_pr | Fresh PR monitor for PR [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272), created 2026-05-20 after rollback of the mistaken `plans/*` ignore, branch repair, push, AWF rebuild, and cleanup of terminal orphan resources. Replaces cancelled stale monitor `ws_77bb4cce4aea4892bb41e0e6`. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | Live AWF state showed zero active workspaces on 2026-05-21 after PRs [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), and [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) merged. |
 
 ### Reschedule Required Slices
 
@@ -92,7 +90,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | The 2026-05-20 recovery-required PRs were re-adopted as fresh active monitors `ws_986a024640994f17a0f39897`, `ws_0367e5e1266d4acdbd13441a`, and `ws_53702c4210de4ec59e9ec059`. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | The 2026-05-20 recovery-required PRs were re-adopted as fresh monitors and have since completed: `ws_986a024640994f17a0f39897` / PR [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264), `ws_0367e5e1266d4acdbd13441a` / PR [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268), and `ws_53702c4210de4ec59e9ec059` / PR [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272). No reschedule-required P0/P1 slices remain as of 2026-05-21. |
 
 ### Pending Capacity Slices
 
@@ -104,7 +102,7 @@ an active slot opens.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | No P0/P1 slice is currently waiting only for capacity as of 2026-05-20T00:44+04:00. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | No P0/P1 slice is currently waiting only for capacity as of 2026-05-21; live AWF state showed zero active workspaces. |
 
 Historical failed attempts are kept under Failed / Superseded Slices for
 root-cause history.
@@ -113,6 +111,9 @@ root-cause history.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Local Service Readiness | Align `awf init` Compose env file behavior | `ws_986a024640994f17a0f39897` | [#264](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/264) | merged | Merged 2026-05-20. Fresh monitor replaced cancelled stale monitor `ws_6b8303d60f8949d78b1237e7` after rollback of the mistaken `plans/*` ignore, branch repair, AWF rebuild, and cleanup of terminal orphan resources. |
+| P1 Test Coverage And Quality Gates | Make protected quality-gate guardrail diff-aware | `ws_0367e5e1266d4acdbd13441a` | [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268) | merged | Merged 2026-05-20. Fresh monitor replaced cancelled stale monitor `ws_285b5bf215fd4b329eb1af65`; implements section/shape-aware protected-file guardrails for legitimate dependency/workflow edits without allowing CI or coverage bypasses. |
+| P0 AWF Dogfood Stability | Automate preserved-active restart recovery | `ws_53702c4210de4ec59e9ec059` | [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272) | merged | Merged 2026-05-21. Fresh monitor replaced cancelled stale monitor `ws_77bb4cce4aea4892bb41e0e6`; closes the preserved-active execution reattach/recovery gap after service or worker restarts. |
 | P0 / P1 AWF Dogfood Stability | Bootstrap env and PR-monitor recovery stability | `ws_677ab22a7f7b4b7abc02ea57` | [#267](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/267) | merged | Merged 2026-05-19. Carries local bootstrap env, validation-handoff, salvage safe-directory, and provider-circuit monitor recovery fixes. |
 | P1 Merge Safety And PR Monitor Correctness | Separate advisory PR feedback from merge-blocking reviews | `ws_e718fac4c82c41d4baa143af` | [#269](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/269) | merged | Merged 2026-05-20. Salvaged clean work from failed `ws_0d8e6ceeb322430daa745ad6`; PR monitor no longer treats advisory `COMMENTED` reviews and top-level bot comments as merge blockers while preserving them for the address loop. |
 | P1 API Contract Completion | Expose workspace create effort across REST, CLI, and MCP | _local_ | [#271](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/271) | merged | Merged 2026-05-20. Adds `task.effort` to `POST /v1/workspaces`, persists it as `task_policy.agent_effort`, exposes CLI `--effort`, exposes MCP `effort`, regenerates `openapi.json`, and adds API/CLI/MCP/contract regressions. |
@@ -527,7 +528,7 @@ root-cause history.
 - [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
 - [x] Add integration tests for Dockerized project profiles with sidecar services.
 - [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
-- [ ] **P1: Make protected quality-gate guardrail diff-aware.** Regression
+- [x] **P1: Make protected quality-gate guardrail diff-aware.** Regression
   source: monitoring PR #470 in `dimileeh/aira-agent` showed AWF blocked
   legitimate edits to `pyproject.toml` and `.github/workflows/*.yml` because
   the guardrail treats every protected-file edit as a coverage/CI bypass.
@@ -538,9 +539,11 @@ root-cause history.
   bypasses, test-command narrowing, and job/step removals; include file,
   section/path, approximate line, and reason in block messages; document the
   policy in `docs/PROTECTED_FILES.md`; and pass the seven unit cases plus
-  executor/PR-monitor regressions. Active PR #268 is now monitored by fresh
-  workspace `ws_0367e5e1266d4acdbd13441a` after the 2026-05-20 AWF rebuild;
-  cancelled stale monitor `ws_285b5bf215fd4b329eb1af65` is superseded.
+  executor/PR-monitor regressions. Completed by PR
+  [#268](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/268),
+  merged 2026-05-20 with fresh monitor workspace
+  `ws_0367e5e1266d4acdbd13441a`; cancelled stale monitor
+  `ws_285b5bf215fd4b329eb1af65` is superseded.
 - [x] Repair deterministic post-agent pre-commit hook rewrites before failing
   otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
   failed `ws_06ee567d44eb479bb0f68478`,
@@ -923,7 +926,7 @@ and production configuration footguns.
   merged 2026-05-07 and preserves healthy live agent/validation/push
   executions instead of tearing them down after worker restart or in-memory
   execution-task loss.
-- [ ] **P0: Close preserved-active execution reattach gap after worker
+- [x] **P0: Close preserved-active execution reattach gap after worker
   restart.** Regression source: `ws_0d8e6ceeb322430daa745ad6` was running an
   agent, completed implementation, passed focused validation, and committed
   locally, then a local service restart emitted
@@ -944,9 +947,11 @@ and production configuration footguns.
   commit but before validation/push, restart after PR creation but before
   monitor handoff, and restart with no usable worktree changes; useful completed
   work cannot be terminalized without an automatic salvage/reschedule path.
-  Active PR #272 is now monitored by fresh workspace
-  `ws_53702c4210de4ec59e9ec059` after the 2026-05-20 AWF rebuild; cancelled
-  stale monitor `ws_77bb4cce4aea4892bb41e0e6` is superseded.
+  Completed by PR
+  [#272](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/272),
+  merged 2026-05-21 with fresh monitor workspace
+  `ws_53702c4210de4ec59e9ec059`; cancelled stale monitor
+  `ws_77bb4cce4aea4892bb41e0e6` is superseded.
 
 ## P0: API / CLI / MCP Contract Parity
 
@@ -1357,9 +1362,9 @@ local open-source AWF Core.
 
 ## Ready For GKE Discussion When
 
-- [ ] All P0 items are complete, including active AWF dogfood slices and the
+- [x] All P0 items are complete, including active AWF dogfood slices and the
   umbrella provider-recovery acceptance item.
-- [ ] All P1 items are complete, or explicitly deferred with a written reason
+- [x] All P1 items are complete, or explicitly deferred with a written reason
   that preserves the local open-source Core readiness bar.
 - [ ] `awf service readiness --format json` passes without generic recent
   failure reasons, with PRD SLO thresholds met over the rolling window; any

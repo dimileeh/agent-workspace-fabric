@@ -317,6 +317,14 @@ type LogEntry = {
   kind: "tail" | "live";
 };
 
+type LogStreamActivity = {
+  byteCount: number;
+  lineCount: number;
+  changedAt: number;
+};
+
+type LogStreamActivityMap = Record<string, LogStreamActivity>;
+
 type LogWorkspaceTarget = Pick<
   WorkspaceOverview,
   | "workspace_id"
@@ -398,8 +406,10 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const [workspaceLogSelection, setWorkspaceLogSelection] = useState<string[]>([]);
   const [fullscreenWorkspaceIds, setFullscreenWorkspaceIds] = useState<string[]>([]);
   const [taskDetailsWorkspaceId, setTaskDetailsWorkspaceId] = useState<string | null>(null);
+  const [logTailSignal, setLogTailSignal] = useState(0);
   const [fullscreenTailSignal, setFullscreenTailSignal] = useState(0);
-  const [logSortDirection, setLogSortDirection] = useState<SortDirection>("desc");
+  const [logSortDirection, setLogSortDirection] = useState<SortDirection>("asc");
+  const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const [statusFilters, setStatusFilters] = useState<string[]>([]);
   const [agentFilters, setAgentFilters] = useState<string[]>([]);
   const [modelFilters, setModelFilters] = useState<string[]>([]);
@@ -580,6 +590,11 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     });
 
     if (streams.ok) {
+      logStreamActivityRef.current = updateLogStreamActivity(
+        logStreamActivityRef.current,
+        workspaceId,
+        streams.data.items,
+      );
       setSelectedStreams((current) => {
         return pickWorkspaceLogStreams(streams.data.items, current);
       });
@@ -669,33 +684,34 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
       const offset = Math.max(stream.byte_count - 65_536, 0);
+      const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
         `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(
           stream.stream_id,
         )}?offset=${offset}&limit_bytes=65536`,
       );
       if (!result.ok) {
-      setLogEntries((current) =>
-        trimLogEntries([
-          ...current.filter(
-            (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
-          ),
-          {
-            key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-            workspaceId,
-            streamId: stream.stream_id,
-            source: stream.source,
-            fd: null,
-            offset,
-            data: `Unable to load log stream: ${result.message}`,
-            occurredAt: new Date().toISOString(),
-            order: Date.now(),
-            kind: "tail",
-          },
-        ]),
-      );
-      return;
-    }
+        setLogEntries((current) =>
+          trimLogEntries([
+            ...current.filter(
+              (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
+            ),
+            {
+              key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
+              workspaceId,
+              streamId: stream.stream_id,
+              source: stream.source,
+              fd: null,
+              offset,
+              data: `Unable to load log stream: ${result.message}`,
+              occurredAt: new Date().toISOString(),
+              order: Date.now(),
+              kind: "tail",
+            },
+          ]),
+        );
+        return;
+      }
       const tailEntry = {
         key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
         workspaceId,
@@ -704,8 +720,8 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
         fd: null,
         offset: result.data.offset,
         data: result.data.data,
-        occurredAt: stream.closed_at ?? stream.opened_at,
-        order: Date.parse(stream.closed_at ?? stream.opened_at) || Date.now(),
+        occurredAt: new Date(activity).toISOString(),
+        order: activity,
         kind: "tail" as const,
       };
       setLogEntries((current) =>
@@ -961,6 +977,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     if (!selectedId) {
       return;
     }
+    setLogTailSignal((current) => current + 1);
     for (const stream of detail.streams) {
       if (selectedStreams.includes(stream.stream_id)) {
         void loadLogTail(selectedId, stream);
@@ -1149,6 +1166,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
                   entries={selectedLogEntries}
                   offsets={streamOffsets}
                   sortDirection={logSortDirection}
+                  tailSignal={logTailSignal}
                   onToggleStream={(streamId, checked) =>
                     setSelectedStreams((current) => toggleStream(current, streamId, checked))
                   }
@@ -3465,6 +3483,7 @@ function LogsPanel({
   entries,
   offsets,
   sortDirection,
+  tailSignal,
   onToggleStream,
   onSelectAll,
   onClear,
@@ -3478,6 +3497,7 @@ function LogsPanel({
   entries: LogEntry[];
   offsets: Record<string, number>;
   sortDirection: SortDirection;
+  tailSignal: number;
   onToggleStream: (streamId: string, checked: boolean) => void;
   onSelectAll: () => void;
   onClear: () => void;
@@ -3528,6 +3548,7 @@ function LogsPanel({
         entries={entries}
         offsets={offsets}
         sortDirection={sortDirection}
+        tailSignal={tailSignal}
         heightClass="h-[420px]"
         onToggleStream={onToggleStream}
         onSelectAll={onSelectAll}
@@ -3645,6 +3666,7 @@ function WorkspaceLogColumn({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const previousTailSignal = useRef(tailSignal);
+  const streamActivityRef = useRef<LogStreamActivityMap>({});
 
   const selectedStreamMetas = useMemo(
     () => streams.filter((stream) => selectedStreams.includes(stream.stream_id)),
@@ -3663,7 +3685,13 @@ function WorkspaceLogColumn({
       return;
     }
     const results = await Promise.all(
-      selected.map((stream) => readLogTailEntry(workspace.workspace_id, stream)),
+      selected.map((stream) =>
+        readLogTailEntry(
+          workspace.workspace_id,
+          stream,
+          logStreamActivityFor(streamActivityRef.current, workspace.workspace_id, stream),
+        ),
+      ),
     );
     const byStream = new Map(results.map((result) => [result.entry.streamId, result]));
     setEntries((current) =>
@@ -3700,6 +3728,11 @@ function WorkspaceLogColumn({
       return;
     }
     setError(null);
+    streamActivityRef.current = updateLogStreamActivity(
+      streamActivityRef.current,
+      workspace.workspace_id,
+      result.data.items,
+    );
     setStreams(result.data.items);
     setSelectedStreams((current) => pickWorkspaceLogStreams(result.data.items, current));
     setLoading(false);
@@ -3833,6 +3866,7 @@ function WorkspaceLogColumn({
           entries={selectedEntries}
           offsets={offsets}
           sortDirection={sortDirection}
+          tailSignal={tailSignal}
           heightClass="h-full"
           onToggleStream={(streamId, checked) =>
             setSelectedStreams((current) => toggleStream(current, streamId, checked))
@@ -3852,6 +3886,7 @@ function LogBrowser({
   entries,
   offsets,
   sortDirection,
+  tailSignal,
   heightClass,
   onToggleStream,
   onSelectAll,
@@ -3863,6 +3898,7 @@ function LogBrowser({
   entries: LogEntry[];
   offsets: Record<string, number>;
   sortDirection: SortDirection;
+  tailSignal: number;
   heightClass: string;
   onToggleStream: (streamId: string, checked: boolean) => void;
   onSelectAll: () => void;
@@ -3892,7 +3928,7 @@ function LogBrowser({
           onClear={onClear}
         />
       </div>
-      <LogOutput value={renderedLog} heightClass={heightClass} sortDirection={sortDirection} />
+      <LogOutput value={renderedLog} heightClass={heightClass} sortDirection={sortDirection} tailSignal={tailSignal} />
     </div>
   );
 }
@@ -3965,23 +4001,59 @@ function LogOutput({
   value,
   heightClass,
   sortDirection,
+  tailSignal,
 }: {
   value: string;
   heightClass: string;
   sortDirection: SortDirection;
+  tailSignal: number;
 }) {
   const ref = useRef<HTMLPreElement | null>(null);
+  const preserveRef = useRef({ scrollHeight: 0, scrollTop: 0 });
+  const followTailRef = useRef(true);
+  const previousSortRef = useRef(sortDirection);
+  const previousTailSignalRef = useRef(tailSignal);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = ref.current;
-    if (node) {
-      node.scrollTop = sortDirection === "desc" ? 0 : node.scrollHeight;
+    if (!node) {
+      return;
     }
-  }, [sortDirection, value]);
+
+    const previous = preserveRef.current;
+    const sortChanged = previousSortRef.current !== sortDirection;
+    const tailRequested = previousTailSignalRef.current !== tailSignal;
+
+    if (sortChanged || tailRequested || followTailRef.current) {
+      scrollLogOutputToTail(node, sortDirection);
+    } else if (sortDirection === "desc") {
+      const heightDelta = node.scrollHeight - previous.scrollHeight;
+      node.scrollTop = previous.scrollTop + Math.max(heightDelta, 0);
+    } else {
+      node.scrollTop = previous.scrollTop;
+    }
+
+    followTailRef.current = isLogOutputAtTail(node, sortDirection);
+    preserveRef.current = {
+      scrollHeight: node.scrollHeight,
+      scrollTop: node.scrollTop,
+    };
+    previousSortRef.current = sortDirection;
+    previousTailSignalRef.current = tailSignal;
+  }, [sortDirection, tailSignal, value]);
 
   return (
     <pre
       ref={ref}
+      data-testid="log-output"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        followTailRef.current = isLogOutputAtTail(node, sortDirection);
+        preserveRef.current = {
+          scrollHeight: node.scrollHeight,
+          scrollTop: node.scrollTop,
+        };
+      }}
       className={`mono min-h-0 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed break-words text-slate-100 ${heightClass}`}
     >
       {value || "No log data loaded."}
@@ -4485,6 +4557,7 @@ function parseJson(text: string): ParsedJson {
 async function readLogTailEntry(
   workspaceId: string,
   stream: WorkspaceLogStream,
+  activity = logStreamFallbackActivity(stream),
 ): Promise<{ entry: LogEntry; nextOffset: number }> {
   const offset = Math.max(stream.byte_count - 65_536, 0);
   const result = await apiGet<WorkspaceLogRead>(
@@ -4520,12 +4593,73 @@ async function readLogTailEntry(
       fd: null,
       offset: result.data.offset,
       data: result.data.data,
-      occurredAt: stream.closed_at ?? stream.opened_at,
-      order: Date.parse(stream.closed_at ?? stream.opened_at) || Date.now(),
+      occurredAt: new Date(activity).toISOString(),
+      order: activity,
       kind: "tail",
     },
     nextOffset: result.data.next_offset,
   };
+}
+
+function logStreamActivityKey(workspaceId: string, streamId: string): string {
+  return `${workspaceId}:${streamId}`;
+}
+
+function updateLogStreamActivity(
+  current: LogStreamActivityMap,
+  workspaceId: string,
+  streams: readonly WorkspaceLogStream[],
+  now = Date.now(),
+): LogStreamActivityMap {
+  const next = { ...current };
+  const seen = new Set<string>();
+
+  for (const stream of streams) {
+    const key = logStreamActivityKey(workspaceId, stream.stream_id);
+    seen.add(key);
+    const previous = current[key];
+    const fallback = logStreamFallbackActivity(stream, now);
+    const changed =
+      !previous || previous.byteCount !== stream.byte_count || previous.lineCount !== stream.line_count;
+    next[key] = {
+      byteCount: stream.byte_count,
+      lineCount: stream.line_count,
+      changedAt: !previous ? fallback : changed ? (stream.closed_at ? fallback : now) : previous.changedAt,
+    };
+  }
+
+  const workspacePrefix = `${workspaceId}:`;
+  for (const key of Object.keys(next)) {
+    if (key.startsWith(workspacePrefix) && !seen.has(key)) {
+      delete next[key];
+    }
+  }
+  return next;
+}
+
+function logStreamActivityFor(
+  activity: LogStreamActivityMap,
+  workspaceId: string,
+  stream: WorkspaceLogStream,
+): number {
+  return activity[logStreamActivityKey(workspaceId, stream.stream_id)]?.changedAt ?? logStreamFallbackActivity(stream);
+}
+
+function logStreamFallbackActivity(stream: WorkspaceLogStream, fallback = Date.now()): number {
+  const parsed = Date.parse(stream.closed_at ?? stream.opened_at);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isLogOutputAtTail(node: HTMLElement, direction: SortDirection): boolean {
+  const thresholdPx = 8;
+  if (direction === "desc") {
+    return node.scrollTop <= thresholdPx;
+  }
+  return node.scrollHeight - node.clientHeight - node.scrollTop <= thresholdPx;
+}
+
+function scrollLogOutputToTail(node: HTMLElement, direction: SortDirection): void {
+  node.scrollTop = direction === "desc" ? 0 : node.scrollHeight;
 }
 
 function parseFrame(raw: string): AwfStreamFrame | null {
