@@ -232,14 +232,18 @@ class AgentAdapter(ABC):
         # Wrap the agent run with optional usage sampling. The sampler captures a
         # baseline + periodic samples and is finalized in *every* exit path so the
         # final usage sample is recorded on success, failure/timeout, and
-        # cancellation — never masking the agent outcome.
-        sampler_ctx = await self._start_usage_sampling(
-            compose_project=compose_project,
-            compose_file=compose_file,
-            workspace_id=workspace_id,
-        )
+        # cancellation — never masking the agent outcome. _start_usage_sampling
+        # stays *inside* the try: cancellation during baseline capture re-raises
+        # CancelledError (a BaseException its own except-Exception guard can't
+        # catch), so only the enclosing try/finally still reaches finalization.
+        sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         try:
+            sampler_ctx = await self._start_usage_sampling(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+            )
             result = await self._run_agent_cli(
                 invocation=invocation,
                 args=args,

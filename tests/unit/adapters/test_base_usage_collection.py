@@ -177,6 +177,43 @@ async def test_sampler_start_error_does_not_mask_result() -> None:
 
 
 @pytest.mark.unit
+async def test_finalization_reached_when_start_cancelled() -> None:
+    # Cancellation during baseline capture makes CcusageCollector.start re-raise
+    # CancelledError. Since that is a BaseException (not caught by
+    # _start_usage_sampling's except-Exception guard), the call must sit inside
+    # the run try/finally so the cancelled exit path still reaches finalization
+    # (a no-op for the missing context) instead of escaping the guard.
+    events: list[str] = []
+    sampler = _RecordingSampler(events, start_error=asyncio.CancelledError())
+    runner = _EventRunner(events, result=CommandResult(returncode=0, stdout="ok", stderr=""))
+    adapter = CodexAdapter(runner=runner, usage_sampler=sampler)
+
+    finalize_calls: list[tuple[Any, str]] = []
+    original_finalize = adapter._finalize_usage_sampling
+
+    async def _recording_finalize(
+        sampler_ctx: Any, *, status: str, workspace_id: str | None
+    ) -> None:
+        finalize_calls.append((sampler_ctx, status))
+        await original_finalize(sampler_ctx, status=status, workspace_id=workspace_id)
+
+    adapter._finalize_usage_sampling = _recording_finalize  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.run(
+            compose_project="proj",
+            compose_file=_COMPOSE_FILE,
+            prompt="do work",
+            workspace_id="ws_cancel_start",
+        )
+
+    # start() raised before the agent ran, yet finalization still ran — with no
+    # context (None) and the cancelled status.
+    assert events == ["start"]
+    assert finalize_calls == [(None, "cancelled")]
+
+
+@pytest.mark.unit
 async def test_sampler_finalize_error_does_not_mask_agent_error() -> None:
     events: list[str] = []
     sampler = _RecordingSampler(events, finalize_error=RuntimeError("finalize down"))
