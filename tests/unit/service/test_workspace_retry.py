@@ -1026,6 +1026,7 @@ async def test_retry_agent_idle_timeout_salvage_unavailable_errors_abort_retry(
 
     assert exc_info.value.error_code == "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
     assert exc_info.value.detail["reason_code"] == SALVAGE_BASE_UNAVAILABLE
+    assert exc_info.value.detail["source_reason_code"] == AGENT_IDLE_TIMEOUT
     assert len(workspaces) == 1
     assert len(operations) == 0
 
