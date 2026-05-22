@@ -83,7 +83,10 @@ async def _wait_for(predicate: Callable[[], bool], *, tries: int = 200) -> None:
     for _ in range(tries):
         if predicate():
             return
-        await asyncio.sleep(0)
+        # Real (tiny) delay, not sleep(0): snapshot writes now run via
+        # asyncio.to_thread, so the poll must yield enough wall-time for the
+        # worker thread to complete and post its result back to the loop.
+        await asyncio.sleep(0.001)
     raise AssertionError("condition not reached")
 
 
@@ -369,7 +372,9 @@ async def test_live_snapshots_written_during_run(tmp_path: Path) -> None:
     )
     await _wait_for(lambda: len(clock.sleeps) == 1)
     clock.tick()
-    await _wait_for(lambda: len(runner.calls) == 2)
+    # The write trails the ccusage call (it now runs via asyncio.to_thread), so
+    # wait on the observable snapshot landing rather than the runner call count.
+    await _wait_for(lambda: read_latest_usage_snapshot("ws_live", work_dir=tmp_path) is not None)
 
     snap = read_latest_usage_snapshot("ws_live", work_dir=tmp_path)
     assert snap is not None

@@ -230,7 +230,7 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _sample_and_write(self, *, phase: str, run_status: str) -> None:
         if self._source is None:
-            self._write(
+            await self._write(
                 phase=phase,
                 run_status=run_status,
                 status_label="unavailable",
@@ -241,7 +241,7 @@ class _CcusageSampleContext(UsageSampleContext):
             return
         usage, reason, model = await self._run_ccusage()
         if usage is None:
-            self._write(
+            await self._write(
                 phase=phase,
                 run_status=run_status,
                 status_label="unavailable",
@@ -254,7 +254,7 @@ class _CcusageSampleContext(UsageSampleContext):
             # We have a current reading but never anchored a baseline, so a delta
             # would expose copied host history. Report unavailable with the
             # baseline failure reason instead of an inflated total.
-            self._write(
+            await self._write(
                 phase=phase,
                 run_status=run_status,
                 status_label="unavailable",
@@ -264,7 +264,7 @@ class _CcusageSampleContext(UsageSampleContext):
             )
             return
         delta = subtract_baseline(usage, self._baseline)
-        self._write(
+        await self._write(
             phase=phase,
             run_status=run_status,
             status_label="available",
@@ -273,7 +273,7 @@ class _CcusageSampleContext(UsageSampleContext):
             model=model,
         )
 
-    def _write(
+    async def _write(
         self,
         *,
         phase: str,
@@ -300,7 +300,9 @@ class _CcusageSampleContext(UsageSampleContext):
             currency=metrics.currency,
             baseline=self._baseline.as_baseline_dict() if self._baseline is not None else None,
         )
-        write_usage_snapshot(snapshot, work_dir=self._collector._work_dir)
+        # Offload the blocking mkdir/write/replace off the event loop; finalize()
+        # shields its sample so the final write still completes under cancellation.
+        await asyncio.to_thread(write_usage_snapshot, snapshot, work_dir=self._collector._work_dir)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
         invocation = build_tracked_compose_exec(
