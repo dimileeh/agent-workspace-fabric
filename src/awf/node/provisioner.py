@@ -46,6 +46,8 @@ from awf.service.secret_leases import (
 
 _log = get_logger(__name__)
 
+_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
+
 
 @dataclass(frozen=True)
 class ProvisionerConfig:
@@ -659,7 +661,7 @@ def _release_sync_source_branch(ws: Workspace) -> str | None:
         source = block.get("source_branch")
         if isinstance(source, str) and source.strip():
             return source.strip()
-    return "development"
+    return _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
