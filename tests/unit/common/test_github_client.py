@@ -3301,6 +3301,47 @@ class TestMutations:
             await client.post_comment(repo=RepoRef(owner="o", name="r"), pr_number=1, body="x")
 
     @pytest.mark.unit
+    async def test_create_pull_request_argv_and_url(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/o/r/pull/321\n",
+        )
+        client = GitHubClient(fake)
+
+        url = await client.create_pull_request(
+            repo=RepoRef(owner="o", name="r"),
+            base="main",
+            head="development",
+            title="Release: merge development into main",
+            body="auto release sync",
+        )
+
+        args = fake.calls[0].args
+        assert args[:3] == ["gh", "pr", "create"]
+        assert "--repo" in args and "o/r" in args
+        assert args[args.index("--base") + 1] == "main"
+        assert args[args.index("--head") + 1] == "development"
+        assert args[args.index("--title") + 1] == "Release: merge development into main"
+        assert args[args.index("--body") + 1] == "auto release sync"
+        assert url == "https://github.com/o/r/pull/321"
+
+    @pytest.mark.unit
+    async def test_create_pull_request_raises_on_error(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="no commits between main and development")
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError) as exc:
+            await client.create_pull_request(
+                repo=RepoRef(owner="o", name="r"),
+                base="main",
+                head="development",
+                title="t",
+                body="b",
+            )
+        assert "no commits between" in str(exc.value)
+
+    @pytest.mark.unit
     async def test_merge_pr_squash_delete_branch_default(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0)  # merge

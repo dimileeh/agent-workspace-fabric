@@ -21,11 +21,11 @@ Design notes:
 * **Thread dedup is the caller's problem**. The runner drops stale
   addressed-state when fetched review-thread/comment evidence changes,
   then ``decide`` skips only the still-current addressed items.
-* **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
-  exactly one place: when all 5 gates are green it returns
-  ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
-  wait state, not a terminal completion, and keeps polling until the PR
-  is actually merged or closed.
+* **Release-PR variant** (``auto_merge=False`` — used by ``sync_release_pr``
+  and by PR adoption of release/manual PRs) differs in exactly one place:
+  when all 5 gates are green it returns ``NotifyHuman`` instead of ``Merge``.
+  The runner treats that as a live wait state, not a terminal completion, and
+  keeps polling until the PR is actually merged or closed.
 """
 
 from __future__ import annotations

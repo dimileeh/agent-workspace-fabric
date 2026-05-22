@@ -1288,7 +1288,7 @@ class TestCreateWorkspace:
                 "base_branch": "main",
                 "task_title": "Add planner hook",
                 "task_prompt": "Implement the planner hook.",
-                "task_kind": "refactor_task",
+                "task_kind": "feature_branch_pr",
                 "agent": "claude_code",
                 "model": "claude-opus-4-7",
                 "effort": "xhigh",
@@ -1334,7 +1334,7 @@ class TestCreateWorkspace:
         assert ws.task_title == "Add planner hook"
         assert ws.task_prompt == "Implement the planner hook."
         assert ws.task_external_id == "AIRA-42"
-        assert ws.task_kind == "refactor_task"
+        assert ws.task_kind == "feature_branch_pr"
         assert ws.agent == "claude_code"
         assert ws.task_policy["agent_model"] == "claude-opus-4-7"
         assert ws.task_policy["agent_effort"] == "xhigh"
@@ -1446,6 +1446,100 @@ class TestCreateWorkspace:
 
         assert ws is not None
         assert ws.branch_base == "development"
+
+    @pytest.mark.unit
+    async def test_create_workspace_sync_release_pr_omitted_base_defaults_to_main(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/release-sync-default.git",
+                "task_kind": "sync_release_pr",
+                "task_title": "Release sync default target",
+                "task_prompt": "Open the standing release PR for the default target.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp release-sync default target regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        # Omitting base_branch for sync_release_pr must target main (development ->
+        # main), not the legacy development default that degenerates to
+        # development -> development and exits NO_CHANGES_TO_SYNC.
+        assert ws.branch_base == "main"
+        assert ws.task_policy["release_sync"] == {
+            "source_branch": "development",
+            "target_branch": "main",
+        }
+
+    @pytest.mark.unit
+    async def test_create_workspace_sync_release_pr_honors_explicit_base(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/release-sync-explicit.git",
+                "base_branch": "release/2026.05",
+                "task_kind": "sync_release_pr",
+                "task_title": "Release sync explicit target",
+                "task_prompt": "Open the release PR against an explicit target branch.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp release-sync explicit target regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "release/2026.05"
+        assert ws.task_policy["release_sync"]["target_branch"] == "release/2026.05"
+
+    @pytest.mark.unit
+    async def test_create_workspace_sync_release_pr_honors_explicit_source_branch(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/release-sync-source.git",
+                "base_branch": "main",
+                "source_branch": "release/staging",
+                "task_kind": "sync_release_pr",
+                "task_title": "Release sync explicit source",
+                "task_prompt": "Open the release PR from a non-default source branch.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp release-sync source override regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        # The MCP source_branch override must thread through to the release-sync
+        # policy so callers can sync a non-default branch, matching CLI/REST.
+        assert ws.task_policy["release_sync"] == {
+            "source_branch": "release/staging",
+            "target_branch": "main",
+        }
 
     @pytest.mark.unit
     async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(

@@ -67,16 +67,18 @@ triggers; tunable to N = 3 if you want to batch more).
 
 ## Approach
 
-### Core idea: a new task kind `sync_release_pr`
+### Core idea: the task kind `sync_release_pr`
 
-Extend the existing `TaskKind` enum (added in Phase 1.5 for
-`monitor_release_pr`) with a third value:
+`sync_release_pr` is a real `TaskKind`. The earlier `monitor_release_pr`
+kind is deprecated and removed — monitoring an existing release/manual
+PR now goes through the generic PR-adoption flow with `auto_merge=false`,
+which selects `build_release_pr_monitor`.
 
 ```python
 class TaskKind(StrEnum):
-    feature_branch_pr = "feature_branch_pr"       # existing
-    monitor_release_pr = "monitor_release_pr"     # existing
-    sync_release_pr = "sync_release_pr"           # NEW
+    feature_branch_pr = "feature_branch_pr"   # everyday coding-agent PR
+    sync_release_pr = "sync_release_pr"        # open/reuse source→target release PR
+    sync_feature_pr = "sync_feature_pr"        # adopt an existing feature PR
 ```
 
 A `sync_release_pr` workspace is short-lived and semantically distinct

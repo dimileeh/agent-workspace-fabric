@@ -34,7 +34,6 @@ _log = get_logger(__name__)
 _GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
-_GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 
 
 class GitOperationError(Exception):
