@@ -15,6 +15,7 @@ from awf.service.conformance_salvage import (
     SALVAGE_SOURCE_UNAVAILABLE,
     ConformanceSalvageCapture,
     ConformanceSalvageError,
+    build_agent_timeout_salvage_retry_prompt,
     build_conformance_salvage_conflict_prompt,
     build_conformance_salvage_retry_prompt,
     capture_conformance_salvage,
@@ -150,6 +151,43 @@ def test_capture_policy_includes_optional_source_and_string_gap(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_capture_stages_tracked_files_under_ignored_parent_directory(tmp_path: Path) -> None:
+    worktree = tmp_path / "git" / "worktrees" / "ws_ignored_parent"
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / ".gitignore").write_text("lib/\n", encoding="utf-8")
+    (worktree / "apps/console/lib").mkdir(parents=True)
+    (worktree / "apps/console/lib/format.ts").write_text(
+        "export const value = 'old';\n",
+        encoding="utf-8",
+    )
+    _git(["add", ".gitignore"], worktree)
+    _git(["add", "-f", "apps/console/lib/format.ts"], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+
+    (worktree / "apps/console/lib/format.ts").write_text(
+        "export const value = 'new';\n",
+        encoding="utf-8",
+    )
+
+    capture = capture_conformance_salvage(
+        work_dir=tmp_path,
+        source_workspace_id="ws_ignored_parent",
+        source_base_commit=base_commit,
+        conformance_evidence=None,
+        conformance_evidence_ref=None,
+        source_branch_name=None,
+        source_remote_push_branch=None,
+    )
+
+    assert capture.implementation_paths == ["apps/console/lib/format.ts"]
+    assert "export const value = 'new';" in capture.patch_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
 def test_capture_policy_omits_absent_optional_source_fields(tmp_path: Path) -> None:
     capture = ConformanceSalvageCapture(
         source_workspace_id="ws_source",
@@ -198,9 +236,17 @@ def test_prompt_helpers_handle_long_or_missing_path_lists() -> None:
         agent_patch_path=".awf/salvage/ws.patch",
         apply_error="",
     )
+    timeout_prompt = build_agent_timeout_salvage_retry_prompt(
+        task_prompt="finish timed-out task",
+        evidence={"reason_code": "AGENT_IDLE_TIMEOUT", "message": "no output"},
+        salvage={"implementation_paths": long_paths},
+    )
 
     assert "... and 2 more" in retry_prompt
     assert "... and 2 more" in conflict_prompt
+    assert "... and 2 more" in timeout_prompt
+    assert "Automatic AWF timeout salvage" in timeout_prompt
+    assert "finish timed-out task" in timeout_prompt
     assert "Re-check conformance evidence." in conflict_prompt
     assert "No paths recorded." in missing_paths_prompt
     assert conformance_salvage_from_task_policy(None) is None

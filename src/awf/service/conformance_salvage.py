@@ -243,10 +243,7 @@ def build_conformance_salvage_retry_prompt(
     evidence: Mapping[str, Any],
     salvage: Mapping[str, Any],
 ) -> str:
-    implementation_paths = _string_list(salvage.get("implementation_paths"))
-    paths = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
-    if len(implementation_paths) > 20:
-        paths += f"\n- ... and {len(implementation_paths) - 20} more"
+    paths = _implementation_path_lines(salvage)
     return (
         "## Automatic AWF salvage\n\n"
         "AWF automatically captured the prior implementation diff from the failed "
@@ -255,6 +252,28 @@ def build_conformance_salvage_retry_prompt(
         "restart from scratch unless the recovered code is unusable.\n\n"
         f"### Salvaged implementation paths\n{paths or '- No paths recorded.'}\n\n"
         + build_conformance_retry_prompt(task_prompt=task_prompt, evidence=evidence)
+    )
+
+
+def build_agent_timeout_salvage_retry_prompt(
+    *,
+    task_prompt: str,
+    evidence: Mapping[str, Any],
+    salvage: Mapping[str, Any],
+) -> str:
+    reason_code = _optional_str(evidence.get("reason_code")) or "AGENT_IDLE_TIMEOUT"
+    message = _optional_str(evidence.get("message"))
+    message_line = f"\n\n### Timeout message\n{message[:1000]}" if message else ""
+    return (
+        "## Automatic AWF timeout salvage\n\n"
+        "AWF automatically captured the prior implementation diff from an agent "
+        "run that timed out before it could finish. The retry workspace will "
+        "restore that diff before the agent runs. Continue from the recovered "
+        "implementation; do not restart from scratch unless the recovered code "
+        "is unusable.\n\n"
+        f"### Source reason\n`{reason_code}`{message_line}\n\n"
+        f"### Salvaged implementation paths\n{_implementation_path_lines(salvage)}\n\n"
+        f"### Original task\n{task_prompt}\n"
     )
 
 
@@ -339,6 +358,14 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and item]
+
+
+def _implementation_path_lines(salvage: Mapping[str, Any]) -> str:
+    implementation_paths = _string_list(salvage.get("implementation_paths"))
+    paths = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
+    if len(implementation_paths) > 20:
+        paths += f"\n- ... and {len(implementation_paths) - 20} more"
+    return paths or "- No paths recorded."
 
 
 def _optional_str(value: object) -> str | None:

@@ -66,6 +66,10 @@ def _assert_prompt_sent_on_stdin(runner: FakeCommandRunner, prompt: str = _PROMP
     wrapped_prompt = input_bytes.decode()
     assert wrapped_prompt.endswith(prompt)
     assert "AWF workspace contract" in wrapped_prompt
+    assert "DO NOT run AWF/GitHub-owned broad validation" in wrapped_prompt
+    assert "inside the agent" in wrapped_prompt
+    assert "pytest --cov" in wrapped_prompt
+    assert "focused checks" in wrapped_prompt
     return wrapped_prompt
 
 

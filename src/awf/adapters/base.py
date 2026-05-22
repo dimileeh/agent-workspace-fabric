@@ -60,6 +60,19 @@ branch that AWF has already created for you. Your contract:
 3. Commit your work locally as you go (`git add` + `git commit` is
    fine). AWF's post-agent step will also capture any uncommitted
    changes, but commits with good messages are preferred.
+4. **DO NOT run AWF/GitHub-owned broad validation inside the agent
+   phase.** Do not run the full `.awf/workspace.yml` validation suite,
+   whole-repository test suites, full coverage gates such as
+   `pytest --cov` / `--cov-fail-under`, full frontend builds, or CI-
+   equivalent commands unless the operator explicitly asks for that
+   exact diagnostic action in this task. AWF and GitHub CI own broad
+   validation, provenance, logs, timeouts, and merge gating after you
+   finish the code.
+5. Focus your local checks. Run targeted tests, focused lint/type checks,
+   or small repro commands only for the files and behavior you changed.
+   When a plan or validation document needs evidence, record those
+   focused checks and state that full AWF/GitHub validation is managed by
+   AWF after agent completion; do not execute the broad suite yourself.
 
 ---
 
