@@ -86,13 +86,15 @@ class _RealClock:
 def _is_missing_binary(result: CommandResult) -> bool:
     if result.returncode == 127:
         return True
-    # A real missing binary exits 127 (handled above); only treat stderr as a
-    # missing-binary signal for the exact phrases shells emit ("command not
-    # found" from bash, "no such file" from a failed exec/setsid). This keeps
-    # app-level errors that merely contain "not found" (e.g. ccusage
-    # "source not found") classified as REASON_COMMAND_FAILED.
-    stderr_lower = result.stderr.lower()
-    return "command not found" in stderr_lower or "no such file" in stderr_lower
+    # A real missing binary exits 127 (handled above): on this Debian image both
+    # the setsid (util-linux EXIT_NOTFOUND) and dash exec paths return 127 on
+    # ENOENT. Only treat stderr as a secondary missing-binary signal for the
+    # exact phrase shells emit ("command not found" from bash/sh). Avoid
+    # "no such file" here: ccusage (Node) emits ENOENT errors for missing
+    # config/data files (e.g. the --config neutral file) with that phrase in
+    # stderr, which would misclassify a present-but-failing binary as
+    # REASON_UNAVAILABLE ("ccusage not installed") instead of REASON_COMMAND_FAILED.
+    return "command not found" in result.stderr.lower()
 
 
 class CcusageCollector(UsageSampler):

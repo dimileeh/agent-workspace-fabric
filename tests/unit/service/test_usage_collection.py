@@ -768,15 +768,20 @@ async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
     ("result", "expected"),
     [
         (CommandResult(returncode=127, stdout="", stderr=""), True),
-        # Exact shell phrases for a missing executable count even on a non-127 exit.
+        # The exact "command not found" shell phrase counts even on a non-127 exit.
         (CommandResult(returncode=1, stdout="", stderr="bash: ccusage: command not found"), True),
+        # A non-127 "no such file" is NOT a missing binary: a real missing binary
+        # exits 127 (covered above), whereas ccusage (Node) emits this phrase for
+        # ENOENT on a missing config/data file while the binary is present, so it
+        # must stay REASON_COMMAND_FAILED rather than REASON_UNAVAILABLE.
         (
             CommandResult(
                 returncode=1,
                 stdout="",
-                stderr="setsid: failed to execute ccusage: No such file or directory",
+                stderr="Error: ENOENT: no such file or directory, open "
+                "'/opt/awf/ccusage-neutral.json'",
             ),
-            True,
+            False,
         ),
         (CommandResult(returncode=1, stdout="", stderr="boom"), False),
         # A bare "<x> not found" on stderr is an app-level error (e.g. ccusage
