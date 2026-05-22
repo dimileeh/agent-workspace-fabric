@@ -123,7 +123,9 @@ def _usage_from_record(record: dict[str, Any], *, model: str | None) -> Normaliz
     total_tokens = _first(record, _TOTAL_TOKEN_KEYS, _coerce_int)
     cost_estimate = _first(record, _COST_KEYS, _coerce_float)
     if total_tokens is None and (input_tokens is not None or output_tokens is not None):
-        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+        total_tokens = (input_tokens if input_tokens is not None else 0) + (
+            output_tokens if output_tokens is not None else 0
+        )
     if (
         input_tokens is None
         and output_tokens is None
