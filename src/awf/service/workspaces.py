@@ -273,6 +273,7 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
         self,
         workspace: Workspace,
         *,
+        source_reason_code: str = PLAN_CONFORMANCE_UNSATISFIED,
         reason_code: str,
         message: str,
         evidence: Mapping[str, Any] | None,
@@ -282,7 +283,7 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
         evidence = evidence or {}
         payload: dict[str, Any] = {
             "source_workspace_id": workspace.id,
-            "source_reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+            "source_reason_code": source_reason_code,
             "reason_code": reason_code,
             "gaps": _retry_evidence_gaps(evidence),
             "plan_path": _optional_retry_evidence_str(evidence.get("plan_path")),
@@ -1693,6 +1694,7 @@ async def retry_workspace_row(
                 )
                 raise WorkspaceRetrySalvageUnavailableError(
                     source,
+                    source_reason_code=agent_timeout_context.reason_code,
                     reason_code=exc.reason_code,
                     message=str(exc),
                     evidence=agent_timeout_context.evidence,
