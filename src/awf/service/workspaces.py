@@ -1135,6 +1135,13 @@ def workspace_create_payload_matches(
 
 def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
     """Check stored auto-merge intent, treating legacy NULL as the old default."""
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        # Release-PR syncs force auto_merge off at persistence and execution, so
+        # the stored value carries no idempotency signal. Rows written before
+        # that canonicalization snapshotted the raw request (default True), and
+        # comparing them against the effective False would spuriously conflict on
+        # an otherwise identical replay. The kind itself is matched separately.
+        return True
     stored = getattr(existing, "auto_merge", None)
     return (stored is not False) == _effective_auto_merge(payload)
 

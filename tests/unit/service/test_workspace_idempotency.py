@@ -644,6 +644,30 @@ async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
 
 
 @pytest.mark.unit
+async def test_create_release_sync_legacy_replay_allows_stored_auto_merge_true(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A legacy sync_release_pr row written before auto_merge was forced off at
+    persistence snapshotted the raw request default (auto_merge=True). An identical
+    replay now resolves the effective auto_merge to False, so the matcher must skip
+    the comparison rather than conflict on an otherwise unchanged request."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-legacy-auto-merge"
+    request = _release_sync_request(auto_merge=True)
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.auto_merge = True
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
 async def test_create_release_sync_replay_conflicts_when_source_branch_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
