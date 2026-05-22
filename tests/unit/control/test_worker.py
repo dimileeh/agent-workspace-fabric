@@ -6636,6 +6636,7 @@ class TestRunOnceExecution:
             assert event["tracked_count"] == 1
             assert event["tracked_workspace_ids"] == [monitor_id]
             assert event["tracked_monitor_ids"] == [monitor_id]
+            assert event["tracked_draining_ids"] == []
             assert event["consecutive_saturated_cycles"] == interval
 
             # Fires again only on the next multiple of the cadence interval.
@@ -6677,6 +6678,77 @@ class TestRunOnceExecution:
             slot_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    @pytest.mark.unit
+    async def test_execution_slots_saturation_log_surfaces_draining_ids(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # When starvation is driven by draining tasks past the 2x cap, no
+        # MONITOR_RESUME tasks remain, so tracked_monitor_ids is empty. The log
+        # must still name the occupying workspaces via tracked_draining_ids,
+        # otherwise an operator sees tracked_count > 0 with no IDs to explain it.
+        interval = worker_module._EXECUTION_SLOTS_SATURATED_LOG_INTERVAL  # noqa: SLF001
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        # Two draining tasks against a budget of 1: the cap excludes only one, so
+        # the surplus counts as occupied and the slot stays saturated every cycle.
+        draining_ids = ["drain-a", "drain-b"]
+        draining_tasks: list[asyncio.Task[None]] = []
+        for workspace_id in draining_ids:
+            task = asyncio.create_task(_pending_execution_task(), name=workspace_id)
+            draining_tasks.append(task)
+            worker._track_execution_task(  # noqa: SLF001
+                workspace_id,
+                task,
+                kind=worker_module._ExecutionTaskKind.MONITOR_DRAINING,  # noqa: SLF001
+            )
+
+        async def _empty_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            return []
+
+        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+
+        try:
+            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            with structlog.testing.capture_logs() as captured:
+                for _ in range(interval):
+                    assert (
+                        await asyncio.wait_for(
+                            worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                        )
+                        == 0
+                    )
+            events = [
+                event
+                for event in captured
+                if event.get("event") == "worker.execution_slots_saturated"
+            ]
+            assert len(events) == 1
+            event = events[0]
+            assert event["tracked_count"] == 2
+            assert event["tracked_workspace_ids"] == sorted(draining_ids)
+            assert event["tracked_monitor_ids"] == []
+            assert event["tracked_draining_ids"] == sorted(draining_ids)
+        finally:
+            for task in draining_tasks:
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*draining_tasks, return_exceptions=True)
 
     @pytest.mark.unit
     async def test_provisioning_dispatch_does_not_mask_execution_saturation(

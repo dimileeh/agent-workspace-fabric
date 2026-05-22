@@ -4610,6 +4610,13 @@ class ControlWorker:
             if kind is _ExecutionTaskKind.MONITOR_RESUME
         ]
 
+    def _tracked_draining_workspace_ids(self) -> list[str]:
+        return [
+            workspace_id
+            for workspace_id, kind in self._execution_task_kinds.items()
+            if kind is _ExecutionTaskKind.MONITOR_DRAINING
+        ]
+
     async def _reconcile_stale_monitor_execution_tasks(self) -> None:
         """Cancel tracked PR-monitor tasks whose workspace has left ``monitoring_pr``.
 
@@ -4664,6 +4671,7 @@ class ControlWorker:
             tracked_count=len(self._execution_tasks),
             tracked_workspace_ids=sorted(self._execution_tasks),
             tracked_monitor_ids=sorted(self._tracked_monitor_workspace_ids()),
+            tracked_draining_ids=sorted(self._tracked_draining_workspace_ids()),
             consecutive_saturated_cycles=self._consecutive_saturated_cycles,
         )
 
