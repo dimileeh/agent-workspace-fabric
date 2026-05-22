@@ -125,7 +125,18 @@ async def test_ccusage_argv_per_provider(
     assert args[:2] == ["docker", "compose"]
     assert "-p" in args and "proj" in args
     assert "agent" in args
-    assert args[-5:] == ["ccusage", source, "daily", "--json", "--offline"]
+    # ``--config`` pins a neutral config (baked into the agent-runtime image) so
+    # ccusage skips auto-discovery of user/project ccusage configs that could
+    # otherwise filter per-run totals. The literal path must match the Dockerfile.
+    assert args[-7:] == [
+        "ccusage",
+        source,
+        "daily",
+        "--json",
+        "--offline",
+        "--config",
+        "/opt/awf/ccusage-neutral.json",
+    ]
 
 
 @pytest.mark.unit

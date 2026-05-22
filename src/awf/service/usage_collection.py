@@ -53,6 +53,21 @@ _log = get_logger(__name__)
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 60.0
 DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 
+# Neutral ccusage config baked into the agent-runtime image (see
+# docker/agent-runtime.Dockerfile). Passed via ``--config`` on every ccusage
+# invocation so the collector loads ONLY this empty config and ccusage skips
+# auto-discovery of ``.ccusage/ccusage.json`` (cwd), ``~/.claude/ccusage.json``
+# and ``~/.config/claude/ccusage.json``. The per-workspace auth copy seeds
+# ``~/.claude`` from the host (see ``_prepare_isolated_claude_auth``) and does
+# not strip a host ``ccusage.json``, so without this pin a host config's
+# ``since``/``until``/``project``/``breakdown``/``instances`` defaults (or
+# per-``daily`` overrides) would silently filter the sampler's reading to partial
+# totals or REASON_NO_RECORDS instead of full per-run usage. Pinning any path
+# bypasses discovery even when the file is absent (ccusage then applies no
+# config), so the isolation holds regardless; the baked empty file additionally
+# guards against a future pin that might reject a missing ``--config`` target.
+_CCUSAGE_NEUTRAL_CONFIG_PATH = "/opt/awf/ccusage-neutral.json"
+
 
 class _Clock(Protocol):
     def now(self) -> datetime: ...  # pragma: no cover - Protocol declaration only.
@@ -387,16 +402,27 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
         # Expected ccusage CLI contract (pinned at 20.0.3 in
-        # docker/agent-runtime.Dockerfile): ``ccusage <source> daily --json --offline``,
-        # where ``<source>`` is a positional provider sub-command ("claude" /
-        # "codex" / "gemini" / "opencode"; see ``provider_ccusage_source``). A future
-        # pin that moves the provider behind a flag (e.g. ``--source``) would make
-        # this positional invocation degrade to REASON_COMMAND_FAILED, so re-verify
-        # this argument order whenever the Dockerfile pin is bumped.
+        # docker/agent-runtime.Dockerfile): ``ccusage <source> daily --json --offline
+        # --config <neutral>``, where ``<source>`` is a positional provider
+        # sub-command ("claude" / "codex" / "gemini" / "opencode"; see
+        # ``provider_ccusage_source``) and ``--config`` pins a neutral config so
+        # auto-discovered user/project ccusage configs can't filter per-run totals
+        # (see ``_CCUSAGE_NEUTRAL_CONFIG_PATH``). A future pin that moves the provider
+        # behind a flag (e.g. ``--source``) or renames/removes ``--config`` would make
+        # this invocation degrade to REASON_COMMAND_FAILED, so re-verify the argument
+        # order and flags whenever the Dockerfile pin is bumped.
         invocation = build_tracked_compose_exec(
             compose_project=self._compose_project,
             compose_file=self._compose_file,
-            cli_args=["ccusage", str(self._source), "daily", "--json", "--offline"],
+            cli_args=[
+                "ccusage",
+                str(self._source),
+                "daily",
+                "--json",
+                "--offline",
+                "--config",
+                _CCUSAGE_NEUTRAL_CONFIG_PATH,
+            ],
             source="usage",
             label="ccusage",
         )

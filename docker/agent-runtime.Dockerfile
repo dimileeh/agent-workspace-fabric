@@ -134,6 +134,15 @@ RUN npm install -g --no-fund --no-audit \
     && opencode --version || true \
     && ccusage --version
 
+# Neutral ccusage config consumed via ``--config`` by AWF's usage collector
+# (src/awf/service/usage_collection.py). The per-workspace auth copy seeds
+# ~/.claude from the host and does not strip a host ccusage.json, so pinning an
+# empty config keeps ccusage from auto-discovering a user/project config whose
+# since/until/project/breakdown defaults would silently filter per-run usage.
+RUN mkdir -p /opt/awf \
+    && printf '{}\n' > /opt/awf/ccusage-neutral.json \
+    && chmod 0644 /opt/awf/ccusage-neutral.json
+
 # ── Stage 6: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir \
