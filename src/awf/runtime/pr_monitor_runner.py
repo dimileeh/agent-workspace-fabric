@@ -4601,12 +4601,6 @@ class PullRequestMonitorRunner:
                     for r in active_reasons
                     if r.reason_code in _SYNC_BASE_RESOLVABLE_STALE_REASONS
                 ]
-                if not resolvable:
-                    # Nothing SyncBase remediates. Leave the candidate (and any
-                    # intrinsic blocking reason like docs_task_scope_violation)
-                    # untouched, and skip the extra ``git rev-parse`` so this is
-                    # a no-op when there is no target-derived staleness to clear.
-                    return
                 worktree_path = self._worktrees_root / workspace_id
                 rev_parse = await self._deps.runner.run(
                     _git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
@@ -4620,7 +4614,21 @@ class PullRequestMonitorRunner:
                     )
                     return
                 new_base_sha = rev_parse.stdout.strip()
+                # Advance the validation base to the SHA we just merged in even
+                # when there is nothing for SyncBase to remediate right now. The
+                # staleness service measures target advancement as
+                # ``<base_sha>..origin/<base>``; leaving ``base_sha`` anchored to
+                # the old commit makes the next refresh re-derive target-derived
+                # findings (e.g. ``STALE_TARGET_ADVANCED``) against an
+                # already-merged base and re-block the merge gate.
                 candidate.base_sha = new_base_sha
+                if not resolvable:
+                    # No target-derived rows to clear. Leave any intrinsic
+                    # blocking reason (e.g. ``docs_task_scope_violation``) and
+                    # the candidate's stale flag untouched — a rebase does not
+                    # remediate those — and just persist the advanced base.
+                    await session.commit()
+                    return
                 # Resolve only the target-derived rows by re-stating every other
                 # active finding: ``replace_active_findings`` keeps rows whose
                 # (reason_code, trigger_type, trigger_ref) key is supplied and
