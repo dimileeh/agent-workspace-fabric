@@ -226,17 +226,28 @@ class _CcusageSampleContext(UsageSampleContext):
             raise
         except Exception:
             # Unexpected runner failure: swallow-and-log so the agent outcome is
-            # never masked, but flag the baseline as unanchored so later samples
-            # don't subtract against nothing and leak copied host history. Skip the
-            # start snapshot on this path: an unexpected exception leaves the
-            # sampler in an unknown state, so keep the existing swallow-and-log
-            # behavior rather than writing from a reading we never obtained.
+            # never masked, and flag the baseline as unanchored so later samples
+            # don't subtract against nothing and leak copied host history.
             _log.warning(
                 "usage.collect.baseline_error",
                 workspace_id=self._workspace_id,
                 exc_info=True,
             )
             self._baseline_unavailable_reason = REASON_COMMAND_FAILED
+            # Still seed an immediate unavailable snapshot, like the classified-
+            # failure path below. The reused workspace id means the prior run's
+            # snapshot.json is the latest record on disk; skipping the write would
+            # leave it reported as this run's usage until the first live tick (or
+            # indefinitely if sampling keeps failing). Persist zeros + the baseline
+            # failure reason — never the reading we failed to obtain — so usage
+            # state stays consistent with this run without leaking host history.
+            await self._safe_write_reading(
+                usage=None,
+                reason=REASON_COMMAND_FAILED,
+                model=None,
+                phase="live",
+                run_status="running",
+            )
             return
         if usage is not None:
             self._baseline = usage

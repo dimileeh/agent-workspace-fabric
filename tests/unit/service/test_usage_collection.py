@@ -749,7 +749,18 @@ async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
     )
     # Neither the baseline error nor the final-sample error propagates.
     await ctx.finalize(status="failed")
-    assert read_latest_usage_snapshot("ws_raise", work_dir=tmp_path) is None
+    # The baseline read raised before anchoring a baseline, but the start path
+    # still seeds an unavailable snapshot so a reused workspace id's prior-run
+    # snapshot.json can't be reported as this run's usage during the window before
+    # the first live tick. The final-sample error is swallowed (no later write),
+    # so this seed stays the latest record on disk.
+    seed = read_latest_usage_snapshot("ws_raise", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.phase == "live"
+    assert seed.run_status == "running"
+    assert seed.status == "unavailable"
+    assert seed.reason == "ccusage_command_failed"  # baseline failure, not a reading
+    assert seed.total_tokens is None  # no prior-run metrics reported as this run's
 
 
 @pytest.mark.unit
