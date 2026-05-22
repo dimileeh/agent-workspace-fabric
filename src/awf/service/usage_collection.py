@@ -189,13 +189,16 @@ class _CcusageSampleContext(UsageSampleContext):
         # baseline would let the prior run's tokens inflate this run's per-run
         # total; a fresh reading anchors the baseline at this run's true start.
         try:
-            usage, reason, _model = await self._run_ccusage()
+            usage, reason, model = await self._run_ccusage()
         except asyncio.CancelledError:
             raise
         except Exception:
             # Unexpected runner failure: swallow-and-log so the agent outcome is
             # never masked, but flag the baseline as unanchored so later samples
-            # don't subtract against nothing and leak copied host history.
+            # don't subtract against nothing and leak copied host history. Skip the
+            # start snapshot on this path: an unexpected exception leaves the
+            # sampler in an unknown state, so keep the existing swallow-and-log
+            # behavior rather than writing from a reading we never obtained.
             _log.warning(
                 "usage.collect.baseline_error",
                 workspace_id=self._workspace_id,
@@ -205,18 +208,55 @@ class _CcusageSampleContext(UsageSampleContext):
             return
         if usage is not None:
             self._baseline = usage
-            return
-        if reason == REASON_NO_RECORDS:
-            # Fresh workspace: ccusage ran cleanly with no prior host usage, so an
-            # empty baseline is correct and later totals are genuine workspace usage.
-            return
-        # ccusage failed for a classified reason (timeout / command error /
-        # unreadable output): we can't anchor a trustworthy baseline, so flag it.
-        self._baseline_unavailable_reason = reason or REASON_COMMAND_FAILED
+        elif reason != REASON_NO_RECORDS:
+            # ccusage failed for a classified reason (timeout / command error /
+            # unreadable output): we can't anchor a trustworthy baseline, so flag
+            # it. (REASON_NO_RECORDS is a fresh workspace: an empty baseline is
+            # correct and later totals are genuine workspace usage.)
+            self._baseline_unavailable_reason = reason or REASON_COMMAND_FAILED
+        # Seed an immediate "running" snapshot from this same baseline reading.
+        # The same workspace id is reused across retries/recovery, so the prior
+        # run's snapshot.json is still the latest record on disk; without this
+        # write it would stay latest until the first live sample (one interval
+        # away) or finalization, and workspace_usage_summary would report the old
+        # run's totals as this run's usage during that window. No extra ccusage
+        # exec: the start reading is, by definition, a zero delta against the
+        # baseline it just anchored (or an unavailable reason when it didn't).
+        await self._safe_write_reading(
+            usage=usage, reason=reason, model=model, phase="live", run_status="running"
+        )
 
     async def _safe_sample(self, *, phase: str, run_status: str) -> None:
         try:
             await self._sample_and_write(phase=phase, run_status=run_status)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                workspace_id=self._workspace_id,
+                phase=phase,
+                status=run_status,
+                exc_info=True,
+            )
+
+    async def _safe_write_reading(
+        self,
+        *,
+        usage: NormalizedUsage | None,
+        reason: str | None,
+        model: str | None,
+        phase: str,
+        run_status: str,
+    ) -> None:
+        # Swallow-and-log wrapper for seeding the start snapshot from the baseline
+        # reading. A failed seed write must not mask the agent outcome nor abort
+        # the sampler (its caller runs on the agent start path), so it logs like
+        # _safe_sample rather than propagating.
+        try:
+            await self._write_reading(
+                usage=usage, reason=reason, model=model, phase=phase, run_status=run_status
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -240,6 +280,22 @@ class _CcusageSampleContext(UsageSampleContext):
             )
             return
         usage, reason, model = await self._run_ccusage()
+        await self._write_reading(
+            usage=usage, reason=reason, model=model, phase=phase, run_status=run_status
+        )
+
+    async def _write_reading(
+        self,
+        *,
+        usage: NormalizedUsage | None,
+        reason: str | None,
+        model: str | None,
+        phase: str,
+        run_status: str,
+    ) -> None:
+        # Persist one ccusage reading as a baseline-subtracted snapshot. Shared by
+        # the periodic/final samples (reading fetched via _run_ccusage) and the
+        # start-time seed snapshot (reading reused from _capture_baseline).
         if usage is None:
             await self._write(
                 phase=phase,

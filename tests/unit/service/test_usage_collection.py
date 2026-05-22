@@ -370,11 +370,25 @@ async def test_live_snapshots_written_during_run(tmp_path: Path) -> None:
         workspace_id="ws_live",
         provider=AgentRuntime.codex,
     )
+    # start() seeds an immediate zero-delta "running" snapshot from the baseline
+    # reading (so a reused workspace id can't surface a prior run's totals before
+    # the first live sample). It lands synchronously, before the first tick.
+    seed = read_latest_usage_snapshot("ws_live", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.phase == "live"
+    assert seed.total_tokens == 0  # baseline 2 - baseline 2
+
     await _wait_for(lambda: len(clock.sleeps) == 1)
     clock.tick()
-    # The write trails the ccusage call (it now runs via asyncio.to_thread), so
-    # wait on the observable snapshot landing rather than the runner call count.
-    await _wait_for(lambda: read_latest_usage_snapshot("ws_live", work_dir=tmp_path) is not None)
+    # The write trails the ccusage call (it now runs via asyncio.to_thread), and
+    # the seed is already on disk, so wait on the live *delta* landing rather than
+    # mere snapshot presence.
+    await _wait_for(
+        lambda: (
+            (snap := read_latest_usage_snapshot("ws_live", work_dir=tmp_path)) is not None
+            and snap.total_tokens == 7
+        )
+    )
 
     snap = read_latest_usage_snapshot("ws_live", work_dir=tmp_path)
     assert snap is not None
@@ -382,6 +396,88 @@ async def test_live_snapshots_written_during_run(tmp_path: Path) -> None:
     assert snap.total_tokens == 7  # 9 - 2 baseline
 
     await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_start_seeds_running_snapshot_over_prior_run(tmp_path: Path) -> None:
+    # A prior run left a final snapshot with metrics for this workspace id, which
+    # retries/recovery reuse. At start — before the first live sample — the
+    # collector must overwrite it with a fresh zero-delta "running" snapshot so
+    # workspace_usage_summary can't keep reporting the prior run's 500-token total
+    # as this run's usage during the pre-first-sample window.
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_seed",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            run_status="success",
+            captured_at="2026-05-22T00:00:00+00:00",
+            input_tokens=300,
+            output_tokens=200,
+            total_tokens=500,
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(json.dumps({"totals": {"totalTokens": 120}}))  # fresh baseline only
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_seed",
+        provider=AgentRuntime.claude_code,
+    )
+
+    # No live tick yet: the seed has already replaced the prior snapshot on disk.
+    seed = read_latest_usage_snapshot("ws_seed", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.phase == "live"
+    assert seed.run_status == "running"
+    assert seed.status == "available"
+    assert seed.total_tokens == 0  # baseline 120 - baseline 120, not the prior 500
+    assert len(runner.calls) == 1  # only the baseline exec; the seed reuses it
+
+    await ctx.finalize(status="cancelled")
+
+
+@pytest.mark.unit
+async def test_start_seed_clears_stale_metrics_when_baseline_unavailable(tmp_path: Path) -> None:
+    # Same reused-id scenario, but the run-start baseline read times out, so no
+    # trustworthy baseline is anchored. The seed must still overwrite the prior
+    # run's metrics — reporting unavailable with the baseline reason rather than
+    # leaving the stale 500-token total as this run's usage.
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_seed_fail",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=500,
+        ),
+        work_dir=tmp_path,
+    )
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_seed_fail",
+        provider=AgentRuntime.claude_code,
+    )
+
+    seed = read_latest_usage_snapshot("ws_seed_fail", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.phase == "live"
+    assert seed.run_status == "running"
+    assert seed.status == "unavailable"
+    assert seed.reason == "ccusage_timeout"  # baseline failure reason, not "available"
+    assert seed.total_tokens is None  # prior run's 500 cleared, not reported
+
+    await ctx.finalize(status="failed")
 
 
 @pytest.mark.unit
