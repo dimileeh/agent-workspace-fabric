@@ -748,12 +748,19 @@ class ControlWorker:
         while self._execution_tasks:
             tasks = tuple(self._execution_tasks.values())
             # A cancelled monitor that is still draining stays tracked here, so
-            # swallow its CancelledError rather than aborting the drain wait.
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # tolerate its CancelledError rather than aborting the drain wait.
+            # Any other task failure must still surface so once=True runs fail
+            # loud instead of exiting as if successful.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task.done():
                     self._execution_tasks.pop(workspace_id, None)
                     self._execution_task_kinds.pop(workspace_id, None)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
