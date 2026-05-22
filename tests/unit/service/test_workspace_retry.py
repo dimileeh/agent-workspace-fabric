@@ -20,6 +20,10 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.conformance_salvage import (
+    ConformanceSalvageError,
+    SALVAGE_BASE_UNAVAILABLE,
+)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -960,6 +964,51 @@ async def test_retry_agent_idle_timeout_plan_only_diff_retries_without_salvage(
     assert retried.task_prompt == "Fix the intermittent validation failure."
     assert "source_reason_code" not in operations[0].payload
     assert "conformance_salvage" not in operations[0].payload
+
+
+@pytest.mark.unit
+async def test_retry_agent_idle_timeout_salvage_unavailable_errors_abort_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    base_commit = _create_conformance_source_worktree(
+        settings,
+        first.id,
+        implementation_diff=True,
+    )
+    await _mark_agent_timeout_failed(factory, first.id, base_commit=base_commit)
+
+    def _raise(**_kwargs: object) -> None:
+        raise ConformanceSalvageError(
+            reason_code=SALVAGE_BASE_UNAVAILABLE,
+            message="Timeout salvage capture intentionally failed",
+            detail={"base_commit": "missing"},
+        )
+
+    monkeypatch.setattr("awf.service.workspaces.capture_conformance_salvage", _raise)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySalvageUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry service test fixture",
+                settings=settings,
+            )
+
+    async with factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        operations = list((await session.execute(select(Operation))).scalars())
+
+    assert exc_info.value.error_code == "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
+    assert exc_info.value.detail["reason_code"] == SALVAGE_BASE_UNAVAILABLE
+    assert len(workspaces) == 1
+    assert len(operations) == 0
 
 
 @pytest.mark.unit

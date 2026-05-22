@@ -1680,12 +1680,19 @@ async def retry_workspace_row(
             )
         except ConformanceSalvageError as exc:
             if exc.reason_code != SALVAGE_NO_IMPLEMENTATION_DIFF:
-                _log.info(
-                    "workspace.agent_timeout_salvage_unavailable",
-                    workspace_id=source.id,
+                raise WorkspaceRetrySalvageUnavailableError(
+                    source,
                     reason_code=exc.reason_code,
+                    message=str(exc),
+                    evidence=agent_timeout_context.evidence,
                     detail=exc.detail,
-                )
+                ) from exc
+            _log.info(
+                "workspace.agent_timeout_salvage_unavailable",
+                workspace_id=source.id,
+                reason_code=exc.reason_code,
+                detail=exc.detail,
+            )
         else:
             conformance_salvage = {
                 **salvage_capture.as_policy(),
