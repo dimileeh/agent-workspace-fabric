@@ -149,9 +149,12 @@ def _usage_from_daily(daily: list[Any], *, model: str | None) -> NormalizedUsage
         if usage is None:
             continue
         seen = True
-        totals["inputTokens"] = (totals.get("inputTokens", 0)) + (usage.input_tokens or 0)
-        totals["outputTokens"] = (totals.get("outputTokens", 0)) + (usage.output_tokens or 0)
-        totals["totalTokens"] = (totals.get("totalTokens", 0)) + (usage.total_tokens or 0)
+        if usage.input_tokens is not None:
+            totals["inputTokens"] = (totals.get("inputTokens", 0)) + usage.input_tokens
+        if usage.output_tokens is not None:
+            totals["outputTokens"] = (totals.get("outputTokens", 0)) + usage.output_tokens
+        if usage.total_tokens is not None:
+            totals["totalTokens"] = (totals.get("totalTokens", 0)) + usage.total_tokens
         if usage.cost_estimate is not None:
             totals["totalCost"] = (totals.get("totalCost", 0.0)) + usage.cost_estimate
     if not seen:

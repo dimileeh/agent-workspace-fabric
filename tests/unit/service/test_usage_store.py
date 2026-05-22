@@ -198,6 +198,27 @@ def test_normalize_ccusage_json_daily_skips_noise_entries() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_ccusage_json_daily_preserves_unknown_token_field() -> None:
+    # When no daily entry reports a token field, the aggregate must stay
+    # ``None`` (unknown) rather than collapsing to a misleading ``0``.
+    raw = json.dumps(
+        {
+            "daily": [
+                {"outputTokens": 5},
+                {"outputTokens": 7},
+            ]
+        }
+    )
+    usage, reason = normalize_ccusage_json(raw)
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens is None
+    assert usage.output_tokens == 12
+    assert usage.total_tokens == 12
+    assert usage.cost_estimate is None
+
+
+@pytest.mark.unit
 def test_normalized_usage_baseline_dict_round_trip() -> None:
     usage = NormalizedUsage(
         input_tokens=1, output_tokens=2, total_tokens=3, cost_estimate=0.4, currency="USD"
