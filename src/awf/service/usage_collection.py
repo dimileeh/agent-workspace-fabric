@@ -150,6 +150,9 @@ class _CcusageSampleContext(UsageSampleContext):
         self._baseline_unavailable_reason: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._finalized = False
+        # Most recent snapshot write, tracked so finalize() can drain an in-flight
+        # live write before issuing its own final write (see _write / _drain_pending_write).
+        self._pending_write: asyncio.Task[Path] | None = None
 
     async def finalize(self, *, status: str) -> None:
         if self._finalized:
@@ -164,6 +167,7 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _finalize_inner(self, status: str) -> None:
         await self._cancel_loop()
+        await self._drain_pending_write()
         await self._safe_sample(phase="final", run_status=status)
 
     async def _cancel_loop(self) -> None:
@@ -173,6 +177,19 @@ class _CcusageSampleContext(UsageSampleContext):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    async def _drain_pending_write(self) -> None:
+        # _cancel_loop only cancels the loop *task*; if it was awaiting a snapshot
+        # write, the thread-pool job is uncancellable and keeps running to its
+        # tmp.replace(target) rename. Wait for that write (kept reachable past the
+        # cancellation by the shield in _write) to land before finalize issues its
+        # own write, so a late live-write rename can't clobber the final snapshot
+        # under the store's latest-wins semantics.
+        pending = self._pending_write
+        if pending is None:
+            return
+        with contextlib.suppress(Exception):
+            await pending
 
     async def _run_loop(self) -> None:
         while True:
@@ -356,9 +373,17 @@ class _CcusageSampleContext(UsageSampleContext):
             currency=metrics.currency,
             baseline=self._baseline.as_baseline_dict() if self._baseline is not None else None,
         )
-        # Offload the blocking mkdir/write/replace off the event loop; finalize()
-        # shields its sample so the final write still completes under cancellation.
-        await asyncio.to_thread(write_usage_snapshot, snapshot, work_dir=self._collector._work_dir)
+        # Offload the blocking mkdir/write/replace off the event loop, tracking the
+        # write so finalize() can drain it. shield keeps the worker-thread job
+        # reachable when a loop cancellation interrupts this await: the await raises
+        # CancelledError but the thread keeps running to its tmp.replace(target)
+        # rename, and the tracked task lets _drain_pending_write order that rename
+        # before the final write. finalize() also shields its own sample so the
+        # final write still completes under outer cancellation.
+        self._pending_write = asyncio.create_task(
+            asyncio.to_thread(write_usage_snapshot, snapshot, work_dir=self._collector._work_dir)
+        )
+        await asyncio.shield(self._pending_write)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
         # Expected ccusage CLI contract (pinned at 20.0.3 in

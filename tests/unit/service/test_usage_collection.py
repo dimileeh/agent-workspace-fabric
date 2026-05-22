@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -604,6 +605,75 @@ async def test_finalize_completes_final_sample_under_cancellation(tmp_path: Path
     assert snap is not None
     assert snap.phase == "final"
     assert snap.total_tokens == 40  # 50 - 10 baseline
+
+
+@pytest.mark.unit
+async def test_final_write_drains_inflight_live_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A live-sample snapshot write runs in a worker thread that can't be
+    # cancelled. If finalize cancelled the loop and raced ahead to its own final
+    # write while that live write was still mid-rename, the two renames would race
+    # and a late live rename could clobber the final snapshot (the store is
+    # latest-wins). finalize must instead drain the in-flight live write first, so
+    # the final write is never even started until the live write has landed.
+    real_write = usage_collection.write_usage_snapshot
+    block_live = threading.Event()  # enabled once the start-time seed write is done
+    live_entered = threading.Event()  # worker signals it is blocked mid live write
+    release_live = threading.Event()  # test releases the blocked live write
+    final_started = threading.Event()  # worker signals the final write has begun
+
+    def instrumented_write(snapshot: UsageSnapshot, *, work_dir: Path) -> Path:
+        if snapshot.phase == "live" and block_live.is_set():
+            live_entered.set()
+            release_live.wait()
+        if snapshot.phase == "final":
+            final_started.set()
+        return real_write(snapshot, work_dir=work_dir)
+
+    monkeypatch.setattr(usage_collection, "write_usage_snapshot", instrumented_write)
+
+    clock = FakeClock()
+    runner = _ccusage_runner(
+        json.dumps({"totals": {"totalTokens": 2}}),  # baseline (+ start-time seed write)
+        json.dumps({"totals": {"totalTokens": 9}}),  # live sample
+        json.dumps({"totals": {"totalTokens": 12}}),  # final sample
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=clock)
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_drain",
+        provider=AgentRuntime.claude_code,
+    )
+
+    # The seed write already landed during start(); only block the live sample.
+    block_live.set()
+    await _wait_for(lambda: len(clock.sleeps) == 1)
+    clock.tick()
+    await _wait_for(live_entered.is_set)  # live write is now blocked in its worker thread
+
+    finalize_task = asyncio.ensure_future(ctx.finalize(status="success"))
+    await _wait_for(lambda: ctx._task is not None and ctx._task.done())  # loop cancelled
+
+    # The default executor has many workers, so without draining the final write
+    # would run on its own thread and race the blocked live write's rename. Give
+    # finalize ample yields: the final write must not start while the live write
+    # is still in flight (each sleep lets finalize/the worker threads progress).
+    for _ in range(50):
+        await asyncio.sleep(0.002)
+        assert not final_started.is_set(), "final write started before the live write drained"
+    assert not finalize_task.done()  # blocked draining the in-flight live write
+
+    release_live.set()  # let the in-flight live write finish its rename
+    await finalize_task
+
+    snap = read_latest_usage_snapshot("ws_drain", work_dir=tmp_path)
+    assert snap is not None
+    # The final write ran only after the live write landed, so it wins latest-wins.
+    assert snap.phase == "final"
+    assert snap.run_status == "success"
+    assert snap.total_tokens == 10  # final 12 - baseline 2
 
 
 @pytest.mark.unit
