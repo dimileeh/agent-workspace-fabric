@@ -1288,7 +1288,7 @@ class TestCreateWorkspace:
                 "base_branch": "main",
                 "task_title": "Add planner hook",
                 "task_prompt": "Implement the planner hook.",
-                "task_kind": "refactor_task",
+                "task_kind": "feature_branch_pr",
                 "agent": "claude_code",
                 "model": "claude-opus-4-7",
                 "effort": "xhigh",
@@ -1334,7 +1334,7 @@ class TestCreateWorkspace:
         assert ws.task_title == "Add planner hook"
         assert ws.task_prompt == "Implement the planner hook."
         assert ws.task_external_id == "AIRA-42"
-        assert ws.task_kind == "refactor_task"
+        assert ws.task_kind == "feature_branch_pr"
         assert ws.agent == "claude_code"
         assert ws.task_policy["agent_model"] == "claude-opus-4-7"
         assert ws.task_policy["agent_effort"] == "xhigh"
