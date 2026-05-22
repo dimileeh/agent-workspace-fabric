@@ -1117,6 +1117,7 @@ def workspace_create_payload_matches(
         and _stored_task_agent_effort(existing) == payload.task.effort
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
+        and _release_sync_source_branch_matches(existing, payload)
         and (
             getattr(existing, "initial_review_grace_period_seconds", None)
             == payload.task.initial_review_grace_period_seconds
@@ -1136,6 +1137,23 @@ def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequ
     """Check stored auto-merge intent, treating legacy NULL as the old default."""
     stored = getattr(existing, "auto_merge", None)
     return (stored is not False) == _effective_auto_merge(payload)
+
+
+def _release_sync_source_branch_matches(
+    existing: Workspace, payload: WorkspaceCreateRequest
+) -> bool:
+    """Check the stored release-sync source branch for sync_release_pr replays.
+
+    ``repo.source_branch`` selects which branch the release PR syncs, so a replay
+    that changes it must conflict instead of silently reusing the original
+    workspace and syncing the wrong branch. Other task kinds ignore the field.
+    """
+    if payload.task.kind != TaskKind.sync_release_pr.value:
+        return True
+    requested = payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    release_sync = _stored_task_policy(existing).get(RELEASE_SYNC_POLICY_KEY)
+    stored = release_sync.get("source_branch") if isinstance(release_sync, Mapping) else None
+    return stored == requested
 
 
 def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:

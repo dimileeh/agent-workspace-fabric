@@ -69,12 +69,14 @@ def _v2_request(
     )
 
 
-def _release_sync_request(*, auto_merge: bool = True) -> WorkspaceCreateRequest:
+def _release_sync_request(
+    *, auto_merge: bool = True, source_branch: str = "development"
+) -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest(
         repo={
             "url": "git@github.com:example/idempotency.git",
             "base_branch": "main",
-            "source_branch": "development",
+            "source_branch": source_branch,
         },
         task={
             "title": "Sync release PR",
@@ -639,6 +641,29 @@ async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
     replayed = await service.create(request, idempotency_key=idempotency_key)
 
     assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_release_sync_replay_conflicts_when_source_branch_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A sync_release_pr replay that changes repo.source_branch must conflict
+    rather than silently reusing the workspace, which would sync the wrong branch."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-source-branch"
+    request = _release_sync_request(source_branch="development")
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    assert created.id.startswith("ws_")
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+    assert replayed.id == created.id
+
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(
+            _release_sync_request(source_branch="release-candidate"),
+            idempotency_key=idempotency_key,
+        )
 
 
 @pytest.mark.unit
