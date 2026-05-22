@@ -1490,27 +1490,50 @@ class WorkspaceExecutor:
         caller's current status so the failure transition matches it (a
         mismatched status is treated as a stale-action skip by
         :meth:`_mark_failed`, so passing the wrong one would silently no-op).
+
+        When a reclaimed workspace still carries an active validate/rebase
+        recovery operation (the worker-restart salvage of a stale ``running``
+        claim), those pending/running rows are finalized as ``failed`` with the
+        same terminal reason code *before* the workspace is failed, mirroring
+        the recovery branches in :meth:`execute`; otherwise the workspace would
+        go terminal while the recovery operation lingered unresolved.
         """
         task_kind = workspace.task_kind
         if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
+            message = (
+                "task kind 'monitor_release_pr' is deprecated; monitor an existing "
+                "release/manual PR via PR adoption with auto_merge=false instead."
+            )
+            if _get_active_recovery_payload(workspace) is not None:
+                await self._finish_active_recovery_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    reason_code=_DEPRECATED_TASK_KIND_REASON_CODE,
+                    error_message=message,
+                )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=from_status,
                 failure_reason=FailureReason.policy_failure,
-                message=(
-                    "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-                    "release/manual PR via PR adoption with auto_merge=false instead."
-                ),
+                message=message,
                 reason_code=_DEPRECATED_TASK_KIND_REASON_CODE,
                 details={"task_kind": task_kind},
             )
             return True
         if task_kind not in _SUPPORTED_TASK_KINDS:
+            message = f"unsupported task kind {task_kind!r}; cannot run as feature work."
+            if _get_active_recovery_payload(workspace) is not None:
+                await self._finish_active_recovery_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
+                    error_message=message,
+                )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=from_status,
                 failure_reason=FailureReason.policy_failure,
-                message=f"unsupported task kind {task_kind!r}; cannot run as feature work.",
+                message=message,
                 reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
                 details={"task_kind": task_kind},
             )

@@ -46,9 +46,10 @@ from awf.control.executor import (
     _validation_run_command_records,
     _with_release_sync_pr_metadata,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    OperationRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
@@ -4888,6 +4889,59 @@ class TestTaskKindFailFast:
             assert ws.failure_reason == "policy_failure"
             assert message_fragment in (ws.failure_message or "")
             assert ws.events[-1].reason_code == reason_code
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("task_kind", "reason_code"),
+        [
+            ("monitor_release_pr", "DEPRECATED_TASK_KIND"),
+            ("totally_made_up", "UNSUPPORTED_TASK_KIND"),
+        ],
+    )
+    async def test_reject_unsupported_task_kind_finalizes_active_recovery(
+        self,
+        task_kind: str,
+        reason_code: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A reclaimed workspace whose deprecated/unsupported kind is rejected
+        must also finalize any active validate/rebase recovery operation. This is
+        the worker-restart salvage of a stale ``running`` claim: failing the
+        workspace without closing the recovery row would strand it pending/running
+        forever. The fail-fast guard runs before recovery dispatch, so it owns the
+        cleanup itself.
+        """
+        ws_id = await _seed_ready(factory, task_kind=task_kind)
+        async with factory() as s:
+            op = await OperationRepository(s).create(
+                workspace_id=ws_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"source": "worker_restart", "recovery_mode": "validate_only"},
+                idempotency_key=f"worker_restart:validate_only:{ws_id}",
+            )
+            op_id = op.id
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert ws.events[-1].reason_code == reason_code
+            op = await OperationRepository(s).get(op_id)
+            assert op is not None
+            assert op.status == OperationStatus.failed.value
+            assert op.error_code == reason_code
+            assert op.result == {"reason_code": reason_code}
+            assert op.finished_at is not None
 
 
 class TestSyncReleasePrHandoff:
