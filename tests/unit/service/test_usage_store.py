@@ -134,7 +134,7 @@ def test_normalize_ccusage_json_extracts_model_when_present() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("raw", ["", "   ", "not-json{", "[1, 2, 3]"])
+@pytest.mark.parametrize("raw", ["not-json{", "[1, 2, 3]"])
 def test_normalize_ccusage_json_invalid_returns_invalid_json(raw: str) -> None:
     usage, reason = normalize_ccusage_json(raw)
     assert usage is None
@@ -145,6 +145,9 @@ def test_normalize_ccusage_json_invalid_returns_invalid_json(raw: str) -> None:
 @pytest.mark.parametrize(
     "raw",
     [
+        # Empty / whitespace-only output from an exit-0 run is "no records yet".
+        "",
+        "   ",
         json.dumps({}),
         json.dumps({"daily": []}),
         json.dumps({"totals": {}}),

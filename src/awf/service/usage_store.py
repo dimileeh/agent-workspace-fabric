@@ -167,7 +167,11 @@ def normalize_ccusage_json(raw: str) -> tuple[NormalizedUsage | None, str | None
 
     text = raw.strip()
     if not text:
-        return None, REASON_INVALID_JSON
+        # Callers only parse stdout after a clean (exit 0) ccusage run, so empty
+        # output means "ran fine, no records yet", not unreadable JSON. Reporting
+        # REASON_INVALID_JSON here would wrongly flag the run's baseline as
+        # unavailable (see _capture_baseline) for every later sample.
+        return None, REASON_NO_RECORDS
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
