@@ -1679,7 +1679,18 @@ async def retry_workspace_row(
                 run_subprocess=run_subprocess,
             )
         except ConformanceSalvageError as exc:
-            if exc.reason_code != SALVAGE_NO_IMPLEMENTATION_DIFF:
+            if exc.reason_code == SALVAGE_NO_IMPLEMENTATION_DIFF:
+                _log.debug(
+                    "workspace.agent_timeout_salvage_skipped_no_diff",
+                    workspace_id=source.id,
+                )
+            else:
+                _log.info(
+                    "workspace.agent_timeout_salvage_unavailable",
+                    workspace_id=source.id,
+                    reason_code=exc.reason_code,
+                    detail=exc.detail,
+                )
                 raise WorkspaceRetrySalvageUnavailableError(
                     source,
                     reason_code=exc.reason_code,
@@ -1687,12 +1698,6 @@ async def retry_workspace_row(
                     evidence=agent_timeout_context.evidence,
                     detail=exc.detail,
                 ) from exc
-            _log.info(
-                "workspace.agent_timeout_salvage_unavailable",
-                workspace_id=source.id,
-                reason_code=exc.reason_code,
-                detail=exc.detail,
-            )
         else:
             conformance_salvage = {
                 **salvage_capture.as_policy(),
