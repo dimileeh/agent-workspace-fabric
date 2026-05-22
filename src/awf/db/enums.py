@@ -144,6 +144,12 @@ class TaskKind(StrEnum):
     handing the workspace to the normal PR monitor."""
 
 
+# Legacy task-kind value removed from ``TaskKind`` above. Kept here as the
+# single canonical literal so the REST/MCP admission validator and the executor
+# fail-fast guard reject ``monitor_release_pr`` identically and cannot drift.
+DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
+
+
 class TaskClass(StrEnum):
     """PRD task policy class used by scheduling, validation, and overlap risk."""
 

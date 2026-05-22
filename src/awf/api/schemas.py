@@ -18,7 +18,14 @@ from awf.common.callback_targets import (
     is_public_callback_target_host,
     validate_callback_target_url_port,
 )
-from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, TaskKind, WorkspaceStatus
+from awf.db.enums import (
+    DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
+    AgentRuntime,
+    OperationStatus,
+    TaskClass,
+    TaskKind,
+    WorkspaceStatus,
+)
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
@@ -64,7 +71,6 @@ _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
-_DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
 # Task kinds operators may request directly via REST/MCP workspace creation.
 # ``sync_feature_pr`` is intentionally absent: it is created through the
 # PR-adoption endpoint, not direct workspace creation.
@@ -170,7 +176,7 @@ class WorkspaceTask(BaseModel):
         """
         if value in PUBLIC_DIRECT_CREATE_TASK_KINDS:
             return value
-        if value == _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
+        if value == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             raise ValueError(
                 "task kind 'monitor_release_pr' is deprecated; monitor an existing "
                 "release/manual PR via PR adoption with auto_merge=false instead."

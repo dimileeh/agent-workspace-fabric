@@ -80,6 +80,7 @@ from awf.control.validation_fix_cycle import (
     read_output_tail,
 )
 from awf.db.enums import (
+    DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
     FailureReason,
     OperationStatus,
@@ -247,7 +248,6 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
-_DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
 _DEPRECATED_TASK_KIND_REASON_CODE = "DEPRECATED_TASK_KIND"
 _UNSUPPORTED_TASK_KIND_REASON_CODE = "UNSUPPORTED_TASK_KIND"
 # Task kinds the executor may legitimately drive (directly or via a monitor
@@ -1484,7 +1484,7 @@ class WorkspaceExecutor:
         handoffs are routed later by :meth:`_dispatch_non_feature_task_kind`.
         """
         task_kind = workspace.task_kind
-        if task_kind == _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
+        if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
