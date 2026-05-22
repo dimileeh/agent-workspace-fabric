@@ -12,7 +12,7 @@ import json
 import pytest
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
@@ -333,6 +333,94 @@ class TestFindOrCreateReleasePr:
         assert exc.value.detail["expected_repo"] == "o/r"
         assert exc.value.detail["parsed_repo"] == "other/repo"
         # No gh pr view should run once the repo mismatch is detected.
+        assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
+
+    @pytest.mark.unit
+    async def test_adopts_pr_when_create_loses_race(self) -> None:
+        # The initial list finds no PR, but a concurrent sync run or a human
+        # opens one before `gh pr create` runs, so create fails on the
+        # duplicate. The re-check must adopt the now-existing same-repo PR
+        # instead of failing the workspace.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none yet
+        fake.queue_result(
+            returncode=1,
+            stderr='a pull request for branch "development" into branch "main" already exists',
+        )  # gh pr create -> duplicate rejected
+        fake.queue_result(
+            returncode=0, stdout=_open_pr_list_payload(number=77)
+        )  # gh pr list (re-check)
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=77))  # gh pr view
+        gh = GitHubClient(fake)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+        )
+
+        assert created is False
+        assert metadata.number == 77
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "list"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
+    async def test_create_failure_without_existing_pr_reraises(self) -> None:
+        # A create failure that is not a lost race (no PR appears on re-check)
+        # must surface the original gh error rather than being swallowed.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=1, stderr="HTTP 500 from GitHub")  # gh pr create -> fails
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list (re-check) -> still none
+        gh = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
+        assert exc.value.operation == "gh pr create"
+        # No `gh pr view` runs when the create failure is genuine.
+        assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
+
+    @pytest.mark.unit
+    async def test_race_recheck_ignores_fork_collision(self) -> None:
+        # If create fails and the re-check only finds a fork PR sharing the head
+        # branch name, that fork must not be adopted; the original error
+        # re-raises rather than monitoring a fork PR.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=1, stderr="already exists")  # gh pr create -> fails
+        fake.queue_result(
+            returncode=0, stdout=_fork_open_pr_list_payload(number=555)
+        )  # gh pr list (re-check) -> only a fork PR
+        gh = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError):
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
         assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
 
 

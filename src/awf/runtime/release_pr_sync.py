@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from awf.common.commands import AsyncCommandRunner
 from awf.common.github_client import (
     GitHubClient,
+    GitHubClientError,
     PullRequestAdoptionMetadata,
     RepoRef,
     fetch_pull_request_adoption_metadata,
@@ -118,6 +119,32 @@ async def count_commits_ahead(
         ) from exc
 
 
+async def _find_open_same_repo_pr_number(
+    *,
+    runner: AsyncCommandRunner,
+    repo: RepoRef,
+    source_branch: str,
+    target_branch: str,
+) -> int | None:
+    """Number of an open same-repo ``source→target`` PR, or ``None`` if none.
+
+    ``gh pr list --head`` matches by branch name alone, so a fork PR opened
+    against this repo with an identically-named head branch can show up here.
+    Only a PR whose head lives in the requested repo is eligible; fork
+    collisions are ignored.
+    """
+
+    repo_slug = repo.slug()
+    existing = await list_open_pull_requests_for_branch(
+        runner=runner,
+        repo=repo,
+        branch_name=source_branch,
+        base_branch=target_branch,
+    )
+    same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
+    return same_repo_existing[0].number if same_repo_existing else None
+
+
 async def find_or_create_release_pr(
     *,
     runner: AsyncCommandRunner,
@@ -134,47 +161,63 @@ async def find_or_create_release_pr(
     """
 
     repo_slug = repo.slug()
-    existing = await list_open_pull_requests_for_branch(
+    existing_number = await _find_open_same_repo_pr_number(
         runner=runner,
         repo=repo,
-        branch_name=source_branch,
-        base_branch=target_branch,
+        source_branch=source_branch,
+        target_branch=target_branch,
     )
-    # ``gh pr list --head`` matches by branch name alone, so a fork PR opened
-    # against this repo with an identically-named head branch can show up here.
-    # Only adopt a PR whose head lives in the requested repo; otherwise create.
-    same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
-    if same_repo_existing:
-        pr_number = same_repo_existing[0].number
+    if existing_number is not None:
+        pr_number = existing_number
         created = False
     else:
-        pr_url = await gh.create_pull_request(
-            repo=repo,
-            base=target_branch,
-            head=source_branch,
-            title=title,
-            body=body,
-        )
         try:
-            parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
-        except ValueError as exc:
-            raise ReleasePrSyncError(
-                reason_code="RELEASE_SYNC_PR_URL_INVALID",
-                message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
-                detail={"source_branch": source_branch, "target_branch": target_branch},
-            ) from exc
-        if parsed_repo.slug().lower() != repo_slug.lower():
-            raise ReleasePrSyncError(
-                reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
-                message=(f"gh pr create returned a PR URL for a different repository: {pr_url!r}"),
-                detail={
-                    "expected_repo": repo_slug,
-                    "parsed_repo": parsed_repo.slug(),
-                    "source_branch": source_branch,
-                    "target_branch": target_branch,
-                },
+            pr_url = await gh.create_pull_request(
+                repo=repo,
+                base=target_branch,
+                head=source_branch,
+                title=title,
+                body=body,
             )
-        created = True
+        except GitHubClientError:
+            # TOCTOU: the list above can race a concurrent sync run or a human
+            # opening the same source→target PR before this create. GitHub
+            # rejects the duplicate, so re-check and adopt the now-existing PR
+            # instead of failing the workspace; a genuine create failure (no
+            # PR appeared) re-raises.
+            raced_number = await _find_open_same_repo_pr_number(
+                runner=runner,
+                repo=repo,
+                source_branch=source_branch,
+                target_branch=target_branch,
+            )
+            if raced_number is None:
+                raise
+            pr_number = raced_number
+            created = False
+        else:
+            try:
+                parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
+            except ValueError as exc:
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_URL_INVALID",
+                    message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
+                    detail={"source_branch": source_branch, "target_branch": target_branch},
+                ) from exc
+            if parsed_repo.slug().lower() != repo_slug.lower():
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
+                    message=(
+                        f"gh pr create returned a PR URL for a different repository: {pr_url!r}"
+                    ),
+                    detail={
+                        "expected_repo": repo_slug,
+                        "parsed_repo": parsed_repo.slug(),
+                        "source_branch": source_branch,
+                        "target_branch": target_branch,
+                    },
+                )
+            created = True
     metadata = await fetch_pull_request_adoption_metadata(
         runner=runner,
         repo=repo,
