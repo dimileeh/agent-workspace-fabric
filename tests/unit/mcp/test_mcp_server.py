@@ -1448,6 +1448,67 @@ class TestCreateWorkspace:
         assert ws.branch_base == "development"
 
     @pytest.mark.unit
+    async def test_create_workspace_sync_release_pr_omitted_base_defaults_to_main(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/release-sync-default.git",
+                "task_kind": "sync_release_pr",
+                "task_title": "Release sync default target",
+                "task_prompt": "Open the standing release PR for the default target.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp release-sync default target regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        # Omitting base_branch for sync_release_pr must target main (development ->
+        # main), not the legacy development default that degenerates to
+        # development -> development and exits NO_CHANGES_TO_SYNC.
+        assert ws.branch_base == "main"
+        assert ws.task_policy["release_sync"] == {
+            "source_branch": "development",
+            "target_branch": "main",
+        }
+
+    @pytest.mark.unit
+    async def test_create_workspace_sync_release_pr_honors_explicit_base(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                "repo_url": "git@github.com:example/release-sync-explicit.git",
+                "base_branch": "release/2026.05",
+                "task_kind": "sync_release_pr",
+                "task_title": "Release sync explicit target",
+                "task_prompt": "Open the release PR against an explicit target branch.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp release-sync explicit target regression",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.branch_base == "release/2026.05"
+        assert ws.task_policy["release_sync"]["target_branch"] == "release/2026.05"
+
+    @pytest.mark.unit
     async def test_create_workspace_accepts_matching_legacy_and_canonical_aliases(
         self,
         mcp,

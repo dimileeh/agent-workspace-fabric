@@ -43,7 +43,14 @@ from awf.api.schemas import (
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    TaskKind,
+    WorkspaceStatus,
+)
 from awf.db.repositories import TaskExternalIdConflictError, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
@@ -125,6 +132,10 @@ RuntimeHealthSummaryProvider = Callable[
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
+# sync_release_pr omits base_branch -> target the release branch (main), not the
+# legacy development default, so the release PR is opened development -> main
+# instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
+_MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT = "main"
 
 
 class ReadinessProvider(Protocol):
@@ -200,8 +211,10 @@ def build_mcp_server(
             max_length=256,
             json_schema_extra={"default": _MCP_LEGACY_BASE_BRANCH_DEFAULT},
             description=(
-                "Branch to branch FROM; feature branch is created off it. "
-                f"Defaults to {_MCP_LEGACY_BASE_BRANCH_DEFAULT} when omitted."
+                "Target branch: feature_branch_pr branches FROM it; "
+                "sync_release_pr opens the release PR against it. Defaults to "
+                f"{_MCP_LEGACY_BASE_BRANCH_DEFAULT} for feature_branch_pr and "
+                f"{_MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT} for sync_release_pr when omitted."
             ),
         ),
         branch_base: str | None = Field(
@@ -365,7 +378,12 @@ def build_mcp_server(
                 "Provide either requires_database or profile_ref/env_profile='aira'.",
             )
 
-        effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
+        default_base_branch = (
+            _MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT
+            if task_kind == TaskKind.sync_release_pr.value
+            else _MCP_LEGACY_BASE_BRANCH_DEFAULT
+        )
+        effective_base_branch = branch_base or base_branch or default_base_branch
         effective_validation_commands = (
             test_commands if test_commands is not None else validation_commands or []
         )
