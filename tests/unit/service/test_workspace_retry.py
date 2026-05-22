@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -526,6 +526,7 @@ async def _mark_agent_timeout_failed(
     workspace_id: str,
     *,
     base_commit: str | None = None,
+    reason_code: str = AGENT_IDLE_TIMEOUT,
 ) -> None:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -540,9 +541,9 @@ async def _mark_agent_timeout_failed(
         await repo.transition(
             workspace,
             to=WorkspaceStatus.failed,
-            reason_code=AGENT_IDLE_TIMEOUT,
+            reason_code=reason_code,
             payload={
-                "reason_code": AGENT_IDLE_TIMEOUT,
+                "reason_code": reason_code,
                 "message": "agent emitted no output for 3600.0 seconds",
                 "details": {
                     "provider": "claude_code",
@@ -853,15 +854,22 @@ async def test_retry_conformance_unsatisfied_without_evidence_still_salvages_dif
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout_reason", [AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT])
 async def test_retry_agent_idle_timeout_auto_salvages_implementation_diff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    timeout_reason: str,
 ) -> None:
     settings = _settings_with_work_dir(tmp_path)
     service = WorkspaceService(factory)
     first = await service.create(_request())
     base_commit = _create_conformance_source_worktree(settings, first.id)
-    await _mark_agent_timeout_failed(factory, first.id, base_commit=base_commit)
+    await _mark_agent_timeout_failed(
+        factory,
+        first.id,
+        base_commit=base_commit,
+        reason_code=timeout_reason,
+    )
 
     async with factory() as session:
         retry = await retry_workspace_row(
@@ -911,25 +919,27 @@ async def test_retry_agent_idle_timeout_auto_salvages_implementation_diff(
     assert salvage["conformance_evidence_ref"] == {
         "source_workspace_id": first.id,
         "event_type": "workspace.state_changed",
-        "reason_code": AGENT_IDLE_TIMEOUT,
+        "reason_code": timeout_reason,
     }
     assert "Automatic AWF timeout salvage" in retried.task_prompt
     assert "Fix the intermittent validation failure." in retried.task_prompt
     assert "Continue from the recovered implementation" in retried.task_prompt
-    assert operations[0].payload["source_reason_code"] == AGENT_IDLE_TIMEOUT
+    assert operations[0].payload["source_reason_code"] == timeout_reason
     assert operations[0].payload["recovery_strategy"] == "continue_from_timeout_salvage"
     assert operations[0].payload["salvage_kind"] == "agent_timeout"
     assert operations[0].payload["conformance_salvage"] == salvage
-    assert operations[0].result["source_reason_code"] == AGENT_IDLE_TIMEOUT
+    assert operations[0].result["source_reason_code"] == timeout_reason
     assert operations[0].result["conformance_salvage"] == salvage
-    assert retry_created[0].payload["source_reason_code"] == AGENT_IDLE_TIMEOUT
+    assert retry_created[0].payload["source_reason_code"] == timeout_reason
     assert retry_created[0].payload["conformance_salvage"] == salvage
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout_reason", [AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT])
 async def test_retry_agent_idle_timeout_plan_only_diff_retries_without_salvage(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    timeout_reason: str,
 ) -> None:
     settings = _settings_with_work_dir(tmp_path)
     service = WorkspaceService(factory)
@@ -939,7 +949,12 @@ async def test_retry_agent_idle_timeout_plan_only_diff_retries_without_salvage(
         first.id,
         implementation_diff=False,
     )
-    await _mark_agent_timeout_failed(factory, first.id, base_commit=base_commit)
+    await _mark_agent_timeout_failed(
+        factory,
+        first.id,
+        base_commit=base_commit,
+        reason_code=timeout_reason,
+    )
 
     async with factory() as session:
         retry = await retry_workspace_row(
