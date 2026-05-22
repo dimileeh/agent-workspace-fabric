@@ -249,6 +249,10 @@ _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
 _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
 _DEPRECATED_TASK_KIND_REASON_CODE = "DEPRECATED_TASK_KIND"
 _UNSUPPORTED_TASK_KIND_REASON_CODE = "UNSUPPORTED_TASK_KIND"
+# Task kinds the executor may legitimately drive (directly or via a monitor
+# handoff). Anything else — including the deprecated ``monitor_release_pr`` —
+# must fail fast and never run as feature work or recovery validation.
+_SUPPORTED_TASK_KINDS = frozenset({"feature_branch_pr", "sync_feature_pr", "sync_release_pr"})
 _RELEASE_SYNC_REPO_INVALID_REASON_CODE = "RELEASE_SYNC_REPO_INVALID"
 _RELEASE_SYNC_GITHUB_ERROR_REASON_CODE = "RELEASE_SYNC_GITHUB_ERROR"
 _RELEASE_SYNC_NO_CHANGES_EVENT = "workspace.release_pr_sync_no_changes"
@@ -1463,6 +1467,48 @@ class WorkspaceExecutor:
             suffix = "" if existing.endswith("\n") or not existing else "\n"
             exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
 
+    async def _reject_unsupported_task_kind(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+    ) -> bool:
+        """Fail fast deprecated/unknown task kinds; return True if rejected.
+
+        Runs unconditionally — independent of any active provider recovery — so
+        a deprecated ``monitor_release_pr`` or unrecognized kind can never fall
+        through to the coding-agent path or resume recovery validation as
+        feature work. ``feature_branch_pr`` and the ``sync_feature_pr`` /
+        ``sync_release_pr`` monitors are intentionally left untouched here
+        (returns False) so their recovery resumption stays intact; the sync
+        handoffs are routed later by :meth:`_dispatch_non_feature_task_kind`.
+        """
+        task_kind = workspace.task_kind
+        if task_kind == _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.policy_failure,
+                message=(
+                    "task kind 'monitor_release_pr' is deprecated; monitor an existing "
+                    "release/manual PR via PR adoption with auto_merge=false instead."
+                ),
+                reason_code=_DEPRECATED_TASK_KIND_REASON_CODE,
+                details={"task_kind": task_kind},
+            )
+            return True
+        if task_kind not in _SUPPORTED_TASK_KINDS:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.policy_failure,
+                message=f"unsupported task kind {task_kind!r}; cannot run as feature work.",
+                reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
+                details={"task_kind": task_kind},
+            )
+            return True
+        return False
+
     async def _dispatch_non_feature_task_kind(
         self,
         *,
@@ -1472,12 +1518,12 @@ class WorkspaceExecutor:
         compose_file: Path,
         worktree_path: Path,
     ) -> bool:
-        """Route non-default task kinds; return True if the workspace is handled.
+        """Route sync PR task kinds to their monitors; return True if handled.
 
-        Returns False only for ``feature_branch_pr`` so the caller continues to
-        the coding-agent path. ``sync_feature_pr``/``sync_release_pr`` hand off
-        to their monitors; the deprecated ``monitor_release_pr`` and any unknown
-        kind fail fast so they never run as feature work.
+        Only invoked when no provider recovery is active. Deprecated/unknown
+        kinds are already rejected by :meth:`_reject_unsupported_task_kind`, so
+        by this point the kind is ``feature_branch_pr`` (returns False to
+        continue to the coding-agent path) or a ``sync_*`` monitor handoff.
         """
         task_kind = workspace.task_kind
         if task_kind == "sync_feature_pr":
@@ -1496,29 +1542,6 @@ class WorkspaceExecutor:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 worktree_path=worktree_path,
-            )
-            return True
-        if task_kind == _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.policy_failure,
-                message=(
-                    "task kind 'monitor_release_pr' is deprecated; monitor an existing "
-                    "release/manual PR via PR adoption with auto_merge=false instead."
-                ),
-                reason_code=_DEPRECATED_TASK_KIND_REASON_CODE,
-                details={"task_kind": task_kind},
-            )
-            return True
-        if task_kind != "feature_branch_pr":
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.policy_failure,
-                message=f"unsupported task kind {task_kind!r}; cannot run as feature work.",
-                reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
-                details={"task_kind": task_kind},
             )
             return True
         return False
@@ -1999,6 +2022,21 @@ class WorkspaceExecutor:
         )
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
         worktree_path = self._config.worktrees_root / workspace_id
+
+        # Deprecated/unsupported task kinds must fail fast unconditionally,
+        # BEFORE branching on recovery. The recovery branch below skips
+        # ``_dispatch_non_feature_task_kind``, so a ``monitor_release_pr`` or
+        # unknown kind that re-entered the executor with an active validate /
+        # rebase recovery (e.g. a worker-restart salvage of a stale ``running``
+        # claim) would otherwise bypass the guard and resume the validation
+        # path — the "silently run as feature work" scenario this is meant to
+        # forbid. ``sync_feature_pr`` / ``sync_release_pr`` are NOT rejected
+        # here so their recovery resumption stays intact.
+        if await self._reject_unsupported_task_kind(
+            workspace_id=workspace_id,
+            workspace=ws,
+        ):
+            return
 
         # When the PR monitor's RECOVERY_DISPATCH path delivered this
         # workspace, the executor must NOT re-run planning, the agent
