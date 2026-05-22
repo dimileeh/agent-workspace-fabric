@@ -250,7 +250,7 @@ def build_conformance_salvage_retry_prompt(
         "conformance attempt. The retry workspace will restore that diff before "
         "the agent runs. Continue from the recovered implementation; do not "
         "restart from scratch unless the recovered code is unusable.\n\n"
-        f"### Salvaged implementation paths\n{paths or '- No paths recorded.'}\n\n"
+        f"### Salvaged implementation paths\n{paths}\n\n"
         + build_conformance_retry_prompt(task_prompt=task_prompt, evidence=evidence)
     )
 
