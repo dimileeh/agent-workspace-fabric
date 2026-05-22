@@ -17,6 +17,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from awf.common.config import get_settings
 from awf.common.logging import get_logger
@@ -375,9 +376,18 @@ def write_usage_snapshot(snapshot: UsageSnapshot, *, work_dir: str | Path) -> Pa
     usage_dir = workspace_usage_dir(work_dir, snapshot.workspace_id)
     usage_dir.mkdir(parents=True, exist_ok=True)
     target = usage_dir / SNAPSHOT_FILENAME
-    tmp = usage_dir / f"{SNAPSHOT_FILENAME}.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(snapshot.to_dict(), separators=(",", ":")))
-    tmp.replace(target)
+    # A per-write unique suffix (not just the process-scoped PID) keeps the temp
+    # path distinct if two coroutines in the same worker process write a
+    # snapshot for the same workspace concurrently, so neither can overwrite the
+    # other's bytes before ``replace`` performs the atomic swap.
+    tmp = usage_dir / f"{SNAPSHOT_FILENAME}.{os.getpid()}.{uuid4().hex}.tmp"
+    try:
+        tmp.write_text(json.dumps(snapshot.to_dict(), separators=(",", ":")))
+        tmp.replace(target)
+    finally:
+        # ``replace`` consumes tmp on success; this clears a partial temp left by
+        # a failed write so the now-unique-named temps cannot accumulate.
+        tmp.unlink(missing_ok=True)
     return target
 
 

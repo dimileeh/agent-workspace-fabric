@@ -375,6 +375,34 @@ def test_write_snapshot_is_atomic_overwrite(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_write_snapshot_cleans_up_temp_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The per-write unique temp suffix (added so concurrent same-process writers
+    # cannot collide) must not leak: a write that fails before the atomic
+    # replace has to remove its partial temp instead of orphaning it.
+    snapshot = UsageSnapshot(
+        workspace_id="ws_fail",
+        provider="claude_code",
+        ccusage_source="claude",
+        status="available",
+        phase="final",
+        captured_at="2026-05-22T01:02:03+00:00",
+        total_tokens=7,
+    )
+
+    def boom(self: Path, target: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with pytest.raises(OSError, match="replace failed"):
+        write_usage_snapshot(snapshot, work_dir=tmp_path)
+
+    usage_dir = workspace_usage_dir(tmp_path, "ws_fail")
+    assert list(usage_dir.iterdir()) == []
+
+
+@pytest.mark.unit
 def test_snapshot_serialization_contains_only_safe_keys(tmp_path: Path) -> None:
     snapshot = UsageSnapshot(
         workspace_id="ws_safe",
