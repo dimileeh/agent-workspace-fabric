@@ -71,10 +71,13 @@ class _RealClock:
 def _is_missing_binary(result: CommandResult) -> bool:
     if result.returncode == 127:
         return True
-    # Only inspect stderr: a shell's "command not found" lands there, whereas
-    # ccusage's own stdout may legitimately contain "not found" for app-level
-    # reasons (e.g. "record not found"), which must stay REASON_COMMAND_FAILED.
-    return "not found" in result.stderr.lower()
+    # A real missing binary exits 127 (handled above); only treat stderr as a
+    # missing-binary signal for the exact phrases shells emit ("command not
+    # found" from bash, "no such file" from a failed exec/setsid). This keeps
+    # app-level errors that merely contain "not found" (e.g. ccusage
+    # "source not found") classified as REASON_COMMAND_FAILED.
+    stderr_lower = result.stderr.lower()
+    return "command not found" in stderr_lower or "no such file" in stderr_lower
 
 
 class CcusageCollector(UsageSampler):

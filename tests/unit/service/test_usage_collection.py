@@ -390,7 +390,7 @@ async def test_live_snapshots_written_during_run(tmp_path: Path) -> None:
         (CommandResult(returncode=2, stdout="", stderr="boom"), "ccusage_command_failed"),
         (CommandResult(returncode=127, stdout="", stderr=""), "ccusage_unavailable"),
         (
-            CommandResult(returncode=1, stdout="", stderr="sh: ccusage: not found"),
+            CommandResult(returncode=1, stdout="", stderr="sh: ccusage: command not found"),
             "ccusage_unavailable",
         ),
         (CommandResult(returncode=0, stdout="garbage{", stderr=""), "ccusage_invalid_json"),
@@ -575,8 +575,21 @@ async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
     ("result", "expected"),
     [
         (CommandResult(returncode=127, stdout="", stderr=""), True),
-        (CommandResult(returncode=1, stdout="", stderr="ccusage: not found"), True),
+        # Exact shell phrases for a missing executable count even on a non-127 exit.
+        (CommandResult(returncode=1, stdout="", stderr="bash: ccusage: command not found"), True),
+        (
+            CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="setsid: failed to execute ccusage: No such file or directory",
+            ),
+            True,
+        ),
         (CommandResult(returncode=1, stdout="", stderr="boom"), False),
+        # A bare "<x> not found" on stderr is an app-level error (e.g. ccusage
+        # "source not found"), not a missing binary — a real missing binary
+        # exits 127 (covered above).
+        (CommandResult(returncode=1, stdout="", stderr="source not found"), False),
         # App-level "not found" in stdout (non-127, clean stderr) is a command
         # failure, not a missing binary.
         (CommandResult(returncode=1, stdout="usage record not found", stderr=""), False),
