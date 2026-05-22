@@ -1934,6 +1934,7 @@ class ControlWorker:
             and has_open_pr_for_remonitor(candidate.status.value, candidate.pr_url)
             and finding is None
             and snapshot.stack_state == "running"
+            and await self._candidate_has_claim(candidate)
         ):
             await self._record_recoverable_runtime_stranding(
                 candidate,
@@ -2013,6 +2014,19 @@ class ControlWorker:
             repo = WorkspaceRepository(session)
             ws = await repo.get(candidate.workspace_id)
             return ws is not None and ws.status == candidate.status.value
+
+    async def _candidate_has_claim(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            return (
+                ws is not None
+                and ws.status == candidate.status.value
+                and (ws.monitor_claimed_by is not None or ws.execution_claimed_by is not None)
+            )
 
     async def _has_preserved_active_recovery_evidence(
         self,
