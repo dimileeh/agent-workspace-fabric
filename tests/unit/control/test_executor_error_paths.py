@@ -5078,6 +5078,72 @@ class TestSyncReleasePrHandoff:
             assert ws.events[-1].reason_code == "RELEASE_SYNC_FETCH_FAILED"
 
     @pytest.mark.unit
+    async def test_open_pr_lookup_error_fails_cleanly_before_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        fake.queue_result(returncode=1, stderr="gh: not authorized")  # gh pr list fails
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run after an open-PR lookup failure")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "OPEN_PR_LOOKUP_FAILED"
+
+    @pytest.mark.unit
+    async def test_pr_create_github_error_fails_cleanly_before_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> no existing PR
+        fake.queue_result(returncode=1, stderr="gh: API rate limit exceeded")  # gh pr create fails
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run after a gh pr create failure")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "RELEASE_SYNC_GITHUB_ERROR"
+            assert "gh pr create" in (ws.failure_message or "")
+
+    @pytest.mark.unit
     async def test_no_op_skips_when_status_changes_mid_flight(
         self,
         monkeypatch: pytest.MonkeyPatch,

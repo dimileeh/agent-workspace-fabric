@@ -50,7 +50,13 @@ from awf.common.compose_exec import (
     cleanup_failure_message,
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
-from awf.common.github_client import GitHubClient, PullRequestAdoptionMetadata, RepoRef
+from awf.common.github_client import (
+    GitHubClient,
+    GitHubClientError,
+    PullRequestAdoptionMetadata,
+    PullRequestMetadataError,
+    RepoRef,
+)
 from awf.common.logging import get_logger
 from awf.control.protected_file_diffs import (
     committed_changed_paths_since,
@@ -244,6 +250,7 @@ _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
 _DEPRECATED_TASK_KIND_REASON_CODE = "DEPRECATED_TASK_KIND"
 _UNSUPPORTED_TASK_KIND_REASON_CODE = "UNSUPPORTED_TASK_KIND"
 _RELEASE_SYNC_REPO_INVALID_REASON_CODE = "RELEASE_SYNC_REPO_INVALID"
+_RELEASE_SYNC_GITHUB_ERROR_REASON_CODE = "RELEASE_SYNC_GITHUB_ERROR"
 _RELEASE_SYNC_NO_CHANGES_EVENT = "workspace.release_pr_sync_no_changes"
 _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 _DEFAULT_RELEASE_SYNC_TARGET_BRANCH = "main"
@@ -1632,7 +1639,7 @@ class WorkspaceExecutor:
                 title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
                 body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
             )
-        except ReleasePrSyncError as exc:
+        except (ReleasePrSyncError, PullRequestMetadataError) as exc:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
@@ -1640,6 +1647,15 @@ class WorkspaceExecutor:
                 message=f"sync_release_pr failed: {exc.message}",
                 reason_code=exc.reason_code,
                 details=exc.detail,
+            )
+            return
+        except GitHubClientError as exc:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"sync_release_pr GitHub error ({exc.operation}): {exc.stderr or str(exc)}",
+                reason_code=_RELEASE_SYNC_GITHUB_ERROR_REASON_CODE,
             )
             return
 
