@@ -133,14 +133,19 @@ async def find_or_create_release_pr(
     Returns the resolved adoption metadata plus a ``created`` flag.
     """
 
+    repo_slug = repo.slug()
     existing = await list_open_pull_requests_for_branch(
         runner=runner,
         repo=repo,
         branch_name=source_branch,
         base_branch=target_branch,
     )
-    if existing:
-        pr_number = existing[0].number
+    # ``gh pr list --head`` matches by branch name alone, so a fork PR opened
+    # against this repo with an identically-named head branch can show up here.
+    # Only adopt a PR whose head lives in the requested repo; otherwise create.
+    same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
+    if same_repo_existing:
+        pr_number = same_repo_existing[0].number
         created = False
     else:
         pr_url = await gh.create_pull_request(
@@ -151,13 +156,24 @@ async def find_or_create_release_pr(
             body=body,
         )
         try:
-            _repo, pr_number = parse_github_pull_request_url(pr_url)
+            parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
         except ValueError as exc:
             raise ReleasePrSyncError(
                 reason_code="RELEASE_SYNC_PR_URL_INVALID",
                 message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
                 detail={"source_branch": source_branch, "target_branch": target_branch},
             ) from exc
+        if parsed_repo.slug().lower() != repo_slug.lower():
+            raise ReleasePrSyncError(
+                reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
+                message=(f"gh pr create returned a PR URL for a different repository: {pr_url!r}"),
+                detail={
+                    "expected_repo": repo_slug,
+                    "parsed_repo": parsed_repo.slug(),
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                },
+            )
         created = True
     metadata = await fetch_pull_request_adoption_metadata(
         runner=runner,

@@ -62,6 +62,21 @@ def _open_pr_list_payload(*, number: int = 321) -> str:
     )
 
 
+def _fork_open_pr_list_payload(*, number: int = 555) -> str:
+    return json.dumps(
+        [
+            {
+                "number": number,
+                "url": f"https://github.com/o/r/pull/{number}",
+                "headRefName": "development",
+                "headRefOid": "f" * 40,
+                "headRepository": {"name": "r", "nameWithOwner": "fork/r"},
+                "headRepositoryOwner": {"login": "fork"},
+            }
+        ]
+    )
+
+
 class TestCountCommitsAhead:
     @pytest.mark.unit
     async def test_parses_positive_count(self) -> None:
@@ -207,6 +222,59 @@ class TestFindOrCreateReleasePr:
             )
 
         assert exc.value.reason_code == "RELEASE_SYNC_PR_URL_INVALID"
+
+    @pytest.mark.unit
+    async def test_ignores_fork_pr_and_creates_in_repo(self) -> None:
+        # gh pr list can return a fork PR sharing the head branch name; it must
+        # not be adopted — a same-repo PR is created instead.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=_fork_open_pr_list_payload(number=555))  # list
+        fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/321\n")  # create
+        fake.queue_result(returncode=0, stdout=_adoption_payload(number=321))  # view
+        gh = GitHubClient(fake)
+
+        metadata, created = await find_or_create_release_pr(
+            runner=fake,
+            gh=gh,
+            repo=_REPO,
+            source_branch="development",
+            target_branch="main",
+            title="t",
+            body="b",
+        )
+
+        assert created is True
+        assert metadata.number == 321
+        assert [c.args[:3] for c in fake.calls] == [
+            ["gh", "pr", "list"],
+            ["gh", "pr", "create"],
+            ["gh", "pr", "view"],
+        ]
+
+    @pytest.mark.unit
+    async def test_created_url_for_other_repo_raises(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/other/repo/pull/7\n")  # create
+        gh = GitHubClient(fake)
+
+        with pytest.raises(ReleasePrSyncError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
+        assert exc.value.reason_code == "RELEASE_SYNC_PR_REPO_MISMATCH"
+        assert exc.value.detail is not None
+        assert exc.value.detail["expected_repo"] == "o/r"
+        assert exc.value.detail["parsed_repo"] == "other/repo"
+        # No gh pr view should run once the repo mismatch is detected.
+        assert all(c.args[:3] != ["gh", "pr", "view"] for c in fake.calls)
 
 
 class TestPrepareReleasePrSync:
