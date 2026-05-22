@@ -105,6 +105,61 @@ class TestWorkspaceCreate:
         assert body["task"]["agent"] == "codex"
         assert body["task"]["auto_merge"] is True
         assert body["task"]["initial_review_grace_period_seconds"] is None
+        assert body["repo"]["base_branch"] == "development"
+
+    @pytest.mark.unit
+    def test_sync_release_pr_defaults_base_to_main(self) -> None:
+        """Without --base, a sync_release_pr targets main so it syncs development → main."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_rel"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Release sync",
+                    "--prompt",
+                    "Open the release PR.",
+                    "--task-kind",
+                    "sync_release_pr",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["kind"] == "sync_release_pr"
+        assert body["repo"]["base_branch"] == "main"
+        assert "source_branch" not in body["repo"]
+
+    @pytest.mark.unit
+    def test_sync_release_pr_respects_explicit_base(self) -> None:
+        """An explicit --base always wins over the task-kind default."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_rel2"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Release sync",
+                    "--prompt",
+                    "Open the release PR.",
+                    "--task-kind",
+                    "sync_release_pr",
+                    "--base",
+                    "release",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["repo"]["base_branch"] == "release"
 
     @pytest.mark.unit
     def test_monitor_policy_flags_are_sent(self) -> None:

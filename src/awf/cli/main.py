@@ -36,7 +36,14 @@ from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.urls import normalize_api_url, sanitize_request_url
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    TaskKind,
+    WorkspaceStatus,
+)
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 from awf.service.smoke import _PROFILE_MARKER_PATHS as _PROJECT_PROFILE_MARKER_PATHS
@@ -2367,7 +2374,14 @@ def workspace_create(
     repo_url: str = typer.Option(..., "--repo", help="Git URL."),
     task_title: str = typer.Option(..., "--title"),
     task_prompt: str = typer.Option(..., "--prompt"),
-    branch_base: str = typer.Option("development", "--base"),
+    branch_base: str | None = typer.Option(
+        None,
+        "--base",
+        help=(
+            "Base/target branch. Defaults to 'development' for feature_branch_pr "
+            "and 'main' for sync_release_pr."
+        ),
+    ),
     task_kind: str = typer.Option(
         "feature_branch_pr",
         "--task-kind",
@@ -2444,6 +2458,8 @@ def workspace_create(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Submit a workspace creation request."""
+    if branch_base is None:
+        branch_base = "main" if task_kind == TaskKind.sync_release_pr.value else "development"
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
