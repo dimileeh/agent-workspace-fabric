@@ -293,6 +293,9 @@ async def test_failed_baseline_does_not_leak_host_usage(tmp_path: Path) -> None:
     # report unavailable rather than subtracting against nothing and leaking it.
     runner = FakeCommandRunner()
     runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    # The baseline timeout triggers targeted compose-exec cleanup, which issues a
+    # runner.run() that consumes the next FIFO slot (shared with run_streaming).
+    runner.queue_result(returncode=0, stdout="awf cleanup: absent")
     runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 999}}))
     collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
     ctx = await collector.start(
@@ -309,6 +312,37 @@ async def test_failed_baseline_does_not_leak_host_usage(tmp_path: Path) -> None:
     assert snap.status == "unavailable"
     assert snap.reason == "ccusage_timeout"  # baseline failure reason, not "available"
     assert snap.total_tokens is None  # host total is NOT leaked as workspace usage
+
+
+@pytest.mark.unit
+async def test_timeout_runs_targeted_compose_exec_cleanup(tmp_path: Path) -> None:
+    # A timed-out ccusage exec only kills the local compose client; per the
+    # build_tracked_compose_exec contract the in-container process tree may survive.
+    # The collector must run targeted cleanup for the timed-out invocation so
+    # orphaned ccusage processes can't accumulate across repeated timeouts. The
+    # sample still stays reason-coded as ccusage_timeout.
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 1}}))  # baseline
+    runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    runner.queue_result(returncode=0, stdout="awf cleanup: killed")  # targeted cleanup run()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_timeout_cleanup",
+        provider=AgentRuntime.claude_code,
+    )
+    await ctx.finalize(status="failed")
+
+    snap = read_latest_usage_snapshot("ws_timeout_cleanup", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.phase == "final"
+    assert snap.status == "unavailable"
+    assert snap.reason == "ccusage_timeout"  # cleanup failure must not change reason coding
+    # Exactly one targeted cleanup exec was issued for the timed-out invocation
+    # (the cleanup argv carries the awf-cleanup marker).
+    cleanup_calls = [call for call in runner.calls if "awf-cleanup" in call.args]
+    assert len(cleanup_calls) == 1
 
 
 @pytest.mark.unit

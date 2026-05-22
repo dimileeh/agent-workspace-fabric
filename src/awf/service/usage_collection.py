@@ -31,7 +31,11 @@ from awf.common.commands import (
     AsyncStreamingCommandRunner,
     CommandResult,
 )
-from awf.common.compose_exec import build_tracked_compose_exec
+from awf.common.compose_exec import (
+    TrackedComposeExec,
+    build_tracked_compose_exec,
+    cleanup_compose_exec_invocation,
+)
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.service.usage_store import (
@@ -456,6 +460,7 @@ class _CcusageSampleContext(UsageSampleContext):
             idle_timeout_seconds=self._collector._command_timeout_seconds,
         )
         if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+            await self._cleanup_timed_out_invocation(invocation)
             return None, REASON_TIMEOUT, None
         if not result.ok:
             failure_reason = (
@@ -465,3 +470,28 @@ class _CcusageSampleContext(UsageSampleContext):
         usage, reason = normalize_ccusage_json(result.stdout)
         model = usage.model if usage is not None else None
         return usage, reason, model
+
+    async def _cleanup_timed_out_invocation(self, invocation: TrackedComposeExec) -> None:
+        # On timeout, run_streaming kills the local compose client, but per the
+        # build_tracked_compose_exec contract that does not prove the in-container
+        # ccusage process tree is gone. Run targeted cleanup for this invocation so
+        # orphaned ccusage processes can't accumulate across repeated timeouts and
+        # degrade later samples (same pattern as AgentAdapter.run / validation). This
+        # is best-effort diagnostics: swallow-and-log any cleanup failure (it already
+        # logs an error internally) so the sample stays reason-coded as REASON_TIMEOUT
+        # and the agent outcome is never masked.
+        try:
+            await cleanup_compose_exec_invocation(
+                self._collector._runner,
+                invocation,
+                workspace_id=self._workspace_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.cleanup_error",
+                workspace_id=self._workspace_id,
+                invocation_id=invocation.invocation_id,
+                exc_info=True,
+            )
