@@ -149,7 +149,7 @@ class _CcusageSampleContext(UsageSampleContext):
         if self._finalized:
             return
         self._finalized = True
-        final_task = asyncio.ensure_future(self._finalize_inner(status))
+        final_task = asyncio.create_task(self._finalize_inner(status))
         # Shield the final sample so it still completes if the agent run is being
         # cancelled (the await below may be cancelled repeatedly).
         while not final_task.done():
