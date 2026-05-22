@@ -19254,6 +19254,78 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert executor.resume_calls == [workspace_id]
 
     @pytest.mark.unit
+    async def test_monitoring_pr_running_runtime_after_restart_remonitors_open_pr(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "running-claimed-monitoring-pr",
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={"seed": "prior restart scan"},
+            )
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="running",
+                            status="Up 10 minutes",
+                        )
+                    ],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+
+        assert inspector.calls == [f"awf_{workspace_id}"]
+        assert executor.resume_calls == [workspace_id]
+
+    @pytest.mark.unit
     async def test_monitoring_pr_without_pr_url_follows_failure_path(
         self,
         session_factory: async_sessionmaker[AsyncSession],
