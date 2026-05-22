@@ -219,6 +219,13 @@ def test_ci_failure_evidence_linear_scanner_preserves_bracketed_parameters() -> 
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_rejects_wrapped_pytest_node_ids() -> None:
+    line = "Failed: (tests/unit/runtime/test_prompt.py::test_x), and {tests/unit/runtime/test_prompt.py::test_y}"
+
+    assert ci_failure_evidence._pytest_node_candidates(line) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_pytest_repro_command_skips_unparseable_command_before_valid_pytest() -> None:
     command = ci_failure_evidence._pytest_repro_command(  # noqa: SLF001
         [

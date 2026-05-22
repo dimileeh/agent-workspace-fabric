@@ -21,6 +21,8 @@ _COMMAND_MARKERS = (
     "npm ",
 )
 _PYTEST_NODE_END_DELIMITERS = {",", ";", ")", "`", "'", '"'}
+_PYTEST_NODE_PREFIX_DELIMITERS = "([{<"
+_PYTEST_NODE_SUFFIX_DELIMITERS = ")]}>"
 _MAX_TEST_NODES = 20
 _MAX_REPRO_NODES = 5
 _MAX_COMMANDS = 5
@@ -124,7 +126,11 @@ def _pytest_node_candidates(line: str) -> list[str]:
             break
 
         start = anchor
-        while start > 0 and not line[start - 1].isspace():
+        while (
+            start > 0
+            and not line[start - 1].isspace()
+            and line[start - 1] not in _PYTEST_NODE_PREFIX_DELIMITERS
+        ):
             start -= 1
 
         end = anchor + len(".py::")
@@ -140,17 +146,21 @@ def _pytest_node_candidates(line: str) -> list[str]:
             end += 1
 
         candidate = _strip_node_suffix(line[start:end].strip("`'\""))
-        if _has_pytest_node_boundary(line, end) and _looks_like_pytest_node(candidate):
+        if _has_pytest_node_boundary(line, start, end) and _looks_like_pytest_node(candidate):
             nodes.append(candidate)
         search_from = max(end, anchor + len(".py::"))
 
     return nodes
 
 
-def _has_pytest_node_boundary(line: str, end: int) -> bool:
+def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
+    if start > 0 and line[start - 1] in _PYTEST_NODE_PREFIX_DELIMITERS:
+        return False
     if end >= len(line):
         return True
     char = line[end]
+    if char in _PYTEST_NODE_SUFFIX_DELIMITERS:
+        return False
     if char in _PYTEST_NODE_END_DELIMITERS:
         return True
     if char.isspace():
@@ -162,6 +172,8 @@ def _has_pytest_node_boundary(line: str, end: int) -> bool:
 def _looks_like_pytest_node(candidate: str) -> bool:
     path, separator, test_part = candidate.partition(".py::")
     if not separator or not path or not test_part:
+        return False
+    if path and path[0] in _PYTEST_NODE_PREFIX_DELIMITERS:
         return False
     if any(char.isspace() for char in path):
         return False
