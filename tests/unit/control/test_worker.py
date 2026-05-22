@@ -6156,6 +6156,302 @@ class TestRunOnceExecution:
 
         assert calls == [ready_id]
 
+    @pytest.mark.unit
+    async def test_stale_monitor_moved_to_ready_is_cancelled_and_frees_slot(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "wedged-monitor")
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        monitor_task: asyncio.Task[None] | None = None
+        try:
+            # First cycle dispatches and blocks the monitor resume, occupying the slot.
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+            )
+            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.MONITOR_RESUME
+            )
+            monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
+
+            # The workspace leaves monitoring_pr; a fresh ready workspace appears.
+            async with session_factory() as s:
+                await s.execute(
+                    update(Workspace)
+                    .where(Workspace.id == monitor_id)
+                    .values(status=WorkspaceStatus.ready.value)
+                )
+                await s.commit()
+            await _create_ready(session_factory, origin_repo, "ready-after-wedge")
+
+            with structlog.testing.capture_logs() as captured:
+                dispatched = await asyncio.wait_for(
+                    worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                )
+
+            assert any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                and event.get("log_level") == "warning"
+                and event.get("workspace_id") == monitor_id
+                for event in captured
+            )
+            # The stale monitor task was cancelled and is no longer tracked as a monitor
+            # (its freed slot may be immediately reused by a ready execution this cycle).
+            assert monitor_task.cancelling() > 0
+            assert (
+                worker._execution_task_kinds.get(monitor_id)  # noqa: SLF001
+                is not worker_module._ExecutionTaskKind.MONITOR_RESUME
+            )
+            # A ready execution dispatched in the same cycle that freed the slot.
+            assert dispatched >= 1
+            assert (
+                worker_module._ExecutionTaskKind.READY  # noqa: SLF001
+                in worker._execution_task_kinds.values()  # noqa: SLF001
+            )
+        finally:
+            executor.release.set()
+            if monitor_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+
+    @pytest.mark.unit
+    async def test_healthy_monitor_still_monitoring_pr_is_not_cancelled(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "healthy-monitor")
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        try:
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+            )
+            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
+
+            # Status stays monitoring_pr: reconcile must leave the healthy monitor alone.
+            with structlog.testing.capture_logs() as captured:
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+            assert not any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                for event in captured
+            )
+            assert not monitor_task.cancelled()
+            assert not monitor_task.done()
+            assert monitor_id in worker._execution_tasks  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.MONITOR_RESUME
+            )
+        finally:
+            executor.release.set()
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+
+    @pytest.mark.unit
+    async def test_monitor_reconcile_does_not_cancel_ready_or_preserved_tasks(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "ready-execution")
+        preserved_id = await _create_ready(session_factory, origin_repo, "preserved-execution")
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=3,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        ready_task = asyncio.create_task(_pending_execution_task())
+        preserved_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[ready_id] = ready_task  # noqa: SLF001
+        worker._execution_tasks[preserved_id] = preserved_task  # noqa: SLF001
+        worker._execution_task_kinds[ready_id] = (  # noqa: SLF001
+            worker_module._ExecutionTaskKind.READY
+        )
+        worker._execution_task_kinds[preserved_id] = (  # noqa: SLF001
+            worker_module._ExecutionTaskKind.PRESERVED_ACTIVE
+        )
+
+        async def _empty_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            return []
+
+        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+            assert not any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                for event in captured
+            )
+            assert not ready_task.cancelled()
+            assert not preserved_task.cancelled()
+            assert worker._execution_tasks[ready_id] is ready_task  # noqa: SLF001
+            assert worker._execution_tasks[preserved_id] is preserved_task  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[ready_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.READY
+            )
+            assert (
+                worker._execution_task_kinds[preserved_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.PRESERVED_ACTIVE
+            )
+        finally:
+            for task in (ready_task, preserved_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            worker._execution_tasks.clear()  # noqa: SLF001
+            worker._execution_task_kinds.clear()  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_execution_slots_saturation_logs_only_at_intended_cadence(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        interval = worker_module._EXECUTION_SLOTS_SATURATED_LOG_INTERVAL  # noqa: SLF001
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "saturating-monitor")
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        # Occupy the single slot with a still-monitoring monitor task so reconcile
+        # leaves it in place every cycle and the slot stays saturated.
+        slot_task = asyncio.create_task(_pending_execution_task())
+        worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
+        worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
+            worker_module._ExecutionTaskKind.MONITOR_RESUME
+        )
+
+        async def _empty_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            return []
+
+        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+
+        def _saturation_events(captured: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                event
+                for event in captured
+                if event.get("event") == "worker.execution_slots_saturated"
+            ]
+
+        try:
+            with structlog.testing.capture_logs() as captured:
+                for _ in range(interval):
+                    assert (
+                        await asyncio.wait_for(
+                            worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                        )
+                        == 0
+                    )
+            events = _saturation_events(captured)
+            assert len(events) == 1
+            event = events[0]
+            assert event.get("log_level") == "warning"
+            assert event["slot_limit"] == 1
+            assert event["tracked_count"] == 1
+            assert event["tracked_workspace_ids"] == [monitor_id]
+            assert event["tracked_monitor_ids"] == [monitor_id]
+            assert event["consecutive_saturated_cycles"] == interval
+
+            # Fires again only on the next multiple of the cadence interval.
+            with structlog.testing.capture_logs() as captured_again:
+                for _ in range(interval):
+                    assert (
+                        await asyncio.wait_for(
+                            worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                        )
+                        == 0
+                    )
+            events_again = _saturation_events(captured_again)
+            assert len(events_again) == 1
+            assert events_again[0]["consecutive_saturated_cycles"] == 2 * interval
+
+            # A non-saturated cycle (slot free) resets the counter.
+            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
+            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
+            )
+            assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
+
+            # The next saturated run restarts at 1 and does not immediately log.
+            worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
+            worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
+                worker_module._ExecutionTaskKind.MONITOR_RESUME
+            )
+            with structlog.testing.capture_logs() as captured_restart:
+                assert (
+                    await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+                    == 0
+                )
+            assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
+            assert _saturation_events(captured_restart) == []
+        finally:
+            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
+            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
+            slot_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
 
 class TestRunOnceMonitorRecovery:
     @pytest.mark.unit

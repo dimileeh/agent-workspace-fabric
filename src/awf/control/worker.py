@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from inspect import getattr_static
 from pathlib import Path
@@ -314,6 +315,20 @@ def _preserved_active_execution_status_values(
     return (workspace_status.value,)
 
 
+class _ExecutionTaskKind(StrEnum):
+    """Kind of work tracked in ``ControlWorker._execution_tasks`` slot accounting."""
+
+    MONITOR_RESUME = "monitor_resume"
+    READY = "ready"
+    PRESERVED_ACTIVE = "preserved_active"
+
+
+# Emit ``worker.execution_slots_saturated`` every Nth consecutive idle cycle in
+# which every execution slot stays occupied. Keeps the signal low-noise while
+# still surfacing wedged-slot starvation for operators.
+_EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     poll_interval_seconds: float = 1.0
@@ -585,6 +600,8 @@ class ControlWorker:
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
+        self._execution_task_kinds: dict[str, _ExecutionTaskKind] = {}
+        self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
         # Session-local advisory state; reset on restart and bounded below.
         self._active_salvage_monitor_recovery_operation_ids: dict[str, None] = {}
@@ -612,6 +629,8 @@ class ControlWorker:
         and should immediately loop again.
         """
         dispatched_ids: set[str] = set()
+
+        await self._reconcile_stale_monitor_execution_tasks()
 
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
@@ -701,6 +720,7 @@ class ControlWorker:
                 )
                 dispatched_ids.update(ready_dispatched)
 
+        self._update_execution_slot_saturation(dispatched=len(dispatched_ids))
         return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self) -> None:
@@ -711,6 +731,7 @@ class ControlWorker:
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task.done():
                     self._execution_tasks.pop(workspace_id, None)
+                    self._execution_task_kinds.pop(workspace_id, None)
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
@@ -1145,6 +1166,24 @@ class ControlWorker:
             on_retry=self._log_transient_db_retry,
         )
 
+    async def _load_workspace_statuses(self, workspace_ids: list[str]) -> dict[str, str]:
+        """Bulk-read current ``status`` for the given workspace IDs.
+
+        Callers (``_filter_current_status`` and reconciliation) guard against an
+        empty list, so this is only invoked with at least one ID.
+        """
+
+        async def _operation(session: AsyncSession) -> dict[str, str]:
+            stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
+            result = await session.execute(stmt)
+            return {row[0]: row[1] for row in result.all()}
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
+
     async def _filter_current_status(
         self,
         workspace_ids: list[str],
@@ -1155,16 +1194,7 @@ class ControlWorker:
         if not workspace_ids:
             return []
 
-        async def _operation(session: AsyncSession) -> dict[str, str]:
-            stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
-            result = await session.execute(stmt)
-            return {row[0]: row[1] for row in result.all()}
-
-        statuses = await run_db_operation_with_retry(
-            self._session_factory,
-            _operation,
-            on_retry=self._log_transient_db_retry,
-        )
+        statuses = await self._load_workspace_statuses(workspace_ids)
 
         current_ids: list[str] = []
         for workspace_id in workspace_ids:
@@ -4463,8 +4493,7 @@ class ControlWorker:
                 self._safely_execute_claimed(workspace_id),
                 name=f"awf-execute-{workspace_id}",
             )
-            self._execution_tasks[workspace_id] = task
-            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.READY)
             dispatched.add(workspace_id)
         return dispatched
 
@@ -4484,8 +4513,7 @@ class ControlWorker:
                 ),
                 name=f"awf-monitor-{workspace_id}",
             )
-            self._execution_tasks[workspace_id] = task
-            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.MONITOR_RESUME)
             dispatched.add(workspace_id)
         return dispatched
 
@@ -4500,12 +4528,86 @@ class ControlWorker:
             self._safely_execute_claimed(workspace_id),
             name=f"awf-preserved-active-validate-{workspace_id}",
         )
-        self._execution_tasks[workspace_id] = task
-        task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+        self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.PRESERVED_ACTIVE)
         return True
 
-    def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
-        self._execution_tasks.pop(workspace_id, None)
+    def _track_execution_task(
+        self,
+        workspace_id: str,
+        task: asyncio.Task[None],
+        *,
+        kind: _ExecutionTaskKind,
+    ) -> None:
+        self._execution_tasks[workspace_id] = task
+        self._execution_task_kinds[workspace_id] = kind
+        task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+
+    def _forget_execution_task(self, workspace_id: str, task: asyncio.Task[None]) -> None:
+        # Identity-guarded: a reconcile-driven cancel can free a slot and re-dispatch
+        # the same workspace within one run_once, so only forget the task we tracked.
+        if self._execution_tasks.get(workspace_id) is task:
+            self._execution_tasks.pop(workspace_id, None)
+            self._execution_task_kinds.pop(workspace_id, None)
+
+    def _tracked_monitor_workspace_ids(self) -> list[str]:
+        return [
+            workspace_id
+            for workspace_id, kind in self._execution_task_kinds.items()
+            if kind is _ExecutionTaskKind.MONITOR_RESUME
+        ]
+
+    async def _reconcile_stale_monitor_execution_tasks(self) -> None:
+        """Cancel tracked PR-monitor tasks whose workspace has left ``monitoring_pr``.
+
+        A wedged monitor resume coroutine keeps occupying an execution slot
+        forever. Once its workspace row is gone or has transitioned away from
+        ``monitoring_pr`` the resume is stale, so we cancel it and free the slot
+        synchronously in the current ``run_once`` (the done-callback alone runs
+        asynchronously and would not free the slot before ready dispatch). Only
+        ``MONITOR_RESUME`` tasks are inspected, so ready/preserved-active
+        executions are never touched here.
+        """
+        monitor_ids = self._tracked_monitor_workspace_ids()
+        if not monitor_ids:
+            return
+        statuses = await self._load_workspace_statuses(monitor_ids)
+        for workspace_id in monitor_ids:
+            status = statuses.get(workspace_id)
+            if status == WorkspaceStatus.monitoring_pr.value:
+                continue
+            task = self._execution_tasks.get(workspace_id)
+            if task is None:
+                self._execution_task_kinds.pop(workspace_id, None)
+                continue
+            _log.warning(
+                "worker.stale_monitor_execution_task_cancelled",
+                workspace_id=workspace_id,
+                status=status,
+            )
+            task.cancel()
+            self._execution_tasks.pop(workspace_id, None)
+            self._execution_task_kinds.pop(workspace_id, None)
+
+    def _update_execution_slot_saturation(self, *, dispatched: int) -> None:
+        saturated = (
+            self._can_dispatch_execution_when_slot_available()
+            and dispatched == 0
+            and self._available_execution_slots() <= 0
+        )
+        if not saturated:
+            self._consecutive_saturated_cycles = 0
+            return
+        self._consecutive_saturated_cycles += 1
+        if self._consecutive_saturated_cycles % _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL != 0:
+            return
+        _log.warning(
+            "worker.execution_slots_saturated",
+            slot_limit=self._config.max_concurrent_executions,
+            tracked_count=len(self._execution_tasks),
+            tracked_workspace_ids=sorted(self._execution_tasks),
+            tracked_monitor_ids=sorted(self._tracked_monitor_workspace_ids()),
+            consecutive_saturated_cycles=self._consecutive_saturated_cycles,
+        )
 
     async def _safely_provision_claimed(self, workspace_id: str) -> None:
         try:
