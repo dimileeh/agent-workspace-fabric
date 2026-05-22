@@ -286,10 +286,7 @@ def build_conformance_salvage_conflict_prompt(
 ) -> str:
     gaps = _string_list(salvage.get("remaining_gaps"))
     gap_lines = "\n".join(f"- {gap}" for gap in gaps) or "- Re-check conformance evidence."
-    implementation_paths = _string_list(salvage.get("implementation_paths"))
-    path_lines = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
-    if len(implementation_paths) > 20:
-        path_lines += f"\n- ... and {len(implementation_paths) - 20} more"
+    path_lines = _implementation_path_lines(salvage)
     return (
         "## Automatic AWF salvage conflict\n\n"
         "AWF captured the prior implementation diff, but it could not be applied "
