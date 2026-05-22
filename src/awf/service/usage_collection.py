@@ -209,6 +209,13 @@ class _CcusageSampleContext(UsageSampleContext):
             await pending
 
     async def _run_loop(self) -> None:
+        # ``interval_seconds`` (DEFAULT_SAMPLE_INTERVAL_SECONDS) is the sleep
+        # *between* samples, not a fixed wall-clock period: each iteration then
+        # runs _safe_sample, which can itself spend up to ``command_timeout_seconds``
+        # waiting on ccusage, so the effective period is interval + sample time
+        # (~80s worst case at the defaults). Sampling is a diagnostic, so this
+        # gap-based cadence (no drift correction back to a fixed clock) is
+        # intentional; tune the constant with that composition in mind.
         while True:
             await self._collector._clock.sleep(self._collector._interval_seconds)
             await self._safe_sample(phase="live", run_status="running")
@@ -423,7 +430,11 @@ class _CcusageSampleContext(UsageSampleContext):
         # (see ``_CCUSAGE_NEUTRAL_CONFIG_PATH``). A future pin that moves the provider
         # behind a flag (e.g. ``--source``) or renames/removes ``--config`` would make
         # this invocation degrade to REASON_COMMAND_FAILED, so re-verify the argument
-        # order and flags whenever the Dockerfile pin is bumped.
+        # order and flags whenever the Dockerfile pin is bumped. ``--offline`` is
+        # ccusage's global ``-O`` option and is accepted by every source subcommand,
+        # including ``opencode``, at the pinned 20.0.3 (verified: ``ccusage opencode
+        # daily --help`` lists ``-O, --offline`` and the full invocation exits 0), so
+        # it does not degrade opencode runs even though the docs page omits it.
         invocation = build_tracked_compose_exec(
             compose_project=self._compose_project,
             compose_file=self._compose_file,
