@@ -76,6 +76,36 @@ export function fallbackLlmUsage(
   };
 }
 
+const USAGE_SOURCE_LABELS: Record<string, string> = {
+  ccusage: "ccusage",
+  operations: "operations",
+  none: "none",
+};
+
+const USAGE_REASON_LABELS: Record<string, string> = {
+  usage_not_reported: "not reported",
+  ccusage_source_unsupported: "provider not supported by ccusage",
+  ccusage_unavailable: "ccusage not installed",
+  ccusage_command_failed: "ccusage command failed",
+  ccusage_timeout: "ccusage timed out",
+  ccusage_invalid_json: "ccusage output unreadable",
+  ccusage_no_records: "no usage recorded yet",
+};
+
+// Friendly provenance line for the LLM usage block: maps the AWF usage source
+// and reason code to human-readable labels without redesigning the dashboard.
+export function formatUsageProvenance(
+  source: string | null | undefined,
+  reason: string | null | undefined,
+): string {
+  const sourceLabel = (source && USAGE_SOURCE_LABELS[source]) || source || "none";
+  if (!reason) {
+    return sourceLabel;
+  }
+  const reasonLabel = USAGE_REASON_LABELS[reason] ?? reason;
+  return `${sourceLabel} / ${reasonLabel}`;
+}
+
 export function formatCostWithPricing(
   cost: number | null,
   currency: string | null | undefined,

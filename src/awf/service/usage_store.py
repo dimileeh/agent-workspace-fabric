@@ -1,0 +1,354 @@
+"""AWF-owned durable store for normalized workspace LLM usage snapshots.
+
+This module is intentionally dependency-light: it maps AWF agent runtimes to
+``ccusage`` sources, normalizes ``ccusage --json`` output into safe numeric
+accounting data, and reads/writes a single latest-wins snapshot per workspace
+under ``<work_dir>/usage/<workspace_id>/snapshot.json``.
+
+It never persists raw prompt JSONL, file paths, or credential-bearing content —
+only normalized token/cost numbers plus safe metadata (provider, source, model,
+status, reason codes, timestamps).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from awf.common.config import get_settings
+from awf.common.logging import get_logger
+from awf.db.enums import AgentRuntime
+
+_log = get_logger(__name__)
+
+SCHEMA_VERSION = 1
+SNAPSHOT_FILENAME = "snapshot.json"
+USAGE_SOURCE = "ccusage"
+
+# Reason codes surfaced when ccusage usage is missing or invalid.
+REASON_SOURCE_UNSUPPORTED = "ccusage_source_unsupported"
+REASON_UNAVAILABLE = "ccusage_unavailable"
+REASON_COMMAND_FAILED = "ccusage_command_failed"
+REASON_TIMEOUT = "ccusage_timeout"
+REASON_INVALID_JSON = "ccusage_invalid_json"
+REASON_NO_RECORDS = "ccusage_no_records"
+
+# AWF runtime -> ccusage per-source subcommand. Generic table; any runtime not
+# present here has no ccusage source and reports ``ccusage_source_unsupported``.
+_PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
+    AgentRuntime.claude_code: "claude",
+    AgentRuntime.codex: "codex",
+    AgentRuntime.gemini: "gemini",
+    AgentRuntime.opencode: "opencode",
+}
+
+_INPUT_TOKEN_KEYS = ("inputTokens", "input_tokens")
+_OUTPUT_TOKEN_KEYS = ("outputTokens", "output_tokens")
+_TOTAL_TOKEN_KEYS = ("totalTokens", "total_tokens")
+_COST_KEYS = ("totalCost", "costUSD", "cost", "cost_estimate")
+
+
+def provider_ccusage_source(runtime: AgentRuntime) -> str | None:
+    """Return the ccusage source subcommand for an AWF runtime, or ``None``."""
+
+    return _PROVIDER_CCUSAGE_SOURCE.get(runtime)
+
+
+@dataclass(frozen=True)
+class NormalizedUsage:
+    """Normalized token/cost accounting extracted from ccusage output."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_estimate: float | None = None
+    currency: str | None = None
+    model: str | None = None
+
+    def as_baseline_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cost_estimate": self.cost_estimate,
+            "currency": self.currency,
+            "model": self.model,
+        }
+
+    @classmethod
+    def from_baseline_dict(cls, data: dict[str, Any]) -> NormalizedUsage:
+        return cls(
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+            cost_estimate=data.get("cost_estimate"),
+            currency=data.get("currency"),
+            model=data.get("model"),
+        )
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _first(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> Any:
+    for key in keys:
+        if key in mapping:
+            coerced = coerce(mapping[key])
+            if coerced is not None:
+                return coerced
+    return None
+
+
+def _usage_from_record(record: dict[str, Any], *, model: str | None) -> NormalizedUsage | None:
+    input_tokens = _first(record, _INPUT_TOKEN_KEYS, _coerce_int)
+    output_tokens = _first(record, _OUTPUT_TOKEN_KEYS, _coerce_int)
+    total_tokens = _first(record, _TOTAL_TOKEN_KEYS, _coerce_int)
+    cost_estimate = _first(record, _COST_KEYS, _coerce_float)
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+        and cost_estimate is None
+    ):
+        return None
+    return NormalizedUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_estimate=cost_estimate,
+        currency="USD" if cost_estimate is not None else None,
+        model=model,
+    )
+
+
+def _usage_from_daily(daily: list[Any], *, model: str | None) -> NormalizedUsage | None:
+    totals: dict[str, Any] = {}
+    seen = False
+    for entry in daily:
+        if not isinstance(entry, dict):
+            continue
+        usage = _usage_from_record(entry, model=model)
+        if usage is None:
+            continue
+        seen = True
+        totals["inputTokens"] = (totals.get("inputTokens", 0)) + (usage.input_tokens or 0)
+        totals["outputTokens"] = (totals.get("outputTokens", 0)) + (usage.output_tokens or 0)
+        totals["totalTokens"] = (totals.get("totalTokens", 0)) + (usage.total_tokens or 0)
+        if usage.cost_estimate is not None:
+            totals["totalCost"] = (totals.get("totalCost", 0.0)) + usage.cost_estimate
+    if not seen:
+        return None
+    return _usage_from_record(totals, model=model)
+
+
+def normalize_ccusage_json(raw: str) -> tuple[NormalizedUsage | None, str | None]:
+    """Parse ccusage ``--json`` output into ``NormalizedUsage`` or a reason code."""
+
+    text = raw.strip()
+    if not text:
+        return None, REASON_INVALID_JSON
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None, REASON_INVALID_JSON
+    if not isinstance(data, dict):
+        return None, REASON_INVALID_JSON
+
+    model = data.get("model") if isinstance(data.get("model"), str) else None
+
+    totals = data.get("totals")
+    if isinstance(totals, dict):
+        usage = _usage_from_record(totals, model=model)
+        if usage is not None:
+            return usage, None
+
+    daily = data.get("daily")
+    if isinstance(daily, list):
+        usage = _usage_from_daily(daily, model=model)
+        if usage is not None:
+            return usage, None
+
+    return None, REASON_NO_RECORDS
+
+
+def _delta(current: int | None, baseline: int | None) -> int | None:
+    if current is None:
+        return None
+    if baseline is None:
+        return current
+    return max(0, current - baseline)
+
+
+def _delta_float(current: float | None, baseline: float | None) -> float | None:
+    if current is None:
+        return None
+    if baseline is None:
+        return current
+    return max(0.0, current - baseline)
+
+
+def subtract_baseline(
+    current: NormalizedUsage, baseline: NormalizedUsage | None
+) -> NormalizedUsage:
+    """Return ``current - baseline`` per field, clamped at zero.
+
+    When ``baseline`` is ``None`` the current reading is returned unchanged.
+    ``None`` fields in ``current`` stay ``None`` (unknown, not zero).
+    """
+
+    if baseline is None:
+        return current
+    return NormalizedUsage(
+        input_tokens=_delta(current.input_tokens, baseline.input_tokens),
+        output_tokens=_delta(current.output_tokens, baseline.output_tokens),
+        total_tokens=_delta(current.total_tokens, baseline.total_tokens),
+        cost_estimate=_delta_float(current.cost_estimate, baseline.cost_estimate),
+        currency=current.currency,
+        model=current.model,
+    )
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    """A normalized, latest-wins usage snapshot for one workspace run."""
+
+    workspace_id: str
+    provider: str
+    ccusage_source: str | None
+    status: str
+    phase: str
+    captured_at: str
+    reason: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_estimate: float | None = None
+    currency: str | None = None
+    baseline: dict[str, Any] | None = None
+    schema_version: int = SCHEMA_VERSION
+    source: str = USAGE_SOURCE
+
+    @property
+    def has_metrics(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.input_tokens,
+                self.output_tokens,
+                self.total_tokens,
+                self.cost_estimate,
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "workspace_id": self.workspace_id,
+            "provider": self.provider,
+            "source": self.source,
+            "ccusage_source": self.ccusage_source,
+            "model": self.model,
+            "status": self.status,
+            "reason": self.reason,
+            "phase": self.phase,
+            "captured_at": self.captured_at,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cost_estimate": self.cost_estimate,
+            "currency": self.currency,
+            "baseline": self.baseline,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> UsageSnapshot:
+        return cls(
+            workspace_id=data["workspace_id"],
+            provider=data["provider"],
+            ccusage_source=data.get("ccusage_source"),
+            status=data["status"],
+            phase=data["phase"],
+            captured_at=data["captured_at"],
+            reason=data.get("reason"),
+            model=data.get("model"),
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+            cost_estimate=data.get("cost_estimate"),
+            currency=data.get("currency"),
+            baseline=data.get("baseline"),
+            schema_version=data.get("schema_version", SCHEMA_VERSION),
+            source=data.get("source", USAGE_SOURCE),
+        )
+
+    def baseline_usage(self) -> NormalizedUsage | None:
+        if not isinstance(self.baseline, dict):
+            return None
+        return NormalizedUsage.from_baseline_dict(self.baseline)
+
+
+def workspace_usage_dir(work_dir: str | Path, workspace_id: str) -> Path:
+    """Return the AWF-owned usage directory for a workspace."""
+
+    return Path(work_dir) / "usage" / workspace_id
+
+
+def _resolve_work_dir(work_dir: str | Path | None) -> Path:
+    if work_dir is not None:
+        return Path(work_dir)
+    # Match the worker's work_dir normalization (build_worker_runtime applies
+    # .expanduser().resolve()) so the API reader and the collector writer agree
+    # on the snapshot directory even when settings.work_dir holds ~/ or a
+    # relative/symlinked path.
+    return Path(get_settings().work_dir).expanduser().resolve()
+
+
+def write_usage_snapshot(snapshot: UsageSnapshot, *, work_dir: str | Path) -> Path:
+    """Atomically write the latest snapshot for a workspace and return its path."""
+
+    usage_dir = workspace_usage_dir(work_dir, snapshot.workspace_id)
+    usage_dir.mkdir(parents=True, exist_ok=True)
+    target = usage_dir / SNAPSHOT_FILENAME
+    tmp = usage_dir / f"{SNAPSHOT_FILENAME}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(snapshot.to_dict(), separators=(",", ":")))
+    tmp.replace(target)
+    return target
+
+
+def read_latest_usage_snapshot(
+    workspace_id: str | None, *, work_dir: str | Path | None = None
+) -> UsageSnapshot | None:
+    """Read the latest usage snapshot for a workspace, or ``None`` if absent/invalid."""
+
+    if not workspace_id:
+        return None
+    target = workspace_usage_dir(_resolve_work_dir(work_dir), workspace_id) / SNAPSHOT_FILENAME
+    try:
+        raw = target.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+        return UsageSnapshot.from_dict(data)
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        _log.warning("usage.snapshot.invalid", workspace_id=workspace_id)
+        return None

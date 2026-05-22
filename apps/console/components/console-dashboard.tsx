@@ -56,6 +56,7 @@ import {
   fallbackLifecycleStages,
   fallbackLlmUsage,
   formatDateTime,
+  formatUsageProvenance,
   lifecycleStages,
   relativeTime,
   pickWorkspaceLogStreams,
@@ -2302,7 +2303,7 @@ function UsageSummaryBlock({
           <Badge value="unavailable" />
         </div>
         <div className="mt-2 truncate text-[11px] text-slate-500">
-          {safeUsage.reason ?? "usage unavailable"}
+          {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         </div>
       </div>
     );
@@ -2337,7 +2338,7 @@ function UsageSummaryBlock({
         />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
-        {`${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
+        {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         {pricingReason ? (
           <>
             <span className="text-slate-300">|</span>

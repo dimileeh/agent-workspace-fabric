@@ -2,6 +2,28 @@ import { expect, type Page, test } from "@playwright/test";
 
 const now = "2026-05-02T12:00:00.000Z";
 
+type UsageKind = "available" | "unavailable" | "ccusage" | "ccusage_timeout";
+
+const WORKSPACE_DEFS: { id: string; title: string; usage: UsageKind }[] = [
+  { id: "ws_usage", title: "Usage Workspace", usage: "available" },
+  { id: "ws_no_usage", title: "No Usage Workspace", usage: "unavailable" },
+  { id: "ws_ccusage", title: "Ccusage Workspace", usage: "ccusage" },
+  { id: "ws_ccusage_timeout", title: "Ccusage Timeout Workspace", usage: "ccusage_timeout" },
+];
+
+function llmUsageFor(usage: UsageKind) {
+  switch (usage) {
+    case "available":
+      return { status: "available", input_tokens: 10, output_tokens: 20, total_tokens: 30, cost_estimate: 0.05, currency: "USD", source: "mock", reason: null };
+    case "ccusage":
+      return { status: "available", input_tokens: 111, output_tokens: 222, total_tokens: 333, cost_estimate: null, currency: null, source: "ccusage", reason: null };
+    case "ccusage_timeout":
+      return { status: "unavailable", input_tokens: null, output_tokens: null, total_tokens: null, cost_estimate: null, currency: null, source: "ccusage", reason: "ccusage_timeout" };
+    default:
+      return { status: "unavailable" };
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await mockAwfApi(page);
 });
@@ -47,6 +69,31 @@ test("dashboard hides llm usage metrics when unavailable", async ({ page }) => {
   await expect(page.getByText("Total")).not.toBeVisible();
 });
 
+test("dashboard renders ccusage-backed totals and source label", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByText("Ccusage Workspace", { exact: true }).first().click();
+
+  const usageBlock = page.locator("section").filter({ hasText: "LLM usage" }).first();
+  await expect(usageBlock).toBeVisible();
+  await expect(usageBlock.getByText("333", { exact: true })).toBeVisible();
+  // The ccusage source is surfaced as a friendly provenance label.
+  await expect(usageBlock.getByText("ccusage", { exact: false })).toBeVisible();
+});
+
+test("dashboard renders ccusage unavailable reason", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByText("Ccusage Timeout Workspace", { exact: true }).first().click();
+
+  await expect(page.getByText("LLM usage").first()).toBeVisible();
+  await expect(page.getByText("unavailable").first()).toBeVisible();
+  // Reason code is rendered through its friendly label.
+  await expect(page.getByText("ccusage timed out", { exact: false }).first()).toBeVisible();
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
@@ -64,10 +111,7 @@ async function mockAwfApi(page: Page) {
     if (path === "/api/awf/workspaces/overview") {
       await fulfillJson(
         route,
-        listEnvelope([
-          workspaceOverview("ws_usage", "Usage Workspace", "available"),
-          workspaceOverview("ws_no_usage", "No Usage Workspace", "unavailable"),
-        ])
+        listEnvelope(WORKSPACE_DEFS.map((def) => workspaceOverview(def.id, def.title, def.usage)))
       );
       return;
     }
@@ -94,7 +138,10 @@ async function mockAwfApi(page: Page) {
       else if (path.endsWith("/events")) await fulfillJson(route, listEnvelope([]));
       else if (path.endsWith("/operations")) await fulfillJson(route, listEnvelope([]));
       else if (path.endsWith("/logs")) await fulfillJson(route, listEnvelope([]));
-      else await fulfillJson(route, workspaceOverview(id, id === "ws_usage" ? "Usage Workspace" : "No Usage Workspace", id === "ws_usage" ? "available" : "unavailable"));
+      else {
+        const def = WORKSPACE_DEFS.find((d) => d.id === id) ?? WORKSPACE_DEFS[1];
+        await fulfillJson(route, workspaceOverview(def.id, def.title, def.usage));
+      }
       return;
     }
     if (path.endsWith("/stream")) {
@@ -118,7 +165,7 @@ function listEnvelope<T>(items: T[]) {
   return { items, next_cursor: null, has_more: false };
 }
 
-function workspaceOverview(id: string, title: string, usageStatus: string) {
+function workspaceOverview(id: string, title: string, usage: UsageKind) {
   return {
     id,
     workspace_id: id,
@@ -137,7 +184,7 @@ function workspaceOverview(id: string, title: string, usageStatus: string) {
     created_at: now,
     updated_at: now,
     lifecycle: [],
-    llm_usage: usageStatus === "available" ? { status: "available", input_tokens: 10, output_tokens: 20, total_tokens: 30, cost_estimate: 0.05, currency: "USD", source: "mock", reason: null } : { status: "unavailable" },
+    llm_usage: llmUsageFor(usage),
     coordination_warnings: [],
   };
 }

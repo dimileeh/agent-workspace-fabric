@@ -2072,6 +2072,124 @@ def test_workspace_usage_summary_is_explicitly_unavailable_without_adapter_usage
     assert usage.reason == "usage_not_reported"
 
 
+def _usage_snapshot(**overrides: object) -> object:
+    from awf.service.usage_store import UsageSnapshot
+
+    base: dict[str, object] = {
+        "workspace_id": "ws_snap",
+        "provider": "claude_code",
+        "ccusage_source": "claude",
+        "status": "available",
+        "phase": "final",
+        "captured_at": "2026-05-22T00:00:00+00:00",
+    }
+    base.update(overrides)
+    return UsageSnapshot(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_prefers_ccusage_snapshot_with_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(
+        input_tokens=10, output_tokens=20, total_tokens=30, cost_estimate=0.05, currency="USD"
+    )
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    # Operation usage exists, but the ccusage snapshot takes precedence.
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"total_tokens": 999}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.source == "ccusage"
+    assert usage.status == "available"
+    assert usage.total_tokens == 30
+    assert usage.input_tokens == 10
+    assert usage.reason is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_surfaces_ccusage_unavailable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason="ccusage_no_records")
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.status == "unavailable"
+    assert usage.reason == "ccusage_no_records"
+    assert usage.total_tokens is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_ccusage_unavailable_defaults_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason=None)
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.reason == "usage_not_reported"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_falls_back_to_operations_when_ccusage_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason="ccusage_timeout")
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"input_tokens": 7, "total_tokens": 7}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    # Operation usage is a real metric; it wins over a metric-less ccusage snapshot.
+    assert usage.source == "operations"
+    assert usage.input_tokens == 7
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_operations_when_no_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: None
+    )
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"total_tokens": 5}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.source == "operations"
+    assert usage.total_tokens == 5
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_usage_not_reported_when_nothing_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: None
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "none"
+    assert usage.reason == "usage_not_reported"
+
+
 class TestWorkspacePricingMetadata:
     @pytest.mark.unit
     def test_returns_none_when_no_pricing_stanza(self) -> None:

@@ -47,6 +47,7 @@ from awf.service.target_branch_monitor import (
     TargetBranchReconcileMonitor,
     reconcile_and_refresh_stale_candidates,
 )
+from awf.service.usage_collection import CcusageCollector
 
 _log = get_logger(__name__)
 
@@ -76,6 +77,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
     runner = AsyncioSubprocessRunner()
+    usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
@@ -200,6 +202,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
+        usage_sampler=usage_collector,
     )
     worker = ControlWorker(
         session_factory=session_factory,

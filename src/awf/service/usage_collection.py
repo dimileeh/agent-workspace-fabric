@@ -1,0 +1,282 @@
+"""ccusage-backed implementation of the ``UsageSampler`` protocol.
+
+``CcusageCollector`` samples per-run LLM usage from inside a workspace's agent
+container by running a pinned ``ccusage`` with ``--json --offline``. It is wired
+into ``AgentAdapter.run`` (the single shared agent chokepoint) so both normal
+workspace execution and PR-monitor/recovery runs are covered without duplicating
+provider-specific runner code.
+
+Design invariants:
+- Sampling never masks the agent outcome (all sample failures are reason-coded
+  or swallowed-and-logged).
+- Reported totals are baseline-subtracted so copied host history can't inflate
+  them; the baseline is persisted and reused across runs of the same workspace.
+- Only normalized numeric/accounting data is persisted (see ``usage_store``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Protocol
+
+from awf.adapters.usage import UsageSampleContext, UsageSampler
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    AsyncStreamingCommandRunner,
+    CommandResult,
+)
+from awf.common.compose_exec import build_tracked_compose_exec
+from awf.common.logging import get_logger
+from awf.db.enums import AgentRuntime
+from awf.service.usage_store import (
+    REASON_COMMAND_FAILED,
+    REASON_SOURCE_UNSUPPORTED,
+    REASON_TIMEOUT,
+    REASON_UNAVAILABLE,
+    NormalizedUsage,
+    UsageSnapshot,
+    normalize_ccusage_json,
+    provider_ccusage_source,
+    read_latest_usage_snapshot,
+    subtract_baseline,
+    write_usage_snapshot,
+)
+
+_log = get_logger(__name__)
+
+DEFAULT_SAMPLE_INTERVAL_SECONDS = 60.0
+DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
+
+
+class _Clock(Protocol):
+    def now(self) -> datetime: ...  # pragma: no cover - Protocol declaration only.
+
+    async def sleep(self, seconds: float) -> None: ...  # pragma: no cover - Protocol decl.
+
+
+class _RealClock:
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+
+def _is_missing_binary(result: CommandResult) -> bool:
+    if result.returncode == 127:
+        return True
+    haystack = f"{result.stdout} {result.stderr}".lower()
+    return "not found" in haystack
+
+
+class CcusageCollector(UsageSampler):
+    """Samples ccusage usage inside the agent container every ``interval`` seconds."""
+
+    def __init__(
+        self,
+        *,
+        runner: AsyncStreamingCommandRunner,
+        work_dir: str | Path,
+        clock: _Clock | None = None,
+        interval_seconds: float = DEFAULT_SAMPLE_INTERVAL_SECONDS,
+        command_timeout_seconds: float = DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS,
+    ) -> None:
+        self._runner = runner
+        self._work_dir = Path(work_dir)
+        self._clock = clock or _RealClock()
+        self._interval_seconds = interval_seconds
+        self._command_timeout_seconds = command_timeout_seconds
+
+    async def start(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+    ) -> _CcusageSampleContext:
+        source = provider_ccusage_source(provider)
+        ctx = _CcusageSampleContext(
+            collector=self,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            workspace_id=workspace_id,
+            provider=provider,
+            source=source,
+        )
+        if source is None:
+            # Unsupported provider: record the reason once, no periodic loop.
+            await ctx._safe_sample(phase="live", status="running")
+            return ctx
+        ctx._baseline = await ctx._capture_baseline()
+        ctx._task = asyncio.create_task(ctx._run_loop())
+        return ctx
+
+
+class _CcusageSampleContext(UsageSampleContext):
+    """Per-run sampling handle returned by ``CcusageCollector.start``."""
+
+    def __init__(
+        self,
+        *,
+        collector: CcusageCollector,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str,
+        provider: AgentRuntime,
+        source: str | None,
+    ) -> None:
+        self._collector = collector
+        self._compose_project = compose_project
+        self._compose_file = compose_file
+        self._workspace_id = workspace_id
+        self._provider = provider
+        self._source = source
+        self._baseline: NormalizedUsage | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._finalized = False
+
+    async def finalize(self, *, status: str) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        final_task = asyncio.ensure_future(self._finalize_inner(status))
+        # Shield the final sample so it still completes if the agent run is being
+        # cancelled (the await below may be cancelled repeatedly).
+        while not final_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(final_task)
+
+    async def _finalize_inner(self, status: str) -> None:
+        await self._cancel_loop()
+        await self._safe_sample(phase="final", status=status)
+
+    async def _cancel_loop(self) -> None:
+        task = self._task
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _run_loop(self) -> None:
+        while True:
+            await self._collector._clock.sleep(self._collector._interval_seconds)
+            await self._safe_sample(phase="live", status="running")
+
+    async def _capture_baseline(self) -> NormalizedUsage | None:
+        prior = read_latest_usage_snapshot(self._workspace_id, work_dir=self._collector._work_dir)
+        if prior is not None:
+            reused = prior.baseline_usage()
+            if reused is not None:
+                return reused
+        try:
+            usage, _reason, _model = await self._run_ccusage()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.baseline_error",
+                workspace_id=self._workspace_id,
+                exc_info=True,
+            )
+            return None
+        return usage
+
+    async def _safe_sample(self, *, phase: str, status: str) -> None:
+        try:
+            await self._sample_and_write(phase=phase)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                workspace_id=self._workspace_id,
+                phase=phase,
+                status=status,
+                exc_info=True,
+            )
+
+    async def _sample_and_write(self, *, phase: str) -> None:
+        if self._source is None:
+            self._write(
+                phase=phase,
+                status_label="unavailable",
+                reason=REASON_SOURCE_UNSUPPORTED,
+                metrics=NormalizedUsage(),
+                model=None,
+            )
+            return
+        usage, reason, model = await self._run_ccusage()
+        if usage is None:
+            self._write(
+                phase=phase,
+                status_label="unavailable",
+                reason=reason,
+                metrics=NormalizedUsage(),
+                model=None,
+            )
+            return
+        delta = subtract_baseline(usage, self._baseline)
+        self._write(
+            phase=phase,
+            status_label="available",
+            reason=None,
+            metrics=delta,
+            model=model,
+        )
+
+    def _write(
+        self,
+        *,
+        phase: str,
+        status_label: str,
+        reason: str | None,
+        metrics: NormalizedUsage,
+        model: str | None,
+    ) -> None:
+        snapshot = UsageSnapshot(
+            workspace_id=self._workspace_id,
+            provider=self._provider.value,
+            ccusage_source=self._source,
+            status=status_label,
+            phase=phase,
+            captured_at=self._collector._clock.now().isoformat(),
+            reason=reason,
+            model=model,
+            input_tokens=metrics.input_tokens,
+            output_tokens=metrics.output_tokens,
+            total_tokens=metrics.total_tokens,
+            cost_estimate=metrics.cost_estimate,
+            currency=metrics.currency,
+            baseline=self._baseline.as_baseline_dict() if self._baseline is not None else None,
+        )
+        write_usage_snapshot(snapshot, work_dir=self._collector._work_dir)
+
+    async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
+        invocation = build_tracked_compose_exec(
+            compose_project=self._compose_project,
+            compose_file=self._compose_file,
+            cli_args=["ccusage", str(self._source), "daily", "--json", "--offline"],
+            source="usage",
+            label="ccusage",
+        )
+        result = await self._collector._runner.run_streaming(
+            invocation.args,
+            wall_timeout_seconds=self._collector._command_timeout_seconds,
+            idle_timeout_seconds=self._collector._command_timeout_seconds,
+        )
+        if result.reason_code in (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON):
+            return None, REASON_TIMEOUT, None
+        if not result.ok:
+            failure_reason = (
+                REASON_UNAVAILABLE if _is_missing_binary(result) else REASON_COMMAND_FAILED
+            )
+            return None, failure_reason, None
+        usage, reason = normalize_ccusage_json(result.stdout)
+        model = usage.model if usage is not None else None
+        return usage, reason, model

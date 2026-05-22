@@ -37,6 +37,7 @@ from awf.service.provider_recovery import (
     ProviderRecoveryStateView,
     provider_recovery_state_for_workspace,
 )
+from awf.service.usage_store import USAGE_SOURCE, read_latest_usage_snapshot
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -556,6 +557,58 @@ def workspace_lifecycle_summary(
 
 
 def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
+    """Resolve usage for a workspace, preferring ccusage snapshots.
+
+    Tiers (highest precedence first):
+    1. A ccusage snapshot with metrics → trusted live/final usage.
+    2. Operation-provided usage aggregation → compatibility fallback.
+    3. A ccusage snapshot without metrics → surface its reason code so the
+       console can show *why* usage is unavailable.
+    4. ``usage_not_reported``.
+    """
+
+    snapshot = read_latest_usage_snapshot(getattr(workspace, "id", None))
+    if snapshot is not None and snapshot.has_metrics:
+        return LlmUsageSummary(
+            input_tokens=snapshot.input_tokens,
+            output_tokens=snapshot.output_tokens,
+            total_tokens=snapshot.total_tokens,
+            cost_estimate=snapshot.cost_estimate,
+            currency=snapshot.currency,
+            status="available",
+            source=USAGE_SOURCE,
+            reason=snapshot.reason,
+        )
+
+    operations_summary = _operations_usage_summary(workspace)
+    if operations_summary is not None:
+        return operations_summary
+
+    if snapshot is not None:
+        return LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source=USAGE_SOURCE,
+            reason=snapshot.reason or "usage_not_reported",
+        )
+
+    return LlmUsageSummary(
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        cost_estimate=None,
+        currency=None,
+        status="unavailable",
+        source="none",
+        reason="usage_not_reported",
+    )
+
+
+def _operations_usage_summary(workspace: Workspace) -> LlmUsageSummary | None:
     input_tokens = None
     output_tokens = None
     total_tokens = None
@@ -630,16 +683,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
         and total_tokens is None
         and cost_estimate is None
     ):
-        return LlmUsageSummary(
-            input_tokens=None,
-            output_tokens=None,
-            total_tokens=None,
-            cost_estimate=None,
-            currency=None,
-            status="unavailable",
-            source="none",
-            reason="usage_not_reported",
-        )
+        return None
 
     return LlmUsageSummary(
         input_tokens=input_tokens,

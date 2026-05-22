@@ -160,6 +160,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             config: object,
             pr_monitor_factory: object,
             log_store: object,
+            usage_sampler: object = None,
         ) -> None:
             created["executor"] = self
             created["executor_session_factory"] = session_factory
@@ -170,6 +171,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["executor_config"] = config
             created["executor_monitor_factory"] = pr_monitor_factory
             created["executor_log_store"] = log_store
+            created["executor_usage_sampler"] = usage_sampler
 
     class _ControlWorker:
         def __init__(
@@ -258,6 +260,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["stack_auth_mount_resolver"].workspace_owner_gid == 1000
     assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
     assert created["executor_log_store"] is created["validation_log_store"]
+    assert created["executor_usage_sampler"].__class__ is worker_mod.CcusageCollector
+    assert created["executor_usage_sampler"]._runner is created["executor_runner"]
+    assert created["executor_usage_sampler"]._work_dir == work_dir
     assert created["log_root"] == work_dir / "logs"
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"
     assert created["executor_config"].worktrees_root == work_dir / "git" / "worktrees"
