@@ -926,7 +926,6 @@ async def test_retry_agent_idle_timeout_auto_salvages_implementation_diff(
     assert "Continue from the recovered implementation" in retried.task_prompt
     assert operations[0].payload["source_reason_code"] == timeout_reason
     assert operations[0].payload["recovery_strategy"] == "continue_from_timeout_salvage"
-    assert operations[0].payload["salvage_kind"] == "agent_timeout"
     assert operations[0].payload["conformance_salvage"] == salvage
     assert operations[0].result["source_reason_code"] == timeout_reason
     assert operations[0].result["conformance_salvage"] == salvage

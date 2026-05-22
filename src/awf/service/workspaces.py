@@ -1936,7 +1936,6 @@ def _agent_timeout_salvage_recovery_payload(
         "source_reason_code": context.reason_code,
         "recovery_strategy": "continue_from_timeout_salvage",
         "conformance_salvage": dict(salvage),
-        "salvage_kind": "agent_timeout",
         "agent_timeout_evidence_ref": context.evidence_ref,
     }
     message = _optional_retry_evidence_str(context.evidence.get("message"))
