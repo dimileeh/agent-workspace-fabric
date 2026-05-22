@@ -6233,6 +6233,93 @@ class TestRunOnceExecution:
             )
 
     @pytest.mark.unit
+    async def test_stale_monitor_stays_tracked_as_draining_until_stopped(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # cancel() is cooperative: a wedged monitor coroutine can keep running
+        # after reconcile cancels it. The slot must free for OTHER workspaces,
+        # but the cancelled task must stay tracked so a fresh dispatch for the
+        # SAME workspace is blocked until it truly stops.
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "wedged-monitor")
+        executor = _BlockingMonitorExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+        monitor_task: asyncio.Task[None] | None = None
+        try:
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+            )
+            await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
+            assert worker._available_execution_slots() == 0  # noqa: SLF001
+
+            # The workspace leaves monitoring_pr, so the resume is now stale.
+            async with session_factory() as s:
+                await s.execute(
+                    update(Workspace)
+                    .where(Workspace.id == monitor_id)
+                    .values(status=WorkspaceStatus.ready.value)
+                )
+                await s.commit()
+
+            # Drive reconcile directly (not via run_once): there is no await
+            # between cancel() and its return, so we observe the task mid-drain
+            # before the cooperative cancellation can run to completion.
+            with structlog.testing.capture_logs() as captured:
+                await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+
+            assert any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                and event.get("workspace_id") == monitor_id
+                for event in captured
+            )
+            # Cancellation was requested but the coroutine has not stopped yet.
+            assert monitor_task.cancelling() > 0
+            assert not monitor_task.done()
+            # The task stays tracked under its workspace_id, reclassified as draining.
+            assert worker._execution_tasks[monitor_id] is monitor_task  # noqa: SLF001
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.MONITOR_DRAINING
+            )
+            # Same-workspace dispatch stays blocked while it drains ...
+            assert worker._dispatchable_execution_ids([monitor_id], limit=1) == []  # noqa: SLF001
+            # ... yet the slot is excluded from accounting, so it frees for others.
+            assert worker._available_execution_slots() == 1  # noqa: SLF001
+
+            # A second reconcile pass leaves the already-draining task alone:
+            # no re-cancel and no duplicate warning.
+            with structlog.testing.capture_logs() as second_pass:
+                await worker._reconcile_stale_monitor_execution_tasks()  # noqa: SLF001
+            assert not any(
+                event.get("event") == "worker.stale_monitor_execution_task_cancelled"
+                for event in second_pass
+            )
+            assert (
+                worker._execution_task_kinds[monitor_id]  # noqa: SLF001
+                is worker_module._ExecutionTaskKind.MONITOR_DRAINING
+            )
+        finally:
+            executor.release.set()
+            if monitor_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(monitor_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
+
+    @pytest.mark.unit
     async def test_healthy_monitor_still_monitoring_pr_is_not_cancelled(
         self,
         session_factory: async_sessionmaker[AsyncSession],

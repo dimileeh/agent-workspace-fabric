@@ -321,6 +321,12 @@ class _ExecutionTaskKind(StrEnum):
     MONITOR_RESUME = "monitor_resume"
     READY = "ready"
     PRESERVED_ACTIVE = "preserved_active"
+    # A monitor resume that reconcile has cancelled but whose coroutine has not
+    # yet stopped. Cancellation is cooperative, so the task can keep running
+    # after ``cancel()`` returns. We keep it tracked under its workspace_id so a
+    # fresh dispatch for the *same* workspace stays blocked, but exclude it from
+    # the slot budget so it does not starve *other* workspaces.
+    MONITOR_DRAINING = "monitor_draining"
 
 
 # Emit ``worker.execution_slots_saturated`` every Nth consecutive idle cycle in
@@ -732,7 +738,9 @@ class ControlWorker:
         """Wait for ready execution or monitor-resume tasks started by this worker."""
         while self._execution_tasks:
             tasks = tuple(self._execution_tasks.values())
-            await asyncio.gather(*tasks)
+            # A cancelled monitor that is still draining stays tracked here, so
+            # swallow its CancelledError rather than aborting the drain wait.
+            await asyncio.gather(*tasks, return_exceptions=True)
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task.done():
                     self._execution_tasks.pop(workspace_id, None)
@@ -4464,8 +4472,19 @@ class ControlWorker:
         )
         return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    def _draining_execution_task_count(self) -> int:
+        return sum(
+            1
+            for kind in self._execution_task_kinds.values()
+            if kind is _ExecutionTaskKind.MONITOR_DRAINING
+        )
+
     def _available_execution_slots(self) -> int:
-        return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
+        # Draining tasks (cancelled monitors not yet stopped) stay tracked for
+        # same-workspace dedup but must not count against the slot budget, or a
+        # wedged monitor would keep starving other workspaces (issue #276).
+        occupied = len(self._execution_tasks) - self._draining_execution_task_count()
+        return max(0, self._config.max_concurrent_executions - occupied)
 
     def _can_dispatch_execution_when_slot_available(self) -> bool:
         return self._executor is not None and self._config.max_concurrent_executions > 0
@@ -4566,11 +4585,16 @@ class ControlWorker:
 
         A wedged monitor resume coroutine keeps occupying an execution slot
         forever. Once its workspace row is gone or has transitioned away from
-        ``monitoring_pr`` the resume is stale, so we cancel it and free the slot
-        synchronously in the current ``run_once`` (the done-callback alone runs
-        asynchronously and would not free the slot before ready dispatch). Only
-        ``MONITOR_RESUME`` tasks are inspected, so ready/preserved-active
-        executions are never touched here.
+        ``monitoring_pr`` the resume is stale, so we cancel it and reclassify it
+        as ``MONITOR_DRAINING``. Reclassifying frees its slot for *other*
+        workspaces synchronously in the current ``run_once`` (the slot budget
+        excludes draining tasks) while keeping the task tracked under its
+        workspace_id. ``cancel()`` is cooperative, so the coroutine can keep
+        running afterwards; retaining the tracking reference keeps slot dedup
+        blocking a fresh dispatch for the *same* workspace until it truly stops,
+        and the existing done-callback drops it once it does. Only
+        ``MONITOR_RESUME`` tasks are inspected, so ready/preserved-active and
+        already-draining executions are never touched here.
         """
         monitor_ids = self._tracked_monitor_workspace_ids()
         if not monitor_ids:
@@ -4590,8 +4614,7 @@ class ControlWorker:
                 status=status,
             )
             task.cancel()
-            self._execution_tasks.pop(workspace_id, None)
-            self._execution_task_kinds.pop(workspace_id, None)
+            self._execution_task_kinds[workspace_id] = _ExecutionTaskKind.MONITOR_DRAINING
 
     def _update_execution_slot_saturation(self, *, dispatched: int) -> None:
         saturated = (
