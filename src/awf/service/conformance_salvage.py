@@ -35,12 +35,16 @@ _GIT_TIMEOUT_SECONDS = 30.0
 
 
 class CompletedProcessLike(Protocol):
+    """Protocol describing the small git subprocess result contract."""
+
     returncode: int
     stdout: str
     stderr: str
 
 
 class SubprocessRun(Protocol):
+    """Protocol for a subprocess runner used by salvage operations."""
+
     def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
@@ -50,11 +54,15 @@ class SubprocessRun(Protocol):
         text: Literal[True],
         timeout: float,
         env: Mapping[str, str],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike:
+        """Execute subprocess command and return a captured result."""
+        ...
 
 
 @dataclass(frozen=True)
 class ConformanceSalvageCapture:
+    """Captures a salvage operation's metadata and artifact location."""
+
     source_workspace_id: str
     source_base_commit: str
     patch_path: Path
@@ -71,6 +79,7 @@ class ConformanceSalvageCapture:
     report_path: str | None = None
 
     def as_policy(self) -> dict[str, Any]:
+        """Convert capture metadata into a plan-policy payload."""
         payload: dict[str, Any] = {
             "status": "captured",
             "source_workspace_id": self.source_workspace_id,
@@ -96,6 +105,8 @@ class ConformanceSalvageCapture:
 
 
 class ConformanceSalvageError(Exception):
+    """Raised when salvage capture or validation fails."""
+
     def __init__(
         self,
         *,
@@ -103,6 +114,7 @@ class ConformanceSalvageError(Exception):
         message: str,
         detail: dict[str, Any] | None = None,
     ) -> None:
+        """Initialise an error with machine-readable salvage metadata."""
         self.reason_code = reason_code
         self.detail = detail or {}
         super().__init__(message)
@@ -119,6 +131,7 @@ def capture_conformance_salvage(
     source_remote_push_branch: str | None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ConformanceSalvageCapture:
+    """Capture a salvage patch and metadata from a failed workspace run."""
     if not source_base_commit:
         raise ConformanceSalvageError(
             reason_code=SALVAGE_BASE_UNAVAILABLE,
@@ -243,18 +256,39 @@ def build_conformance_salvage_retry_prompt(
     evidence: Mapping[str, Any],
     salvage: Mapping[str, Any],
 ) -> str:
-    implementation_paths = _string_list(salvage.get("implementation_paths"))
-    paths = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
-    if len(implementation_paths) > 20:
-        paths += f"\n- ... and {len(implementation_paths) - 20} more"
+    """Build a retry prompt that replays recovered conformance implementation diffs."""
+    paths = _implementation_path_lines(salvage)
     return (
         "## Automatic AWF salvage\n\n"
         "AWF automatically captured the prior implementation diff from the failed "
         "conformance attempt. The retry workspace will restore that diff before "
         "the agent runs. Continue from the recovered implementation; do not "
         "restart from scratch unless the recovered code is unusable.\n\n"
-        f"### Salvaged implementation paths\n{paths or '- No paths recorded.'}\n\n"
+        f"### Salvaged implementation paths\n{paths}\n\n"
         + build_conformance_retry_prompt(task_prompt=task_prompt, evidence=evidence)
+    )
+
+
+def build_agent_timeout_salvage_retry_prompt(
+    *,
+    task_prompt: str,
+    evidence: Mapping[str, Any],
+    salvage: Mapping[str, Any],
+) -> str:
+    """Build a retry prompt for timeout recovery with recovered implementation diff."""
+    reason_code = _optional_str(evidence.get("reason_code")) or "AGENT_IDLE_TIMEOUT"
+    message = _optional_str(evidence.get("message"))
+    message_line = f"\n\n### Timeout message\n{message[:1000]}" if message else ""
+    return (
+        "## Automatic AWF timeout salvage\n\n"
+        "AWF automatically captured the prior implementation diff from an agent "
+        "run that timed out before it could finish. The retry workspace will "
+        "restore that diff before the agent runs. Continue from the recovered "
+        "implementation; do not restart from scratch unless the recovered code "
+        "is unusable.\n\n"
+        f"### Source reason\n`{reason_code}`{message_line}\n\n"
+        f"### Salvaged implementation paths\n{_implementation_path_lines(salvage)}\n\n"
+        f"### Original task\n{task_prompt}\n"
     )
 
 
@@ -265,12 +299,10 @@ def build_conformance_salvage_conflict_prompt(
     agent_patch_path: str,
     apply_error: str,
 ) -> str:
+    """Build a prompt that guides a conflict-resolution retry attempt."""
     gaps = _string_list(salvage.get("remaining_gaps"))
     gap_lines = "\n".join(f"- {gap}" for gap in gaps) or "- Re-check conformance evidence."
-    implementation_paths = _string_list(salvage.get("implementation_paths"))
-    path_lines = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
-    if len(implementation_paths) > 20:
-        path_lines += f"\n- ... and {len(implementation_paths) - 20} more"
+    path_lines = _implementation_path_lines(salvage)
     return (
         "## Automatic AWF salvage conflict\n\n"
         "AWF captured the prior implementation diff, but it could not be applied "
@@ -278,7 +310,7 @@ def build_conformance_salvage_conflict_prompt(
         "use the salvage patch as source material, resolve the conflict against "
         "the current base, and finish the original conformance gaps.\n\n"
         f"### Salvage patch\n`{agent_patch_path}`\n\n"
-        f"### Salvaged implementation paths\n{path_lines or '- No paths recorded.'}\n\n"
+        f"### Salvaged implementation paths\n{path_lines}\n\n"
         f"### Remaining conformance gaps\n{gap_lines}\n\n"
         f"### Apply error\n{apply_error[:2000] or 'git apply --check failed.'}\n\n"
         f"### Original task\n{task_prompt}\n"
@@ -288,6 +320,7 @@ def build_conformance_salvage_conflict_prompt(
 def conformance_salvage_from_task_policy(
     task_policy: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """Extract conformance-salvage metadata from a task policy blob."""
     if not isinstance(task_policy, Mapping):
         return None
     value = task_policy.get(CONFORMANCE_SALVAGE_POLICY_KEY)
@@ -302,6 +335,7 @@ def _run_git(
     env: Mapping[str, str],
     failure_reason: str = SALVAGE_SOURCE_UNAVAILABLE,
 ) -> CompletedProcessLike:
+    """Run a git command for salvage with deterministic timeout and failure mapping."""
     result = run(
         ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
         check=False,
@@ -323,10 +357,12 @@ def _run_git(
 
 
 def _git_lines(value: str) -> list[str]:
+    """Split git output into a sorted list of non-empty changed paths."""
     return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
 def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    """Convert salvage evidence gaps into a stable list of non-empty strings."""
     value = evidence.get("gaps")
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -336,12 +372,23 @@ def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _string_list(value: object) -> list[str]:
+    """Return a filtered list of strings, dropping non-string and empty values."""
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and item]
 
 
+def _implementation_path_lines(salvage: Mapping[str, Any]) -> str:
+    """Format captured implementation paths as prompt bullet lines with truncation."""
+    implementation_paths = _string_list(salvage.get("implementation_paths"))
+    paths = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
+    if len(implementation_paths) > 20:
+        paths += f"\n- ... and {len(implementation_paths) - 20} more"
+    return paths or "- No paths recorded."
+
+
 def _optional_str(value: object) -> str | None:
+    """Normalize an optional string value to ``str`` or ``None``."""
     if not isinstance(value, str):
         return None
     stripped = value.strip()

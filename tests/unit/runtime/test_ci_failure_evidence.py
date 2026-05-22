@@ -69,6 +69,26 @@ def test_ci_failure_evidence_suggests_generic_repro_when_pytest_command_is_unava
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
+    valid_node_id = "tests/unit/test_example.py::test_valid_failure"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "FAILED:tests/unit/test_example.py::test_glued_prefix - AssertionError",
+                f"FAILED {valid_node_id} - AssertionError",
+            ]
+        ),
+        check_name="unit",
+    )
+
+    assert evidence.test_node_ids == (valid_node_id,)
+    assert evidence.suggested_repro_commands == (
+        f"uv run --python 3.12 --extra dev pytest {valid_node_id} -q",
+    )
+
+
+@pytest.mark.unit
 def test_ci_failure_repro_command_skips_non_pytest_commands() -> None:
     assert (
         ci_failure_evidence._pytest_repro_command(  # noqa: SLF001
@@ -181,6 +201,75 @@ def test_ci_failure_evidence_bounds_and_quotes_multiple_node_ids_with_known_comm
     assert evidence.test_node_ids == tuple(node_ids)
     assert evidence.suggested_repro_commands == (f"python -m pytest {quoted} -q",)
     assert node_ids[-1] not in evidence.suggested_repro_commands[0]
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_scans_noisy_malformed_pytest_lines_in_bounded_time() -> None:
+    valid_node_id = "tests/unit/runtime/test_prompt.py::test_keeps_working"
+    malformed_node = "tests/unit/runtime/test_prompt.py::" + ("case" * 2000)
+    noisy_line = f"Backend CI\tRun tests\tFAILED {malformed_node} " + " ".join(
+        f"package_{index}-1.0.0" for index in range(400)
+    )
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                noisy_line,
+                f"FAILED {valid_node_id} - AssertionError: boom",
+            ]
+        ),
+        check_name="Backend CI",
+    )
+
+    assert evidence.test_node_ids == (valid_node_id,)
+    assert evidence.suggested_repro_commands == (
+        f"uv run --python 3.12 --extra dev pytest {valid_node_id} -q",
+    )
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_linear_scanner_preserves_bracketed_parameters() -> None:
+    node_ids = [
+        "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        "pkg/tests/test_api.py::TestApi::test_nested[a - b]",
+        "tests/unit/runtime/test_prompt.py::test_handles[(a)]",
+        "pkg/tests/test_api.py::TestApi::test_with_angle<id><x>",
+    ]
+    line = " and ".join(f"`{node_id}`" for node_id in node_ids)
+
+    assert ci_failure_evidence._pytest_node_candidates(line) == node_ids  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_rejects_unterminated_bracketed_node_ids() -> None:
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "FAILED tests/unit/runtime/test_prompt.py::test_handles[param - truncated",
+                "FAILED tests/unit/runtime/test_prompt.py::test_alpha - AssertionError: boom",
+            ]
+        ),
+        check_name="unit",
+    )
+
+    assert evidence.test_node_ids == ("tests/unit/runtime/test_prompt.py::test_alpha",)
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_rejects_wrapped_pytest_node_ids() -> None:
+    line = "Failed: (tests/unit/runtime/test_prompt.py::test_x), and {tests/unit/runtime/test_prompt.py::test_y}"
+
+    assert ci_failure_evidence._pytest_node_candidates(line) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_pytest_node_boundary_rejects_unsupported_scanner_stop() -> None:
+    with pytest.raises(AssertionError, match="unsupported pytest node boundary"):
+        ci_failure_evidence._has_pytest_node_boundary(  # noqa: SLF001
+            "tests/unit/runtime/test_prompt.py::test_x/",
+            0,
+            len("tests/unit/runtime/test_prompt.py::test_x"),
+        )
 
 
 @pytest.mark.unit

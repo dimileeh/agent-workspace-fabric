@@ -10,14 +10,6 @@ from dataclasses import dataclass
 from awf.common.redaction import redact_secrets
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
-_PYTEST_NODE_PATH = r"[^\s:]+\.py"
-_PYTEST_NODE_RE = re.compile(
-    rf"(?<!\S)(?P<node>{_PYTEST_NODE_PATH}(?:::{_PYTEST_NODE_COMPONENT})+)(?=\s+-\s+|$)"
-)
-_FAILED_PYTEST_NODE_RE = re.compile(
-    rf"\bFAILED\s+(?P<node>{_PYTEST_NODE_PATH}(?:::{_PYTEST_NODE_COMPONENT})+)(?:\s+-\s+|$)"
-)
 _RUFF_DIAGNOSTIC_RE = re.compile(r"\b(?:src|tests)/[^\s:]+\.py:\d+:\d+:")
 _COMMAND_MARKERS = (
     "uv run ",
@@ -28,6 +20,10 @@ _COMMAND_MARKERS = (
     "mypy ",
     "npm ",
 )
+_PYTEST_NODE_END_DELIMITERS = {",", ";", ")", "`", "'", '"'}
+_PYTEST_NODE_PREFIX_DELIMITERS = "([{<"
+_PYTEST_NODE_SUFFIX_DELIMITERS = ")]}>"
+_PYTEST_NODE_QUOTE_DELIMITERS = {"`", "'", '"'}
 _MAX_TEST_NODES = 20
 _MAX_REPRO_NODES = 5
 _MAX_COMMANDS = 5
@@ -107,13 +103,90 @@ def _truncate_line(line: str) -> str:
 def _extract_test_nodes(lines: Iterable[str]) -> list[str]:
     nodes: list[str] = []
     for line in lines:
-        failed_match = _FAILED_PYTEST_NODE_RE.search(line)
-        if failed_match:
-            nodes.append(failed_match.group("node").strip())
-            continue
-        for match in _PYTEST_NODE_RE.finditer(line):
-            nodes.append(_strip_node_suffix(match.group("node")))
+        nodes.extend(_pytest_node_candidates(line))
     return nodes
+
+
+def _pytest_node_candidates(line: str) -> list[str]:
+    """Extract pytest node ids with a linear scan.
+
+    CI logs are untrusted text. A previous nested-regex extractor could spend
+    unbounded CPU on long GitHub Actions lines before the PR monitor even logged
+    its decision. This scanner only looks around ``.py::`` anchors and walks
+    each line forward once.
+    """
+
+    if ".py::" not in line:
+        return []
+
+    nodes: list[str] = []
+    search_from = 0
+    while True:
+        anchor = line.find(".py::", search_from)
+        if anchor < 0:
+            break
+
+        start = anchor
+        while start > 0 and _is_pytest_path_char(line[start - 1]):
+            start -= 1
+
+        end = anchor + len(".py::")
+        bracket_depth = 0
+        while end < len(line):
+            char = line[end]
+            if char == "[":
+                bracket_depth += 1
+            elif char == "]" and bracket_depth > 0:
+                bracket_depth -= 1
+            elif bracket_depth == 0 and (char.isspace() or char in _PYTEST_NODE_END_DELIMITERS):
+                break
+            end += 1
+
+        candidate = _strip_node_suffix(line[start:end].strip("`'\""))
+        if (
+            bracket_depth == 0
+            and _has_pytest_node_boundary(line, start, end)
+            and _looks_like_pytest_node(candidate)
+        ):
+            nodes.append(candidate)
+        search_from = max(end, anchor + len(".py::"))
+
+    return nodes
+
+
+def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
+    if start > 0:
+        char = line[start - 1]
+        if char in _PYTEST_NODE_PREFIX_DELIMITERS:
+            return False
+        if not char.isspace() and char not in _PYTEST_NODE_QUOTE_DELIMITERS:
+            return False
+    if end >= len(line):
+        return True
+    char = line[end]
+    if char in _PYTEST_NODE_SUFFIX_DELIMITERS:
+        return False
+    if char in _PYTEST_NODE_END_DELIMITERS:
+        return True
+    if char.isspace():
+        rest = line[end:].lstrip()
+        return not rest or rest.startswith("- ")
+    raise AssertionError(f"unsupported pytest node boundary: {char!r}")
+
+
+def _is_pytest_path_char(char: str) -> bool:
+    return char.isalnum() or char in "/._-"
+
+
+def _looks_like_pytest_node(candidate: str) -> bool:
+    path, separator, test_part = candidate.partition(".py::")
+    if not separator or not path or not test_part:
+        return False
+    if path and path[0] in _PYTEST_NODE_PREFIX_DELIMITERS:
+        return False
+    if any(char.isspace() for char in path):
+        return False
+    return "://" not in path
 
 
 def _strip_node_suffix(node: str) -> str:
