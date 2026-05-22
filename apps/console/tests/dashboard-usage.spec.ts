@@ -75,7 +75,10 @@ test("dashboard renders ccusage-backed totals and source label", async ({ page }
 
   await page.getByText("Ccusage Workspace", { exact: true }).first().click();
 
-  const usageBlock = page.locator("section").filter({ hasText: "LLM usage" }).first();
+  // Scope to the usage block itself: the surrounding details section also
+  // carries the workspace title/id/branch ("Ccusage Workspace", "ws_ccusage"),
+  // which would otherwise trip strict-mode on a substring match for "ccusage".
+  const usageBlock = page.getByTestId("llm-usage");
   await expect(usageBlock).toBeVisible();
   await expect(usageBlock.getByText("333", { exact: true })).toBeVisible();
   // The ccusage source is surfaced as a friendly provenance label.

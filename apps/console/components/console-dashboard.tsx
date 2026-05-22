@@ -2297,7 +2297,7 @@ function UsageSummaryBlock({
 
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (
-      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
         <div className="flex items-center justify-between gap-2">
           <span className="font-semibold text-slate-900">LLM usage</span>
           <Badge value="unavailable" />
@@ -2309,7 +2309,7 @@ function UsageSummaryBlock({
     );
   }
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">LLM usage</span>
         <div className="flex items-center gap-1.5">
