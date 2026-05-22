@@ -6320,6 +6320,67 @@ class TestRunOnceExecution:
             )
 
     @pytest.mark.unit
+    async def test_draining_exclusion_is_capped_to_bound_in_flight_coroutines(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # cancel() is cooperative, so wedged monitors can keep running as
+        # MONITOR_DRAINING tasks indefinitely. Draining tasks are excluded from
+        # the slot budget (issue #276) so a wedged monitor does not starve other
+        # workspaces -- but that exclusion is capped at max_concurrent_executions.
+        # A flood of stale-and-wedged monitors must NOT let dispatch run unbounded
+        # past the budget, or in-flight coroutines could exhaust runtime resources.
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=2,
+            ),
+        )
+
+        stop = asyncio.Event()
+        tasks: list[asyncio.Task[None]] = []
+
+        def _add_draining(workspace_id: str) -> None:
+            async def _pending() -> None:
+                await stop.wait()
+
+            task = asyncio.create_task(_pending(), name=workspace_id)
+            tasks.append(task)
+            worker._track_execution_task(  # noqa: SLF001
+                workspace_id,
+                task,
+                kind=worker_module._ExecutionTaskKind.MONITOR_DRAINING,  # noqa: SLF001
+            )
+
+        try:
+            # Up to the budget, every wedged monitor still frees its slot so other
+            # workspaces keep moving (issue #276): 1 then 2 draining -> 2 free.
+            _add_draining("drain-1")
+            assert worker._available_execution_slots() == 2  # noqa: SLF001
+            _add_draining("drain-2")
+            assert worker._available_execution_slots() == 2  # noqa: SLF001
+
+            # Beyond the budget the exclusion is capped, so surplus draining tasks
+            # count as occupied. (The uncapped behavior would still report 2 free
+            # here no matter how many monitors wedged.) This bounds total in-flight
+            # coroutines at 2x the budget: available reaches 0 and stays there.
+            _add_draining("drain-3")
+            assert worker._available_execution_slots() == 1  # noqa: SLF001
+            _add_draining("drain-4")
+            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            _add_draining("drain-5")
+            assert worker._available_execution_slots() == 0  # noqa: SLF001
+        finally:
+            stop.set()
+            for task in tasks:
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.unit
     async def test_healthy_monitor_still_monitoring_pr_is_not_cancelled(
         self,
         session_factory: async_sessionmaker[AsyncSession],

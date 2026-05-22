@@ -4490,10 +4490,20 @@ class ControlWorker:
 
     def _available_execution_slots(self) -> int:
         # Draining tasks (cancelled monitors not yet stopped) stay tracked for
-        # same-workspace dedup but must not count against the slot budget, or a
-        # wedged monitor would keep starving other workspaces (issue #276).
-        occupied = len(self._execution_tasks) - self._draining_execution_task_count()
-        return max(0, self._config.max_concurrent_executions - occupied)
+        # same-workspace dedup but are excluded from the slot budget so a wedged
+        # monitor does not keep starving other workspaces (issue #276).
+        #
+        # That exclusion is capped, though: cancel() is cooperative, so a steady
+        # supply of stale-and-wedged monitors could otherwise accumulate draining
+        # coroutines without bound and let dispatch run arbitrarily far past the
+        # budget, exhausting runtime resources. Excluding at most
+        # max_concurrent_executions draining tasks bounds total in-flight
+        # coroutines at 2x the budget; beyond that, surplus draining tasks count
+        # as occupied and throttle fresh dispatch until they truly stop.
+        max_executions = self._config.max_concurrent_executions
+        excluded_draining = min(self._draining_execution_task_count(), max_executions)
+        occupied = len(self._execution_tasks) - excluded_draining
+        return max(0, max_executions - occupied)
 
     def _can_dispatch_execution_when_slot_available(self) -> bool:
         return self._executor is not None and self._config.max_concurrent_executions > 0
