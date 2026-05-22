@@ -2190,6 +2190,62 @@ def test_workspace_usage_summary_usage_not_reported_when_nothing_available(
     assert usage.reason == "usage_not_reported"
 
 
+@pytest.mark.unit
+def test_workspace_usage_summary_uses_prefetched_snapshot_without_disk_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When a list endpoint has pre-read snapshots off-thread, the summary must
+    # consult that map and not block the event loop with a per-workspace read.
+    def _fail_disk_read(_workspace_id: object) -> object:
+        raise AssertionError("read_latest_usage_snapshot must not run when id is prefetched")
+
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", _fail_disk_read
+    )
+    snapshot = _usage_snapshot(workspace_id="ws_pf", total_tokens=42)
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_pf": snapshot}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_pf", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.total_tokens == 42
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_prefetched_none_skips_disk_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A prefetched ``None`` (snapshot already read off-thread as absent/invalid)
+    # is honored as "no snapshot" without a redundant disk read.
+    def _fail_disk_read(_workspace_id: object) -> object:
+        raise AssertionError("read_latest_usage_snapshot must not run when id is prefetched")
+
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", _fail_disk_read
+    )
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_pf": None}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_pf", operations=[]))
+
+    assert usage.source == "none"
+    assert usage.reason == "usage_not_reported"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_falls_back_to_disk_when_id_absent_from_prefetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An id missing from the prefetch map is distinct from a cached ``None``: it
+    # must still fall back to a direct read rather than be treated as absent.
+    snapshot = _usage_snapshot(workspace_id="ws_other", total_tokens=9)
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_present": None}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_other", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.total_tokens == 9
+
+
 class TestWorkspacePricingMetadata:
     @pytest.mark.unit
     def test_returns_none_when_no_pricing_stanza(self) -> None:

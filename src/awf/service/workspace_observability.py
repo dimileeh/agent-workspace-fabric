@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, TypedDict, cast
@@ -37,7 +40,12 @@ from awf.service.provider_recovery import (
     ProviderRecoveryStateView,
     provider_recovery_state_for_workspace,
 )
-from awf.service.usage_store import USAGE_SOURCE, read_latest_usage_snapshot
+from awf.service.usage_store import (
+    USAGE_SOURCE,
+    UsageSnapshot,
+    read_latest_usage_snapshot,
+    read_latest_usage_snapshots,
+)
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -265,8 +273,11 @@ async def list_workspace_overview_response(
     )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
+    snapshots = await asyncio.to_thread(read_latest_usage_snapshots, [ws.id for ws in page_rows])
+    with prefetched_usage_snapshots(snapshots):
+        items = [_workspace_overview_item(ws) for ws in page_rows]
     return WorkspaceOverviewListResponse(
-        items=[_workspace_overview_item(ws) for ws in page_rows],
+        items=items,
         next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
         has_more=has_more,
         limit=limit,
@@ -556,6 +567,43 @@ def workspace_lifecycle_summary(
     return summaries
 
 
+# Request-scoped map of pre-read usage snapshots keyed by workspace id. List
+# endpoints populate it (off the event loop) so the synchronous projection below
+# does not block the loop with one file read per workspace; see
+# ``prefetched_usage_snapshots``.
+_PREFETCHED_USAGE_SNAPSHOTS: ContextVar[Mapping[str, UsageSnapshot | None] | None] = ContextVar(
+    "awf_prefetched_usage_snapshots", default=None
+)
+
+
+@contextmanager
+def prefetched_usage_snapshots(
+    snapshots: Mapping[str, UsageSnapshot | None],
+) -> Iterator[None]:
+    """Scope a request-local map of pre-read usage snapshots for this task.
+
+    ``workspace_usage_summary`` consults this map first, so a list endpoint can
+    read every workspace's snapshot once in a worker thread (keeping the
+    blocking file I/O off the async event loop) instead of doing a synchronous
+    read per workspace on the loop. Outside this scope, or for an id absent from
+    the map, the summary falls back to a direct disk read — the map is a pure
+    optimization, never a correctness dependency.
+    """
+
+    token = _PREFETCHED_USAGE_SNAPSHOTS.set(snapshots)
+    try:
+        yield
+    finally:
+        _PREFETCHED_USAGE_SNAPSHOTS.reset(token)
+
+
+def _resolve_usage_snapshot(workspace_id: str | None) -> UsageSnapshot | None:
+    prefetched = _PREFETCHED_USAGE_SNAPSHOTS.get()
+    if prefetched is not None and workspace_id is not None and workspace_id in prefetched:
+        return prefetched[workspace_id]
+    return read_latest_usage_snapshot(workspace_id)
+
+
 def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     """Resolve usage for a workspace, preferring ccusage snapshots.
 
@@ -567,7 +615,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     4. ``usage_not_reported``.
     """
 
-    snapshot = read_latest_usage_snapshot(getattr(workspace, "id", None))
+    snapshot = _resolve_usage_snapshot(getattr(workspace, "id", None))
     if snapshot is not None and snapshot.has_metrics:
         return LlmUsageSummary(
             input_tokens=snapshot.input_tokens,

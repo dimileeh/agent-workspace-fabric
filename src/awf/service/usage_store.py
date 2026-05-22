@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -409,3 +410,24 @@ def read_latest_usage_snapshot(
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         _log.warning("usage.snapshot.invalid", workspace_id=workspace_id)
         return None
+
+
+def read_latest_usage_snapshots(
+    workspace_ids: Iterable[str | None], *, work_dir: str | Path | None = None
+) -> dict[str, UsageSnapshot | None]:
+    """Read the latest snapshot for several workspaces in one pass.
+
+    Designed to be offloaded to a worker thread (e.g. ``asyncio.to_thread``) so
+    list endpoints can take the per-workspace blocking file reads off the async
+    event loop. The work directory is resolved once and reused. Returns a map
+    keyed by workspace id (blank/``None`` ids and duplicates are skipped); each
+    value is the snapshot or ``None`` when absent/invalid.
+    """
+
+    resolved = _resolve_work_dir(work_dir)
+    snapshots: dict[str, UsageSnapshot | None] = {}
+    for workspace_id in workspace_ids:
+        if not workspace_id or workspace_id in snapshots:
+            continue
+        snapshots[workspace_id] = read_latest_usage_snapshot(workspace_id, work_dir=resolved)
+    return snapshots

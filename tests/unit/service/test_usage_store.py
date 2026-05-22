@@ -19,6 +19,7 @@ from awf.service.usage_store import (
     normalize_ccusage_json,
     provider_ccusage_source,
     read_latest_usage_snapshot,
+    read_latest_usage_snapshots,
     subtract_baseline,
     workspace_usage_dir,
     write_usage_snapshot,
@@ -422,6 +423,34 @@ def test_snapshot_serialization_contains_only_safe_keys(tmp_path: Path) -> None:
     assert ".jsonl" not in text
     assert "/home/" not in text
     assert "projects" not in text
+
+
+@pytest.mark.unit
+def test_read_latest_usage_snapshots_batch(tmp_path: Path) -> None:
+    base = {
+        "provider": "claude_code",
+        "ccusage_source": "claude",
+        "status": "available",
+        "phase": "final",
+        "captured_at": "2026-05-22T01:02:03+00:00",
+    }
+    write_usage_snapshot(
+        UsageSnapshot(workspace_id="ws_a", total_tokens=3, **base), work_dir=tmp_path
+    )
+    write_usage_snapshot(
+        UsageSnapshot(workspace_id="ws_b", total_tokens=7, **base), work_dir=tmp_path
+    )
+
+    # Blank/None ids are skipped and duplicates collapse to a single read.
+    result = read_latest_usage_snapshots(
+        ["ws_a", "ws_b", "ws_missing", None, "", "ws_a"], work_dir=tmp_path
+    )
+
+    assert set(result) == {"ws_a", "ws_b", "ws_missing"}
+    assert result["ws_a"] is not None and result["ws_a"].total_tokens == 3
+    assert result["ws_b"] is not None and result["ws_b"].total_tokens == 7
+    # An absent workspace is present in the map as None (read once, off-thread).
+    assert result["ws_missing"] is None
 
 
 @pytest.mark.unit
