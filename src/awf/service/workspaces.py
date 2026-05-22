@@ -1135,7 +1135,7 @@ def workspace_create_payload_matches(
 def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
     """Check stored auto-merge intent, treating legacy NULL as the old default."""
     stored = getattr(existing, "auto_merge", None)
-    return (stored is not False) == payload.task.auto_merge
+    return (stored is not False) == _effective_auto_merge(payload)
 
 
 def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:

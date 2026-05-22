@@ -69,6 +69,29 @@ def _v2_request(
     )
 
 
+def _release_sync_request(*, auto_merge: bool = True) -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
+        repo={
+            "url": "git@github.com:example/idempotency.git",
+            "base_branch": "main",
+            "source_branch": "development",
+        },
+        task={
+            "title": "Sync release PR",
+            "prompt": "Exercise serialized idempotency lookup.",
+            "agent": "codex",
+            "kind": "sync_release_pr",
+            "auto_merge": auto_merge,
+        },
+        workspace={"profile_ref": "auto", "profile": None},
+        validation={"commands": ["pytest -q"], "requested_tier": 1},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "idempotency serialization test fixture",
+        },
+    )
+
+
 def _record_idempotency_lock_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[str, str]]:
@@ -594,6 +617,28 @@ async def test_create_replay_conflicts_when_agent_effort_changes(
             request_with_xhigh_effort,
             idempotency_key=idempotency_key,
         )
+
+
+@pytest.mark.unit
+async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Release-PR sync persists auto_merge=False; a same-payload replay (which
+    still carries the request default auto_merge=True) must match instead of
+    raising a spurious idempotency conflict."""
+    service = WorkspaceService(factory)
+    request = _release_sync_request(auto_merge=True)
+    idempotency_key = "service-create-v2-release-sync-auto-merge"
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.auto_merge is False
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
 
 
 @pytest.mark.unit
