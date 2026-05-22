@@ -290,6 +290,7 @@ async def _seed_ready_workspace_with_recovery(
     operation_type: OperationType = OperationType.validate,
     resolved_profile: dict[str, Any] | None = None,
     recovery_payload_overrides: dict[str, Any] | None = None,
+    task_kind: str = "feature_branch_pr",
 ) -> str:
     """Insert a workspace already in ``ready`` with a pending `pr_monitor`
     validate operation — the shape the monitor's RECOVERY_DISPATCH path
@@ -306,6 +307,7 @@ async def _seed_ready_workspace_with_recovery(
             test_commands=["pytest -q"],
             requires_database=False,
             resolved_profile=resolved_profile,
+            task_kind=task_kind,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
         ws.branch_name = f"awf/{ws.id}"
@@ -821,6 +823,76 @@ async def test_operator_api_validate_only_recovery_skips_full_agent_path(
     assert operator_ops[0].status == OperationStatus.succeeded.value
     assert isinstance(operator_ops[0].result, dict)
     assert "validation_run_id" in operator_ops[0].result
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("task_kind", "expected_reason_code", "message_fragment"),
+    [
+        ("monitor_release_pr", "DEPRECATED_TASK_KIND", "deprecated"),
+        ("totally_made_up", "UNSUPPORTED_TASK_KIND", "unsupported task kind"),
+    ],
+)
+async def test_unsupported_task_kind_with_active_recovery_still_fails_fast(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    task_kind: str,
+    expected_reason_code: str,
+    message_fragment: str,
+) -> None:
+    """Deprecated/unknown task kinds must fail fast even with an active
+    recovery.
+
+    The recovery branch in ``execute`` skips ``_dispatch_non_feature_task_kind``;
+    without the unconditional ``_reject_unsupported_task_kind`` guard a
+    ``monitor_release_pr`` or unknown kind that re-entered with a pending
+    validate-only recovery would resume the validation path instead of being
+    rejected — the "silently run as feature work" scenario PR #278 forbids.
+    """
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        source="worker_restart",
+        task_kind=task_kind,
+    )
+
+    # Queue results that WOULD drive the validation path so the test fails
+    # loudly (a ValidationRun would be created) if the guard is bypassed.
+    _queue_validation_head(fake, head="d" * 40)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "policy_failure"
+    assert message_fragment in (ws.failure_message or "")
+    # The recovery validation path never ran.
+    assert runs == []
+    assert any(
+        event.event_type == "workspace.state_changed"
+        and event.reason_code == expected_reason_code
+        and event.old_state == WorkspaceStatus.running.value
+        and event.new_state == WorkspaceStatus.failed.value
+        for event in events
+    )
+    # The seeded recovery operation was never consumed/succeeded.
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "worker_restart"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status != OperationStatus.succeeded.value
 
 
 @pytest.mark.unit

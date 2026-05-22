@@ -216,10 +216,14 @@ Responsibilities:
 
 ### 5. dev → main: notification-only variant
 
-A new task shape `task_kind: "monitor_release_pr"` that:
+Selected by `auto_merge=False` (no dedicated task kind). To monitor an
+existing release/manual PR, adopt it via the PR-adoption flow with
+`auto_merge=false`; to open/maintain the `development → main` release PR
+automatically, use the `sync_release_pr` task kind. (The earlier
+`monitor_release_pr` task kind is deprecated and rejected.) This variant:
 
 - Does NOT clone a repo or run the initial coding agent.
-- Does NOT create a PR (one already exists).
+- Does NOT create a PR when adopting one that already exists.
 - Runs the same monitor loop against the supplied PR number, but with `auto_merge=False`.
 - On the `Merge` branch of the decision tree: posts a GitHub PR comment "All gates green — ready for human merge", records the ready-SHA, and keeps polling until the PR is actually merged or closed. Never calls `gh pr merge`.
 - If new comments arrive AFTER the "ready" notification but before human merge: re-enters the fix cycle as normal. The CLI still addresses them. New commits push. Checks re-run. The "ready" notification re-posts only when the ready-SHA advances, so the human isn't pinged per-poll.
@@ -327,7 +331,7 @@ would land in "ready but not merged" terminal state.
 - `mypy` / `ruff` clean.
 - Alembic migration up + down: new columns `pr_merge_sha`, `monitor_iter_count`, `monitor_threads_addressed`, `monitor_started_at` on `workspaces`.
 - Manual local run: schedule a small aira-agent task, wait for CodeRabbit + Cursor to comment, observe the workspace cycle through `monitoring_pr` and end in `completed` with the PR merged.
-- Manual release run: create a dev→main PR, schedule a `monitor_release_pr` task, verify a "ready to merge" comment appears when all gates are green and the PR is NOT merged.
+- Manual release run: schedule a `sync_release_pr` task (or adopt an existing dev→main PR with `auto_merge=false`), verify a "ready to merge" comment appears when all gates are green and the PR is NOT merged.
 
 ## Risks + mitigations
 

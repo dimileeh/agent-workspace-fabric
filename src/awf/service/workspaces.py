@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.api.schemas import (
+    PUBLIC_DIRECT_CREATE_TASK_KINDS,
     EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
@@ -44,7 +45,8 @@ from awf.common.audit import redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
     Operation,
@@ -190,7 +192,7 @@ RETRYABLE_WORKSPACE_STATUSES = (
 )
 MAX_CONFORMANCE_RETRY_ATTEMPTS = 4
 PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
-    {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
+    {TaskKind.sync_release_pr.value, TaskKind.sync_feature_pr.value}
 )
 _REDACTED_TEXT = "<redacted>"
 _IDEMPOTENCY_CONFLICT_MESSAGE = (
@@ -1020,6 +1022,7 @@ async def create_workspace_row(
     http_get: HttpGet | None = None,
 ) -> Workspace:
     """Persist one rich workspace create request without committing the session."""
+    _assert_supported_direct_create_task_kind(payload.task.kind)
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
@@ -1057,7 +1060,7 @@ async def create_workspace_row(
         task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
-        auto_merge=payload.task.auto_merge,
+        auto_merge=_effective_auto_merge(payload),
         initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
         agent=payload.task.agent.value,
         env_profile=None,
@@ -1157,6 +1160,7 @@ def workspace_create_payload_matches(
         and _stored_task_agent_effort(existing) == payload.task.effort
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
+        and _release_sync_source_branch_matches(existing, payload)
         and (
             getattr(existing, "initial_review_grace_period_seconds", None)
             == payload.task.initial_review_grace_period_seconds
@@ -1174,8 +1178,37 @@ def workspace_create_payload_matches(
 
 def _stored_auto_merge_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
     """Check stored auto-merge intent, treating legacy NULL as the old default."""
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        # Release-PR syncs force auto_merge off at persistence and execution, so
+        # the stored value carries no idempotency signal. Rows written before
+        # that canonicalization snapshotted the raw request (default True), and
+        # comparing them against the effective False would spuriously conflict on
+        # an otherwise identical replay. The kind itself is matched separately.
+        return True
     stored = getattr(existing, "auto_merge", None)
-    return (stored is not False) == payload.task.auto_merge
+    return (stored is not False) == _effective_auto_merge(payload)
+
+
+def _release_sync_source_branch_matches(
+    existing: Workspace, payload: WorkspaceCreateRequest
+) -> bool:
+    """Check the stored release-sync source branch for sync_release_pr replays.
+
+    ``repo.source_branch`` selects which branch the release PR syncs, so a replay
+    that changes it must conflict instead of silently reusing the original
+    workspace and syncing the wrong branch. Other task kinds ignore the field.
+    """
+    if payload.task.kind != TaskKind.sync_release_pr.value:
+        return True
+    requested = payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    release_sync = _stored_task_policy(existing).get(RELEASE_SYNC_POLICY_KEY)
+    stored = release_sync.get("source_branch") if isinstance(release_sync, Mapping) else None
+    if stored is None:
+        # Legacy rows predate the source_branch snapshot (added with the input
+        # itself), so they could only have synced the default; treat a missing
+        # field as the historical default to keep identical replays idempotent.
+        stored = DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    return stored == requested
 
 
 def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
@@ -3067,6 +3100,31 @@ def workspace_create_profile_snapshots(
     return requested_profile, resolved_profile
 
 
+RELEASE_SYNC_POLICY_KEY = "release_sync"
+
+
+def _assert_supported_direct_create_task_kind(task_kind: str) -> None:
+    """Defense-in-depth re-check of the public direct-create task-kind allow-set.
+
+    The ``WorkspaceTask`` schema validator already rejects unsupported kinds on
+    REST/MCP; this guards internal callers that build a request another way.
+    Adoption bypasses this function (it calls ``WorkspaceRepository.create``).
+    """
+    if task_kind not in PUBLIC_DIRECT_CREATE_TASK_KINDS:
+        supported = ", ".join(sorted(PUBLIC_DIRECT_CREATE_TASK_KINDS))
+        raise ValueError(
+            f"unsupported task kind {task_kind!r} for direct workspace creation; "
+            f"supported kinds are: {supported}."
+        )
+
+
+def _effective_auto_merge(payload: WorkspaceCreateRequest) -> bool:
+    """Release-PR syncs must never auto-merge; force it off at the boundary."""
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        return False
+    return payload.task.auto_merge
+
+
 def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
     """Build a task policy dictionary from a rich create request."""
     policy: dict[str, Any] = {}
@@ -3077,6 +3135,11 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     policy[VALIDATION_POLICY_KEY] = {
         VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
     }
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        policy[RELEASE_SYNC_POLICY_KEY] = {
+            "source_branch": payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+            "target_branch": payload.repo.base_branch,
+        }
     if payload.task.priority != 0 or payload.task.human_boost != 0:
         policy["scheduler"] = scheduler_policy_snapshot(
             base_priority=payload.task.priority,

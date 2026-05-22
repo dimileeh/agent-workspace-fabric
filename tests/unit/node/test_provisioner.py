@@ -36,6 +36,7 @@ from awf.node.provisioner import (
     _egress_plan_destination_category,
     _positive_int,
     _provision_checkout_base_branch,
+    _provision_local_branch_name,
     _provision_remote_push_branch,
 )
 from awf.node.stack_launcher import ComposeStackLauncher
@@ -393,6 +394,52 @@ class TestSuccess:
 
         assert _provision_checkout_base_branch(ws) == "development"
         assert _provision_remote_push_branch(ws) == "awf/ws"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_policy, expected_source",
+        [
+            (
+                {"release_sync": {"source_branch": "release/next", "target_branch": "main"}},
+                "release/next",
+            ),
+            ({"release_sync": {"target_branch": "main"}}, "development"),
+            ({}, "development"),
+            ({"release_sync": "not-a-dict"}, "development"),
+            ({"release_sync": {"source_branch": " "}}, "development"),
+        ],
+    )
+    def test_sync_release_pr_checks_out_source_branch(
+        self,
+        task_policy: dict[str, Any],
+        expected_source: str,
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="main",
+            branch_name=None,
+            remote_push_branch=None,
+            task_kind="sync_release_pr",
+            task_policy=task_policy,
+        )
+
+        assert _provision_local_branch_name(ws, workspace_id="ws1", branch_prefix="awf") == (
+            "release-sync/ws1"
+        )
+        assert _provision_checkout_base_branch(ws) == expected_source
+        assert _provision_remote_push_branch(ws) == expected_source
+
+    @pytest.mark.unit
+    def test_feature_branch_pr_local_branch_uses_prefix(self) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="main",
+            task_kind="feature_branch_pr",
+            task_policy={},
+        )
+        assert (
+            _provision_local_branch_name(ws, workspace_id="ws1", branch_prefix="awf") == "awf/ws1"
+        )
 
     @pytest.mark.unit
     async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(

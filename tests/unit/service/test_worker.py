@@ -278,7 +278,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     default_monitor = created["executor_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
     assert default_monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
@@ -304,7 +308,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monitor = created["executor_monitor_factory"](
         object(),
         profile,
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert monitor is not None
@@ -336,7 +344,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     manual_monitor = created["executor_monitor_factory"](
         object(),
         profile,
-        SimpleNamespace(auto_merge=False, initial_review_grace_period_seconds=12.5),
+        SimpleNamespace(
+            auto_merge=False,
+            initial_review_grace_period_seconds=12.5,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert manual_monitor is not None
@@ -357,6 +369,24 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         created["release_monitor_kwargs"]["merge_coordinator"]
         is created["feature_monitor_kwargs"]["merge_coordinator"]
     )
+
+    # Regression (PRRT_kwDOSJAM6s6EN6XO): a sync_release_pr workspace must get
+    # the human-gated release monitor even when its persisted auto_merge is True,
+    # so the never-auto-merge guarantee never hinges on that flag staying False.
+    created.pop("feature_monitor_kwargs", None)
+    created.pop("release_monitor_kwargs", None)
+    release_sync_monitor = created["executor_monitor_factory"](
+        object(),
+        profile,
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="sync_release_pr",
+        ),
+    )
+    assert release_sync_monitor is not None
+    assert "feature_monitor_kwargs" not in created
+    assert "release_monitor_kwargs" in created
 
 
 @pytest.mark.unit
@@ -499,7 +529,11 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
     created["pr_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
     reconciler = created["reconciler"]
     _ = asyncio.run(
@@ -586,7 +620,11 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
     created["pr_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert isinstance(
