@@ -58,7 +58,7 @@ from awf.common.github_client import (
     RepoRef,
 )
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.common.workspace_policy import release_sync_source_branch
 from awf.control.protected_file_diffs import (
     committed_changed_paths_since,
     git_show_text,
@@ -8000,10 +8000,7 @@ def _release_sync_policy(ws: Workspace) -> Mapping[str, object]:
 
 
 def _release_sync_source_branch(ws: Workspace) -> str:
-    return (
-        _nonblank_metadata_str(_release_sync_policy(ws), "source_branch")
-        or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
-    )
+    return release_sync_source_branch(ws.task_policy)
 
 
 def _release_sync_target_branch(ws: Workspace) -> str:

@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
-from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -654,13 +654,7 @@ def _release_sync_source_branch(ws: Workspace) -> str | None:
     """
     if ws.task_kind != "sync_release_pr":
         return None
-    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    block = policy.get("release_sync")
-    if isinstance(block, dict):
-        source = block.get("source_branch")
-        if isinstance(source, str) and source.strip():
-            return source.strip()
-    return DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    return release_sync_source_branch(ws.task_policy)
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
