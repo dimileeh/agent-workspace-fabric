@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -24,6 +25,10 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_prompt,
     render_workspace_path,
+)
+from awf.service.conformance_salvage import (
+    SALVAGE_BASE_UNAVAILABLE,
+    ConformanceSalvageError,
 )
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
@@ -40,6 +45,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory backed by a disposable test database."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -420,6 +426,7 @@ async def _mark_failed(
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
 ) -> dict[str, object]:
+    """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -448,6 +455,7 @@ async def _mark_conformance_failed(
     *,
     base_commit: str | None = None,
 ) -> None:
+    """Mark a workspace as failed with conformance-unsatisfied evidence."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -494,6 +502,7 @@ async def _mark_conformance_failed_without_evidence(
     *,
     base_commit: str | None = None,
 ) -> None:
+    """Mark a conformance failure workspace without conformance evidence payload."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -511,6 +520,41 @@ async def _mark_conformance_failed_without_evidence(
             payload={
                 "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
                 "details": {"conformance": "legacy-invalid"},
+            },
+        )
+        await session.commit()
+
+
+async def _mark_agent_timeout_failed(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    base_commit: str | None = None,
+    reason_code: str = AGENT_IDLE_TIMEOUT,
+) -> None:
+    """Mark a workspace failure caused by agent timeout in agent phase."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent emitted no output for 3600.0 seconds"
+        workspace.branch_name = "awf/ws_timeout"
+        workspace.remote_push_branch = "awf/ws_timeout"
+        workspace.base_commit = base_commit
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=reason_code,
+            payload={
+                "reason_code": reason_code,
+                "message": "agent emitted no output for 3600.0 seconds",
+                "details": {
+                    "provider": "claude_code",
+                    "model": "claude-opus-4-7",
+                    "retryable": True,
+                },
             },
         )
         await session.commit()
@@ -812,6 +856,179 @@ async def test_retry_conformance_unsatisfied_without_evidence_still_salvages_dif
     assert salvage["source_workspace_id"] == first.id
     assert salvage["remaining_gaps"] == []
     assert salvage["conformance_evidence_ref"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout_reason", [AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT])
+async def test_retry_agent_idle_timeout_auto_salvages_implementation_diff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    timeout_reason: str,
+) -> None:
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    base_commit = _create_conformance_source_worktree(settings, first.id)
+    await _mark_agent_timeout_failed(
+        factory,
+        first.id,
+        base_commit=base_commit,
+        reason_code=timeout_reason,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+        assert retried is not None
+        operations = list(
+            (
+                await session.execute(select(Operation).where(Operation.workspace_id == retried.id))
+            ).scalars()
+        )
+        retry_created = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retried.id,
+                        WorkspaceEvent.event_type == "workspace.retry_created",
+                    )
+                )
+            ).scalars()
+        )
+
+    salvage = retried.task_policy["conformance_salvage"]
+    assert salvage["salvage_kind"] == "agent_timeout"
+    assert salvage["source_workspace_id"] == first.id
+    assert salvage["source_base_commit"] == base_commit
+    assert salvage["implementation_paths"] == [
+        "src/awf/retry.py",
+        "tests/unit/test_retry.py",
+    ]
+    assert salvage["plan_artifact_paths"] == [
+        "docs/awf-plans/ws_old.conformance.json",
+        "docs/awf-plans/ws_old.md",
+    ]
+    assert salvage["remaining_gaps"] == [
+        "The previous agent run timed out before it could finish.",
+        "Continue from the recovered implementation diff and complete the original task.",
+    ]
+    assert salvage["conformance_evidence_ref"] == {
+        "source_workspace_id": first.id,
+        "event_type": "workspace.state_changed",
+        "reason_code": timeout_reason,
+    }
+    assert "Automatic AWF timeout salvage" in retried.task_prompt
+    assert "Fix the intermittent validation failure." in retried.task_prompt
+    assert "Continue from the recovered implementation" in retried.task_prompt
+    assert operations[0].payload["source_reason_code"] == timeout_reason
+    assert operations[0].payload["recovery_strategy"] == "continue_from_timeout_salvage"
+    assert operations[0].payload["conformance_salvage"] == salvage
+    assert operations[0].result["source_reason_code"] == timeout_reason
+    assert operations[0].result["conformance_salvage"] == salvage
+    assert retry_created[0].payload["source_reason_code"] == timeout_reason
+    assert retry_created[0].payload["conformance_salvage"] == salvage
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout_reason", [AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT])
+async def test_retry_agent_idle_timeout_plan_only_diff_retries_without_salvage(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    timeout_reason: str,
+) -> None:
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    base_commit = _create_conformance_source_worktree(
+        settings,
+        first.id,
+        implementation_diff=False,
+    )
+    await _mark_agent_timeout_failed(
+        factory,
+        first.id,
+        base_commit=base_commit,
+        reason_code=timeout_reason,
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+        assert retried is not None
+        operations = list(
+            (
+                await session.execute(select(Operation).where(Operation.workspace_id == retried.id))
+            ).scalars()
+        )
+
+    assert "conformance_salvage" not in retried.task_policy
+    assert retried.task_prompt == "Fix the intermittent validation failure."
+    assert "source_reason_code" not in operations[0].payload
+    assert "conformance_salvage" not in operations[0].payload
+
+
+@pytest.mark.unit
+async def test_retry_agent_idle_timeout_salvage_unavailable_errors_abort_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create(_request())
+    base_commit = _create_conformance_source_worktree(
+        settings,
+        first.id,
+        implementation_diff=True,
+    )
+    await _mark_agent_timeout_failed(factory, first.id, base_commit=base_commit)
+
+    def _raise(**_kwargs: object) -> None:
+        raise ConformanceSalvageError(
+            reason_code=SALVAGE_BASE_UNAVAILABLE,
+            message="Timeout salvage capture intentionally failed",
+            detail={"base_commit": "missing"},
+        )
+
+    monkeypatch.setattr("awf.service.workspaces.capture_conformance_salvage", _raise)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySalvageUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry service test fixture",
+                settings=settings,
+            )
+
+    async with factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        operations = list((await session.execute(select(Operation))).scalars())
+
+    assert exc_info.value.error_code == "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
+    assert exc_info.value.detail["reason_code"] == SALVAGE_BASE_UNAVAILABLE
+    assert exc_info.value.detail["source_reason_code"] == AGENT_IDLE_TIMEOUT
+    assert len(workspaces) == 1
+    assert len(operations) == 0
 
 
 @pytest.mark.unit
@@ -1131,6 +1348,7 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
         context: object,
         executemany: bool,
     ) -> None:
+        """Collect SQL statements for task-kind update assertions."""
         del conn, cursor, parameters, context, executemany
         statements.append(" ".join(statement.lower().split()))
 
