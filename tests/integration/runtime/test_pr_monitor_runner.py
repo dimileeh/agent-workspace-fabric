@@ -22,6 +22,9 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
+    MergeCandidateRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -1274,6 +1277,116 @@ class TestDirtyConflictResolution:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_sync_base_resolves_stale_target_advanced_reason(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """SyncBase must resolve any active STALE_TARGET_ADVANCED row on
+        the candidate after a successful push.
+
+        Regression scenario observed in T143 (aira-agent PR #480): two
+        ``sync_base`` operations succeeded (monitor saw ``base_behind=0``)
+        but the staleness row from the initial detection stayed
+        ``status=active`` with ``blocks_merge=true``, gating every
+        subsequent merge attempt. Without this test, the runner could
+        regress to that wedge silently — symptoms surface only after a
+        second PR merges to the target branch on a parallel workspace.
+        """
+        original_base = "a" * 40
+        new_base = "b" * 40
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Seed an open merge candidate + an active STALE_TARGET_ADVANCED
+        # reason so the post-SyncBase resolve path has something to clear.
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.base_commit = original_base
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws_id)
+            assert attempt is not None
+            task = await TaskRepository(s).get(attempt.task_id)
+            assert task is not None
+            candidate = await MergeCandidateRepository(s).create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=ws,
+                head_sha="h" * 40,
+                base_sha=original_base,
+            )
+            await StaleReasonRepository(s).replace_active_findings(
+                workspace_id=ws_id,
+                candidate_id=candidate.id,
+                attempt_id=attempt.id,
+                task_id=task.id,
+                findings=[
+                    StaleReasonCreate(
+                        reason_code="STALE_TARGET_ADVANCED",
+                        trigger_type="target_advanced",
+                        trigger_ref=new_base,
+                        explanation=(
+                            "Target branch 'development' advanced 2 commit(s) past validation base."
+                        ),
+                    )
+                ],
+            )
+            candidate.stale = True
+            candidate.stale_reason = "stale"
+            await s.commit()
+            candidate_id = candidate.id
+
+        # Outer iter 1: rev-list says base-behind=2 → SyncBase action.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # git merge --abort
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0)  # git merge --no-edit
+        cmd.queue_result(returncode=0)  # git push (sync_base)
+        cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
+        # Outer iter 2: clean → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            reasons = await StaleReasonRepository(s).list_for_workspace(ws_id)
+            assert reasons, "seeded reason should still exist as a historical row"
+            target_advanced = [r for r in reasons if r.reason_code == "STALE_TARGET_ADVANCED"]
+            assert target_advanced, "STALE_TARGET_ADVANCED row should remain"
+            assert all(r.resolved_at is not None for r in target_advanced), (
+                "SyncBase success must mark STALE_TARGET_ADVANCED rows resolved; "
+                "otherwise the merge gate stays blocked even though monitor sees "
+                "base_behind=0 (T143 wedge regression)."
+            )
+            candidate = await MergeCandidateRepository(s).get_by_attempt_id(
+                (await TaskAttemptRepository(s).get_by_workspace_id(ws_id)).id
+            )
+            assert candidate is not None
+            assert candidate.id == candidate_id
+            assert candidate.stale is False, "candidate.stale should flip to False"
+            assert candidate.base_sha == new_base, (
+                "candidate.base_sha should advance to the SHA we just merged in"
+            )
 
     @pytest.mark.unit
     async def test_sync_base_starts_with_merge_abort_for_crash_safety(

@@ -69,8 +69,10 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
+    MergeCandidateRepository,
     PRFeedbackResolutionRepository,
     ProviderModelCircuitBreakerRepository,
+    StaleReasonRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
     pr_feedback_body_hash,
@@ -154,6 +156,11 @@ from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
     provider_recovery_metadata_from_failure,
+)
+from awf.service.staleness import (
+    StalenessRefreshError,
+    StalenessRefreshService,
+    TargetBranchState,
 )
 
 _log = get_logger(__name__)
@@ -1728,6 +1735,19 @@ class PullRequestMonitorRunner:
                 operation_type=OperationType.sync_base.value,
                 monitor_log=monitor_log,
             )
+            if push_result.pushed:
+                # SyncBase merged ``origin/<base>`` into the workspace branch and
+                # pushed. Without this call, the ``STALE_TARGET_ADVANCED`` row
+                # the staleness service wrote when target first advanced stays
+                # ``status=active, resolved_at=null`` with ``blocks_merge=true``
+                # — gating every subsequent merge attempt even though the
+                # monitor's own ``base_behind`` check is back to 0. Advance the
+                # candidate's validation base to the SHA we just merged in and
+                # refresh staleness so the resolution propagates atomically.
+                await self._refresh_staleness_after_sync_base(
+                    workspace_id=workspace_id,
+                    base_branch=base_branch,
+                )
             state.iter_count += 1
             return False
 
@@ -4508,6 +4528,89 @@ class PullRequestMonitorRunner:
             remote_branch=remote_branch,
             remote_url=remote_push_url,
         )
+
+    async def _refresh_staleness_after_sync_base(
+        self,
+        *,
+        workspace_id: str,
+        base_branch: str,
+    ) -> None:
+        """Resolve ``STALE_TARGET_ADVANCED`` on the open candidate after a
+        successful ``SyncBase`` push.
+
+        The pr_monitor's ``base_behind`` view is its own running computation
+        of how far the workspace branch trails the target — that becomes 0
+        the moment we merge ``origin/<base>`` in. The ``WorkspaceStalenessReason``
+        ledger is a separate subsystem written by ``StalenessRefreshService``;
+        it does NOT get re-evaluated on SyncBase. So if the row was inserted
+        with ``severity=blocking, blocks_merge=true`` before SyncBase ran, it
+        stays active forever and ``_merge_gate_for_workspace`` keeps blocking.
+        We bridge the two subsystems here.
+
+        Approach: read ``origin/<base>`` from the worktree (the SHA we just
+        fetched and merged), advance ``MergeCandidate.base_sha`` to it, then
+        call ``StalenessRefreshService.refresh_candidate`` with a synthetic
+        ``TargetBranchState`` reporting ``head_sha == base_sha`` and
+        ``advanced_commits == 0``. ``evaluate_staleness`` returns ``[]`` →
+        ``StaleReasonRepository.replace_active_findings`` marks every active
+        row resolved → ``MergeCandidate.stale`` flips false.
+
+        Failures are logged but never propagated: the background
+        ``target_branch_monitor`` worker will reconcile on its next cycle.
+        """
+        try:
+            async with self._deps.session_factory() as session:
+                candidate = await MergeCandidateRepository(
+                    session
+                ).get_open_for_workspace_with_merge_inputs(workspace_id)
+                if candidate is None:
+                    # No tracked candidate — nothing to refresh.
+                    return
+                active_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                    candidate.id
+                )
+                if not active_reasons:
+                    # Nothing to resolve. Skip the extra ``git rev-parse``
+                    # so workspaces with no active staleness ledger don't
+                    # incur a no-op git call on every SyncBase.
+                    return
+                worktree_path = self._worktrees_root / workspace_id
+                rev_parse = await self._deps.runner.run(
+                    _git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
+                )
+                if rev_parse.returncode != 0 or not rev_parse.stdout.strip():
+                    _log.warning(
+                        "monitor.sync_base_staleness_refresh_skipped",
+                        workspace_id=workspace_id,
+                        reason="rev_parse_failed",
+                        stderr=(rev_parse.stderr[:400] if rev_parse.stderr else None),
+                    )
+                    return
+                new_base_sha = rev_parse.stdout.strip()
+                candidate.base_sha = new_base_sha
+                target_state = TargetBranchState(
+                    branch=base_branch,
+                    head_sha=new_base_sha,
+                    changed_paths=(),
+                    advanced_commits=0,
+                )
+                await StalenessRefreshService(session).refresh_candidate(
+                    candidate.id, target=target_state
+                )
+                await session.commit()
+        except StalenessRefreshError as exc:
+            _log.warning(
+                "monitor.sync_base_staleness_refresh_failed",
+                workspace_id=workspace_id,
+                error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort; reconciler will retry
+            _log.warning(
+                "monitor.sync_base_staleness_refresh_failed",
+                workspace_id=workspace_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     # ── CI failure ─────────────────────────────────────────────────────────
 
