@@ -310,7 +310,7 @@ def build_conformance_salvage_conflict_prompt(
         "use the salvage patch as source material, resolve the conflict against "
         "the current base, and finish the original conformance gaps.\n\n"
         f"### Salvage patch\n`{agent_patch_path}`\n\n"
-        f"### Salvaged implementation paths\n{path_lines or '- No paths recorded.'}\n\n"
+        f"### Salvaged implementation paths\n{path_lines}\n\n"
         f"### Remaining conformance gaps\n{gap_lines}\n\n"
         f"### Apply error\n{apply_error[:2000] or 'git apply --check failed.'}\n\n"
         f"### Original task\n{task_prompt}\n"
