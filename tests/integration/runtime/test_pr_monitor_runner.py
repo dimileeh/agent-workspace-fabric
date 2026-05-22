@@ -1269,15 +1269,17 @@ class TestSyncBase:
 
         async with factory() as s:
             reasons = await StaleReasonRepository(s).list_for_candidate(candidate_id)
-            by_code = {r.reason_code: r for r in reasons}
-            assert by_code["STALE_TARGET_ADVANCED"].resolved_at is not None, (
+            target_rows = [r for r in reasons if r.reason_code == "STALE_TARGET_ADVANCED"]
+            docs_rows = [r for r in reasons if r.reason_code == "docs_task_scope_violation"]
+            assert target_rows, "expected a STALE_TARGET_ADVANCED row"
+            assert all(r.resolved_at is not None for r in target_rows), (
                 "target-derived staleness should resolve once base_sha catches up"
             )
-            assert by_code["docs_task_scope_violation"].status == "active", (
+            assert docs_rows, "expected a docs_task_scope_violation row"
+            assert all(r.status == "active" and r.resolved_at is None for r in docs_rows), (
                 "docs_task_scope_violation is intrinsic to the task scope; a "
                 "SyncBase/rebase does not remediate it and must not resolve the row."
             )
-            assert by_code["docs_task_scope_violation"].resolved_at is None
             candidate = await MergeCandidateRepository(s).get_by_attempt_id(
                 (await TaskAttemptRepository(s).get_by_workspace_id(ws_id)).id
             )
