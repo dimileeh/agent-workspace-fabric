@@ -69,6 +69,26 @@ def test_ci_failure_evidence_suggests_generic_repro_when_pytest_command_is_unava
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
+    valid_node_id = "tests/unit/test_example.py::test_valid_failure"
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "FAILED:tests/unit/test_example.py::test_glued_prefix - AssertionError",
+                f"FAILED {valid_node_id} - AssertionError",
+            ]
+        ),
+        check_name="unit",
+    )
+
+    assert evidence.test_node_ids == (valid_node_id,)
+    assert evidence.suggested_repro_commands == (
+        f"uv run --python 3.12 --extra dev pytest {valid_node_id} -q",
+    )
+
+
+@pytest.mark.unit
 def test_ci_failure_repro_command_skips_non_pytest_commands() -> None:
     assert (
         ci_failure_evidence._pytest_repro_command(  # noqa: SLF001

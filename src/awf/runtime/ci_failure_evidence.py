@@ -23,6 +23,7 @@ _COMMAND_MARKERS = (
 _PYTEST_NODE_END_DELIMITERS = {",", ";", ")", "`", "'", '"'}
 _PYTEST_NODE_PREFIX_DELIMITERS = "([{<"
 _PYTEST_NODE_SUFFIX_DELIMITERS = ")]}>"
+_PYTEST_NODE_QUOTE_DELIMITERS = {"`", "'", '"'}
 _MAX_TEST_NODES = 20
 _MAX_REPRO_NODES = 5
 _MAX_COMMANDS = 5
@@ -126,11 +127,7 @@ def _pytest_node_candidates(line: str) -> list[str]:
             break
 
         start = anchor
-        while (
-            start > 0
-            and not line[start - 1].isspace()
-            and line[start - 1] not in _PYTEST_NODE_PREFIX_DELIMITERS
-        ):
+        while start > 0 and _is_pytest_path_char(line[start - 1]):
             start -= 1
 
         end = anchor + len(".py::")
@@ -158,8 +155,12 @@ def _pytest_node_candidates(line: str) -> list[str]:
 
 
 def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
-    if start > 0 and line[start - 1] in _PYTEST_NODE_PREFIX_DELIMITERS:
-        return False
+    if start > 0:
+        char = line[start - 1]
+        if char in _PYTEST_NODE_PREFIX_DELIMITERS:
+            return False
+        if not char.isspace() and char not in _PYTEST_NODE_QUOTE_DELIMITERS:
+            return False
     if end >= len(line):
         return True
     char = line[end]
@@ -171,6 +172,10 @@ def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
         rest = line[end:].lstrip()
         return not rest or rest.startswith("- ")
     raise AssertionError(f"unsupported pytest node boundary: {char!r}")
+
+
+def _is_pytest_path_char(char: str) -> bool:
+    return char.isalnum() or char in "/._-"
 
 
 def _looks_like_pytest_node(candidate: str) -> bool:
