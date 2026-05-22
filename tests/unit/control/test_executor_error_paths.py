@@ -4849,6 +4849,46 @@ class TestTaskKindFailFast:
             assert "unsupported task kind" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "UNSUPPORTED_TASK_KIND"
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("task_kind", "message_fragment", "reason_code"),
+        [
+            ("monitor_release_pr", "deprecated", "DEPRECATED_TASK_KIND"),
+            ("totally_made_up", "unsupported task kind", "UNSUPPORTED_TASK_KIND"),
+        ],
+    )
+    async def test_resume_pr_monitor_fails_fast_on_unsupported_task_kind(
+        self,
+        task_kind: str,
+        message_fragment: str,
+        reason_code: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A legacy deprecated/unsupported row already in ``monitoring_pr`` must
+        fail fast on the worker-restart resume path instead of being monitored
+        forever. The guard is shared with execute() but transitions from
+        ``monitoring_pr`` here, so the failure actually lands.
+        """
+        ws_id = await _seed_monitoring_pr(factory, task_kind=task_kind)
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("resume must not build a monitor for unsupported kinds")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert message_fragment in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == reason_code
+
 
 class TestSyncReleasePrHandoff:
     @pytest.mark.unit

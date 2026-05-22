@@ -1472,6 +1472,7 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         workspace: Workspace,
+        from_status: WorkspaceStatus = WorkspaceStatus.running,
     ) -> bool:
         """Fail fast deprecated/unknown task kinds; return True if rejected.
 
@@ -1482,12 +1483,19 @@ class WorkspaceExecutor:
         ``sync_release_pr`` monitors are intentionally left untouched here
         (returns False) so their recovery resumption stays intact; the sync
         handoffs are routed later by :meth:`_dispatch_non_feature_task_kind`.
+
+        Shared by both entrypoints so the policy can't drift: :meth:`execute`
+        rejects from ``running`` and :meth:`resume_pr_monitor` rejects a
+        persisted legacy row from ``monitoring_pr``. ``from_status`` is the
+        caller's current status so the failure transition matches it (a
+        mismatched status is treated as a stale-action skip by
+        :meth:`_mark_failed`, so passing the wrong one would silently no-op).
         """
         task_kind = workspace.task_kind
         if task_kind == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             await self._mark_failed(
                 workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
+                from_status=from_status,
                 failure_reason=FailureReason.policy_failure,
                 message=(
                     "task kind 'monitor_release_pr' is deprecated; monitor an existing "
@@ -1500,7 +1508,7 @@ class WorkspaceExecutor:
         if task_kind not in _SUPPORTED_TASK_KINDS:
             await self._mark_failed(
                 workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
+                from_status=from_status,
                 failure_reason=FailureReason.policy_failure,
                 message=f"unsupported task kind {task_kind!r}; cannot run as feature work.",
                 reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
@@ -4095,6 +4103,18 @@ class WorkspaceExecutor:
             workspace_id,
             expected=WorkspaceStatus.monitoring_pr,
             action="resume_pr_monitor",
+        ):
+            return
+
+        # A legacy ``monitor_release_pr`` (or otherwise unsupported) row may have
+        # reached ``monitoring_pr`` before the kind was deprecated; the worker
+        # restart path would otherwise resume monitoring it indefinitely. Apply
+        # the same fail-fast guard execute() uses, from ``monitoring_pr`` so the
+        # failure transition lands instead of being skipped as stale.
+        if await self._reject_unsupported_task_kind(
+            workspace_id=workspace_id,
+            workspace=ws,
+            from_status=WorkspaceStatus.monitoring_pr,
         ):
             return
 
