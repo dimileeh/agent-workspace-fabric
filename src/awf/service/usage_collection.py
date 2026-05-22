@@ -114,7 +114,7 @@ class CcusageCollector(UsageSampler):
         )
         if source is None:
             # Unsupported provider: record the reason once, no periodic loop.
-            await ctx._safe_sample(phase="live", status="running")
+            await ctx._safe_sample(phase="live", run_status="running")
             return ctx
         await ctx._capture_baseline()
         ctx._task = asyncio.create_task(ctx._run_loop())
@@ -161,7 +161,7 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _finalize_inner(self, status: str) -> None:
         await self._cancel_loop()
-        await self._safe_sample(phase="final", status=status)
+        await self._safe_sample(phase="final", run_status=status)
 
     async def _cancel_loop(self) -> None:
         task = self._task
@@ -174,7 +174,7 @@ class _CcusageSampleContext(UsageSampleContext):
     async def _run_loop(self) -> None:
         while True:
             await self._collector._clock.sleep(self._collector._interval_seconds)
-            await self._safe_sample(phase="live", status="running")
+            await self._safe_sample(phase="live", run_status="running")
 
     async def _capture_baseline(self) -> None:
         # Always capture a fresh reading at run start; never reuse a prior
@@ -211,9 +211,9 @@ class _CcusageSampleContext(UsageSampleContext):
         # unreadable output): we can't anchor a trustworthy baseline, so flag it.
         self._baseline_unavailable_reason = reason or REASON_COMMAND_FAILED
 
-    async def _safe_sample(self, *, phase: str, status: str) -> None:
+    async def _safe_sample(self, *, phase: str, run_status: str) -> None:
         try:
-            await self._sample_and_write(phase=phase)
+            await self._sample_and_write(phase=phase, run_status=run_status)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -221,14 +221,15 @@ class _CcusageSampleContext(UsageSampleContext):
                 "usage.collect.error",
                 workspace_id=self._workspace_id,
                 phase=phase,
-                status=status,
+                status=run_status,
                 exc_info=True,
             )
 
-    async def _sample_and_write(self, *, phase: str) -> None:
+    async def _sample_and_write(self, *, phase: str, run_status: str) -> None:
         if self._source is None:
             self._write(
                 phase=phase,
+                run_status=run_status,
                 status_label="unavailable",
                 reason=REASON_SOURCE_UNSUPPORTED,
                 metrics=NormalizedUsage(),
@@ -239,6 +240,7 @@ class _CcusageSampleContext(UsageSampleContext):
         if usage is None:
             self._write(
                 phase=phase,
+                run_status=run_status,
                 status_label="unavailable",
                 reason=reason,
                 metrics=NormalizedUsage(),
@@ -251,6 +253,7 @@ class _CcusageSampleContext(UsageSampleContext):
             # baseline failure reason instead of an inflated total.
             self._write(
                 phase=phase,
+                run_status=run_status,
                 status_label="unavailable",
                 reason=self._baseline_unavailable_reason,
                 metrics=NormalizedUsage(),
@@ -260,6 +263,7 @@ class _CcusageSampleContext(UsageSampleContext):
         delta = subtract_baseline(usage, self._baseline)
         self._write(
             phase=phase,
+            run_status=run_status,
             status_label="available",
             reason=None,
             metrics=delta,
@@ -270,6 +274,7 @@ class _CcusageSampleContext(UsageSampleContext):
         self,
         *,
         phase: str,
+        run_status: str,
         status_label: str,
         reason: str | None,
         metrics: NormalizedUsage,
@@ -280,6 +285,7 @@ class _CcusageSampleContext(UsageSampleContext):
             provider=self._provider.value,
             ccusage_source=self._source,
             status=status_label,
+            run_status=run_status,
             phase=phase,
             captured_at=self._collector._clock.now().isoformat(),
             reason=reason,

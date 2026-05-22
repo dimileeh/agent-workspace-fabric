@@ -240,6 +240,12 @@ class UsageSnapshot:
     phase: str
     captured_at: str
     reason: str | None = None
+    # Agent run outcome (success/failed/timeout/cancelled/running) at the moment
+    # this sample was taken. Distinct from ``status`` (sample availability): a
+    # final snapshot after a timeout and one after success both carry
+    # ``status="available"``/``phase="final"``, so the run outcome is the only
+    # field that distinguishes them.
+    run_status: str | None = None
     model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -271,6 +277,7 @@ class UsageSnapshot:
             "ccusage_source": self.ccusage_source,
             "model": self.model,
             "status": self.status,
+            "run_status": self.run_status,
             "reason": self.reason,
             "phase": self.phase,
             "captured_at": self.captured_at,
@@ -292,6 +299,7 @@ class UsageSnapshot:
             phase=data["phase"],
             captured_at=data["captured_at"],
             reason=data.get("reason"),
+            run_status=data.get("run_status"),
             model=data.get("model"),
             input_tokens=data.get("input_tokens"),
             output_tokens=data.get("output_tokens"),

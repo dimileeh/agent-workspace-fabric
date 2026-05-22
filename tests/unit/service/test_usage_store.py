@@ -32,6 +32,7 @@ _ALLOWED_SNAPSHOT_KEYS = {
     "ccusage_source",
     "model",
     "status",
+    "run_status",
     "reason",
     "phase",
     "captured_at",
