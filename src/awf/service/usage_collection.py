@@ -175,7 +175,16 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _capture_baseline(self) -> None:
         prior = read_latest_usage_snapshot(self._workspace_id, work_dir=self._collector._work_dir)
-        if prior is not None:
+        # Reuse a prior baseline only when it was anchored for the same
+        # provider/source. A workspace can switch agents in place (provider
+        # recovery fallback mutates Workspace.agent for the same workspace_id),
+        # and a baseline from the old provider would subtract against an
+        # unrelated ccusage source and skew the delta.
+        if (
+            prior is not None
+            and prior.provider == self._provider.value
+            and prior.ccusage_source == self._source
+        ):
             reused = prior.baseline_usage()
             if reused is not None:
                 self._baseline = reused

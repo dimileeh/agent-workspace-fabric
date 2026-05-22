@@ -184,6 +184,45 @@ async def test_persisted_baseline_reused_across_runs(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_baseline_not_reused_when_provider_changed(tmp_path: Path) -> None:
+    # A workspace can switch agents in place (provider recovery fallback), so a
+    # prior baseline anchored for a different provider/source must not be reused:
+    # subtracting it against an unrelated ccusage source would skew the delta.
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_switch",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            baseline={"total_tokens": 100},
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(
+        json.dumps({"totals": {"totalTokens": 10}}),  # fresh codex baseline
+        json.dumps({"totals": {"totalTokens": 17}}),  # codex final
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_switch",
+        provider=AgentRuntime.codex,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_switch", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.provider == "codex"
+    assert snap.ccusage_source == "codex"
+    # Stale claude baseline (100) ignored; a fresh codex baseline (10) is captured.
+    assert snap.total_tokens == 7  # fresh baseline 10, final 17
+    assert len(runner.calls) == 2  # fresh baseline + final, not a single reused call
+
+
+@pytest.mark.unit
 async def test_prior_snapshot_without_baseline_captures_fresh(tmp_path: Path) -> None:
     write_usage_snapshot(
         UsageSnapshot(
