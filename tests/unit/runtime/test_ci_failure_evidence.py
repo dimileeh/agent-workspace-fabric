@@ -212,6 +212,8 @@ def test_ci_failure_evidence_linear_scanner_preserves_bracketed_parameters() -> 
     node_ids = [
         "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
         "pkg/tests/test_api.py::TestApi::test_nested[a - b]",
+        "tests/unit/runtime/test_prompt.py::test_handles[(a)]",
+        "pkg/tests/test_api.py::TestApi::test_with_angle<id><x>",
     ]
     line = " and ".join(f"`{node_id}`" for node_id in node_ids)
 
