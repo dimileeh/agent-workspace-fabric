@@ -20,8 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.repositories import (
+    MergeCandidateRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -1071,6 +1074,318 @@ class TestSyncBase:
         # CLI was invoked with a conflict-resolve prompt.
         assert any("CONFLICT" in p or "conflicts" in p for p in adapter.calls)
 
+    @pytest.mark.unit
+    async def test_sync_base_resolves_stale_target_advanced_reason(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """SyncBase must resolve any active STALE_TARGET_ADVANCED row on
+        the candidate after a successful push.
+
+        Regression scenario observed in T143 (aira-agent PR #480): two
+        ``sync_base`` operations succeeded (monitor saw ``base_behind=0``)
+        but the staleness row from the initial detection stayed
+        ``status=active`` with ``blocks_merge=true``, gating every
+        subsequent merge attempt. Without this test, the runner could
+        regress to that wedge silently — symptoms surface only after a
+        second PR merges to the target branch on a parallel workspace.
+        """
+        original_base = "a" * 40
+        new_base = "b" * 40
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Seed an open merge candidate + an active STALE_TARGET_ADVANCED
+        # reason so the post-SyncBase resolve path has something to clear.
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.base_commit = original_base
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws_id)
+            assert attempt is not None
+            task = await TaskRepository(s).get(attempt.task_id)
+            assert task is not None
+            candidate = await MergeCandidateRepository(s).create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=ws,
+                head_sha="h" * 40,
+                base_sha=original_base,
+            )
+            await StaleReasonRepository(s).replace_active_findings(
+                workspace_id=ws_id,
+                candidate_id=candidate.id,
+                attempt_id=attempt.id,
+                task_id=task.id,
+                findings=[
+                    StaleReasonCreate(
+                        reason_code="STALE_TARGET_ADVANCED",
+                        trigger_type="target_advanced",
+                        trigger_ref=new_base,
+                        explanation=(
+                            "Target branch 'development' advanced 2 commit(s) past validation base."
+                        ),
+                    )
+                ],
+            )
+            candidate.stale = True
+            candidate.stale_reason = "stale"
+            await s.commit()
+            candidate_id = candidate.id
+
+        # Outer iter 1: rev-list says base-behind=2 → SyncBase action.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # git merge --abort
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0)  # git merge --no-edit
+        cmd.queue_result(returncode=0)  # git push (sync_base)
+        cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
+        # Outer iter 2: clean → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            reasons = await StaleReasonRepository(s).list_for_workspace(ws_id)
+            assert reasons, "seeded reason should still exist as a historical row"
+            target_advanced = [r for r in reasons if r.reason_code == "STALE_TARGET_ADVANCED"]
+            assert target_advanced, "STALE_TARGET_ADVANCED row should remain"
+            assert all(r.resolved_at is not None for r in target_advanced), (
+                "SyncBase success must mark STALE_TARGET_ADVANCED rows resolved; "
+                "otherwise the merge gate stays blocked even though monitor sees "
+                "base_behind=0 (T143 wedge regression)."
+            )
+            candidate = await MergeCandidateRepository(s).get_by_attempt_id(
+                (await TaskAttemptRepository(s).get_by_workspace_id(ws_id)).id
+            )
+            assert candidate is not None
+            assert candidate.id == candidate_id
+            assert candidate.stale is False, "candidate.stale should flip to False"
+            assert candidate.base_sha == new_base, (
+                "candidate.base_sha should advance to the SHA we just merged in"
+            )
+
+    @pytest.mark.unit
+    async def test_sync_base_preserves_docs_task_scope_violation(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """SyncBase resolves *target-derived* staleness but must leave an
+        intrinsic ``docs_task_scope_violation`` active.
+
+        Regression for PRRT_kwDOSJAM6s6EA4b1: the post-SyncBase refresh used
+        to resolve *every* active stale reason and clear ``candidate.stale``.
+        A rebase brings ``base_sha`` up to the target, which legitimately
+        clears ``STALE_TARGET_ADVANCED`` — but it does NOT remediate a docs
+        task that claims non-docs paths. Clearing that reason here would let
+        ``_merge_gate_for_workspace`` merge the PR without the scope decision /
+        current-head validation it normally requires.
+        """
+        original_base = "a" * 40
+        new_base = "b" * 40
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.base_commit = original_base
+            # Docs task that claims a non-docs path → docs_task_scope_violation.
+            ws.task_class = TaskClass.docs_task.value
+            ws.owned_paths = ["docs/guide.md", "src/awf/not_docs.py"]
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws_id)
+            assert attempt is not None
+            task = await TaskRepository(s).get(attempt.task_id)
+            assert task is not None
+            candidate = await MergeCandidateRepository(s).create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=ws,
+                head_sha="h" * 40,
+                base_sha=original_base,
+            )
+            # Seed one resolvable (target-derived) reason and one intrinsic one.
+            await StaleReasonRepository(s).replace_active_findings(
+                workspace_id=ws_id,
+                candidate_id=candidate.id,
+                attempt_id=attempt.id,
+                task_id=task.id,
+                findings=[
+                    StaleReasonCreate(
+                        reason_code="STALE_TARGET_ADVANCED",
+                        trigger_type="target_advanced",
+                        trigger_ref=new_base,
+                        explanation=(
+                            "Target branch 'development' advanced 2 commit(s) past validation base."
+                        ),
+                    ),
+                    StaleReasonCreate(
+                        reason_code="docs_task_scope_violation",
+                        trigger_type="task_scope",
+                        trigger_ref="docs_task",
+                        explanation="Changed files are outside the docs task scope.",
+                    ),
+                ],
+            )
+            candidate.stale = True
+            candidate.stale_reason = "docs_task_scope_violation"
+            await s.commit()
+            candidate_id = candidate.id
+
+        cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner._refresh_staleness_after_sync_base(
+            workspace_id=ws_id,
+            base_branch="development",
+        )
+
+        async with factory() as s:
+            reasons = await StaleReasonRepository(s).list_for_candidate(candidate_id)
+            target_rows = [r for r in reasons if r.reason_code == "STALE_TARGET_ADVANCED"]
+            docs_rows = [r for r in reasons if r.reason_code == "docs_task_scope_violation"]
+            assert target_rows, "expected a STALE_TARGET_ADVANCED row"
+            assert all(r.resolved_at is not None for r in target_rows), (
+                "target-derived staleness should resolve once base_sha catches up"
+            )
+            assert docs_rows, "expected a docs_task_scope_violation row"
+            assert all(r.status == "active" and r.resolved_at is None for r in docs_rows), (
+                "docs_task_scope_violation is intrinsic to the task scope; a "
+                "SyncBase/rebase does not remediate it and must not resolve the row."
+            )
+            candidate = await MergeCandidateRepository(s).get_by_attempt_id(
+                (await TaskAttemptRepository(s).get_by_workspace_id(ws_id)).id
+            )
+            assert candidate is not None
+            assert candidate.base_sha == new_base, "base_sha should still advance"
+            assert candidate.stale is True, (
+                "candidate must stay stale while the docs scope violation is unresolved"
+            )
+            assert candidate.stale_reason == "docs_task_scope_violation"
+
+    @pytest.mark.unit
+    async def test_sync_base_advances_base_sha_without_resolvable_reasons(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """SyncBase must advance ``candidate.base_sha`` even when there is no
+        target-derived staleness to resolve.
+
+        Regression for PR #275 review: the post-SyncBase refresh used to early
+        return before touching ``base_sha`` whenever the candidate carried only
+        intrinsic findings (or none). The staleness service measures target
+        advancement as ``<base_sha>..origin/<base>``, so leaving ``base_sha`` at
+        the old commit makes the next refresh re-derive ``STALE_TARGET_ADVANCED``
+        against an already-merged base and re-block the merge gate.
+        """
+        original_base = "a" * 40
+        new_base = "b" * 40
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.base_commit = original_base
+            # Docs task that claims a non-docs path → docs_task_scope_violation,
+            # an intrinsic reason that is NOT in
+            # ``_SYNC_BASE_RESOLVABLE_STALE_REASONS``, so ``resolvable`` is empty.
+            ws.task_class = TaskClass.docs_task.value
+            ws.owned_paths = ["docs/guide.md", "src/awf/not_docs.py"]
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws_id)
+            assert attempt is not None
+            task = await TaskRepository(s).get(attempt.task_id)
+            assert task is not None
+            candidate = await MergeCandidateRepository(s).create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=ws,
+                head_sha="h" * 40,
+                base_sha=original_base,
+            )
+            await StaleReasonRepository(s).replace_active_findings(
+                workspace_id=ws_id,
+                candidate_id=candidate.id,
+                attempt_id=attempt.id,
+                task_id=task.id,
+                findings=[
+                    StaleReasonCreate(
+                        reason_code="docs_task_scope_violation",
+                        trigger_type="task_scope",
+                        trigger_ref="docs_task",
+                        explanation="Changed files are outside the docs task scope.",
+                    ),
+                ],
+            )
+            candidate.stale = True
+            candidate.stale_reason = "docs_task_scope_violation"
+            await s.commit()
+            candidate_id = candidate.id
+
+        cmd.queue_result(returncode=0, stdout=f"{new_base}\n")  # rev-parse origin/<base>
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner._refresh_staleness_after_sync_base(
+            workspace_id=ws_id,
+            base_branch="development",
+        )
+
+        async with factory() as s:
+            candidate = await MergeCandidateRepository(s).get_by_attempt_id(
+                (await TaskAttemptRepository(s).get_by_workspace_id(ws_id)).id
+            )
+            assert candidate is not None
+            assert candidate.id == candidate_id
+            assert candidate.base_sha == new_base, (
+                "base_sha must advance to the merged SHA even when there is no "
+                "target-derived staleness to resolve, or the next refresh will "
+                "re-derive STALE_TARGET_ADVANCED against an already-merged base."
+            )
+            # The intrinsic reason and stale flag are left untouched: a rebase
+            # does not remediate the docs scope violation.
+            reasons = await StaleReasonRepository(s).list_for_candidate(candidate_id)
+            scope_rows = [r for r in reasons if r.reason_code == "docs_task_scope_violation"]
+            assert scope_rows, "intrinsic docs_task_scope_violation row should remain"
+            assert any(r.status == "active" for r in scope_rows)
+            assert all(r.resolved_at is None for r in scope_rows)
+            assert candidate.stale is True
+            assert candidate.stale_reason == "docs_task_scope_violation"
+
 
 class TestPushRejectRecovery:
     """Push is rejected when local diverged from remote. Without
@@ -1246,6 +1561,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
         cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="SYNC-BASE-SHA\n")  # rev-parse origin/<base>
         # Outer iter 2: CLEAN → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
