@@ -54,6 +54,11 @@ from awf.service.usage_store import (
 
 _log = get_logger(__name__)
 
+# Gap *between* samples, not a fixed wall-clock period: each loop iteration
+# sleeps this long and then runs ccusage (up to the command timeout below), so
+# the effective cadence is this value + sample time (~80s worst case at the
+# defaults). See ``_run_loop`` for the full rationale; callers/tests overriding
+# the interval should reason about sample frequency with that composition in mind.
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 60.0
 DEFAULT_CCUSAGE_COMMAND_TIMEOUT_SECONDS = 20.0
 
