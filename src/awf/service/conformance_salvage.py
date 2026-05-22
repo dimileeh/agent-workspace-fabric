@@ -335,6 +335,7 @@ def _run_git(
     env: Mapping[str, str],
     failure_reason: str = SALVAGE_SOURCE_UNAVAILABLE,
 ) -> CompletedProcessLike:
+    """Run a git command for salvage with deterministic timeout and failure mapping."""
     result = run(
         ["git", *git_safe_directory_config_args(worktree), "-C", str(worktree), *args],
         check=False,
@@ -356,10 +357,12 @@ def _run_git(
 
 
 def _git_lines(value: str) -> list[str]:
+    """Split git output into a sorted list of non-empty changed paths."""
     return sorted(line.strip() for line in value.splitlines() if line.strip())
 
 
 def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    """Convert salvage evidence gaps into a stable list of non-empty strings."""
     value = evidence.get("gaps")
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -369,6 +372,7 @@ def _evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _string_list(value: object) -> list[str]:
+    """Return a filtered list of strings, dropping non-string and empty values."""
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and item]
@@ -384,6 +388,7 @@ def _implementation_path_lines(salvage: Mapping[str, Any]) -> str:
 
 
 def _optional_str(value: object) -> str | None:
+    """Normalize an optional string value to ``str`` or ``None``."""
     if not isinstance(value, str):
         return None
     stripped = value.strip()

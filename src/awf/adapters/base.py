@@ -394,6 +394,7 @@ def get_adapter(
 
 
 def _failure_reason_for_result(result: CommandResult) -> str:
+    """Normalize command timeout/provider failure reason codes for retries."""
     if result.reason_code == COMMAND_TIMEOUT_REASON:
         return "AGENT_TIMEOUT"
     if result.reason_code == COMMAND_IDLE_TIMEOUT_REASON:

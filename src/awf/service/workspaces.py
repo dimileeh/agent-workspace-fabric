@@ -201,6 +201,8 @@ _IDEMPOTENCY_CONFLICT_MESSAGE = (
 
 @dataclass(frozen=True)
 class _WorkspaceResponseSource:
+    """Projection wrapper exposing computed response values over workspace state."""
+
     workspace: Workspace
     computed_fields: Mapping[str, Any]
 
@@ -374,6 +376,8 @@ class WorkspaceRetryResult:
 
 @dataclass(frozen=True)
 class _ConformanceRetryContext:
+    """Container for conformance retry evidence and provenance."""
+
     reason_code: str
     evidence: Mapping[str, Any]
     evidence_ref: dict[str, str]
@@ -381,6 +385,8 @@ class _ConformanceRetryContext:
 
 @dataclass(frozen=True)
 class _PlanningScopeRetryContext:
+    """Container for planning-scope retry reason, evidence, and strategy."""
+
     reason_code: str
     evidence: Mapping[str, Any]
     evidence_ref: dict[str, str]
@@ -392,6 +398,8 @@ class _PlanningScopeRetryContext:
 
 @dataclass(frozen=True)
 class _AgentTimeoutRetryContext:
+    """Container for timeout retry reason and evidence metadata."""
+
     reason_code: str
     evidence: Mapping[str, Any]
     evidence_ref: dict[str, str]
