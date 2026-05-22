@@ -598,6 +598,24 @@ def prefetched_usage_snapshots(
 
 
 def _resolve_usage_snapshot(workspace_id: str | None) -> UsageSnapshot | None:
+    """Resolve a workspace's usage snapshot, preferring a prefetched read.
+
+    Two tiers:
+    1. The request-scoped ``prefetched_usage_snapshots`` map, when this id is
+       present in it.
+    2. A direct ``read_latest_usage_snapshot`` read (a blocking ``Path.read_text``).
+
+    Tier 2 is reachable on the event loop, by design. Callers that resolve a
+    single workspace take this one bounded latest-wins read inline rather than
+    set up a prefetch context: ``GET /workspaces/{id}`` (``_get_workspace_response``
+    → ``workspace_response``), the websocket initial snapshot (``ws._send_initial_state``),
+    and ``WorkspaceService.get``/``create``. The prefetch exists only to spare
+    *multi-row* projections one blocking read per row, so any latency-sensitive
+    caller that fans out over many workspaces must read snapshots in a worker
+    thread and wrap the projection in ``prefetched_usage_snapshots`` (as the task
+    list and workspace overview endpoints do) instead of relying on this fallback.
+    """
+
     prefetched = _PREFETCHED_USAGE_SNAPSHOTS.get()
     if prefetched is not None and workspace_id is not None and workspace_id in prefetched:
         return prefetched[workspace_id]
