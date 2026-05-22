@@ -151,12 +151,16 @@ from awf.service.workspace_runtime_health import (
 
 
 class RuntimeInspection(Protocol):
+    """Protocol for runtime health inspection implementations."""
+
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
         """Inspect container runtime state for the given compose project."""
 
 
 @dataclass(frozen=True, slots=True)
 class OperationRowsPage:
+    """Paginated container for operation response rows."""
+
     rows: builtins.list[OperationResponse]
 
 
@@ -213,6 +217,8 @@ _PROFILE_APP_ENDPOINTS_ADAPTER = TypeAdapter(list[ProfileAppEndpoint])
 
 
 class WorkspaceRetryError(Exception):
+    """Base error for failures encountered while retrying a workspace."""
+
     error_code = "WORKSPACE_RETRY_ERROR"
     message = "Workspace retry failed."
     detail: dict[str, Any] | None
@@ -231,6 +237,8 @@ class WorkspaceRetryError(Exception):
 
 
 class WorkspaceRetryNotFoundError(WorkspaceRetryError):
+    """Raised when a workspace cannot be found for retry."""
+
     error_code = "WORKSPACE_NOT_FOUND"
 
     def __init__(self, workspace_id: str) -> None:
@@ -239,6 +247,8 @@ class WorkspaceRetryNotFoundError(WorkspaceRetryError):
 
 
 class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
+    """Raised when a workspace is not currently retryable."""
+
     error_code = "WORKSPACE_NOT_RETRYABLE"
 
     def __init__(self, workspace: Workspace) -> None:
@@ -253,6 +263,8 @@ class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
 
 
 class WorkspaceRetryExhaustedError(WorkspaceRetryError):
+    """Raised when retry attempts exceed the configured limit."""
+
     error_code = "WORKSPACE_RETRY_EXHAUSTED"
 
     def __init__(self, attempt_count: int) -> None:
@@ -267,6 +279,8 @@ class WorkspaceRetryExhaustedError(WorkspaceRetryError):
 
 
 class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
+    """Raised when salvage data is required but unavailable."""
+
     error_code = "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
 
     def __init__(
@@ -300,6 +314,8 @@ class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
 
 
 class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
+    """Raised when provider readiness preflight blocks workspace startup."""
+
     error_code = "PROVIDER_READINESS_PRECHECK_FAILED"
 
     def __init__(self, preflight: Mapping[str, Any]) -> None:
@@ -311,6 +327,8 @@ class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
 
 
 class WorkspaceCreateIdempotencyConflictError(Exception):
+    """Raised when an idempotency key has conflicting payload data."""
+
     error_code = "IDEMPOTENCY_CONFLICT"
     message = _IDEMPOTENCY_CONFLICT_MESSAGE
     detail: dict[str, Any] | None = None
@@ -321,6 +339,8 @@ class WorkspaceCreateIdempotencyConflictError(Exception):
 
 
 class WorkspaceCreateInsufficientDiskError(Exception):
+    """Raised when workspace creation is blocked by insufficient disk."""
+
     error_code = "INSUFFICIENT_DISK"
     message = "Insufficient free disk to create a new workspace."
 
@@ -344,6 +364,8 @@ async def _resolve_disk_check_factory(factory: DiskCheckFactory) -> DiskCheck:
 
 @dataclass(frozen=True)
 class WorkspaceRetryResult:
+    """Result container for a workspace retry attempt."""
+
     source_workspace_id: str
     new_workspace: Workspace
     operation: Operation
@@ -377,6 +399,8 @@ class _AgentTimeoutRetryContext:
 
 @dataclass(frozen=True)
 class ResourceReservationPlan:
+    """Resource reservation plan for workspace execution."""
+
     node_id: str
     steady_cpu: float
     steady_memory_gb: float

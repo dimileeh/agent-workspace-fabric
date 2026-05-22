@@ -20,15 +20,15 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.service.conformance_salvage import (
-    ConformanceSalvageError,
-    SALVAGE_BASE_UNAVAILABLE,
-)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_prompt,
     render_workspace_path,
+)
+from awf.service.conformance_salvage import (
+    SALVAGE_BASE_UNAVAILABLE,
+    ConformanceSalvageError,
 )
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
@@ -45,6 +45,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory backed by a disposable test database."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -425,6 +426,7 @@ async def _mark_failed(
     branch_name: str = "codex/old-attempt",
     remote_push_branch: str | None = None,
 ) -> dict[str, object]:
+    """Mark a workspace as failed with shared transition/evidence payload."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -453,6 +455,7 @@ async def _mark_conformance_failed(
     *,
     base_commit: str | None = None,
 ) -> None:
+    """Mark a workspace as failed with conformance-unsatisfied evidence."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -499,6 +502,7 @@ async def _mark_conformance_failed_without_evidence(
     *,
     base_commit: str | None = None,
 ) -> None:
+    """Mark a conformance failure workspace without conformance evidence payload."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -528,6 +532,7 @@ async def _mark_agent_timeout_failed(
     base_commit: str | None = None,
     reason_code: str = AGENT_IDLE_TIMEOUT,
 ) -> None:
+    """Mark a workspace failure caused by agent timeout in agent phase."""
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
@@ -1342,6 +1347,7 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
         context: object,
         executemany: bool,
     ) -> None:
+        """Collect SQL statements for task-kind update assertions."""
         del conn, cursor, parameters, context, executemany
         statements.append(" ".join(statement.lower().split()))
 

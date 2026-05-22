@@ -35,12 +35,16 @@ _GIT_TIMEOUT_SECONDS = 30.0
 
 
 class CompletedProcessLike(Protocol):
+    """Protocol describing the small git subprocess result contract."""
+
     returncode: int
     stdout: str
     stderr: str
 
 
 class SubprocessRun(Protocol):
+    """Protocol for a subprocess runner used by salvage operations."""
+
     def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
@@ -50,11 +54,15 @@ class SubprocessRun(Protocol):
         text: Literal[True],
         timeout: float,
         env: Mapping[str, str],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike:
+        """Execute subprocess command and return a captured result."""
+        ...
 
 
 @dataclass(frozen=True)
 class ConformanceSalvageCapture:
+    """Captures a salvage operation's metadata and artifact location."""
+
     source_workspace_id: str
     source_base_commit: str
     patch_path: Path
@@ -71,6 +79,7 @@ class ConformanceSalvageCapture:
     report_path: str | None = None
 
     def as_policy(self) -> dict[str, Any]:
+        """Convert capture metadata into a plan-policy payload."""
         payload: dict[str, Any] = {
             "status": "captured",
             "source_workspace_id": self.source_workspace_id,
@@ -96,6 +105,8 @@ class ConformanceSalvageCapture:
 
 
 class ConformanceSalvageError(Exception):
+    """Raised when salvage capture or validation fails."""
+
     def __init__(
         self,
         *,
@@ -103,6 +114,7 @@ class ConformanceSalvageError(Exception):
         message: str,
         detail: dict[str, Any] | None = None,
     ) -> None:
+        """Initialise an error with machine-readable salvage metadata."""
         self.reason_code = reason_code
         self.detail = detail or {}
         super().__init__(message)
@@ -119,6 +131,7 @@ def capture_conformance_salvage(
     source_remote_push_branch: str | None,
     run_subprocess: SubprocessRun | None = None,
 ) -> ConformanceSalvageCapture:
+    """Capture a salvage patch and metadata from a failed workspace run."""
     if not source_base_commit:
         raise ConformanceSalvageError(
             reason_code=SALVAGE_BASE_UNAVAILABLE,
@@ -243,6 +256,7 @@ def build_conformance_salvage_retry_prompt(
     evidence: Mapping[str, Any],
     salvage: Mapping[str, Any],
 ) -> str:
+    """Build a retry prompt that replays recovered conformance implementation diffs."""
     paths = _implementation_path_lines(salvage)
     return (
         "## Automatic AWF salvage\n\n"
@@ -261,6 +275,7 @@ def build_agent_timeout_salvage_retry_prompt(
     evidence: Mapping[str, Any],
     salvage: Mapping[str, Any],
 ) -> str:
+    """Build a retry prompt for timeout recovery with recovered implementation diff."""
     reason_code = _optional_str(evidence.get("reason_code")) or "AGENT_IDLE_TIMEOUT"
     message = _optional_str(evidence.get("message"))
     message_line = f"\n\n### Timeout message\n{message[:1000]}" if message else ""
@@ -284,6 +299,7 @@ def build_conformance_salvage_conflict_prompt(
     agent_patch_path: str,
     apply_error: str,
 ) -> str:
+    """Build a prompt that guides a conflict-resolution retry attempt."""
     gaps = _string_list(salvage.get("remaining_gaps"))
     gap_lines = "\n".join(f"- {gap}" for gap in gaps) or "- Re-check conformance evidence."
     path_lines = _implementation_path_lines(salvage)
@@ -304,6 +320,7 @@ def build_conformance_salvage_conflict_prompt(
 def conformance_salvage_from_task_policy(
     task_policy: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """Extract conformance-salvage metadata from a task policy blob."""
     if not isinstance(task_policy, Mapping):
         return None
     value = task_policy.get(CONFORMANCE_SALVAGE_POLICY_KEY)
@@ -358,6 +375,7 @@ def _string_list(value: object) -> list[str]:
 
 
 def _implementation_path_lines(salvage: Mapping[str, Any]) -> str:
+    """Format captured implementation paths as prompt bullet lines with truncation."""
     implementation_paths = _string_list(salvage.get("implementation_paths"))
     paths = "\n".join(f"- `{path}`" for path in implementation_paths[:20])
     if len(implementation_paths) > 20:

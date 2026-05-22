@@ -89,6 +89,7 @@ class AgentRunResult:
 
     @property
     def ok(self) -> bool:
+        """Whether the adapter completed successfully."""
         return self.returncode == 0
 
 
@@ -107,6 +108,7 @@ class AgentRunError(Exception):
         reason_code: str = "AGENT_CLI_FAILED",
         details: dict[str, Any] | None = None,
     ) -> None:
+        """Initialize adapter error metadata from a failed CLI execution."""
         self.agent = agent
         self.result = result
         self.reason_code = reason_code
@@ -138,6 +140,7 @@ class AgentAdapter(ABC):
         agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
         agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     ) -> None:
+        """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
             raise ValueError("agent_wall_timeout_seconds must be positive")
         if agent_idle_timeout_seconds <= 0:
@@ -151,14 +154,19 @@ class AgentAdapter(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> AgentRuntime: ...  # pragma: no cover
+    def name(self) -> AgentRuntime:
+        """Identity of the underlying agent runtime."""
+        ...  # pragma: no cover
 
     @property
     def default_model(self) -> str | None:
+        """Return the default model for this adapter."""
         return self._default_model
 
     @abstractmethod
-    def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
+    def get_provider(self, model: str | None) -> str:
+        """Return the canonical provider identifier for a model."""
+        ...  # pragma: no cover
 
     @abstractmethod
     def _cli_args(self, *, model: str | None) -> list[str]:

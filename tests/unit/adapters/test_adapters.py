@@ -78,7 +78,10 @@ def _assert_prompt_not_in_argv(args: list[str], prompt: str = _PROMPT) -> None:
 
 
 class _TimeoutStreamingRunner:
+    """Fake runner that simulates watchdog timeout and captures cleanup calls."""
+
     def __init__(self, *, reason_code: str) -> None:
+        """Store expected timeout reason and initialize runner state."""
         self.reason_code = reason_code
         self.used_streaming = False
         self.wall_timeout_seconds: float | None = None
@@ -86,6 +89,7 @@ class _TimeoutStreamingRunner:
         self.cleanup_calls: list[list[str]] = []
 
     async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        """Pretend to run cleanup and return a zero exit code."""
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
         return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
@@ -101,6 +105,7 @@ class _TimeoutStreamingRunner:
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
     ) -> CommandResult:
+        """Simulate a timed-out streaming run with watchdog metadata."""
         del input_bytes, cwd
         self.used_streaming = True
         self.wall_timeout_seconds = wall_timeout_seconds
@@ -118,31 +123,44 @@ class _TimeoutStreamingRunner:
 
 
 class _RecordingSinks:
+    """In-memory stdout/stderr sinks used by adapter log-store tests."""
+
     def __init__(self) -> None:
+        """Initialize recorded stream buffers."""
         self.stdout_data: list[str] = []
         self.stderr_data: list[str] = []
         self.closed = False
 
     async def write_stdout(self, data: str) -> None:
+        """Record stdout stream data."""
         self.stdout_data.append(data)
 
     async def write_stderr(self, data: str) -> None:
+        """Record stderr stream data."""
         self.stderr_data.append(data)
 
     async def close(self) -> None:
+        """Mark the sinks as closed."""
         self.closed = True
 
 
 class _RecordingLogStore:
+    """Log store stub that provides deterministic in-memory sinks."""
+
     def __init__(self) -> None:
+        """Initialise a shared in-memory sink."""
         self.sinks = _RecordingSinks()
 
     async def open_command_streams(self, **_kwargs: Any) -> _RecordingSinks:
+        """Return the in-memory sink used by adapter log stream assertions."""
         return self.sinks
 
 
 class _RunOnlyRunner:
+    """Runner that exercises the sync-only adapter execution path."""
+
     def __init__(self) -> None:
+        """Initialize captured call history."""
         self.calls: list[dict[str, object]] = []
 
     async def run(
@@ -152,12 +170,16 @@ class _RunOnlyRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
+        """Record one call and return legacy success output."""
         self.calls.append({"args": args, "input_bytes": input_bytes, "cwd": cwd})
         return CommandResult(returncode=0, stdout="legacy stdout", stderr="legacy stderr")
 
 
 class _CancellingStreamingRunner:
+    """Runner that injects cancellation to test adapter cleanup behavior."""
+
     def __init__(self) -> None:
+        """Initialize cleanup coordination events."""
         self.cleanup_calls: list[list[str]] = []
 
     async def run(
@@ -167,6 +189,7 @@ class _CancellingStreamingRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
+        """Record cleanup call details and return success payload."""
         del input_bytes, cwd
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
@@ -177,10 +200,13 @@ class _CancellingStreamingRunner:
         _args: list[str],
         **_kwargs: Any,
     ) -> CommandResult:
+        """Reject streaming runs by raising cancellation for cleanup assertions."""
         raise asyncio.CancelledError
 
 
 class _SlowCleanupAfterCancelRunner:
+    """Runner that blocks cleanup briefly to test cancellation timing."""
+
     def __init__(self) -> None:
         self.cleanup_started = asyncio.Event()
         self.allow_cleanup = asyncio.Event()
@@ -194,6 +220,7 @@ class _SlowCleanupAfterCancelRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
+        """Capture cleanup-callback details before cancellation."""
         del input_bytes, cwd
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
@@ -207,10 +234,13 @@ class _SlowCleanupAfterCancelRunner:
         _args: list[str],
         **_kwargs: Any,
     ) -> CommandResult:
+        """Raise cancellation immediately to force exception handling paths."""
         raise asyncio.CancelledError
 
 
 class TestCodexAdapter:
+    """End-to-end Codex adapter contract tests."""
+
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("wall_timeout", "idle_timeout", "message"),
@@ -523,6 +553,8 @@ class TestCodexAdapter:
 
 
 class TestClaudeCodeAdapter:
+    """Claude adapter contract tests."""
+
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
@@ -628,6 +660,8 @@ class TestClaudeCodeAdapter:
 
 
 class TestGeminiAdapter:
+    """Gemini adapter contract tests."""
+
     @pytest.mark.unit
     def test_reports_google_provider(self) -> None:
         adapter = GeminiAdapter(runner=FakeCommandRunner())
@@ -727,6 +761,8 @@ class TestGeminiAdapter:
 
 
 class TestOpenCodeAdapter:
+    """OpenCode adapter contract tests."""
+
     @pytest.mark.unit
     def test_reports_provider_from_selected_or_default_model(self) -> None:
         default_adapter = OpenCodeAdapter(runner=FakeCommandRunner())
@@ -954,6 +990,8 @@ def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
 
 
 class TestCentralDefaults:
+    """Default model and effort mapping tests."""
+
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
@@ -977,6 +1015,8 @@ class TestCentralDefaults:
 
 
 class TestRegistry:
+    """Adapter registry wiring tests."""
+
     @pytest.mark.unit
     def test_all_adapters_registered(self) -> None:
         runner = FakeCommandRunner()
