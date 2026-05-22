@@ -219,6 +219,21 @@ def test_ci_failure_evidence_linear_scanner_preserves_bracketed_parameters() -> 
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_rejects_unterminated_bracketed_node_ids() -> None:
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "FAILED tests/unit/runtime/test_prompt.py::test_handles[param - truncated",
+                "FAILED tests/unit/runtime/test_prompt.py::test_alpha - AssertionError: boom",
+            ]
+        ),
+        check_name="unit",
+    )
+
+    assert evidence.test_node_ids == ("tests/unit/runtime/test_prompt.py::test_alpha",)
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_rejects_wrapped_pytest_node_ids() -> None:
     line = "Failed: (tests/unit/runtime/test_prompt.py::test_x), and {tests/unit/runtime/test_prompt.py::test_y}"
 

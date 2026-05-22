@@ -146,7 +146,11 @@ def _pytest_node_candidates(line: str) -> list[str]:
             end += 1
 
         candidate = _strip_node_suffix(line[start:end].strip("`'\""))
-        if _has_pytest_node_boundary(line, start, end) and _looks_like_pytest_node(candidate):
+        if (
+            bracket_depth == 0
+            and _has_pytest_node_boundary(line, start, end)
+            and _looks_like_pytest_node(candidate)
+        ):
             nodes.append(candidate)
         search_from = max(end, anchor + len(".py::"))
 
