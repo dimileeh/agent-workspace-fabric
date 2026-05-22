@@ -123,19 +123,19 @@ class TaskKind(StrEnum):
     """Default: clone repo, run coding CLI, push PR against base branch,
     monitor comments + CI, squash-merge into base. The everyday path."""
 
-    monitor_release_pr = "monitor_release_pr"
-    """No clone, no initial coding-CLI run, no PR creation. Given an
-    existing PR number, monitor the 5 gates and — when all green — post
-    a "ready to merge" comment. Never auto-merges (dev→main is human-only)."""
-
     sync_release_pr = "sync_release_pr"
-    """Automated development→main release-PR maintenance. Checks for
-    divergence; opens a PR if one doesn't exist; attaches the release-
-    PR monitor (auto_merge=False). Intended to be fired by a watcher /
-    webhook whenever development advances beyond main. Never merges;
-    only posts "ready to merge" when all gates green. The existing open
-    PR is kept current via the monitor's SyncBase cycle as more feature
-    branches land on development."""
+    """Automated source→target release-PR maintenance (default
+    development→``repo.base_branch``). No coding agent and no feature PR:
+    checks whether the source branch is ahead of the target; completes
+    cleanly when nothing is ahead; otherwise reuses an existing open
+    source→target PR or opens one, then attaches the release-PR monitor
+    (auto_merge forced ``False``). Never merges; only posts "ready to
+    merge" when all gates are green. The open PR is kept current via the
+    monitor's SyncBase cycle as more work lands on the source branch.
+
+    To monitor an arbitrary already-open PR (any base/head), use the
+    generic PR-adoption flow with ``auto_merge=false`` instead of a task
+    kind — that selects the same release/manual monitor behavior."""
 
     sync_feature_pr = "sync_feature_pr"
     """Adopt an already-open feature PR into AWF's service monitor.

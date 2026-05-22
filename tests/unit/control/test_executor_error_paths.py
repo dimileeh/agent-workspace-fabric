@@ -39,8 +39,11 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
     _call_pr_monitor_factory,
+    _release_sync_source_branch,
+    _release_sync_target_branch,
     _required_metadata_str,
     _validation_run_command_records,
+    _with_release_sync_pr_metadata,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
@@ -4703,9 +4706,7 @@ class TestExecutorCoverageEdges:
             assert ws.events[-1].reason_code == "MONITOR_RECOVERY_METADATA_MISSING"
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "task_kind", ["monitor_release_pr", "sync_release_pr", "sync_feature_pr"]
-    )
+    @pytest.mark.parametrize("task_kind", ["sync_release_pr", "sync_feature_pr"])
     async def test_sync_and_release_resume_fail_when_remote_push_branch_is_unknown(
         self,
         task_kind: str,
@@ -4735,3 +4736,541 @@ class TestExecutorCoverageEdges:
             assert "remote_push_branch" in (ws.failure_message or "")
             assert task_kind in (ws.failure_message or "")
             assert ws.remote_push_branch is None
+
+
+def _release_adoption_payload(
+    *,
+    number: int = 321,
+    head_ref: str = "development",
+    base_ref: str = "main",
+    head_sha: str = "h" * 40,
+    base_sha: str = "b" * 40,
+) -> str:
+    return json.dumps(
+        {
+            "number": number,
+            "headRefName": head_ref,
+            "headRepository": {"name": "y", "nameWithOwner": "x/y"},
+            "isCrossRepository": False,
+            "baseRefName": base_ref,
+            "headRefOid": head_sha,
+            "baseRefOid": base_sha,
+            "state": "OPEN",
+            "isDraft": False,
+            "author": {"login": "octocat"},
+            "url": f"https://github.com/x/y/pull/{number}",
+            "title": "Release",
+        }
+    )
+
+
+def _release_open_pr_list_payload(*, number: int = 321) -> str:
+    return json.dumps(
+        [
+            {
+                "number": number,
+                "url": f"https://github.com/x/y/pull/{number}",
+                "headRefName": "development",
+                "headRefOid": "h" * 40,
+                "headRepository": {"name": "y", "nameWithOwner": "x/y"},
+                "headRepositoryOwner": {"login": "x"},
+            }
+        ]
+    )
+
+
+_RELEASE_SYNC_POLICY = {"release_sync": {"source_branch": "development", "target_branch": "main"}}
+
+
+class TestTaskKindFailFast:
+    @pytest.mark.unit
+    async def test_legacy_monitor_release_pr_fails_fast_without_feature_work(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("deprecated kinds must not create a PR")
+
+        ws_id = await _seed_ready(factory, task_kind="monitor_release_pr")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert "deprecated" in (ws.failure_message or "")
+            assert "auto_merge=false" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "DEPRECATED_TASK_KIND"
+
+    @pytest.mark.unit
+    async def test_unknown_task_kind_fails_fast_without_feature_work(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+        ws_id = await _seed_ready(factory, task_kind="totally_made_up")
+
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert "unsupported task kind" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "UNSUPPORTED_TASK_KIND"
+
+
+class TestSyncReleasePrHandoff:
+    @pytest.mark.unit
+    async def test_no_commits_ahead_completes_without_pr_or_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="0\n")  # git rev-list --count
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run when there is nothing to sync")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == []
+        assert [c.args[:3] for c in fake.calls] == [
+            ["git", "fetch", "origin"],
+            ["git", "rev-list", "--count"],
+        ]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            no_change_events = [
+                e for e in ws.events if e.event_type == "workspace.release_pr_sync_no_changes"
+            ]
+            assert len(no_change_events) == 1
+            assert no_change_events[0].reason_code == "NO_CHANGES_TO_SYNC"
+            assert no_change_events[0].payload == {
+                "source_branch": "development",
+                "target_branch": "main",
+            }
+            assert ws.pr_url is None
+
+    @pytest.mark.unit
+    async def test_ahead_creates_release_pr_and_enters_monitoring(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+        captured_auto_merge: list[bool] = []
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # gh pr create
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # gh pr view
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        def _monitor_factory(*_args: Any, **kwargs: Any) -> object:
+            workspace = _args[2] if len(_args) > 2 else None
+            if workspace is not None:
+                captured_auto_merge.append(bool(workspace.auto_merge))
+            return _Monitor()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert captured_auto_merge == [False]
+        create_calls = [c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]
+        assert len(create_calls) == 1
+        assert create_calls[0].args[create_calls[0].args.index("--base") + 1] == "main"
+        assert create_calls[0].args[create_calls[0].args.index("--head") + 1] == "development"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.pr_url == "https://github.com/x/y/pull/321"
+            assert ws.pr_number == 321
+            assert ws.remote_push_branch == "development"
+            assert ws.monitor_last_commit_sha == "h" * 40
+            assert ws.base_commit == "b" * 40
+            assert ws.task_policy["release_sync"]["pr"]["number"] == 321
+            assert ws.task_policy["release_sync"]["pr"]["created"] is True
+            candidate = (
+                await s.execute(select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id))
+            ).scalar_one()
+            assert candidate.status == "open"
+            assert candidate.pr_url == "https://github.com/x/y/pull/321"
+
+    @pytest.mark.unit
+    async def test_ahead_reuses_existing_open_release_pr(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list --count
+        fake.queue_result(
+            returncode=0, stdout=_release_open_pr_list_payload(number=88)
+        )  # gh pr list
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=88))  # gh pr view
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert all(c.args[:3] != ["gh", "pr", "create"] for c in fake.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.pr_number == 88
+            assert ws.task_policy["release_sync"]["pr"]["created"] is False
+
+    @pytest.mark.unit
+    async def test_invalid_repo_url_fails_before_git(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.repo_url = "not a github url"
+            await s.commit()
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run when the repo URL is invalid")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.execute(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.events[-1].reason_code == "RELEASE_SYNC_REPO_INVALID"
+
+    @pytest.mark.unit
+    async def test_fetch_failure_fails_cleanly_before_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        fake.queue_result(returncode=1, stderr="network down")  # git fetch fails
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("monitor must not run after a fetch failure")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "RELEASE_SYNC_FETCH_FAILED"
+
+    @pytest.mark.unit
+    async def test_no_op_skips_when_status_changes_mid_flight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="0\n")  # rev-list -> no changes
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].payload["action"] == "sync_release_pr_handoff"
+
+    @pytest.mark.unit
+    async def test_monitoring_handoff_skips_when_status_changes_mid_flight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list
+        fake.queue_result(returncode=0, stdout=_release_open_pr_list_payload(number=70))
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=70))
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        class _Monitor:
+            async def run(self, **_kwargs: Any) -> None:
+                monitor_runs.append(ws_id)
+
+        executor = _make_executor(
+            fake, factory, tmp_path, pr_monitor_factory=lambda *_a, **_k: _Monitor()
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].payload["action"] == "sync_release_pr_handoff"
+
+    @pytest.mark.unit
+    async def test_recheck_prevents_monitor_run_after_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # create
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # view
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=dict(_RELEASE_SYNC_POLICY),
+        )
+
+        class _Monitor:
+            async def run(self, **_kwargs: Any) -> None:
+                monitor_runs.append(ws_id)
+
+        executor = _make_executor(
+            fake, factory, tmp_path, pr_monitor_factory=lambda *_a, **_k: _Monitor()
+        )
+
+        async def _recheck_status(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+        ) -> bool:
+            del workspace_id, expected, reason_code
+            return action != "run_pr_monitor"
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.events[-1].reason_code == "PR_MONITOR_ADOPTED"
+
+
+class TestReleaseSyncHelpers:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_policy, expected",
+        [
+            ({"release_sync": {"source_branch": "release/x"}}, "release/x"),
+            ({"release_sync": {}}, "development"),
+            ({}, "development"),
+        ],
+    )
+    def test_release_sync_source_branch(self, task_policy: dict[str, Any], expected: str) -> None:
+        ws = Workspace(
+            repo_url="git@github.com:x/y.git", branch_base="main", task_policy=task_policy
+        )
+        assert _release_sync_source_branch(ws) == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_policy, branch_base, expected",
+        [
+            ({"release_sync": {"target_branch": "master"}}, "main", "master"),
+            ({}, "main", "main"),
+            ({}, "", "main"),
+        ],
+    )
+    def test_release_sync_target_branch(
+        self, task_policy: dict[str, Any], branch_base: str, expected: str
+    ) -> None:
+        ws = Workspace(
+            repo_url="git@github.com:x/y.git", branch_base=branch_base, task_policy=task_policy
+        )
+        assert _release_sync_target_branch(ws) == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_policy", [None, {"release_sync": "not-a-dict"}, {}])
+    def test_with_release_sync_pr_metadata_handles_missing_block(self, task_policy: Any) -> None:
+        metadata = PullRequestAdoptionMetadata(
+            number=5,
+            head_ref="development",
+            head_repo_slug="x/y",
+            base_ref="main",
+            head_sha="h" * 40,
+            base_sha="b" * 40,
+            state="OPEN",
+            is_draft=False,
+            closed=False,
+            merged=False,
+            author="octocat",
+            url="https://github.com/x/y/pull/5",
+            title="Release",
+        )
+
+        policy = _with_release_sync_pr_metadata(task_policy, metadata=metadata, created=True)
+
+        assert policy["release_sync"]["pr"]["number"] == 5
+        assert policy["release_sync"]["pr"]["created"] is True

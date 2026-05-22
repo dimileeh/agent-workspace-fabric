@@ -49,6 +49,8 @@ from awf.service.workspaces import (
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     WorkspaceService,
+    _assert_supported_direct_create_task_kind,
+    _effective_auto_merge,
     _parse_memory_gb,
     owned_path_overlap_warning_payload,
     owned_path_overlap_warnings,
@@ -895,6 +897,91 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
     assert unchanged is profile
     assert changed.validation.requested_tier == 3
     assert profile.validation.requested_tier == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source_branch", "expected_source"),
+    [("release/cut", "release/cut"), (None, "development")],
+)
+def test_sync_release_pr_snapshot_records_release_sync_block(
+    source_branch: str | None,
+    expected_source: str,
+) -> None:
+    repo: dict[str, object] = {"url": "git@github.com:example/rel.git", "base_branch": "master"}
+    if source_branch is not None:
+        repo["source_branch"] = source_branch
+    request = WorkspaceCreateRequest(
+        repo=repo,
+        task={"title": "Release sync", "prompt": "p", "agent": "codex", "kind": "sync_release_pr"},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "release sync fixture",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert policy["release_sync"] == {
+        "source_branch": expected_source,
+        "target_branch": "master",
+    }
+
+
+@pytest.mark.unit
+def test_feature_branch_pr_snapshot_omits_release_sync_block() -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/feat.git", "base_branch": "main"},
+        task={"title": "Feature", "prompt": "p", "agent": "codex", "kind": "feature_branch_pr"},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "feature fixture",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert "release_sync" not in policy
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kind", "requested_auto_merge", "expected"),
+    [
+        ("sync_release_pr", True, False),
+        ("feature_branch_pr", True, True),
+        ("feature_branch_pr", False, False),
+    ],
+)
+def test_effective_auto_merge_forces_false_for_release_sync(
+    kind: str,
+    requested_auto_merge: bool,
+    expected: bool,
+) -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/am.git", "base_branch": "main"},
+        task={
+            "title": "Auto merge",
+            "prompt": "p",
+            "agent": "codex",
+            "kind": kind,
+            "auto_merge": requested_auto_merge,
+        },
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "auto merge fixture",
+        },
+    )
+
+    assert _effective_auto_merge(request) is expected
+
+
+@pytest.mark.unit
+def test_assert_supported_direct_create_task_kind_guards_unsupported() -> None:
+    _assert_supported_direct_create_task_kind("feature_branch_pr")
+    _assert_supported_direct_create_task_kind("sync_release_pr")
+    with pytest.raises(ValueError, match="unsupported task kind"):
+        _assert_supported_direct_create_task_kind("sync_feature_pr")
 
 
 @pytest.mark.unit

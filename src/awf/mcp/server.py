@@ -214,7 +214,13 @@ def build_mcp_server(
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
         task_kind: str = Field(
             default="feature_branch_pr",
-            description="Task kind for scheduling/monitor behavior.",
+            description=(
+                "Task kind: 'feature_branch_pr' (default) or 'sync_release_pr' "
+                "(open/reuse a source->target release PR, monitored without "
+                "auto-merge). The deprecated 'monitor_release_pr' and the "
+                "adoption-only 'sync_feature_pr' are rejected here; to monitor an "
+                "existing PR, adopt it with auto_merge=false."
+            ),
         ),
         agent: AgentRuntime = Field(
             default=AgentRuntime.codex,

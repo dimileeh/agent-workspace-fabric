@@ -50,7 +50,7 @@ from awf.common.compose_exec import (
     cleanup_failure_message,
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClient, PullRequestAdoptionMetadata, RepoRef
 from awf.common.logging import get_logger
 from awf.control.protected_file_diffs import (
     committed_changed_paths_since,
@@ -138,6 +138,14 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
 )
 from awf.runtime.pr_push_remote import remote_push_url_for_workspace
+from awf.runtime.release_pr_sync import (
+    NO_CHANGES_REASON_CODE,
+    ReleasePrSyncError,
+    ReleasePrSyncNoOp,
+    prepare_release_pr_sync,
+    release_pr_body,
+    release_pr_title,
+)
 from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
@@ -232,6 +240,13 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
+_DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
+_DEPRECATED_TASK_KIND_REASON_CODE = "DEPRECATED_TASK_KIND"
+_UNSUPPORTED_TASK_KIND_REASON_CODE = "UNSUPPORTED_TASK_KIND"
+_RELEASE_SYNC_REPO_INVALID_REASON_CODE = "RELEASE_SYNC_REPO_INVALID"
+_RELEASE_SYNC_NO_CHANGES_EVENT = "workspace.release_pr_sync_no_changes"
+_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
+_DEFAULT_RELEASE_SYNC_TARGET_BRANCH = "main"
 _EXCEPTION_TRACEBACK_LIMIT = 4000
 _VALIDATION_EVIDENCE_JSON_LIMIT = 20000
 _VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS = (
@@ -1441,7 +1456,7 @@ class WorkspaceExecutor:
             suffix = "" if existing.endswith("\n") or not existing else "\n"
             exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
 
-    async def _handoff_sync_feature_pr_monitor(
+    async def _dispatch_non_feature_task_kind(
         self,
         *,
         workspace_id: str,
@@ -1449,28 +1464,72 @@ class WorkspaceExecutor:
         compose_project: str,
         compose_file: Path,
         worktree_path: Path,
-    ) -> None:
-        metadata = _sync_feature_pr_adoption_metadata(workspace)
-        missing = _missing_sync_feature_pr_adoption_metadata(workspace, metadata)
-        if missing:
+    ) -> bool:
+        """Route non-default task kinds; return True if the workspace is handled.
+
+        Returns False only for ``feature_branch_pr`` so the caller continues to
+        the coding-agent path. ``sync_feature_pr``/``sync_release_pr`` hand off
+        to their monitors; the deprecated ``monitor_release_pr`` and any unknown
+        kind fail fast so they never run as feature work.
+        """
+        task_kind = workspace.task_kind
+        if task_kind == "sync_feature_pr":
+            await self._handoff_sync_feature_pr_monitor(
+                workspace_id=workspace_id,
+                workspace=workspace,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
+            return True
+        if task_kind == "sync_release_pr":
+            await self._handoff_sync_release_pr_monitor(
+                workspace_id=workspace_id,
+                workspace=workspace,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
+            return True
+        if task_kind == _DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=_sync_feature_pr_missing_metadata_message(missing),
-                reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
-                details={"missing": missing},
+                failure_reason=FailureReason.policy_failure,
+                message=(
+                    "task kind 'monitor_release_pr' is deprecated; monitor an existing "
+                    "release/manual PR via PR adoption with auto_merge=false instead."
+                ),
+                reason_code=_DEPRECATED_TASK_KIND_REASON_CODE,
+                details={"task_kind": task_kind},
             )
-            return
+            return True
+        if task_kind != "feature_branch_pr":
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.policy_failure,
+                message=f"unsupported task kind {task_kind!r}; cannot run as feature work.",
+                reason_code=_UNSUPPORTED_TASK_KIND_REASON_CODE,
+                details={"task_kind": task_kind},
+            )
+            return True
+        return False
 
-        if not await self._ensure_worktree_available(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            expected=WorkspaceStatus.running,
-            action="sync_feature_pr_handoff",
-        ):
-            return
+    async def _build_handoff_pr_monitor(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        worktree_path: Path,
+        build_failed_log_event: str,
+        build_failed_message_prefix: str,
+    ) -> _MonitorRunnerProto | None:
+        """Build the PR monitor for a handoff, marking the workspace failed on error.
 
+        Shared by the ``sync_feature_pr`` and ``sync_release_pr`` handoffs. Returns
+        ``None`` (after transitioning to ``failed``) when no monitor can be built.
+        """
         monitor: _MonitorRunnerProto | None = self._pr_monitor
         try:
             if monitor is None and self._pr_monitor_factory is not None:
@@ -1501,7 +1560,7 @@ class WorkspaceExecutor:
                 )
         except Exception as exc:
             _log.error(
-                "executor.sync_feature_pr_monitor_build_failed",
+                build_failed_log_event,
                 workspace_id=workspace_id,
                 redacted_traceback=_redacted_exception_traceback(exc),
             )
@@ -1510,19 +1569,271 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"adopted PR monitor handoff failed: {safe_exception}"[:2000],
+                message=f"{build_failed_message_prefix}{safe_exception}"[:2000],
                 reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
             )
-            return
+            return None
 
         if monitor is None:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
                 failure_reason=FailureReason.infrastructure_failure,
-                message="adopted PR monitor handoff failed: no PR monitor configured",
+                message=f"{build_failed_message_prefix}no PR monitor configured",
                 reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
             )
+            return None
+        return monitor
+
+    async def _handoff_sync_release_pr_monitor(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+    ) -> None:
+        """Open/reuse a source→target release PR, then monitor it (never auto-merge).
+
+        No coding agent, no feature PR. When the source branch has no commits
+        ahead of the target, the workspace completes cleanly without a PR.
+        """
+        if not await self._ensure_worktree_available(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            expected=WorkspaceStatus.running,
+            action="sync_release_pr_handoff",
+        ):
+            return
+
+        source_branch = _release_sync_source_branch(workspace)
+        target_branch = _release_sync_target_branch(workspace)
+        try:
+            repo = RepoRef.from_url(workspace.repo_url)
+        except ValueError as exc:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"sync_release_pr cannot parse repo URL: {redact_audit_text(str(exc))}",
+                reason_code=_RELEASE_SYNC_REPO_INVALID_REASON_CODE,
+            )
+            return
+
+        try:
+            outcome = await prepare_release_pr_sync(
+                runner=self._runner,
+                gh=GitHubClient(self._runner),
+                repo=repo,
+                cwd=str(worktree_path),
+                source_branch=source_branch,
+                target_branch=target_branch,
+                title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
+                body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
+            )
+        except ReleasePrSyncError as exc:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"sync_release_pr failed: {exc.message}",
+                reason_code=exc.reason_code,
+                details=exc.detail,
+            )
+            return
+
+        if isinstance(outcome, ReleasePrSyncNoOp):
+            await self._complete_release_pr_sync_no_op(
+                workspace_id=workspace_id,
+                source_branch=source_branch,
+                target_branch=target_branch,
+            )
+            return
+
+        monitor = await self._build_handoff_pr_monitor(
+            workspace_id=workspace_id,
+            workspace=workspace,
+            worktree_path=worktree_path,
+            build_failed_log_event="executor.sync_release_pr_monitor_build_failed",
+            build_failed_message_prefix="release PR monitor handoff failed: ",
+        )
+        if monitor is None:
+            return
+
+        metadata = outcome.metadata
+        async with self._session_factory() as session:
+            repo_db = WorkspaceRepository(session)
+            persisted = await repo_db.get(workspace_id)
+            if persisted is None:  # pragma: no cover - destroyed mid-flight
+                return
+            if persisted.status != WorkspaceStatus.running.value:
+                await self._record_stale_action_skip(
+                    repo_db,
+                    persisted,
+                    action="sync_release_pr_handoff",
+                    expected=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return
+
+            persisted.pr_url = metadata.url
+            persisted.pr_number = metadata.number
+            persisted.remote_push_branch = source_branch
+            persisted.monitor_last_commit_sha = metadata.head_sha
+            persisted.base_commit = metadata.base_sha
+            persisted.task_policy = _with_release_sync_pr_metadata(
+                persisted.task_policy,
+                metadata=metadata,
+                created=outcome.created,
+            )
+            await repo_db.add_event(
+                persisted,
+                event_type=_PR_MONITOR_ADOPTED_EVENT,
+                reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
+                payload={
+                    "pr_number": metadata.number,
+                    "pr_url": metadata.url,
+                    "head_ref": metadata.head_ref,
+                    "base_ref": metadata.base_ref,
+                    "head_sha": metadata.head_sha,
+                    "base_sha": metadata.base_sha,
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "created": outcome.created,
+                    "source": "release_pr_sync",
+                },
+            )
+            await repo_db.transition(
+                persisted,
+                to=WorkspaceStatus.validating,
+                reason_code=_PR_ADOPTION_SKIP_AGENT_REASON_CODE,
+                payload={"source": "release_pr_sync"},
+            )
+            await repo_db.transition(
+                persisted,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
+                payload={
+                    "pr_number": metadata.number,
+                    "pr_url": metadata.url,
+                    "head_sha": metadata.head_sha,
+                    "base_sha": metadata.base_sha,
+                    "source": "release_pr_sync",
+                },
+            )
+            await session.commit()
+
+        _log.info(
+            "executor.sync_release_pr_handoff_to_monitor",
+            workspace_id=workspace_id,
+            pr_url=metadata.url,
+            created=outcome.created,
+        )
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="run_pr_monitor",
+        ):
+            return
+        await monitor.run(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
+
+    async def _complete_release_pr_sync_no_op(
+        self,
+        *,
+        workspace_id: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> None:
+        """Complete a ``sync_release_pr`` workspace that has nothing to sync."""
+        async with self._session_factory() as session:
+            repo_db = WorkspaceRepository(session)
+            persisted = await repo_db.get(workspace_id)
+            if persisted is None:  # pragma: no cover - destroyed mid-flight
+                return
+            if persisted.status != WorkspaceStatus.running.value:
+                await self._record_stale_action_skip(
+                    repo_db,
+                    persisted,
+                    action="sync_release_pr_handoff",
+                    expected=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return
+            await repo_db.add_event(
+                persisted,
+                event_type=_RELEASE_SYNC_NO_CHANGES_EVENT,
+                reason_code=NO_CHANGES_REASON_CODE,
+                payload={"source_branch": source_branch, "target_branch": target_branch},
+            )
+            await repo_db.transition(
+                persisted,
+                to=WorkspaceStatus.validating,
+                reason_code=NO_CHANGES_REASON_CODE,
+                payload={"source": "release_pr_sync"},
+            )
+            await repo_db.transition(
+                persisted,
+                to=WorkspaceStatus.completed,
+                reason_code=NO_CHANGES_REASON_CODE,
+                payload={
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "source": "release_pr_sync",
+                },
+            )
+            await session.commit()
+        _log.info(
+            "executor.sync_release_pr_no_changes",
+            workspace_id=workspace_id,
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+
+    async def _handoff_sync_feature_pr_monitor(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+    ) -> None:
+        metadata = _sync_feature_pr_adoption_metadata(workspace)
+        missing = _missing_sync_feature_pr_adoption_metadata(workspace, metadata)
+        if missing:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=_sync_feature_pr_missing_metadata_message(missing),
+                reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+                details={"missing": missing},
+            )
+            return
+
+        if not await self._ensure_worktree_available(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            expected=WorkspaceStatus.running,
+            action="sync_feature_pr_handoff",
+        ):
+            return
+
+        monitor = await self._build_handoff_pr_monitor(
+            workspace_id=workspace_id,
+            workspace=workspace,
+            worktree_path=worktree_path,
+            build_failed_log_event="executor.sync_feature_pr_monitor_build_failed",
+            build_failed_message_prefix="adopted PR monitor handoff failed: ",
+        )
+        if monitor is None:
             return
 
         async with self._session_factory() as session:
@@ -1687,14 +1998,13 @@ class WorkspaceExecutor:
                 return
             recovery = guard_result.recovery
 
-        if ws.task_kind == "sync_feature_pr" and recovery is None:
-            await self._handoff_sync_feature_pr_monitor(
-                workspace_id=workspace_id,
-                workspace=ws,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-            )
+        if recovery is None and await self._dispatch_non_feature_task_kind(
+            workspace_id=workspace_id,
+            workspace=ws,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            worktree_path=worktree_path,
+        ):
             return
 
         # ── Step 1: agent CLI runs the task inside the container ────────────
@@ -7584,6 +7894,52 @@ def _sync_feature_pr_adoption_metadata(ws: Workspace) -> Mapping[str, object]:
     policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
     adoption = policy.get("pr_adoption")
     return adoption if isinstance(adoption, Mapping) else {}
+
+
+def _release_sync_policy(ws: Workspace) -> Mapping[str, object]:
+    policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
+    block = policy.get("release_sync")
+    return block if isinstance(block, Mapping) else {}
+
+
+def _release_sync_source_branch(ws: Workspace) -> str:
+    return (
+        _nonblank_metadata_str(_release_sync_policy(ws), "source_branch")
+        or _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    )
+
+
+def _release_sync_target_branch(ws: Workspace) -> str:
+    target = _nonblank_metadata_str(_release_sync_policy(ws), "target_branch")
+    if target is not None:
+        return target
+    base = ws.branch_base
+    if isinstance(base, str) and base.strip():
+        return base.strip()
+    return _DEFAULT_RELEASE_SYNC_TARGET_BRANCH
+
+
+def _with_release_sync_pr_metadata(
+    task_policy: object,
+    *,
+    metadata: PullRequestAdoptionMetadata,
+    created: bool,
+) -> dict[str, Any]:
+    """Return a copy of ``task_policy`` recording the resolved release PR."""
+    policy: dict[str, Any] = dict(task_policy) if isinstance(task_policy, Mapping) else {}
+    block_source = policy.get("release_sync")
+    block: dict[str, Any] = dict(block_source) if isinstance(block_source, Mapping) else {}
+    block["pr"] = {
+        "number": metadata.number,
+        "url": metadata.url,
+        "head_ref": metadata.head_ref,
+        "base_ref": metadata.base_ref,
+        "head_sha": metadata.head_sha,
+        "base_sha": metadata.base_sha,
+        "created": created,
+    }
+    policy["release_sync"] = block
+    return policy
 
 
 def _existing_pr_remote_push_url(ws: Workspace) -> str | None:

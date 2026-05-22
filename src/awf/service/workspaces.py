@@ -19,6 +19,7 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    PUBLIC_DIRECT_CREATE_TASK_KINDS,
     EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
@@ -43,7 +44,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
     Operation,
@@ -183,7 +184,7 @@ RETRYABLE_WORKSPACE_STATUSES = (
 )
 MAX_CONFORMANCE_RETRY_ATTEMPTS = 4
 PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
-    {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
+    {TaskKind.sync_release_pr.value, TaskKind.sync_feature_pr.value}
 )
 _REDACTED_TEXT = "<redacted>"
 _IDEMPOTENCY_CONFLICT_MESSAGE = (
@@ -977,6 +978,7 @@ async def create_workspace_row(
     http_get: HttpGet | None = None,
 ) -> Workspace:
     """Persist one rich workspace create request without committing the session."""
+    _assert_supported_direct_create_task_kind(payload.task.kind)
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
@@ -1014,7 +1016,7 @@ async def create_workspace_row(
         task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
-        auto_merge=payload.task.auto_merge,
+        auto_merge=_effective_auto_merge(payload),
         initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
         agent=payload.task.agent.value,
         env_profile=None,
@@ -2935,6 +2937,32 @@ def workspace_create_profile_snapshots(
     return requested_profile, resolved_profile
 
 
+RELEASE_SYNC_POLICY_KEY = "release_sync"
+_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
+
+
+def _assert_supported_direct_create_task_kind(task_kind: str) -> None:
+    """Defense-in-depth re-check of the public direct-create task-kind allow-set.
+
+    The ``WorkspaceTask`` schema validator already rejects unsupported kinds on
+    REST/MCP; this guards internal callers that build a request another way.
+    Adoption bypasses this function (it calls ``WorkspaceRepository.create``).
+    """
+    if task_kind not in PUBLIC_DIRECT_CREATE_TASK_KINDS:
+        supported = ", ".join(sorted(PUBLIC_DIRECT_CREATE_TASK_KINDS))
+        raise ValueError(
+            f"unsupported task kind {task_kind!r} for direct workspace creation; "
+            f"supported kinds are: {supported}."
+        )
+
+
+def _effective_auto_merge(payload: WorkspaceCreateRequest) -> bool:
+    """Release-PR syncs must never auto-merge; force it off at the boundary."""
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        return False
+    return payload.task.auto_merge
+
+
 def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
     """Build a task policy dictionary from a rich create request."""
     policy: dict[str, Any] = {}
@@ -2945,6 +2973,11 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     policy[VALIDATION_POLICY_KEY] = {
         VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
     }
+    if payload.task.kind == TaskKind.sync_release_pr.value:
+        policy[RELEASE_SYNC_POLICY_KEY] = {
+            "source_branch": payload.repo.source_branch or _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+            "target_branch": payload.repo.base_branch,
+        }
     if payload.task.priority != 0 or payload.task.human_boost != 0:
         policy["scheduler"] = scheduler_policy_snapshot(
             base_priority=payload.task.priority,

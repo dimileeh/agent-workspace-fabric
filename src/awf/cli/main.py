@@ -2368,6 +2368,16 @@ def workspace_create(
     task_title: str = typer.Option(..., "--title"),
     task_prompt: str = typer.Option(..., "--prompt"),
     branch_base: str = typer.Option("development", "--base"),
+    task_kind: str = typer.Option(
+        "feature_branch_pr",
+        "--task-kind",
+        help="feature_branch_pr (default) or sync_release_pr.",
+    ),
+    source_branch: str | None = typer.Option(
+        None,
+        "--source-branch",
+        help="Source branch for sync_release_pr release PRs (default development).",
+    ),
     agent: str = typer.Option("codex", "--agent"),
     model: str | None = typer.Option(None, "--model"),
     effort: str | None = typer.Option(
@@ -2434,13 +2444,16 @@ def workspace_create(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Submit a workspace creation request."""
+    repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
+    if source_branch is not None:
+        repo_body["source_branch"] = source_branch
     body: dict[str, Any] = {
-        "repo": {"url": repo_url, "base_branch": branch_base},
+        "repo": repo_body,
         "task": {
             "title": task_title,
             "prompt": task_prompt,
             "agent": agent,
-            "kind": "feature_branch_pr",
+            "kind": task_kind,
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         },
