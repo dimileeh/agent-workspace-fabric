@@ -158,9 +158,12 @@ from awf.service.provider_recovery import (
     provider_recovery_metadata_from_failure,
 )
 from awf.service.staleness import (
-    StalenessRefreshError,
-    StalenessRefreshService,
-    TargetBranchState,
+    REASON_BUILD_CONFIG,
+    REASON_DEPENDENCY,
+    REASON_OVERLAP,
+    REASON_PLAN_ARTIFACT_OVERLAP,
+    REASON_SCHEMA,
+    REASON_TARGET_ADVANCED,
 )
 
 _log = get_logger(__name__)
@@ -313,6 +316,22 @@ _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
+# Staleness reason codes that a successful SyncBase legitimately remediates:
+# the target-derived findings ``evaluate_staleness`` produces from the target
+# diff. Bringing ``base_sha`` up to ``origin/<base>`` makes all of these go
+# stale-free. Intrinsic reasons (e.g. ``docs_task_scope_violation``) are NOT
+# in this set — a rebase does not satisfy their remediation/validation, so the
+# SyncBase refresh must leave them active.
+_SYNC_BASE_RESOLVABLE_STALE_REASONS: frozenset[str] = frozenset(
+    {
+        REASON_TARGET_ADVANCED,
+        REASON_OVERLAP,
+        REASON_SCHEMA,
+        REASON_DEPENDENCY,
+        REASON_BUILD_CONFIG,
+        REASON_PLAN_ARTIFACT_OVERLAP,
+    }
+)
 _RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON = "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
@@ -4535,29 +4554,37 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         base_branch: str,
     ) -> None:
-        """Resolve ``STALE_TARGET_ADVANCED`` on the open candidate after a
+        """Resolve target-derived staleness on the open candidate after a
         successful ``SyncBase`` push.
 
         The pr_monitor's ``base_behind`` view is its own running computation
         of how far the workspace branch trails the target — that becomes 0
         the moment we merge ``origin/<base>`` in. The ``WorkspaceStalenessReason``
         ledger is a separate subsystem written by ``StalenessRefreshService``;
-        it does NOT get re-evaluated on SyncBase. So if the row was inserted
-        with ``severity=blocking, blocks_merge=true`` before SyncBase ran, it
-        stays active forever and ``_merge_gate_for_workspace`` keeps blocking.
-        We bridge the two subsystems here.
+        it does NOT get re-evaluated on SyncBase. So if a target-derived row
+        (e.g. ``STALE_TARGET_ADVANCED``) was inserted with
+        ``severity=blocking, blocks_merge=true`` before SyncBase ran, it stays
+        active forever and ``_merge_gate_for_workspace`` keeps blocking. We
+        bridge the two subsystems here.
 
         Approach: read ``origin/<base>`` from the worktree (the SHA we just
         fetched and merged), advance ``MergeCandidate.base_sha`` to it, then
-        call ``StalenessRefreshService.refresh_candidate`` with a synthetic
-        ``TargetBranchState`` reporting ``head_sha == base_sha`` and
-        ``advanced_commits == 0``. ``evaluate_staleness`` returns ``[]`` →
-        ``StaleReasonRepository.replace_active_findings`` marks every active
-        row resolved → ``MergeCandidate.stale`` flips false.
+        resolve only the active rows whose ``reason_code`` is in
+        ``_SYNC_BASE_RESOLVABLE_STALE_REASONS`` — the target-derived findings
+        that bringing ``base_sha`` up to ``origin/<base>`` actually clears.
+
+        Intrinsic blocking reasons such as ``docs_task_scope_violation`` are
+        deliberately left untouched: a rebase does not satisfy their
+        remediation/validation, and clearing them here would let merge proceed
+        without the intended gate. After resolving the target-derived rows we
+        re-derive ``MergeCandidate.stale`` from the surviving intrinsic reasons
+        via ``sync_candidate_readiness`` so the flag matches the ledger.
 
         Failures are logged but never propagated: the background
         ``target_branch_monitor`` worker will reconcile on its next cycle.
         """
+        from awf.db.repositories import StaleReasonCreate, sync_candidate_readiness
+
         try:
             async with self._deps.session_factory() as session:
                 candidate = await MergeCandidateRepository(
@@ -4569,10 +4596,16 @@ class PullRequestMonitorRunner:
                 active_reasons = await StaleReasonRepository(session).list_active_for_candidate(
                     candidate.id
                 )
-                if not active_reasons:
-                    # Nothing to resolve. Skip the extra ``git rev-parse``
-                    # so workspaces with no active staleness ledger don't
-                    # incur a no-op git call on every SyncBase.
+                resolvable = [
+                    r
+                    for r in active_reasons
+                    if r.reason_code in _SYNC_BASE_RESOLVABLE_STALE_REASONS
+                ]
+                if not resolvable:
+                    # Nothing SyncBase remediates. Leave the candidate (and any
+                    # intrinsic blocking reason like docs_task_scope_violation)
+                    # untouched, and skip the extra ``git rev-parse`` so this is
+                    # a no-op when there is no target-derived staleness to clear.
                     return
                 worktree_path = self._worktrees_root / workspace_id
                 rev_parse = await self._deps.runner.run(
@@ -4588,22 +4621,43 @@ class PullRequestMonitorRunner:
                     return
                 new_base_sha = rev_parse.stdout.strip()
                 candidate.base_sha = new_base_sha
-                target_state = TargetBranchState(
-                    branch=base_branch,
-                    head_sha=new_base_sha,
-                    changed_paths=(),
-                    advanced_commits=0,
+                # Resolve only the target-derived rows by re-stating every other
+                # active finding: ``replace_active_findings`` keeps rows whose
+                # (reason_code, trigger_type, trigger_ref) key is supplied and
+                # resolves the rest, so the preserved intrinsic rows survive.
+                preserved = [
+                    r
+                    for r in active_reasons
+                    if r.reason_code not in _SYNC_BASE_RESOLVABLE_STALE_REASONS
+                ]
+                await StaleReasonRepository(session).replace_active_findings(
+                    workspace_id=candidate.workspace_id,
+                    candidate_id=candidate.id,
+                    attempt_id=candidate.attempt_id,
+                    task_id=candidate.task_id,
+                    findings=[
+                        StaleReasonCreate(
+                            reason_code=r.reason_code,
+                            trigger_type=r.trigger_type,
+                            trigger_ref=r.trigger_ref,
+                            explanation=r.explanation,
+                        )
+                        for r in preserved
+                    ],
                 )
-                await StalenessRefreshService(session).refresh_candidate(
-                    candidate.id, target=target_state
+                # The candidate's stale_reason column may still hold a reason we
+                # just resolved (or a generic "stale"). Clear it, then let
+                # sync_candidate_readiness reinstate only the intrinsic reasons
+                # (docs scope / validation tier) that genuinely still apply.
+                candidate.stale = False
+                candidate.stale_reason = None
+                sync_candidate_readiness(
+                    candidate,
+                    workspace=candidate.workspace,
+                    attempt=candidate.attempt,
+                    sync_validation_staleness=True,
                 )
                 await session.commit()
-        except StalenessRefreshError as exc:
-            _log.warning(
-                "monitor.sync_base_staleness_refresh_failed",
-                workspace_id=workspace_id,
-                error=str(exc),
-            )
         except Exception as exc:  # noqa: BLE001 — best-effort; reconciler will retry
             _log.warning(
                 "monitor.sync_base_staleness_refresh_failed",
