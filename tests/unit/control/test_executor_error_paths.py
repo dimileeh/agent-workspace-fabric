@@ -15,6 +15,7 @@ file targets specific error branches that need dedicated fixtures:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
@@ -4782,6 +4783,11 @@ def _release_open_pr_list_payload(*, number: int = 321) -> str:
 _RELEASE_SYNC_POLICY = {"release_sync": {"source_branch": "development", "target_branch": "main"}}
 
 
+def _release_sync_policy() -> dict[str, Any]:
+    """Return an independent copy so tests can't share nested policy state."""
+    return copy.deepcopy(_RELEASE_SYNC_POLICY)
+
+
 class TestTaskKindFailFast:
     @pytest.mark.unit
     async def test_legacy_monitor_release_pr_fails_fast_without_feature_work(
@@ -4860,7 +4866,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
@@ -4924,7 +4930,7 @@ class TestSyncReleasePrHandoff:
             task_kind="sync_release_pr",
             auto_merge=False,
             create_task_attempt=True,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         def _monitor_factory(*_args: Any, **kwargs: Any) -> object:
@@ -4993,7 +4999,7 @@ class TestSyncReleasePrHandoff:
             task_kind="sync_release_pr",
             auto_merge=False,
             create_task_attempt=True,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         executor = _make_executor(
@@ -5025,7 +5031,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -5060,7 +5066,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
@@ -5092,7 +5098,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
@@ -5125,7 +5131,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
@@ -5158,7 +5164,7 @@ class TestSyncReleasePrHandoff:
             factory,
             task_kind="sync_release_pr",
             auto_merge=False,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         executor = _make_executor(fake, factory, tmp_path)
@@ -5201,7 +5207,7 @@ class TestSyncReleasePrHandoff:
             task_kind="sync_release_pr",
             auto_merge=False,
             create_task_attempt=True,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         class _Monitor:
@@ -5251,7 +5257,7 @@ class TestSyncReleasePrHandoff:
             task_kind="sync_release_pr",
             auto_merge=False,
             create_task_attempt=True,
-            task_policy=dict(_RELEASE_SYNC_POLICY),
+            task_policy=_release_sync_policy(),
         )
 
         class _Monitor:
