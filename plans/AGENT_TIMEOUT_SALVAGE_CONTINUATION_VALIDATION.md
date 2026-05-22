@@ -11,9 +11,9 @@ Plan reference: `plans/AGENT_TIMEOUT_SALVAGE_CONTINUATION_PLAN.md`
   temp-index binary patch flow: Complete.
   - Reused `capture_conformance_salvage()` for timeout retries.
   - Live evidence: retry workspace `ws_6f996a0f4db54b93814ff6bc` captured
-    `/Users/dlihhats/.awf/service/artifacts/salvage/ws_0661de05250d40d18951b515-b85a6d31fdba.patch`.
+    `<awf-service-root>/artifacts/salvage/ws_0661de05250d40d18951b515-b85a6d31fdba.patch`.
   - Live evidence: retry workspace `ws_0062f80399b34037b05c989a` captured
-    `/Users/dlihhats/.awf/service/artifacts/salvage/ws_39eeffb62ae345a8a5e5a0df-f208a4fb14e7.patch`.
+    `<awf-service-root>/artifacts/salvage/ws_39eeffb62ae345a8a5e5a0df-f208a4fb14e7.patch`.
 - Retry task policy records salvage metadata and executor applies it through the
   existing execution path: Complete.
   - Both live retries have `task_policy.conformance_salvage.salvage_kind =
