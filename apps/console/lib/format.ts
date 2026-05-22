@@ -90,6 +90,14 @@ const USAGE_REASON_LABELS: Record<string, string> = {
   ccusage_timeout: "ccusage timed out",
   ccusage_invalid_json: "ccusage output unreadable",
   ccusage_no_records: "no usage recorded yet",
+  // compute_cost_estimate reason codes surfaced via usage_payload when AWF
+  // pricing can't derive a cost (workspace_observability.py).
+  pricing_not_configured: "pricing not configured",
+  pricing_stale: "pricing stale",
+  pricing_rates_unavailable: "pricing rates unavailable",
+  no_token_data: "no token data",
+  negative_token_count: "invalid token count",
+  unsupported_pricing_unit: "unsupported pricing unit",
 };
 
 // Friendly provenance line for the LLM usage block: maps the AWF usage source

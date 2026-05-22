@@ -57,6 +57,27 @@ test("formatUsageProvenance maps ccusage source and reason codes to friendly lab
   assert.equal(formatUsageProvenance("none", "usage_not_reported"), "none / not reported");
 });
 
+test("formatUsageProvenance maps pricing cost-reason codes to friendly labels", () => {
+  assert.equal(
+    formatUsageProvenance("ccusage", "pricing_not_configured"),
+    "ccusage / pricing not configured",
+  );
+  assert.equal(formatUsageProvenance("ccusage", "pricing_stale"), "ccusage / pricing stale");
+  assert.equal(
+    formatUsageProvenance("ccusage", "pricing_rates_unavailable"),
+    "ccusage / pricing rates unavailable",
+  );
+  assert.equal(formatUsageProvenance("ccusage", "no_token_data"), "ccusage / no token data");
+  assert.equal(
+    formatUsageProvenance("ccusage", "negative_token_count"),
+    "ccusage / invalid token count",
+  );
+  assert.equal(
+    formatUsageProvenance("ccusage", "unsupported_pricing_unit"),
+    "ccusage / unsupported pricing unit",
+  );
+});
+
 test("formatUsageProvenance passes through unknown source and reason", () => {
   assert.equal(formatUsageProvenance("custom_src", "weird_reason"), "custom_src / weird_reason");
   assert.equal(formatUsageProvenance(undefined, undefined), "none");
