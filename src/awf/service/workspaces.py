@@ -1153,6 +1153,11 @@ def _release_sync_source_branch_matches(
     requested = payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
     release_sync = _stored_task_policy(existing).get(RELEASE_SYNC_POLICY_KEY)
     stored = release_sync.get("source_branch") if isinstance(release_sync, Mapping) else None
+    if stored is None:
+        # Legacy rows predate the source_branch snapshot (added with the input
+        # itself), so they could only have synced the default; treat a missing
+        # field as the historical default to keep identical replays idempotent.
+        stored = DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
     return stored == requested
 
 

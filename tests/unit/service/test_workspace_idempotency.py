@@ -667,6 +667,31 @@ async def test_create_release_sync_replay_conflicts_when_source_branch_changes(
 
 
 @pytest.mark.unit
+async def test_create_release_sync_legacy_replay_allows_missing_source_branch(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A legacy sync_release_pr row created before the source_branch snapshot has
+    no recorded value; an identical default-branch replay must still match rather
+    than conflict, because such rows could only have synced the default branch."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-legacy-source-branch"
+    request = _release_sync_request(source_branch="development")
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        task_policy = dict(workspace.task_policy)
+        task_policy.pop("release_sync", None)
+        workspace.task_policy = task_policy
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
 async def test_create_auto_profile_legacy_replay_allows_missing_requested_tier(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
