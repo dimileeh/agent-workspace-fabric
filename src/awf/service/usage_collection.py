@@ -10,7 +10,9 @@ Design invariants:
 - Sampling never masks the agent outcome (all sample failures are reason-coded
   or swallowed-and-logged).
 - Reported totals are baseline-subtracted so copied host history can't inflate
-  them; the baseline is persisted and reused across runs of the same workspace.
+  them; a fresh baseline is captured at the start of each run (never reused from
+  a prior run, whose transcripts persist in the per-workspace auth copy) so
+  prior-run usage can't inflate this run's per-run total.
 - Only normalized numeric/accounting data is persisted (see ``usage_store``).
 """
 
@@ -42,7 +44,6 @@ from awf.service.usage_store import (
     UsageSnapshot,
     normalize_ccusage_json,
     provider_ccusage_source,
-    read_latest_usage_snapshot,
     subtract_baseline,
     write_usage_snapshot,
 )
@@ -174,21 +175,14 @@ class _CcusageSampleContext(UsageSampleContext):
             await self._safe_sample(phase="live", status="running")
 
     async def _capture_baseline(self) -> None:
-        prior = read_latest_usage_snapshot(self._workspace_id, work_dir=self._collector._work_dir)
-        # Reuse a prior baseline only when it was anchored for the same
-        # provider/source. A workspace can switch agents in place (provider
-        # recovery fallback mutates Workspace.agent for the same workspace_id),
-        # and a baseline from the old provider would subtract against an
-        # unrelated ccusage source and skew the delta.
-        if (
-            prior is not None
-            and prior.provider == self._provider.value
-            and prior.ccusage_source == self._source
-        ):
-            reused = prior.baseline_usage()
-            if reused is not None:
-                self._baseline = reused
-                return
+        # Always capture a fresh reading at run start; never reuse a prior
+        # snapshot's baseline. The per-workspace auth copy persists across
+        # retries and recovery runs (auth_mounts skips the copytree when the
+        # target dir already exists, and the copy is only GC'd once the
+        # workspace completes), so the previous run's transcripts are still on
+        # disk when the next run starts. Reusing the old start-of-prior-run
+        # baseline would let the prior run's tokens inflate this run's per-run
+        # total; a fresh reading anchors the baseline at this run's true start.
         try:
             usage, reason, _model = await self._run_ccusage()
         except asyncio.CancelledError:

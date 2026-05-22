@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -45,18 +45,24 @@ class FakeClock:
 
 
 class _BlockingRunner:
-    """``run_streaming`` records the call then blocks until ``release`` is set."""
+    """``run_streaming`` records each call. The first calls return the matching
+    ``passthrough`` result immediately (e.g. the run-start baseline read); every
+    later call blocks until ``release`` is set."""
 
-    def __init__(self, result: CommandResult) -> None:
+    def __init__(self, result: CommandResult, *, passthrough: Sequence[CommandResult] = ()) -> None:
         self.calls: list[list[str]] = []
         self.release = asyncio.Event()
         self._result = result
+        self._passthrough = tuple(passthrough)
 
     async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:  # pragma: no cover
         raise AssertionError("run() should not be called")
 
     async def run_streaming(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        index = len(self.calls)
         self.calls.append(list(args))
+        if index < len(self._passthrough):
+            return self._passthrough[index]
         await self.release.wait()
         return self._result
 
@@ -151,8 +157,15 @@ async def test_baseline_subtracted_from_final_sample(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-async def test_persisted_baseline_reused_across_runs(tmp_path: Path) -> None:
-    # A prior snapshot already anchored a baseline for this workspace.
+async def test_prior_baseline_not_reused_fresh_capture_each_run(tmp_path: Path) -> None:
+    # A prior snapshot anchored a baseline for this workspace, but it must NOT be
+    # reused. The per-workspace auth copy persists across retries/recovery runs
+    # (auth_mounts skips the copy when the target dir exists; GC only runs on
+    # workspace completion), so the prior run's transcripts are still on disk and
+    # ccusage at this run's start already reflects them. Here the persisted
+    # baseline is 100 but the on-disk reading at run start is 120 (the prior run
+    # added 20). Reusing 100 would report 130-100=30, inflating this run's total
+    # by the prior run's usage; a fresh baseline (120) reports the true 130-120=10.
     write_usage_snapshot(
         UsageSnapshot(
             workspace_id="ws_reuse",
@@ -165,7 +178,10 @@ async def test_persisted_baseline_reused_across_runs(tmp_path: Path) -> None:
         ),
         work_dir=tmp_path,
     )
-    runner = _ccusage_runner(json.dumps({"totals": {"totalTokens": 130}}))
+    runner = _ccusage_runner(
+        json.dumps({"totals": {"totalTokens": 120}}),  # fresh baseline at run start
+        json.dumps({"totals": {"totalTokens": 130}}),  # final
+    )
     collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
     ctx = await collector.start(
         compose_project="p",
@@ -177,10 +193,10 @@ async def test_persisted_baseline_reused_across_runs(tmp_path: Path) -> None:
 
     snap = read_latest_usage_snapshot("ws_reuse", work_dir=tmp_path)
     assert snap is not None
-    # delta uses the *persisted* baseline (100), not a fresh one: 130 - 100 = 30.
-    assert snap.total_tokens == 30
-    # The final sample was the only ccusage call (baseline reused, no extra call).
-    assert len(runner.calls) == 1
+    # Fresh baseline (120) captured at run start, NOT the persisted 100: 130-120=10.
+    assert snap.total_tokens == 10
+    # Two ccusage calls: fresh baseline + final (no reuse short-circuit).
+    assert len(runner.calls) == 2
 
 
 @pytest.mark.unit
@@ -453,20 +469,15 @@ async def test_finalize_is_idempotent(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 async def test_finalize_completes_final_sample_under_cancellation(tmp_path: Path) -> None:
-    write_usage_snapshot(
-        UsageSnapshot(
-            workspace_id="ws_cancel",
-            provider="claude_code",
-            ccusage_source="claude",
-            status="available",
-            phase="final",
-            captured_at="2026-05-22T00:00:00+00:00",
-            baseline={"total_tokens": 10},
-        ),
-        work_dir=tmp_path,
-    )
+    # Baseline is read fresh at run start (passthrough, totalTokens=10); the final
+    # sample (totalTokens=50) blocks in run_streaming so we can cancel mid-finalize.
     runner = _BlockingRunner(
-        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 50}}), stderr="")
+        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 50}}), stderr=""),
+        passthrough=[
+            CommandResult(
+                returncode=0, stdout=json.dumps({"totals": {"totalTokens": 10}}), stderr=""
+            )
+        ],
     )
     clock = FakeClock()
     collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=clock)
@@ -476,11 +487,11 @@ async def test_finalize_completes_final_sample_under_cancellation(tmp_path: Path
         workspace_id="ws_cancel",
         provider=AgentRuntime.claude_code,
     )
-    assert runner.calls == []  # baseline reused from prior snapshot
+    assert len(runner.calls) == 1  # fresh baseline captured at run start
 
     await _wait_for(lambda: len(clock.sleeps) == 1)  # live loop parked on sleep
     finalize_task = asyncio.ensure_future(ctx.finalize(status="cancelled"))
-    await _wait_for(lambda: len(runner.calls) == 1)  # final sample blocked in run_streaming
+    await _wait_for(lambda: len(runner.calls) == 2)  # final sample blocked in run_streaming
 
     finalize_task.cancel()  # cancel the agent run mid-finalize
     for _ in range(5):
@@ -516,20 +527,15 @@ async def test_baseline_cancellation_propagates(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 async def test_live_sample_cancellation_propagates(tmp_path: Path) -> None:
-    write_usage_snapshot(
-        UsageSnapshot(
-            workspace_id="ws_lcancel",
-            provider="claude_code",
-            ccusage_source="claude",
-            status="available",
-            phase="final",
-            captured_at="2026-05-22T00:00:00+00:00",
-            baseline={"total_tokens": 1},
-        ),
-        work_dir=tmp_path,
-    )
+    # Baseline is read fresh at run start (passthrough); the live sample blocks in
+    # run_streaming so we can cancel it and assert the cancellation propagates.
     runner = _BlockingRunner(
-        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 9}}), stderr="")
+        CommandResult(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 9}}), stderr=""),
+        passthrough=[
+            CommandResult(
+                returncode=0, stdout=json.dumps({"totals": {"totalTokens": 1}}), stderr=""
+            )
+        ],
     )
     clock = FakeClock()
     collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=clock)
@@ -541,7 +547,7 @@ async def test_live_sample_cancellation_propagates(tmp_path: Path) -> None:
     )
     await _wait_for(lambda: len(clock.sleeps) == 1)  # parked on sleep
     clock.tick()
-    await _wait_for(lambda: len(runner.calls) == 1)  # live sample blocked in run_streaming
+    await _wait_for(lambda: len(runner.calls) == 2)  # live sample blocked in run_streaming
 
     assert ctx._task is not None
     ctx._task.cancel()  # cancellation must propagate, not be swallowed
