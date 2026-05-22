@@ -58,6 +58,7 @@ from awf.common.github_client import (
     RepoRef,
 )
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.control.protected_file_diffs import (
     committed_changed_paths_since,
     git_show_text,
@@ -256,7 +257,6 @@ _SUPPORTED_TASK_KINDS = frozenset({"feature_branch_pr", "sync_feature_pr", "sync
 _RELEASE_SYNC_REPO_INVALID_REASON_CODE = "RELEASE_SYNC_REPO_INVALID"
 _RELEASE_SYNC_GITHUB_ERROR_REASON_CODE = "RELEASE_SYNC_GITHUB_ERROR"
 _RELEASE_SYNC_NO_CHANGES_EVENT = "workspace.release_pr_sync_no_changes"
-_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 _DEFAULT_RELEASE_SYNC_TARGET_BRANCH = "main"
 _EXCEPTION_TRACEBACK_LIMIT = 4000
 _VALIDATION_EVIDENCE_JSON_LIMIT = 20000
@@ -7959,7 +7959,7 @@ def _release_sync_policy(ws: Workspace) -> Mapping[str, object]:
 def _release_sync_source_branch(ws: Workspace) -> str:
     return (
         _nonblank_metadata_str(_release_sync_policy(ws), "source_branch")
-        or _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+        or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
     )
 
 

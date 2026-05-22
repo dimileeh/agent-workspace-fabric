@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -45,8 +46,6 @@ from awf.service.secret_leases import (
 )
 
 _log = get_logger(__name__)
-
-_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 
 
 @dataclass(frozen=True)
@@ -661,7 +660,7 @@ def _release_sync_source_branch(ws: Workspace) -> str | None:
         source = block.get("source_branch")
         if isinstance(source, str) and source.strip():
             return source.strip()
-    return _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    return DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:

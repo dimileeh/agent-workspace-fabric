@@ -44,6 +44,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskKind, WorkspaceStatus
 from awf.db.models import (
     EgressAuditRecord,
@@ -2938,7 +2939,6 @@ def workspace_create_profile_snapshots(
 
 
 RELEASE_SYNC_POLICY_KEY = "release_sync"
-_DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 
 
 def _assert_supported_direct_create_task_kind(task_kind: str) -> None:
@@ -2975,7 +2975,7 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     }
     if payload.task.kind == TaskKind.sync_release_pr.value:
         policy[RELEASE_SYNC_POLICY_KEY] = {
-            "source_branch": payload.repo.source_branch or _DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+            "source_branch": payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
             "target_branch": payload.repo.base_branch,
         }
     if payload.task.priority != 0 or payload.task.human_boost != 0:
