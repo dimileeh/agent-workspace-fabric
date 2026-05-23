@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -387,6 +388,47 @@ def test_init_guided_writes_answers_into_workspace_yml(
         == "Needs package registry and model-provider access."
     )
     assert profile["phases"]["validate"] == [{"command": "pytest -q", "required": True}]
+
+
+@pytest.mark.unit
+def test_init_guided_egress_choices_follow_model_enum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.cli import main as cli_main
+
+    class CustomEgressMode(StrEnum):
+        restricted = "restricted"
+        private = "private"
+
+    preview = SimpleNamespace(
+        draft=SimpleNamespace(
+            template="generic",
+            profile=SimpleNamespace(phases=SimpleNamespace(validate_commands=["pytest -q"])),
+        )
+    )
+    captured: dict[str, object] = {}
+    prompt_answers = iter(["generic", "private"])
+
+    monkeypatch.setattr("awf.cli.main.typer.prompt", lambda *_args, **_kwargs: next(prompt_answers))
+    monkeypatch.setattr("awf.cli.main.typer.confirm", lambda *_args, **_kwargs: False)
+
+    def customize_preview(received_preview: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return received_preview
+
+    result, wants_write = cli_main._prompt_project_onboarding_choices(  # noqa: SLF001
+        tmp_path,
+        preview=preview,
+        include_smoke_request=False,
+        supported_templates=("generic",),
+        egress_mode_type=CustomEgressMode,
+        preview_factory=lambda *_args, **_kwargs: preview,
+        customize_preview=customize_preview,
+    )
+
+    assert result is preview
+    assert wants_write is False
+    assert captured["egress_mode"] == CustomEgressMode.private
 
 
 @pytest.mark.unit

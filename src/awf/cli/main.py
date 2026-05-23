@@ -1003,7 +1003,7 @@ def _prompt_project_onboarding_choices(
         )
 
     egress_mode = typer.prompt("Egress mode", default="restricted").strip().lower()
-    supported_egress = {"restricted", "open", "offline"}
+    supported_egress = {mode.value for mode in egress_mode_type}
     if egress_mode not in supported_egress:
         typer.echo(
             "error: unsupported egress mode "
