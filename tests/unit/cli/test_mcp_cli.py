@@ -83,7 +83,8 @@ def test_mcp_serve_disposes_engine_when_server_build_fails(
 
     result = _runner.invoke(app, ["mcp", "serve", "--env-file", str(env_file)])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2
+    assert "error: MCP server setup failed: boom" in result.stderr
     assert calls.get("disposed") is True
 
 

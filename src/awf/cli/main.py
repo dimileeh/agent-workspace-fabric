@@ -1884,6 +1884,13 @@ def mcp_serve(
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from None
+    except Exception as exc:
+        import logging
+        import traceback
+
+        logging.debug("MCP server setup failed:\n%s", traceback.format_exc())
+        typer.echo(f"error: MCP server setup failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
 
 
 def _run_mcp_server(*, env_file: Path | None) -> None:
