@@ -5638,6 +5638,66 @@ async def test_protected_scope_rollback_failed_reset_omits_unattempted_clean_res
 
 
 @pytest.mark.unit
+async def test_protected_scope_rollback_distinguishes_reset_from_incomplete_cleanup_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
+    cmd.queue_result(returncode=128, stderr="fatal: status unavailable\n")
+    cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    push_result = await runner._repair_protected_scope_commits_before_push(
+        workspace_id=workspace_id,
+        pr_number=42,
+        protected_scope_block=_ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+        operation_start_head="start-sha",
+    )
+
+    assert push_result.failed is True
+    assert push_result.returncode == 1
+    assert "reset the local repair delta" in push_result.stderr
+    assert "untracked repair leftovers may remain" in push_result.stderr
+    assert "local rollback failed" not in push_result.stderr
+    assert push_result.details is not None
+    assert push_result.details["branch_reset"] is True
+    assert push_result.details["branch_restored"] is False
+    assert push_result.details["untracked_evidence_complete"] is False
+    assert push_result.details["rollback_status"] == "reset_succeeded_cleanup_uncertain"
+    assert push_result.details["reverted_path_collection_errors"] == [
+        {
+            "phase": "worktree_status_command",
+            "returncode": 128,
+            "stderr": "fatal: status unavailable\n",
+        }
+    ]
+    assert not any("clean" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_protected_scope_commit_repair_missing_start_head_does_not_push_or_repair(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

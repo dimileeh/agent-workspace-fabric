@@ -5344,11 +5344,17 @@ class PullRequestMonitorRunner:
             error.get("phase") == "worktree_status_command"
             for error in delta_evidence.collection_errors
         )
-        branch_restored = (
-            reset_result.ok
-            and untracked_evidence_complete
-            and (clean_result is None or clean_result.ok)
-        )
+        branch_reset = reset_result.ok
+        cleanup_succeeded = clean_result is None or clean_result.ok
+        branch_restored = branch_reset and untracked_evidence_complete and cleanup_succeeded
+        if branch_restored:
+            rollback_status = "succeeded"
+        elif branch_reset and not untracked_evidence_complete:
+            rollback_status = "reset_succeeded_cleanup_uncertain"
+        elif branch_reset:
+            rollback_status = "reset_succeeded_cleanup_failed"
+        else:
+            rollback_status = "failed"
         details: dict[str, object] = {
             "phase": "pre_push_committed_diff",
             "paths": paths,
@@ -5358,8 +5364,10 @@ class PullRequestMonitorRunner:
             "operation_start_head_sha": operation_start_head,
             "attempted_head_sha": attempted_head,
             "rollback_strategy": "git_reset_hard_to_operation_start",
-            "rollback_status": "succeeded" if branch_restored else "failed",
+            "rollback_status": rollback_status,
+            "branch_reset": branch_reset,
             "branch_restored": branch_restored,
+            "untracked_evidence_complete": untracked_evidence_complete,
             "reverted_paths": reverted_paths,
             "cleanup_paths": cleanup_paths,
             "pushed": False,
@@ -5397,7 +5405,9 @@ class PullRequestMonitorRunner:
             cleanup_paths=cleanup_paths,
             operation_start_head=operation_start_head,
             attempted_head=attempted_head,
+            branch_reset=branch_reset,
             branch_restored=branch_restored,
+            untracked_evidence_complete=untracked_evidence_complete,
             reverted_path_collection_errors=delta_evidence.collection_errors,
         )
 
@@ -5416,11 +5426,19 @@ class PullRequestMonitorRunner:
                 details=details,
             )
 
-        stderr = (
-            f"{protected_scope_block.message}\n"
-            "AWF attempted to roll back the protected-scope repair before push, "
-            "but local rollback failed; no push was attempted."
-        )
+        if branch_reset and not untracked_evidence_complete:
+            stderr = (
+                f"{protected_scope_block.message}\n"
+                f"AWF reset the local repair delta to {operation_start_head} "
+                "but could not collect untracked cleanup paths; "
+                "untracked repair leftovers may remain. No push was attempted."
+            )
+        else:
+            stderr = (
+                f"{protected_scope_block.message}\n"
+                "AWF attempted to roll back the protected-scope repair before push, "
+                "but local rollback failed; no push was attempted."
+            )
         return _GitPushResult(
             pushed=False,
             failed=True,
