@@ -63,6 +63,14 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_links_gemini_bundled_ripgrep() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "vendor/ripgrep" in dockerfile
+    assert "rg-${rg_platform}-${rg_arch}" in dockerfile
+
+
+@pytest.mark.unit
 def test_readme_notes_agent_runtime_rebuild_for_docker_tooling_changes() -> None:
     readme = Path("CONTRIBUTING.md").read_text(encoding="utf-8")
     start = readme.index("### Build the Agent Runtime Image")

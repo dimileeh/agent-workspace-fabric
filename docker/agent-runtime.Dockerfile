@@ -134,6 +134,19 @@ RUN npm install -g --no-fund --no-audit \
     && opencode --version || true \
     && ccusage --version
 
+# Gemini CLI 0.42.0 only enables its ripgrep-backed search tool when a bundled
+# platform-specific rg binary exists; it does not fall back to the system rg on
+# PATH. Link the Debian ripgrep package into the bundled layout so Gemini uses
+# its file-aware RipGrepTool instead of the directory-only GrepTool fallback.
+RUN set -eux; \
+    gemini_entrypoint="$(readlink -f "$(command -v gemini)")"; \
+    gemini_bundle_dir="$(dirname "$gemini_entrypoint")"; \
+    rg_platform="$(node -p 'process.platform')"; \
+    rg_arch="$(node -p 'process.arch')"; \
+    mkdir -p "$gemini_bundle_dir/vendor/ripgrep"; \
+    ln -sf "$(command -v rg)" "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"; \
+    test -x "$gemini_bundle_dir/vendor/ripgrep/rg-${rg_platform}-${rg_arch}"
+
 # Neutral ccusage config consumed via ``--config`` by AWF's usage collector
 # (src/awf/service/usage_collection.py). The per-workspace auth copy seeds
 # ~/.claude from the host and does not strip a host ccusage.json, so pinning an
