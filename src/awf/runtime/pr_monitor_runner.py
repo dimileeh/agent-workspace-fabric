@@ -510,6 +510,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
 
 @dataclass(frozen=True)
 class _NonCheckReviewerSettleDecision:
+    """Decision result for non-check reviewer settle scheduling."""
+
     action: str
     wait_seconds: float = 0.0
     configured_reviewers: tuple[str, ...] = ()
@@ -7434,6 +7436,7 @@ def _non_check_reviewer_settle_started_key(
     head_sha: str,
     activity_signature: str | None = None,
 ) -> str:
+    """Build state key for a non-check reviewer settle start marker."""
     key = f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
     if activity_signature is not None:
         return f"{key}:{activity_signature}"
@@ -7441,6 +7444,7 @@ def _non_check_reviewer_settle_started_key(
 
 
 def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
+    """Build namespace prefix for non-check reviewer settle state keys."""
     return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
 
 
@@ -7450,6 +7454,7 @@ def _non_check_reviewer_settle_done_key(
     head_sha: str,
     activity_signature: str | None = None,
 ) -> str:
+    """Build state key for a completed non-check reviewer settle window."""
     key = f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
     if activity_signature is not None:
         return f"{key}:{activity_signature}"
@@ -7457,6 +7462,7 @@ def _non_check_reviewer_settle_done_key(
 
 
 def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
+    """Build skip marker key for missing non-check reviewer visibility checks."""
     return f"__awf_non_check_reviewer_settle_skipped_visible__:{pr_number}:{head_sha}"
 
 
@@ -7469,6 +7475,7 @@ def _non_check_reviewer_settle_decision(
     now: float,
     now_wall: datetime | None = None,
 ) -> _NonCheckReviewerSettleDecision:
+    """Return settle decision for non-check reviewers, preferring activity clock when available."""
     configured_reviewers = _normalize_non_check_reviewer_logins(config.non_check_reviewer_logins)
     if not config.auto_merge:
         return _NonCheckReviewerSettleDecision(
@@ -7589,6 +7596,7 @@ def _non_check_reviewer_activity_settle_decision(
     missing_reviewers: tuple[str, ...],
     visible_reviewers: tuple[str, ...],
 ) -> _NonCheckReviewerSettleDecision:
+    """Return a settle decision anchored to the latest external review activity."""
     assert status.quiet_period_anchor_at is not None
     anchor_at = _utc_datetime(status.quiet_period_anchor_at)
     now_dt = _utc_datetime(now_wall)
@@ -7669,6 +7677,7 @@ def _non_check_reviewer_activity_settle_decision(
 
 
 def _non_check_reviewer_activity_signature(status: PRStatus, *, anchor_at: datetime) -> str:
+    """Return a stable signature for the current settle activity anchor."""
     payload = "|".join(
         (
             status.head_sha,
@@ -7680,12 +7689,14 @@ def _non_check_reviewer_activity_signature(status: PRStatus, *, anchor_at: datet
 
 
 def _utc_datetime(value: datetime) -> datetime:
+    """Normalize datetimes to timezone-aware UTC values."""
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 
 def _datetime_iso(value: datetime | None) -> str | None:
+    """Serialize an optional datetime to ISO-8601 UTC, or ``None``."""
     if value is None:
         return None
     return _utc_datetime(value).isoformat()
