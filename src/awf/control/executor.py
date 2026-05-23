@@ -40,6 +40,7 @@ from awf.adapters.base import (
     get_adapter,
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
+from awf.adapters.usage import UsageSampler
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import AsyncCommandRunner, CommandResult
@@ -1113,6 +1114,7 @@ class WorkspaceExecutor:
         pr_monitor: _MonitorRunnerProto | None = None,
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
+        usage_sampler: UsageSampler | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -1140,6 +1142,7 @@ class WorkspaceExecutor:
         self._pr_monitor = pr_monitor
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
+        self._usage_sampler = usage_sampler
 
     async def _record_executor_pr_audit_event(
         self,
@@ -1604,6 +1607,7 @@ class WorkspaceExecutor:
                     log_store=self._log_store,
                     agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                     agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
+                    usage_sampler=self._usage_sampler,
                 )
                 profile = _profile_for_workspace(
                     workspace,
@@ -2135,6 +2139,7 @@ class WorkspaceExecutor:
                 log_store=self._log_store,
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
+                usage_sampler=self._usage_sampler,
             )
             profile = _profile_for_workspace(
                 ws,
@@ -4206,6 +4211,7 @@ class WorkspaceExecutor:
                     runner=self._runner,
                     defaults=adapter_defaults,
                     log_store=self._log_store,
+                    usage_sampler=self._usage_sampler,
                 )
                 profile = _profile_for_workspace(
                     ws,

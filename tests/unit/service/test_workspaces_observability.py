@@ -2159,6 +2159,180 @@ def test_workspace_usage_summary_is_explicitly_unavailable_without_adapter_usage
     assert usage.reason == "usage_not_reported"
 
 
+def _usage_snapshot(**overrides: object) -> object:
+    from awf.service.usage_store import UsageSnapshot
+
+    base: dict[str, object] = {
+        "workspace_id": "ws_snap",
+        "provider": "claude_code",
+        "ccusage_source": "claude",
+        "status": "available",
+        "phase": "final",
+        "captured_at": "2026-05-22T00:00:00+00:00",
+    }
+    base.update(overrides)
+    return UsageSnapshot(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_prefers_ccusage_snapshot_with_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(
+        input_tokens=10, output_tokens=20, total_tokens=30, cost_estimate=0.05, currency="USD"
+    )
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    # Operation usage exists, but the ccusage snapshot takes precedence.
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"total_tokens": 999}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.source == "ccusage"
+    assert usage.status == "available"
+    assert usage.total_tokens == 30
+    assert usage.input_tokens == 10
+    assert usage.reason is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_surfaces_ccusage_unavailable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason="ccusage_no_records")
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.status == "unavailable"
+    assert usage.reason == "ccusage_no_records"
+    assert usage.total_tokens is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_ccusage_unavailable_defaults_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason=None)
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.reason == "usage_not_reported"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_falls_back_to_operations_when_ccusage_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(status="unavailable", reason="ccusage_timeout")
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"input_tokens": 7, "total_tokens": 7}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    # Operation usage is a real metric; it wins over a metric-less ccusage snapshot.
+    assert usage.source == "operations"
+    assert usage.input_tokens == 7
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_operations_when_no_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: None
+    )
+    workspace = SimpleNamespace(
+        id="ws_snap",
+        operations=[SimpleNamespace(result={"usage": {"total_tokens": 5}})],
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.source == "operations"
+    assert usage.total_tokens == 5
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_usage_not_reported_when_nothing_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: None
+    )
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "none"
+    assert usage.reason == "usage_not_reported"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_uses_prefetched_snapshot_without_disk_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When a list endpoint has pre-read snapshots off-thread, the summary must
+    # consult that map and not block the event loop with a per-workspace read.
+    def _fail_disk_read(_workspace_id: object) -> object:
+        raise AssertionError("read_latest_usage_snapshot must not run when id is prefetched")
+
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", _fail_disk_read
+    )
+    snapshot = _usage_snapshot(workspace_id="ws_pf", total_tokens=42)
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_pf": snapshot}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_pf", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.total_tokens == 42
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_prefetched_none_skips_disk_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A prefetched ``None`` (snapshot already read off-thread as absent/invalid)
+    # is honored as "no snapshot" without a redundant disk read.
+    def _fail_disk_read(_workspace_id: object) -> object:
+        raise AssertionError("read_latest_usage_snapshot must not run when id is prefetched")
+
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", _fail_disk_read
+    )
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_pf": None}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_pf", operations=[]))
+
+    assert usage.source == "none"
+    assert usage.reason == "usage_not_reported"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_falls_back_to_disk_when_id_absent_from_prefetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An id missing from the prefetch map is distinct from a cached ``None``: it
+    # must still fall back to a direct read rather than be treated as absent.
+    snapshot = _usage_snapshot(workspace_id="ws_other", total_tokens=9)
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+    with workspace_observability_module.prefetched_usage_snapshots({"ws_present": None}):
+        usage = workspace_usage_summary(SimpleNamespace(id="ws_other", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.total_tokens == 9
+
+
 class TestWorkspacePricingMetadata:
     @pytest.mark.unit
     def test_returns_none_when_no_pricing_stanza(self) -> None:
@@ -2868,6 +3042,81 @@ def test_usage_payload_preserves_usage_not_reported_when_pricing_absent() -> Non
     assert result["reason"] == "usage_not_reported"
     assert result["status"] == "unavailable"
     assert result["cost_estimate"] is None
+
+
+@pytest.mark.unit
+def test_usage_payload_surfaces_reported_cost_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    # A ccusage snapshot reported a locally-recorded cost, but no AWF pricing
+    # metadata is configured (the common case). The reported cost must not be
+    # dropped behind a pricing_not_configured reason.
+    usage = LlmUsageSummary(
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+        cost_estimate=0.05,
+        currency="USD",
+        status="available",
+        source="ccusage",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["cost_estimate"] == pytest.approx(0.05)
+    assert result["currency"] == "USD"
+    assert result["status"] == "available"
+    assert result["reason"] is None
+    assert result["source"] == "ccusage"
+
+
+@pytest.mark.unit
+def test_usage_payload_prefers_configured_pricing_over_reported_cost() -> None:
+    from awf.profiles.pricing import PricingMetadata
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    # When AWF pricing metadata is configured and yields a cost, that
+    # operator-defined figure stays authoritative over the reported one.
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=0.05,
+        currency="USD",
+        status="available",
+        source="ccusage",
+        reason=None,
+    )
+    pricing = PricingMetadata(
+        provider="openai",
+        model="gpt-4",
+        currency="USD",
+        unit="per_1000_tokens",
+        price_per_unit=0.03,
+        timestamp=datetime.now(UTC),
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: pricing,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["cost_estimate"] == pytest.approx(0.045)
+    assert result["status"] == "available"
 
 
 @pytest.mark.unit

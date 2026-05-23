@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from awf.adapters.provider_failures import classify_provider_failure
+from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -139,6 +140,7 @@ class AgentAdapter(ABC):
         log_store: LogStore | None = None,
         agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
         agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+        usage_sampler: UsageSampler | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
@@ -151,6 +153,7 @@ class AgentAdapter(ABC):
         self._log_store = log_store
         self._agent_wall_timeout_seconds = agent_wall_timeout_seconds
         self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
+        self._usage_sampler = usage_sampler
 
     @property
     @abstractmethod
@@ -226,6 +229,104 @@ class AgentAdapter(ABC):
             source=log_source,
             prompt_bytes=len(prompt_input),
         )
+        # Wrap the agent run with optional usage sampling. The sampler captures a
+        # baseline + periodic samples and is finalized in *every* exit path so the
+        # final usage sample is recorded on success, failure/timeout, and
+        # cancellation — never masking the agent outcome. _start_usage_sampling
+        # stays *inside* the try: cancellation during baseline capture re-raises
+        # CancelledError (a BaseException its own except-Exception guard can't
+        # catch), so only the enclosing try/finally still reaches finalization.
+        sampler_ctx: UsageSampleContext | None = None
+        final_status = "failed"
+        try:
+            sampler_ctx = await self._start_usage_sampling(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+            )
+            result = await self._run_agent_cli(
+                invocation=invocation,
+                args=args,
+                prompt_input=prompt_input,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+                compose_project=compose_project,
+            )
+            final_status = "success"
+            return result
+        except AgentRunError as exc:
+            final_status = (
+                "timeout"
+                if exc.reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+                else "failed"
+            )
+            raise
+        except asyncio.CancelledError:
+            final_status = "cancelled"
+            raise
+        finally:
+            await self._finalize_usage_sampling(
+                sampler_ctx, status=final_status, workspace_id=workspace_id
+            )
+
+    async def _start_usage_sampling(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        workspace_id: str | None,
+    ) -> UsageSampleContext | None:
+        if self._usage_sampler is None or workspace_id is None:
+            return None
+        try:
+            return await self._usage_sampler.start(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                workspace_id=workspace_id,
+                provider=self.name,
+            )
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                phase="start",
+                exc_info=True,
+            )
+            return None
+
+    async def _finalize_usage_sampling(
+        self,
+        sampler_ctx: UsageSampleContext | None,
+        *,
+        status: str,
+        workspace_id: str | None,
+    ) -> None:
+        if sampler_ctx is None:
+            return
+        try:
+            await sampler_ctx.finalize(status=status)
+        except Exception:
+            _log.warning(
+                "usage.collect.error",
+                agent=self.name.value,
+                workspace_id=workspace_id,
+                phase="finalize",
+                exc_info=True,
+            )
+
+    async def _run_agent_cli(
+        self,
+        *,
+        invocation: Any,
+        args: list[str],
+        prompt_input: bytes,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+        compose_project: str,
+    ) -> AgentRunResult:
         # Stream the prompt on stdin and close it explicitly. This avoids OS
         # argv length limits for large review comments while still preventing
         # CLIs from waiting forever for inherited interactive input.
@@ -373,6 +474,7 @@ def get_adapter(
     log_store: LogStore | None = None,
     agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
     agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    usage_sampler: UsageSampler | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -390,6 +492,7 @@ def get_adapter(
         log_store=log_store,
         agent_wall_timeout_seconds=agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=agent_idle_timeout_seconds,
+        usage_sampler=usage_sampler,
     )
 
 

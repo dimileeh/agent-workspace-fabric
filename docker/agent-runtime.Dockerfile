@@ -117,17 +117,31 @@ ARG CODEX_VERSION=0.130.0
 ARG CLAUDE_CODE_VERSION=2.1.143
 ARG GEMINI_VERSION=0.42.0
 ARG OPENCODE_VERSION=1.15.2
+# Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
+# per-workspace usage sampler reads local provider usage files offline.
+ARG CCUSAGE_VERSION=20.0.3
 
 RUN npm install -g --no-fund --no-audit \
       @openai/codex@${CODEX_VERSION} \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @google/gemini-cli@${GEMINI_VERSION} \
       opencode-ai@${OPENCODE_VERSION} \
+      ccusage@${CCUSAGE_VERSION} \
     && npm cache clean --force \
     && codex --version || true \
     && claude --version || true \
     && gemini --version || true \
-    && opencode --version || true
+    && opencode --version || true \
+    && ccusage --version
+
+# Neutral ccusage config consumed via ``--config`` by AWF's usage collector
+# (src/awf/service/usage_collection.py). The per-workspace auth copy seeds
+# ~/.claude from the host and does not strip a host ccusage.json, so pinning an
+# empty config keeps ccusage from auto-discovering a user/project config whose
+# since/until/project/breakdown defaults would silently filter per-run usage.
+RUN mkdir -p /opt/awf \
+    && printf '{}\n' > /opt/awf/ccusage-neutral.json \
+    && chmod 0644 /opt/awf/ccusage-neutral.json
 
 # ── Stage 6: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \

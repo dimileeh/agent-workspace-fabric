@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -14,7 +16,9 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, TaskAttempt, Workspace
 from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
+from awf.service.usage_store import read_latest_usage_snapshots
 from awf.service.workspace_observability import (
+    prefetched_usage_snapshots,
     workspace_identity_usage_payload,
     workspace_pricing_metadata,
 )
@@ -176,15 +180,19 @@ async def build_task_list_response(
     canonical_attempt_ids = await attempt_repo.list_canonical_ids_for_tasks(
         row.task_id for row in attempt_rows
     )
+    workspace_ids = [row.workspace_id for row in attempt_rows]
+    workspace_ids.extend(row.id for row in legacy_rows)
+    snapshots = await asyncio.to_thread(read_latest_usage_snapshots, workspace_ids)
     items: list[TaskResponse] = []
-    for row in attempt_rows:
-        items.append(
-            _task_from_attempt(
-                row,
-                canonical_attempt_id=canonical_attempt_ids.get(row.task_id),
+    with prefetched_usage_snapshots(snapshots):
+        for row in attempt_rows:
+            items.append(
+                _task_from_attempt(
+                    row,
+                    canonical_attempt_id=canonical_attempt_ids.get(row.task_id),
+                )
             )
-        )
-    items.extend(_task_from_workspace(row) for row in legacy_rows)
+        items.extend(_task_from_workspace(row) for row in legacy_rows)
     items.sort(key=lambda item: (item.created_at, item.workspace_id), reverse=True)
     return TaskListResponse(
         items=items[:limit],
