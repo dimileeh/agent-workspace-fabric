@@ -99,6 +99,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       number
       createdAt
+      updatedAt
       headRefOid
       mergeable
       mergeStateStatus
@@ -1129,6 +1130,7 @@ class GitHubClient:
             latest_external_review_activity_at=latest_review_activity_at,
             latest_external_review_activity_source=latest_review_activity_source,
             pr_created_at=_parse_github_datetime(pr.get("createdAt")),
+            pr_updated_at=_parse_github_datetime(pr.get("updatedAt")),
             head_committed_at=_parse_github_datetime(
                 _dig(pr, "commits", "nodes", 0, "commit", "committedDate")
             ),
@@ -1669,6 +1671,7 @@ def _quiet_period_anchor(
     latest_external_review_activity_at: datetime | None,
     latest_external_review_activity_source: str | None,
     pr_created_at: datetime | None,
+    pr_updated_at: datetime | None,
     head_committed_at: datetime | None,
 ) -> tuple[datetime | None, str | None]:
     if latest_external_review_activity_at is not None:
@@ -1678,6 +1681,7 @@ def _quiet_period_anchor(
     anchor_source: str | None = None
     for candidate_at, candidate_source in (
         (pr_created_at, "pull_request"),
+        (pr_updated_at, "pull_request"),
         (head_committed_at, "head_commit"),
     ):
         anchor_at, anchor_source = _newer_activity(

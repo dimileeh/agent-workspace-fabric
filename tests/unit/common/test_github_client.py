@@ -1487,8 +1487,30 @@ class TestFetchPrStatus:
         assert status.latest_external_review_activity_at is None
         assert status.latest_external_review_activity_source is None
         assert status.quiet_period_anchor_at is not None
-        assert status.quiet_period_anchor_source == "head_commit"
-        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:10:00+00:00"
+        assert status.quiet_period_anchor_source == "pull_request"
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:20:00+00:00"
+
+    @pytest.mark.unit
+    async def test_stale_head_commit_uses_pr_updated_at_as_quiet_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:45:00Z",
+                committed_date="2026-05-06T09:10:00Z",
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is None
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_source == "pull_request"
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:45:00+00:00"
 
     @pytest.mark.unit
     async def test_no_review_feedback_uses_latest_pr_or_head_activity_anchor(self) -> None:
