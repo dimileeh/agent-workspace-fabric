@@ -576,6 +576,29 @@ def test_init_invalid_project_path_is_reported_without_service_checks(
 
 
 @pytest.mark.unit
+def test_init_reports_unexpected_preview_failure_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    def _raise_preview_failure(_path: Path, **_kwargs: object) -> object:
+        raise OSError("permission denied reading pyproject.toml")
+
+    monkeypatch.setattr(
+        "awf.profiles.onboarding.preview_project_onboarding",
+        _raise_preview_failure,
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output
+    assert (
+        "error: could not build onboarding preview: permission denied reading pyproject.toml"
+    ) in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
 def test_init_prints_clear_next_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_local_prerequisites(monkeypatch)
 

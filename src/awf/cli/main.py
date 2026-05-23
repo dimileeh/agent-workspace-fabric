@@ -911,6 +911,9 @@ def _run_init_project_onboarding(
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        typer.echo(f"error: could not build onboarding preview: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     doctor_status = (
         getattr(doctor_report, "status", "fail") if doctor_report is not None else "fail"
