@@ -222,9 +222,13 @@ class PRStatus:
     merged: bool = False
     merge_commit_sha: str | None = None
     latest_external_review_activity_at: datetime | None = None
+    """Most recent external (non-viewer) review activity timestamp used by gating checks."""
     latest_external_review_activity_source: str | None = None
+    """Source/type for ``latest_external_review_activity_at`` (for example ``review_thread_comment``)."""
     quiet_period_anchor_at: datetime | None = None
+    """Timestamp that anchors the quiet-period timer used by quiet-window evaluation."""
     quiet_period_anchor_source: str | None = None
+    """Reason that selected this anchor, used to explain quiet-period restarts."""
 
 
 # ── State — small, serialisable, lives on the workspace row ────────────────
