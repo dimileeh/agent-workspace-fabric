@@ -61,6 +61,7 @@ from awf.runtime.pr_monitor_runner import (
     _candidate_stale_required_action,
     _changed_paths_from_name_status_z,
     _changed_paths_from_porcelain,
+    _changed_paths_from_porcelain_z,
     _collect_defer_items,
     _GitPushResult,
     _has_successful_validation_for_pr_head,
@@ -91,6 +92,7 @@ from awf.runtime.pr_monitor_runner import (
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
     _untracked_paths_from_porcelain,
+    _untracked_paths_from_porcelain_z,
     _with_ci_failures,
 )
 from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
@@ -2180,7 +2182,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
         stdout="M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",
     )
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0plans/fallback.md\0")
-    cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\n")
+    cmd.queue_result(returncode=0, stdout="?? plans/orphan dir/file one.md\0")
     cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
     cmd.queue_result(returncode=0, stdout="")
     runner = make_runner(
@@ -2245,7 +2247,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     assert result.details["reverted_paths"] == [
         ".github/workflows/ci.yml",
         "plans/fallback.md",
-        "plans/orphan.md",
+        "plans/orphan dir/file one.md",
     ]
     assert "reverted_path_collection_errors" not in result.details
     assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
@@ -2257,7 +2259,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
         "clean",
         "-fd",
         "--",
-        "plans/orphan.md",
+        "plans/orphan dir/file one.md",
     ) in [call.args for call in cmd.calls]
 
     async with factory() as session:
@@ -5516,7 +5518,7 @@ async def test_protected_scope_commit_repair_rolls_back_delta_without_agent_or_p
             "tests/unit/control/test_ci_workflow_toolchain.py",
         ),
     )
-    cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\n")
+    cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\0")
     cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
     cmd.queue_result(returncode=0, stdout="")
     adapter = FakeAdapter()
@@ -7735,6 +7737,26 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
     assert _untracked_paths_from_porcelain(
         "?? old/name.py -> src/name.py\n?? docs/new.md\n?? docs/new.md\n M tracked.py\n"
     ) == ["old/name.py -> src/name.py", "docs/new.md"]
+    assert _changed_paths_from_porcelain_z(
+        "\0".join(
+            [
+                " M src/changed file.py",
+                "?? docs/new note.md",
+                "R  src/new name.py",
+                "old/name.py",
+                "!! ignored.txt",
+                "",
+            ]
+        )
+    ) == [
+        "src/changed file.py",
+        "docs/new note.md",
+        "old/name.py",
+        "src/new name.py",
+    ]
+    assert _untracked_paths_from_porcelain_z(
+        "?? docs/new note.md\0?? plans/orphan dir/file one.md\0 M tracked.py\0"
+    ) == ["docs/new note.md", "plans/orphan dir/file one.md"]
 
 
 @pytest.mark.unit

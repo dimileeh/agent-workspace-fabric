@@ -5495,11 +5495,11 @@ class PullRequestMonitorRunner:
                 }
             )
         status = await self._deps.runner.run(
-            _git_worktree_command(worktree_path, "status", "--porcelain")
+            _git_worktree_command(worktree_path, "status", "--porcelain", "-z")
         )
         if status.ok:
-            paths.update(_changed_paths_from_porcelain(status.stdout))
-            cleanup_paths.update(_untracked_paths_from_porcelain(status.stdout))
+            paths.update(_changed_paths_from_porcelain_z(status.stdout))
+            cleanup_paths.update(_untracked_paths_from_porcelain_z(status.stdout))
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_status_failed",
@@ -8564,6 +8564,40 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _porcelain_z_records(status_stdout: str) -> list[tuple[str, str, str | None]]:
+    records = status_stdout.split("\0")
+    if records and records[-1] == "":
+        records = records[:-1]
+    parsed: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(records):
+        record = records[i]
+        i += 1
+        if len(record) < 4 or record[2] != " ":
+            continue
+        status = record[:2]
+        path = record[3:]
+        original_path: str | None = None
+        if (status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}) and i < len(records):
+            original_path = records[i]
+            i += 1
+        parsed.append((status, path, original_path))
+    return parsed
+
+
+def _changed_paths_from_porcelain_z(status_stdout: str) -> list[str]:
+    """Extract changed paths from ``git status --porcelain -z`` output."""
+    paths: list[str] = []
+    for status, path, original_path in _porcelain_z_records(status_stdout):
+        if status == "!!":
+            continue
+        if original_path:
+            paths.extend([original_path, path])
+        else:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
 def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
     """Extract changed paths from ``git diff --name-status -z`` output."""
     try:
@@ -8608,6 +8642,17 @@ def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
             continue
         paths.append(line[3:])
     return list(dict.fromkeys(paths))
+
+
+def _untracked_paths_from_porcelain_z(status_stdout: str) -> list[str]:
+    """Extract untracked paths from ``git status --porcelain -z`` output."""
+    return list(
+        dict.fromkeys(
+            path
+            for status, path, _original_path in _porcelain_z_records(status_stdout)
+            if status == "??"
+        )
+    )
 
 
 def _supply_chain_policy_blocked_message(reason_codes: Iterable[str]) -> str:

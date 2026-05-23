@@ -47,6 +47,9 @@ falls back to `git diff --name-only -z` before reporting partial evidence.
 The follow-up operation-start baseline review was also addressed: CI/comment
 repairs now fail terminally before invoking the agent if `git rev-parse HEAD`
 cannot produce a start SHA, preserving the transactional rollback invariant.
+The follow-up cleanup-path review was addressed by collecting rollback status
+with `git status --porcelain -z`, so untracked cleanup pathspecs preserve spaces
+and other filenames Git would C-quote in line-oriented porcelain output.
 
 ## Coverage Added
 
@@ -77,7 +80,8 @@ cannot produce a start SHA, preserving the transactional rollback invariant.
   collected untracked repair leftovers; malformed committed-diff name-status
   output falls back to name-only path collection before reporting partial
   evidence; failed reset evidence omits unattempted clean metadata; missing
-  operation-start HEAD aborts CI/comment repair before agent mutation.
+  operation-start HEAD aborts CI/comment repair before agent mutation; rollback
+  cleanup path collection uses NUL-delimited porcelain status output.
 
 ## Validation Commands
 
@@ -102,6 +106,14 @@ cannot produce a start SHA, preserving the transactional rollback invariant.
   - Result: `Success: no issues found in 1 source file`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'operation_start_head or repair_start_failures_are_terminal or pre_existing_dirty_worktree or failed_reset_omits or protected_scope_delta or protected_scope_commit_repair_rolls_back_delta_without_agent_or_push or execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope'`
   - Result: `11 passed, 166 deselected in 11.07s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `All checks passed`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `2 files already formatted`
+- `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py`
+  - Result: `Success: no issues found in 1 source file`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'porcelain_helpers or protected_scope_delta or protected_scope_commit_repair_rolls_back_delta_without_agent_or_push or operation_start_head or repair_start_failures_are_terminal or failed_reset_omits'`
+  - Result: `9 passed, 168 deselected in 11.11s`
 - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
   - Result: `All checks passed`
 - `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
