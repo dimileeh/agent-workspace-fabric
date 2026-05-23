@@ -25,8 +25,11 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from awf.common.config import Settings
 
 import click
 import httpx
@@ -1887,7 +1890,7 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
         asyncio.run(engine.dispose())
 
 
-def _resolve_mcp_settings(*, env_file: Path | None) -> Any:
+def _resolve_mcp_settings(*, env_file: Path | None) -> Settings:
     """Resolve Settings for the local MCP server command."""
     import dataclasses
 
@@ -1913,15 +1916,11 @@ def _resolve_mcp_settings(*, env_file: Path | None) -> Any:
     if "branch_prefix" in update_dict:
         update_dict["worker_branch_prefix"] = update_dict.pop("branch_prefix")
 
-    # Ensure no fields are silently dropped
+    # Only include keys if they have non-None values and are actually present in the target Settings
     valid_keys = type(base_settings).model_fields.keys()
-    dropped_keys = [k for k in update_dict if k not in valid_keys]
-    if dropped_keys:
-        raise ValueError(
-            f"Unmapped ServiceSettings fields for MCP server: {', '.join(sorted(dropped_keys))}"
-        )
+    final_update = {k: v for k, v in update_dict.items() if v is not None and k in valid_keys}
 
-    return base_settings.model_copy(update=update_dict)
+    return base_settings.model_copy(update=final_update)
 
 
 @app.command("worker")
