@@ -330,6 +330,8 @@ def customize_project_onboarding_preview(
         clean_commands = [command.strip() for command in validation_commands if command.strip()]
         if clean_commands:
             profile = profile.with_validation_commands(clean_commands)
+        else:
+            profile = profile.clear_validation_commands()
 
     diagnostics = _diagnostics_for(
         preview.inspection,

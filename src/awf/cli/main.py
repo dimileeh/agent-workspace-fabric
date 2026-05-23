@@ -1046,7 +1046,7 @@ def _prompt_project_onboarding_choices(
         preview,
         egress_mode=egress_mode_type(egress_mode),
         open_explanation=open_explanation,
-        validation_commands=validation_commands,
+        validation_commands=validation_commands or None,
     )
     return preview, typer.confirm("Write .awf/workspace.yml?", default=True)
 

@@ -474,6 +474,7 @@ def test_init_guided_egress_choices_follow_model_enum(
     assert wants_write is False
     assert prompt_defaults == ["generic", CustomEgressMode.restricted.value]
     assert captured["egress_mode"] == CustomEgressMode.private
+    assert captured["validation_commands"] is None
 
 
 @pytest.mark.unit
