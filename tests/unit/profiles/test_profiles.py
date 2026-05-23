@@ -1353,6 +1353,20 @@ def test_workspace_profile_with_validation_commands_returns_self_for_empty_overr
 
 
 @pytest.mark.unit
+def test_workspace_profile_clear_validation_commands_removes_existing_commands() -> None:
+    profile = WorkspaceProfile(name="generic", phases={"validate": ["pytest -q", "ruff check"]})
+
+    result = profile.clear_validation_commands()
+
+    assert result is not profile
+    assert result.phases.validate_commands == []
+    assert [command.command for command in profile.phases.validate_commands] == [
+        "pytest -q",
+        "ruff check",
+    ]
+
+
+@pytest.mark.unit
 def test_unknown_profile_ref_raises_resolution_error(tmp_path: Path) -> None:
     with pytest.raises(ProfileResolutionError, match="unknown workspace profile_ref"):
         ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="missing-profile")

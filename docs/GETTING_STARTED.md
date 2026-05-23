@@ -78,15 +78,16 @@ If bootstrap or first-run health checks fail, use the
 before continuing with provider or workspace-level work.
 
 After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
-PRs and use `awf init <path>` to inspect a project repository (see
-[Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode
+PRs and use `awf init <path>` to create or inspect a project repository's
+`.awf/workspace.yml` (see [Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode
 walkthrough and per-provider copy-paste prompts). The two `awf init` shapes are
 explicit:
 
 - `awf init` — bootstrap AWF on this machine (Docker, state dir,
   `docker/compose/.env` or `.env`, service stack).
-- `awf init <path>` — run local onboarding readiness checks for a project
-  checkout.
+- `awf init <path>` — run local project onboarding. Interactive terminals get
+  a short guided profile setup; automation can use
+  `awf init <path> --write-profile --yes` to write detected defaults.
 
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.

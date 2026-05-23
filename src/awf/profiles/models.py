@@ -774,6 +774,13 @@ class WorkspaceProfile(BaseModel):
             update={"phases": self.phases.model_copy(update={"validate_commands": phase_commands})},
         )
 
+    def clear_validation_commands(self) -> WorkspaceProfile:
+        """Return a copy with validation commands removed."""
+        return self.model_copy(
+            deep=True,
+            update={"phases": self.phases.model_copy(update={"validate_commands": []})},
+        )
+
 
 def _normalized_endpoint_env_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").upper()

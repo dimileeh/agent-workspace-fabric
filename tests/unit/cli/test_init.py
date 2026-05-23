@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import typer
+import yaml
 from typer.testing import CliRunner
 
 from awf.cli.main import app
@@ -257,14 +260,28 @@ def _stub_local_prerequisites(
 
         def _preview_project_onboarding(_path: Path, **_kwargs: object) -> object:
             return SimpleNamespace(
+                path=_path,
                 draft=SimpleNamespace(template="generic"),
                 smoke_request={"dummy": "payload"},
+                to_dict=lambda: {
+                    "path": str(_path),
+                    "draft": {"template": "generic"},
+                    "diagnostics": {},
+                },
             )
 
         monkeypatch.setattr(
             "awf.profiles.onboarding.preview_project_onboarding",
             _preview_project_onboarding,
         )
+
+
+def _read_written_profile(project: Path) -> dict[str, Any]:
+    raw = yaml.safe_load((project / ".awf" / "workspace.yml").read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    awf_profile = raw.get("awf")
+    assert isinstance(awf_profile, dict)
+    return awf_profile
 
 
 @pytest.mark.unit
@@ -298,6 +315,346 @@ def test_init_is_safe_by_default_and_idempotent(
     assert result_first.exit_code == 0, result_first.output
     assert result_second.exit_code == 0, result_second.output
     assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_write_profile_yes_creates_default_workspace_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.profiles.models import WorkspaceProfile
+
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--write-profile", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    profile = _read_written_profile(tmp_path)
+    WorkspaceProfile.model_validate(profile)
+    assert profile["name"] == "generic"
+    assert profile["security"]["egress"]["mode"] == "restricted"
+    assert "Wrote AWF profile" in result.output
+
+
+@pytest.mark.unit
+def test_init_write_profile_json_reports_profile_exists_after_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes", "--format", "json"],
+    )
+
+    written_path = tmp_path / ".awf" / "workspace.yml"
+    assert result.exit_code == 0, result.output
+    assert written_path.exists()
+    payload = json.loads(result.output)
+    assert payload["mode"] == "write"
+    assert payload["written_path"] == str(written_path)
+    assert payload["profile_exists"] is True
+
+
+@pytest.mark.unit
+def test_init_write_profile_requires_yes_when_not_guided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--write-profile"])
+
+    assert result.exit_code == 2, result.output
+    assert "--write-profile" in result.output
+    assert "--yes" in result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_yes_requires_write_profile(tmp_path: Path) -> None:
+    result = _runner.invoke(app, ["init", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 2, result.output
+    assert "--yes" in result.output
+    assert "--write-profile" in result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_guided_requires_interactive_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: False)
+    monkeypatch.setattr(
+        "awf.cli.main._prompt_project_onboarding_choices",
+        MagicMock(side_effect=AssertionError("should not prompt without a TTY")),
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--guided"])
+
+    assert result.exit_code == 2, result.output
+    assert "--guided requires an interactive terminal" in result.output
+    assert "--yes" in result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_guided_writes_answers_into_workspace_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--guided"],
+        input="\nopen\nNeeds package registry and model-provider access.\ny\npytest -q\nn\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    profile = _read_written_profile(tmp_path)
+    assert profile["security"]["egress"]["mode"] == "open"
+    assert (
+        profile["security"]["egress"]["open_explanation"]
+        == "Needs package registry and model-provider access."
+    )
+    assert profile["phases"]["validate"] == [{"command": "pytest -q", "required": True}]
+
+
+@pytest.mark.unit
+def test_init_guided_accepts_multiple_validation_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--guided"],
+        input="\n\ny\nmake lint\ny\npytest -q\nn\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    profile = _read_written_profile(tmp_path)
+    assert profile["phases"]["validate"] == [
+        {"command": "make lint", "required": True},
+        {"command": "pytest -q", "required": True},
+    ]
+
+
+@pytest.mark.unit
+def test_init_write_profile_guided_declined_confirmation_does_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--guided"],
+        input="\n\n\nn\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+    assert "Wrote AWF profile" not in result.output
+
+
+@pytest.mark.unit
+def test_init_guided_egress_choices_follow_model_enum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from awf.cli import main as cli_main
+
+    class CustomEgressMode(StrEnum):
+        restricted = "private-default"
+        private = "private"
+
+    preview = SimpleNamespace(
+        draft=SimpleNamespace(
+            template="generic",
+            profile=SimpleNamespace(phases=SimpleNamespace(validate_commands=["pytest -q"])),
+        )
+    )
+    captured: dict[str, object] = {}
+    prompt_defaults: list[object] = []
+    prompt_answers = iter(["generic", "private"])
+
+    def prompt(_label: str, **kwargs: object) -> str:
+        prompt_defaults.append(kwargs.get("default"))
+        return next(prompt_answers)
+
+    monkeypatch.setattr("awf.cli.main.typer.prompt", prompt)
+    monkeypatch.setattr("awf.cli.main.typer.confirm", lambda *_args, **_kwargs: False)
+
+    def customize_preview(received_preview: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return received_preview
+
+    result, wants_write = cli_main._prompt_project_onboarding_choices(  # noqa: SLF001
+        tmp_path,
+        preview=preview,
+        include_smoke_request=False,
+        supported_templates=("generic",),
+        egress_mode_type=CustomEgressMode,
+        preview_factory=lambda *_args, **_kwargs: preview,
+        customize_preview=customize_preview,
+    )
+
+    assert result is preview
+    assert wants_write is False
+    assert prompt_defaults == ["generic", CustomEgressMode.restricted.value]
+    assert captured["egress_mode"] == CustomEgressMode.private
+    assert captured["validation_commands"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("preview_error", "expected_code", "expected_message"),
+    (
+        (
+            ValueError("unsupported onboarding template: python"),
+            2,
+            "error: unsupported onboarding template: python",
+        ),
+        (
+            OSError("permission denied reading pyproject.toml"),
+            1,
+            "error: could not build onboarding preview: permission denied reading pyproject.toml",
+        ),
+    ),
+)
+def test_init_guided_template_change_preview_failure_is_reported_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    preview_error: Exception,
+    expected_code: int,
+    expected_message: str,
+) -> None:
+    from awf.cli import main as cli_main
+    from awf.profiles.models import EgressMode
+
+    preview = SimpleNamespace(
+        draft=SimpleNamespace(
+            template="generic",
+            profile=SimpleNamespace(phases=SimpleNamespace(validate_commands=[])),
+        )
+    )
+
+    def _raise_preview_failure(_path: Path, **_kwargs: object) -> object:
+        raise preview_error
+
+    monkeypatch.setattr("awf.cli.main.typer.prompt", lambda *_args, **_kwargs: "python")
+    monkeypatch.setattr(
+        "awf.cli.main.typer.confirm",
+        MagicMock(side_effect=AssertionError("should not continue after preview failure")),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        cli_main._prompt_project_onboarding_choices(  # noqa: SLF001
+            tmp_path,
+            preview=preview,
+            include_smoke_request=False,
+            supported_templates=("generic", "python"),
+            egress_mode_type=EgressMode,
+            preview_factory=_raise_preview_failure,
+            customize_preview=MagicMock(
+                side_effect=AssertionError("should not customize a failed preview")
+            ),
+        )
+
+    captured = capsys.readouterr()
+    assert exc_info.value.exit_code == expected_code
+    assert expected_message in captured.err
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.unit
+def test_init_write_profile_existing_profile_requires_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    profile_path = tmp_path / ".awf" / "workspace.yml"
+    profile_path.parent.mkdir()
+    profile_path.write_text("original: true\n", encoding="utf-8")
+
+    blocked = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes"],
+    )
+    overwritten = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes", "--force"],
+    )
+
+    assert blocked.exit_code == 1, blocked.output
+    assert "already exists" in blocked.output
+    assert overwritten.exit_code == 0, overwritten.output
+    assert _read_written_profile(tmp_path)["name"] == "generic"
+
+
+@pytest.mark.unit
+def test_init_write_profile_alternate_profile_marker_requires_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    alternate_profile_path = tmp_path / ".awf" / "workspace.yaml"
+    alternate_profile_path.parent.mkdir()
+    alternate_profile_path.write_text("version: 1\nname: existing\n", encoding="utf-8")
+    canonical_profile_path = tmp_path / ".awf" / "workspace.yml"
+
+    blocked = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes"],
+    )
+    forced = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes", "--force"],
+    )
+
+    assert blocked.exit_code == 1, blocked.output
+    assert f"{alternate_profile_path} already exists" in blocked.output
+    assert forced.exit_code == 0, forced.output
+    assert canonical_profile_path.is_file()
+    assert alternate_profile_path.is_file()
+
+
+@pytest.mark.unit
+def test_init_json_mode_never_prompts_and_reports_structured_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["path"] == str(tmp_path.resolve())
+    assert payload["profile_exists"] is False
+    assert payload["guided"] is False
+    assert payload["mode"] == "preview"
+    assert payload["service_status"]["status"] == "ok"
+    assert payload["doctor_status"] == "ok"
+    assert "written_path" not in payload
+    assert "prompt" not in payload
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_write_profile_continues_when_local_checks_are_unhealthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch, service_status="fail", doctor_status="fail")
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--write-profile", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".awf" / "workspace.yml").exists()
+    assert "Local prerequisites are not fully ready" in result.output
+    assert "Wrote AWF profile" in result.output
 
 
 @pytest.mark.unit
@@ -340,13 +697,36 @@ def test_init_invalid_project_path_is_reported_without_service_checks(
 
 
 @pytest.mark.unit
+def test_init_reports_unexpected_preview_failure_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    def _raise_preview_failure(_path: Path, **_kwargs: object) -> object:
+        raise OSError("permission denied reading pyproject.toml")
+
+    monkeypatch.setattr(
+        "awf.profiles.onboarding.preview_project_onboarding",
+        _raise_preview_failure,
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output
+    assert (
+        "error: could not build onboarding preview: permission denied reading pyproject.toml"
+    ) in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
 def test_init_prints_clear_next_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_local_prerequisites(monkeypatch)
 
     result = _runner.invoke(app, ["init", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert "awf profile init" in result.output
+    assert "awf init <path> --write-profile --yes" in result.output
     assert "awf profile preview" in result.output
     assert "--include-smoke-request" in result.output
 
@@ -439,9 +819,48 @@ def test_init_continues_when_service_status_probe_raises(
 
     result = _runner.invoke(app, ["init", str(tmp_path)])
 
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 0, result.output
     assert calls["status"] == 1
     assert calls["doctor"] == 1
+    assert "service status: fail" in result.output
+    assert "AWF doctor: fail" in result.output
+    assert "Local prerequisites are not fully ready yet" in result.output
+
+
+@pytest.mark.unit
+def test_init_cached_service_status_lets_doctor_handle_probe_exceptions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"status": 0, "doctor": 0, "status_collector_raised": 0}
+
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
+        calls["status"] += 1
+        raise RuntimeError("service probe is unavailable")
+
+    async def _collect_doctor_report(
+        _settings: object,
+        **kwargs: object,
+    ) -> object:
+        calls["doctor"] += 1
+        status_collector = kwargs["status_collector"]
+        with pytest.raises(RuntimeError, match="service probe is unavailable"):
+            await status_collector(_settings, strict_providers=frozenset(), provider_environ={})
+        calls["status_collector_raised"] += 1
+        return SimpleNamespace(status="fail", diagnostics=())
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
+    monkeypatch.setattr("awf.service.status.collect_service_status", _collect_service_status)
+    monkeypatch.setattr("awf.service.doctor.collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(
+        "awf.service.doctor.render_doctor_pretty",
+        lambda report: f"AWF doctor: {getattr(report, 'status', 'unknown')}\n",
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"status": 1, "doctor": 1, "status_collector_raised": 1}
     assert "service status: fail" in result.output
     assert "AWF doctor: fail" in result.output
     assert "Local prerequisites are not fully ready yet" in result.output
@@ -559,7 +978,7 @@ def test_init_reports_local_prerequisite_failures_without_api_calls(
 
     result = _runner.invoke(app, ["init", str(tmp_path)])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 0, result.output
     assert "Local prerequisites are not fully ready" in result.output
     assert "AWF doctor: fail" in result.output
 
@@ -3203,7 +3622,7 @@ def test_init_without_path_json_marks_non_utf8_env_overlay_merge_failed(
         "message": "env seeding merge requires UTF-8 dotenv files",
     }
     assert not (compose / ".env").exists()
-    assert "root" not in result.output
+    assert "AWF_API_TOKEN=root" not in result.output
 
 
 @pytest.mark.unit
@@ -3609,7 +4028,7 @@ def test_init_with_path_keeps_existing_project_onboarding_behavior(
 
     assert result.exit_code == 0, result.output
     assert "AWF init: local onboarding readiness check" in result.output
-    assert "awf profile init" in result.output
+    assert "awf init <path> --write-profile --yes" in result.output
 
 
 @pytest.mark.unit
@@ -3667,7 +4086,7 @@ def test_init_with_path_rejects_no_write_env_flag(
 
 
 @pytest.mark.unit
-def test_init_with_path_rejects_format_json_flag(
+def test_init_with_path_accepts_format_json_flag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _stub_local_prerequisites(monkeypatch)
@@ -3677,11 +4096,10 @@ def test_init_with_path_rejects_format_json_flag(
         ["init", str(tmp_path), "--format", "json"],
     )
 
-    output = result.output
-    assert result.exit_code == 2
-    assert "--format" in output
-    assert "without a project path" in output or "no path" in output
-    assert "Traceback" not in output
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["mode"] == "preview"
+    assert payload["profile_exists"] is False
 
 
 @pytest.mark.unit
@@ -3696,7 +4114,6 @@ def test_init_with_path_rejects_explicit_default_bootstrap_flags(
         (["--timeout-seconds", "180"], "--timeout-seconds"),
         (["--poll-interval-seconds", "2"], "--poll-interval-seconds"),
         (["--write-env"], "--write-env"),
-        (["--format", "pretty"], "--format"),
     ]
     for extra, expected_flag in cases:
         result = _runner.invoke(app, ["init", str(tmp_path), *extra])

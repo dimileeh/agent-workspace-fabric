@@ -73,10 +73,12 @@ awf smoke run --mocked-local --format pretty
 ```
 
 If `.awf/workspace.yml` already exists, `awf init .` validates local readiness
-and points you at preview/smoke commands. If no profile exists, create one with:
+and points you at preview/smoke commands. If no profile exists, interactive
+terminals guide you through a short setup. For automation, write detected
+defaults without prompting:
 
 ```bash
-awf profile init . --write
+awf init . --write-profile --yes
 ```
 
 ## When Something Fails

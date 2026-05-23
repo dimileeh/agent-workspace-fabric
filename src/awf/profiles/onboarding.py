@@ -287,6 +287,75 @@ def preview_project_onboarding(
     )
 
 
+def supported_onboarding_templates() -> tuple[str, ...]:
+    """Return supported project onboarding template names."""
+    return tuple(sorted(_SUPPORTED_TEMPLATES))
+
+
+def customize_project_onboarding_preview(
+    preview: ProjectOnboardingPreview,
+    *,
+    egress_mode: str | EgressMode | None = None,
+    open_explanation: str | None = None,
+    validation_commands: Sequence[str] | None = None,
+) -> ProjectOnboardingPreview:
+    """Return a preview with safe first-run profile choices applied."""
+    profile = preview.draft.profile.model_copy(deep=True)
+
+    if egress_mode is not None:
+        selected_mode = EgressMode(egress_mode)
+        if selected_mode == EgressMode.restricted:
+            egress = profile.security.egress.model_copy(
+                update={
+                    "mode": selected_mode,
+                    "allowlist_templates": list(_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES),
+                    "open_explanation": None,
+                }
+            )
+        else:
+            egress = profile.security.egress.model_copy(
+                update={
+                    "mode": selected_mode,
+                    "allowlist_templates": [],
+                    "open_explanation": open_explanation
+                    if selected_mode == EgressMode.open
+                    else None,
+                }
+            )
+        profile = profile.model_copy(
+            update={"security": profile.security.model_copy(update={"egress": egress})}
+        )
+
+    if validation_commands is not None:
+        clean_commands = [command.strip() for command in validation_commands if command.strip()]
+        if clean_commands:
+            profile = profile.with_validation_commands(clean_commands)
+        else:
+            profile = profile.clear_validation_commands()
+
+    diagnostics = _diagnostics_for(
+        preview.inspection,
+        profile=profile,
+        template=preview.draft.template,
+    )
+    draft = DraftProfile(
+        template=preview.draft.template,
+        profile=profile,
+        yaml=_profile_yaml(profile),
+        diagnostics=diagnostics,
+    )
+    smoke_request = (
+        _smoke_request(preview.path, profile) if preview.smoke_request is not None else None
+    )
+    return ProjectOnboardingPreview(
+        path=preview.path,
+        inspection=preview.inspection,
+        draft=draft,
+        diagnostics=diagnostics,
+        smoke_request=smoke_request,
+    )
+
+
 def preview_workspace_profile(
     project: Path,
     resolution: ProfileResolution,
@@ -349,11 +418,23 @@ def preview_workspace_profile(
 def write_workspace_profile(preview: ProjectOnboardingPreview, force: bool = False) -> Path:
     """Write the previewed draft to ``.awf/workspace.yml``."""
     profile_path = preview.path / ".awf" / "workspace.yml"
-    if profile_path.exists() and not force:
-        raise FileExistsError(f"{profile_path} already exists; pass --force to overwrite")
+    existing_profile_path = _existing_workspace_profile_path(preview.path)
+    if existing_profile_path is None and profile_path.exists():
+        existing_profile_path = profile_path
+    if existing_profile_path is not None and not force:
+        raise FileExistsError(f"{existing_profile_path} already exists; pass --force to overwrite")
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(preview.draft.yaml, encoding="utf-8")
     return profile_path
+
+
+def _existing_workspace_profile_path(project: Path) -> Path | None:
+    """Return the first supported workspace profile marker path on disk."""
+    for relative_path in PROFILE_MARKER_PATHS:
+        candidate = project / relative_path
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _profile_for_template(inspection: ProjectInspection, template: str) -> WorkspaceProfile:
