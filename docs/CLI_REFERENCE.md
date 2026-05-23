@@ -16,6 +16,15 @@ Run the provisioning worker:
 uv run --python 3.12 --extra dev awf worker
 ```
 
+Run the local MCP server for Claude Code, Codex, or another MCP client:
+
+```bash
+uv run --python 3.12 --extra dev awf mcp serve --env-file docker/compose/.env
+```
+
+The MCP command uses stdio, so stdout is reserved for the MCP protocol. See
+[MCP Setup](MCP_SETUP.md) for copy-paste client configuration.
+
 Local service mode uses a stable worker node id, `local`, so active rows
 survive API/worker/migrate container rebuilds without becoming owned by a dead
 container hostname. Multi-node deployments should set a unique
@@ -143,7 +152,8 @@ uv run --python 3.12 --extra dev awf workspace create \
   --test "pytest -q"
 ```
 
-*Note: The agent `effort` field is explicitly provider-derived (resolved from the workspace profile or provider default) and is not exposed as a direct input flag on the CLI or MCP tools.*
+*Note: `--effort` is optional. When omitted, AWF resolves the provider-specific
+default from the workspace profile or adapter defaults.*
 
 Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
 comment, and `--initial-review-grace-period-seconds 0` only for explicit

@@ -131,6 +131,7 @@ See:
 - [Upgrade Guide](docs/UPGRADE.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [MCP Reference](docs/MCP_REFERENCE.md)
+- [MCP Setup](docs/MCP_SETUP.md)
 - [MCP Client Parity Matrix](docs/MCP_CLIENT_PARITY.md)
 - [Reason Catalog](docs/REASON_CATALOG.md)
 - [Client Surfaces](docs/CLIENT_SURFACES.md)

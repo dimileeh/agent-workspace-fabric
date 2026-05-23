@@ -6,7 +6,9 @@ AWF also exposes MCP tools for clients that want typed tool calls instead of
 shelling out to the REST API. REST is canonical, the CLI is a JSON-first
 operator convenience layer, and MCP is a first-class parity client for agent
 orchestrators. See [MCP_CLIENT_PARITY.md](MCP_CLIENT_PARITY.md) for
-the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
+the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
+[MCP_SETUP.md](MCP_SETUP.md) for Claude Code and Codex setup snippets using
+`awf mcp serve`.
 
 | Tool | Purpose |
 | --- | --- |
@@ -91,6 +93,7 @@ Example `awf_create_workspace` arguments:
   "owned_paths": ["README.md", "docs/**"],
   "agent": "codex",
   "model": null,
+  "effort": null,
   "task_external_id": "AIRA-123",
   "profile_ref": "auto",
   "profile": null,
