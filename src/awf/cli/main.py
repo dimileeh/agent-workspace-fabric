@@ -826,6 +826,14 @@ def _run_init_project_onboarding(
             err=True,
         )
         raise typer.Exit(code=2)
+    stdio_is_interactive = _stdio_is_interactive()
+    if guided is True and not stdio_is_interactive:
+        typer.echo(
+            "error: --guided requires an interactive terminal; use "
+            "--write-profile --yes for non-interactive writes.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     service_status: dict[str, object]
     doctor_report: DoctorReport | None
@@ -915,7 +923,7 @@ def _run_init_project_onboarding(
         and fmt == OutputFormat.pretty
         and existing_profile_path is None
         and not write_profile
-        and _stdio_is_interactive()
+        and stdio_is_interactive
     )
     effective_guided = guided is True or auto_guided
 

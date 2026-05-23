@@ -369,10 +369,31 @@ def test_init_write_profile_requires_yes_when_not_guided(
 
 
 @pytest.mark.unit
+def test_init_guided_requires_interactive_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: False)
+    monkeypatch.setattr(
+        "awf.cli.main._prompt_project_onboarding_choices",
+        MagicMock(side_effect=AssertionError("should not prompt without a TTY")),
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--guided"])
+
+    assert result.exit_code == 2, result.output
+    assert "--guided requires an interactive terminal" in result.output
+    assert "--yes" in result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
 def test_init_guided_writes_answers_into_workspace_yml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
 
     result = _runner.invoke(
         app,
