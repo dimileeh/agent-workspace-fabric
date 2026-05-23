@@ -596,6 +596,45 @@ def test_init_continues_when_service_status_probe_raises(
 
 
 @pytest.mark.unit
+def test_init_cached_service_status_lets_doctor_handle_probe_exceptions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"status": 0, "doctor": 0, "status_collector_raised": 0}
+
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
+        calls["status"] += 1
+        raise RuntimeError("service probe is unavailable")
+
+    async def _collect_doctor_report(
+        _settings: object,
+        **kwargs: object,
+    ) -> object:
+        calls["doctor"] += 1
+        status_collector = kwargs["status_collector"]
+        with pytest.raises(RuntimeError, match="service probe is unavailable"):
+            await status_collector(_settings, strict_providers=frozenset(), provider_environ={})
+        calls["status_collector_raised"] += 1
+        return SimpleNamespace(status="fail", diagnostics=())
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
+    monkeypatch.setattr("awf.service.status.collect_service_status", _collect_service_status)
+    monkeypatch.setattr("awf.service.doctor.collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(
+        "awf.service.doctor.render_doctor_pretty",
+        lambda report: f"AWF doctor: {getattr(report, 'status', 'unknown')}\n",
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"status": 1, "doctor": 1, "status_collector_raised": 1}
+    assert "service status: fail" in result.output
+    assert "AWF doctor: fail" in result.output
+    assert "Local prerequisites are not fully ready yet" in result.output
+
+
+@pytest.mark.unit
 def test_init_uses_cached_service_status_for_doctor_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

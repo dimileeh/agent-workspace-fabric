@@ -852,16 +852,7 @@ def _run_init_project_onboarding(
                 **_kwargs: object,
             ) -> dict[str, object]:
                 _ = settings, strict_providers, provider_environ, _kwargs
-                try:
-                    return await service_status_task
-                except Exception as exc:
-                    return {
-                        "service": service_name,
-                        "status": "fail",
-                        "checks": {},
-                        "agent_readiness": {"status": "fail"},
-                        "detail": str(exc),
-                    }
+                return await service_status_task
 
             service_status_result, doctor_report = await asyncio.gather(
                 service_status_task,
