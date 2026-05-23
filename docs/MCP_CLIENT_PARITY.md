@@ -29,9 +29,9 @@ payload returns the existing workspace, while same key and changed payload
 returns structured `IDEMPOTENCY_CONFLICT`.
 
 **MCP create effort field note:** The agent `effort` field is available on
-`awf_create_workspace`, `awf workspace create`, PR monitor adoption, and the
-corresponding REST surfaces. When omitted, AWF resolves the provider-specific
-default from the workspace profile or adapter defaults.
+`awf_create_workspace`, `awf workspace create`, and the corresponding workspace
+create REST surface. When omitted, AWF resolves the provider-specific default
+from the workspace profile or adapter defaults.
 
 **MCP log and operation response migration note:** MCP log and operation tools
 now use REST-compatible response models. `awf_read_workspace_log` returns
