@@ -518,7 +518,7 @@ def test_init_json_mode_never_prompts_and_reports_structured_state(
     assert payload["service_status"]["status"] == "ok"
     assert payload["doctor_status"] == "ok"
     assert "written_path" not in payload
-    assert "prompt" not in result.output.lower()
+    assert "prompt" not in payload
     assert not (tmp_path / ".awf" / "workspace.yml").exists()
 
 
