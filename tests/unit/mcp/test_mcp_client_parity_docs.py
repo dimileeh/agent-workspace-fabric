@@ -12,6 +12,7 @@ from tests.unit.mcp._parity_utils import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PARITY_DOC = REPO_ROOT / "docs" / "MCP_CLIENT_PARITY.md"
 MCP_REFERENCE = REPO_ROOT / "docs" / "MCP_REFERENCE.md"
+MCP_SETUP = REPO_ROOT / "docs" / "MCP_SETUP.md"
 
 REQUIRED_COLUMNS = [
     "Capability",
@@ -87,7 +88,6 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
     assert "REST is the canonical AWF control-plane API" in doc
     assert "CLI is a JSON-first operator convenience layer" in doc
     assert "MCP is a first-class parity client for agent orchestrators" in doc
-
     for missing_surface in (
         "awf_refresh_workspace",
         "awf_rebase_workspace",
@@ -99,6 +99,34 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
 
     assert "not arbitrary shell" in doc
     assert "unrestricted Docker exec" in doc
+
+
+@pytest.mark.unit
+def test_mcp_setup_publishes_claude_and_codex_stdio_config() -> None:
+    setup_doc = MCP_SETUP.read_text(encoding="utf-8")
+    mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
+
+    assert "claude mcp add --transport stdio" in setup_doc
+    assert "awf mcp serve --env-file" in setup_doc
+    assert "[mcp_servers.awf]" in setup_doc
+    assert 'command = "awf"' in setup_doc
+    assert "MCP_SETUP.md" in mcp_ref
+
+
+@pytest.mark.unit
+def test_mcp_and_cli_docs_do_not_claim_effort_is_excluded() -> None:
+    combined = "\n".join(
+        [
+            PARITY_DOC.read_text(encoding="utf-8"),
+            MCP_REFERENCE.read_text(encoding="utf-8"),
+            (REPO_ROOT / "docs" / "CLI_REFERENCE.md").read_text(encoding="utf-8"),
+        ]
+    )
+
+    assert "effort" in combined
+    assert "effort` field is intentionally excluded" not in combined
+    assert "is not exposed as a direct input flag" not in combined
+    assert "awf_create_workspace" in combined
 
 
 @pytest.mark.unit

@@ -1,7 +1,8 @@
 """Agent Workspace Fabric (AWF).
 
-A standalone execution substrate that lets any coding agent (OpenClaw, Codex,
-Claude Code) run a coding task end-to-end in an isolated Docker workspace.
+A standalone execution substrate that lets supported coding CLIs (Codex,
+Claude Code, Gemini, and OpenCode) run a coding task end-to-end in an isolated
+Docker workspace.
 """
 
 from __future__ import annotations

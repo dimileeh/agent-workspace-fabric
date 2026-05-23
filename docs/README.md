@@ -3,6 +3,7 @@
 - [Quickstart](QUICKSTART.md)
 - [Start Here](START_HERE.md) compatibility pointer for older links.
 - [Upgrade Guide](UPGRADE.md)
+- [MCP Setup](MCP_SETUP.md)
 - [Release Checklist](../RELEASING.md)
 - [Protected Quality-Gate Files](PROTECTED_FILES.md)
 
