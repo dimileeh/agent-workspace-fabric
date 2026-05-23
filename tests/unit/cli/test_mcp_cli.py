@@ -5,12 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+import click
 import pytest
 from typer.testing import CliRunner
 
 from awf.cli.main import app
 
 _runner = CliRunner()
+
+
+def _visible_help(output: str) -> str:
+    """Return help text without terminal styling."""
+    return click.unstyle(output)
 
 
 @pytest.mark.unit
@@ -26,10 +32,33 @@ def test_awf_help_lists_mcp_group() -> None:
 def test_mcp_serve_help_is_available() -> None:
     """Test mcp serve help is available."""
     result = _runner.invoke(app, ["mcp", "serve", "--help"])
+    visible_help = _visible_help(result.output)
 
     assert result.exit_code == 0
-    assert "Run AWF's local MCP server over stdio" in result.output
-    assert "--env-file" in result.output
+    assert "Run AWF's local MCP server over stdio" in visible_help
+    assert "--env-file" in visible_help
+
+
+@pytest.mark.unit
+def test_mcp_serve_help_is_available_when_color_is_forced() -> None:
+    """Test mcp serve help is available when CI-style color is forced."""
+    result = _runner.invoke(
+        app,
+        ["mcp", "serve", "--help"],
+        env={
+            "TERM": "xterm-256color",
+            "FORCE_COLOR": "1",
+            "CLICOLOR_FORCE": "1",
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+        },
+    )
+    visible_help = _visible_help(result.output)
+
+    assert result.exit_code == 0
+    assert "\x1b[" in result.output
+    assert "Run AWF's local MCP server over stdio" in visible_help
+    assert "--env-file" in visible_help
 
 
 @pytest.mark.unit
