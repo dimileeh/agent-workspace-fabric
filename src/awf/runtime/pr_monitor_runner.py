@@ -2918,9 +2918,9 @@ class PullRequestMonitorRunner:
                     )
                     manual_ready_handled = None
                     settle_config = replace(self._config, auto_merge=True)
-                    settle_decision: _NonCheckReviewerSettleDecision | None = None
+                    notify_settle_decision: _NonCheckReviewerSettleDecision | None = None
                     if _gate_requires_validation_recovery(merge_gate):
-                        settle_decision = _non_check_reviewer_settle_decision(
+                        notify_settle_decision = _non_check_reviewer_settle_decision(
                             status,
                             state,
                             settle_config,
@@ -2928,17 +2928,17 @@ class PullRequestMonitorRunner:
                             now=time.monotonic(),
                         )
                         await self._record_non_check_reviewer_settle_decision(
-                            decision=settle_decision,
+                            decision=notify_settle_decision,
                             workspace_id=workspace_id,
                             pr_number=pr_number,
                             status=status,
                             monitor_log=monitor_log,
                         )
-                        if settle_decision.wait_seconds > 0:
+                        if notify_settle_decision.wait_seconds > 0:
                             settle_operation_context = (
                                 _non_check_reviewer_settle_wait_operation_context(
                                     settle_config,
-                                    settle_decision,
+                                    notify_settle_decision,
                                 )
                             )
                             await self._sleep_with_monitor_state_operation(
@@ -2954,7 +2954,7 @@ class PullRequestMonitorRunner:
                                 status=status,
                                 base_branch=base_branch,
                                 remote_branch=remote_branch,
-                                wait_seconds=settle_decision.wait_seconds,
+                                wait_seconds=notify_settle_decision.wait_seconds,
                                 monitor_log=monitor_log,
                                 extra_payload=settle_operation_context.extra_payload,
                                 extra_identity=settle_operation_context.extra_identity,
@@ -2982,8 +2982,8 @@ class PullRequestMonitorRunner:
                     if manual_ready_handled is not None:
                         return manual_ready_handled
 
-                    if settle_decision is None:
-                        settle_decision = _non_check_reviewer_settle_decision(
+                    if notify_settle_decision is None:
+                        notify_settle_decision = _non_check_reviewer_settle_decision(
                             status,
                             state,
                             settle_config,
@@ -2991,17 +2991,17 @@ class PullRequestMonitorRunner:
                             now=time.monotonic(),
                         )
                     await self._record_non_check_reviewer_settle_decision(
-                        decision=settle_decision,
+                        decision=notify_settle_decision,
                         workspace_id=workspace_id,
                         pr_number=pr_number,
                         status=status,
                         monitor_log=monitor_log,
                     )
-                    if settle_decision.wait_seconds > 0:
+                    if notify_settle_decision.wait_seconds > 0:
                         settle_operation_context = (
                             _non_check_reviewer_settle_wait_operation_context(
                                 settle_config,
-                                settle_decision,
+                                notify_settle_decision,
                             )
                         )
                         await self._sleep_with_monitor_state_operation(
