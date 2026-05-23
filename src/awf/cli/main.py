@@ -820,6 +820,12 @@ def _run_init_project_onboarding(
     if fmt == OutputFormat.json and guided is True:
         typer.echo("error: --guided cannot be used with --format json.", err=True)
         raise typer.Exit(code=2)
+    if yes and not write_profile:
+        typer.echo(
+            "error: --yes requires --write-profile to approve a non-interactive profile write.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if write_profile and not yes and guided is not True:
         typer.echo(
             "error: --write-profile requires --yes for non-interactive writes "
@@ -1053,9 +1059,12 @@ def _prompt_project_onboarding_choices(
         "Add a validation command now?",
         default=False,
     ):
-        validation_command = typer.prompt("Validation command").strip()
-        if validation_command:
-            validation_commands.append(validation_command)
+        while True:
+            validation_command = typer.prompt("Validation command").strip()
+            if validation_command:
+                validation_commands.append(validation_command)
+            if not typer.confirm("Add another validation command?", default=False):
+                break
 
     preview = customize_preview(
         preview,

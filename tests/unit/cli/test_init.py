@@ -370,6 +370,16 @@ def test_init_write_profile_requires_yes_when_not_guided(
 
 
 @pytest.mark.unit
+def test_init_yes_requires_write_profile(tmp_path: Path) -> None:
+    result = _runner.invoke(app, ["init", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 2, result.output
+    assert "--yes" in result.output
+    assert "--write-profile" in result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
 def test_init_guided_requires_interactive_stdio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -399,7 +409,7 @@ def test_init_guided_writes_answers_into_workspace_yml(
     result = _runner.invoke(
         app,
         ["init", str(tmp_path), "--guided"],
-        input="\nopen\nNeeds package registry and model-provider access.\ny\npytest -q\ny\n",
+        input="\nopen\nNeeds package registry and model-provider access.\ny\npytest -q\nn\ny\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -410,6 +420,27 @@ def test_init_guided_writes_answers_into_workspace_yml(
         == "Needs package registry and model-provider access."
     )
     assert profile["phases"]["validate"] == [{"command": "pytest -q", "required": True}]
+
+
+@pytest.mark.unit
+def test_init_guided_accepts_multiple_validation_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--guided"],
+        input="\n\ny\nmake lint\ny\npytest -q\nn\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    profile = _read_written_profile(tmp_path)
+    assert profile["phases"]["validate"] == [
+        {"command": "make lint", "required": True},
+        {"command": "pytest -q", "required": True},
+    ]
 
 
 @pytest.mark.unit
