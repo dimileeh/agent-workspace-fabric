@@ -3019,7 +3019,7 @@ class PullRequestMonitorRunner:
                             status=status,
                             base_branch=base_branch,
                             remote_branch=remote_branch,
-                            wait_seconds=settle_decision.wait_seconds,
+                            wait_seconds=notify_settle_decision.wait_seconds,
                             monitor_log=monitor_log,
                             extra_payload=settle_operation_context.extra_payload,
                             extra_identity=settle_operation_context.extra_identity,
