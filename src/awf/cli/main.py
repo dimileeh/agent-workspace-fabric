@@ -1904,15 +1904,19 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
     from awf.service.workspaces import WorkspaceService
 
     settings = _resolve_mcp_settings(env_file=env_file)
-    engine = make_engine(settings.database_url)
-    try:
-        server = build_mcp_server(
-            service=WorkspaceService(make_session_factory(engine), settings=settings),
-            settings=settings,
-        )
-        server.run("stdio")
-    finally:
-        asyncio.run(engine.dispose())
+
+    async def _run_stdio_and_dispose() -> None:
+        engine = make_engine(settings.database_url)
+        try:
+            server = build_mcp_server(
+                service=WorkspaceService(make_session_factory(engine), settings=settings),
+                settings=settings,
+            )
+            await server.run_stdio_async()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run_stdio_and_dispose())
 
 
 def _resolve_mcp_settings(*, env_file: Path | None) -> Settings:

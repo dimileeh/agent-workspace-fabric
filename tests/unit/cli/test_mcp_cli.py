@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, cast
 
@@ -146,13 +147,20 @@ def test_mcp_serve_runs_stdio_with_env_file(
         async def dispose(self) -> None:
             """Dispose."""
             calls["disposed"] = True
+            calls["dispose_loop_id"] = id(asyncio.get_running_loop())
 
     class _FakeMcpServer:
         """Fake MCP server."""
 
+        async def run_stdio_async(self) -> None:
+            """Run async stdio transport."""
+            calls["transport"] = "stdio"
+            calls["server_loop_id"] = id(asyncio.get_running_loop())
+
         def run(self, transport: str) -> None:
             """Run transport."""
-            calls["transport"] = transport
+            calls["sync_run_transport"] = transport
+            asyncio.run(self.run_stdio_async())
 
     def _make_engine(url: str) -> _FakeEngine:
         """Make engine."""
@@ -181,6 +189,8 @@ def test_mcp_serve_runs_stdio_with_env_file(
     assert calls["database_url"] == database_url
     assert calls["transport"] == "stdio"
     assert calls["disposed"] is True
+    assert "sync_run_transport" not in calls
+    assert calls["server_loop_id"] == calls["dispose_loop_id"]
     service = cast(Any, calls["service"])
     settings = cast(Any, calls["settings"])
     assert service.session_factory is calls["session_factory"]
@@ -215,13 +225,20 @@ def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) 
         async def dispose(self) -> None:
             """Dispose."""
             calls["disposed"] = True
+            calls["dispose_loop_id"] = id(asyncio.get_running_loop())
 
     class _FakeMcpServer:
         """Fake MCP server."""
 
+        async def run_stdio_async(self) -> None:
+            """Run async stdio transport."""
+            calls["transport"] = "stdio"
+            calls["server_loop_id"] = id(asyncio.get_running_loop())
+
         def run(self, transport: str) -> None:
             """Run transport."""
-            calls["transport"] = transport
+            calls["sync_run_transport"] = transport
+            asyncio.run(self.run_stdio_async())
 
     def _make_engine(url: str) -> _FakeEngine:
         """Make engine."""
@@ -250,6 +267,8 @@ def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) 
     assert calls["database_url"] == database_url
     assert calls["transport"] == "stdio"
     assert calls["disposed"] is True
+    assert "sync_run_transport" not in calls
+    assert calls["server_loop_id"] == calls["dispose_loop_id"]
     service = cast(Any, calls["service"])
     settings = cast(Any, calls["settings"])
     assert service.session_factory is calls["session_factory"]
