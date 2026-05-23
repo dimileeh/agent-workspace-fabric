@@ -2179,6 +2179,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
         returncode=0,
         stdout="M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",
     )
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\0plans/fallback.md\0")
     cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\n")
     cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
     cmd.queue_result(returncode=0, stdout="")
@@ -2241,16 +2242,23 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert result.details is not None
     assert result.details["branch_restored"] is True
-    assert result.details["reverted_paths"] == ["plans/orphan.md"]
-    assert result.details["reverted_path_collection_errors"] == [
-        {
-            "phase": "committed_diff_parse",
-            "message": "truncated `--name-status -z` record for status 'R100'",
-        }
+    assert result.details["reverted_paths"] == [
+        ".github/workflows/ci.yml",
+        "plans/fallback.md",
+        "plans/orphan.md",
     ]
+    assert "reverted_path_collection_errors" not in result.details
     assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
         call.args for call in cmd.calls
     ]
+    assert _git_worktree_command(
+        worktree,
+        "--literal-pathspecs",
+        "clean",
+        "-fd",
+        "--",
+        "plans/orphan.md",
+    ) in [call.args for call in cmd.calls]
 
     async with factory() as session:
         events = await WorkspaceEventRepository(session).list(
@@ -4791,6 +4799,142 @@ async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status_returncode", "status_stdout", "status_stderr", "expected_reason"),
+    [
+        (0, " M leftover.txt\n?? scratch.log\n", "", "PRE_EXISTING_DIRTY_WORKTREE"),
+        (128, "", "fatal: not a git repository\n", "REPAIR_WORKTREE_STATUS_FAILED"),
+    ],
+)
+async def test_execute_ci_repair_start_failures_are_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    status_returncode: int,
+    status_stdout: str,
+    status_stderr: str,
+    expected_reason: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=status_returncode,
+        stdout=status_stdout,
+        stderr=status_stderr,
+    )
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert adapter.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(worktree, "status", "--porcelain")
+    ]
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=10)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.events[-1].reason_code == expected_reason
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == expected_reason
+    assert ci_operation.result["outcome"] == "repair_start_blocked"
+    assert ci_operation.result["reason_code"] == expected_reason
+
+
+@pytest.mark.unit
+async def test_execute_comment_repair_pre_existing_dirty_worktree_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M leftover.txt\n")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_dirty_start",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert adapter.calls == []
+    assert "T_dirty_start" not in state.threads_addressed_ids
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(worktree, "status", "--porcelain")
+    ]
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=10)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.events[-1].reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    comment_operation = next(
+        operation for operation in operations if operation.type == "comment_repair"
+    )
+    assert comment_operation.status == OperationStatus.failed.value
+    assert comment_operation.error_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert comment_operation.result["outcome"] == "repair_start_blocked"
+
+
+@pytest.mark.unit
 async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_failed_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5222,7 +5366,9 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
     assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in [
         call.args for call in cmd.calls
     ]
-    assert _git_worktree_command(worktree, "clean", "-fd") in [call.args for call in cmd.calls]
+    assert not any(
+        call.args == _git_worktree_command(worktree, "clean", "-fd") for call in cmd.calls
+    )
 
 
 @pytest.mark.unit
@@ -5244,7 +5390,7 @@ async def test_protected_scope_commit_repair_rolls_back_delta_without_agent_or_p
             "tests/unit/control/test_ci_workflow_toolchain.py",
         ),
     )
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\n")
     cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
     cmd.queue_result(returncode=0, stdout="")
     adapter = FakeAdapter()
@@ -5286,6 +5432,7 @@ async def test_protected_scope_commit_repair_rolls_back_delta_without_agent_or_p
     assert push_result.details["reverted_paths"] == [
         ".github/workflows/ci.yml",
         "plans/PR282_CI_SETUP_UV_PLAN.md",
+        "plans/orphan.md",
         "plans/strange\nname.md",
         "tests/unit/control/test_ci_workflow_toolchain.py",
     ]
@@ -5293,7 +5440,17 @@ async def test_protected_scope_commit_repair_rolls_back_delta_without_agent_or_p
     assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
         call.args for call in cmd.calls
     ]
-    assert _git_worktree_command(worktree, "clean", "-fd") in [call.args for call in cmd.calls]
+    assert _git_worktree_command(
+        worktree,
+        "--literal-pathspecs",
+        "clean",
+        "-fd",
+        "--",
+        "plans/orphan.md",
+    ) in [call.args for call in cmd.calls]
+    assert not any(
+        call.args == _git_worktree_command(worktree, "clean", "-fd") for call in cmd.calls
+    )
     assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
 
     async with factory() as session:
@@ -5355,9 +5512,9 @@ async def test_protected_scope_rollback_failed_reset_omits_unattempted_clean_res
     assert push_result.returncode == 128
     assert push_result.details is not None
     assert push_result.details["branch_restored"] is False
-    assert push_result.details["clean_attempted"] is False
+    assert "clean_attempted" not in push_result.details
     assert "clean_returncode" not in push_result.details
-    assert _git_worktree_command(worktree, "clean", "-fd") not in [call.args for call in cmd.calls]
+    assert not any("clean" in call.args for call in cmd.calls)
 
 
 @pytest.mark.unit

@@ -316,6 +316,7 @@ _CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+_REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 # Staleness reason codes that a successful SyncBase legitimately remediates:
@@ -436,6 +437,7 @@ class ProtectedScopeDiffError(Exception):
 @dataclass(frozen=True)
 class _ProtectedScopeRollbackDeltaEvidence:
     reverted_paths: tuple[str, ...]
+    cleanup_paths: tuple[str, ...] = ()
     collection_errors: tuple[dict[str, object], ...] = ()
 
 
@@ -489,6 +491,18 @@ class _GitPushResult:
     def protected_scope_diff_unavailable(self) -> bool:
         return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 
+    @property
+    def terminal_monitor_failure(self) -> bool:
+        return self.failed and (
+            self.protected_scope_blocked
+            or self.reason_code
+            in {
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+                _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+                _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+            }
+        )
+
     def failure_evidence(self) -> dict[str, object]:
         evidence: dict[str, object] = {
             "operation": "git push",
@@ -515,6 +529,11 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:
         return "protected_scope_push_blocked"
+    if push_result.reason_code in {
+        _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+    }:
+        return "repair_start_blocked"
     return "git_push_failed"
 
 
@@ -1725,14 +1744,7 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
-                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
-                    await self._terminate_failed(
-                        workspace_id,
-                        message=push_result.error_message or push_result.reason_code,
-                        reason_code=push_result.reason_code,
-                    )
-                    return True
-                if push_result.protected_scope_blocked:
+                if push_result.terminal_monitor_failure:
                     await self._terminate_failed(
                         workspace_id,
                         message=push_result.error_message or push_result.reason_code,
@@ -2142,14 +2154,7 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
-                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
-                    await self._terminate_failed(
-                        workspace_id,
-                        message=push_result.error_message or push_result.reason_code,
-                        reason_code=push_result.reason_code,
-                    )
-                    return True
-                if push_result.protected_scope_blocked:
+                if push_result.terminal_monitor_failure:
                     await self._terminate_failed(
                         workspace_id,
                         message=push_result.error_message or push_result.reason_code,
@@ -2295,14 +2300,7 @@ class PullRequestMonitorRunner:
                     error_code=reason_code,
                     error_message=push_result.error_message,
                 )
-                if reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE:
-                    await self._terminate_failed(
-                        workspace_id,
-                        message=push_result.error_message or push_result.reason_code,
-                        reason_code=push_result.reason_code,
-                    )
-                    return True
-                if push_result.protected_scope_blocked:
+                if push_result.terminal_monitor_failure:
                     await self._terminate_failed(
                         workspace_id,
                         message=push_result.error_message or push_result.reason_code,
@@ -4921,7 +4919,7 @@ class PullRequestMonitorRunner:
                 failed=True,
                 returncode=status.returncode,
                 stderr="Could not inspect repair worktree before starting the agent.",
-                reason_code=_GIT_PUSH_FAILED_REASON,
+                reason_code=_REPAIR_WORKTREE_STATUS_FAILED_REASON,
                 details={
                     "phase": "repair_start",
                     "operation_type": operation_type,
@@ -5245,17 +5243,31 @@ class PullRequestMonitorRunner:
             operation_start_head=operation_start_head,
         )
         reverted_paths = list(delta_evidence.reverted_paths)
+        cleanup_paths = list(delta_evidence.cleanup_paths)
         reset_result = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
         )
         clean_result: CommandResult | None = None
-        clean_attempted = False
-        if reset_result.ok:
-            clean_attempted = True
+        if reset_result.ok and cleanup_paths:
             clean_result = await self._deps.runner.run(
-                _git_worktree_command(worktree_path, "clean", "-fd")
+                _git_worktree_command(
+                    worktree_path,
+                    "--literal-pathspecs",
+                    "clean",
+                    "-fd",
+                    "--",
+                    *cleanup_paths,
+                )
             )
-        branch_restored = reset_result.ok and clean_result is not None and clean_result.ok
+        untracked_evidence_complete = not any(
+            error.get("phase") == "worktree_status_command"
+            for error in delta_evidence.collection_errors
+        )
+        branch_restored = (
+            reset_result.ok
+            and untracked_evidence_complete
+            and (clean_result is None or clean_result.ok)
+        )
         details: dict[str, object] = {
             "phase": "pre_push_committed_diff",
             "paths": paths,
@@ -5268,13 +5280,14 @@ class PullRequestMonitorRunner:
             "rollback_status": "succeeded" if branch_restored else "failed",
             "branch_restored": branch_restored,
             "reverted_paths": reverted_paths,
+            "cleanup_paths": cleanup_paths,
             "pushed": False,
             "reset_returncode": reset_result.returncode,
-            "clean_attempted": clean_attempted,
         }
         if reset_result.stderr:
             details["reset_stderr"] = reset_result.stderr[:400]
         if clean_result is not None:
+            details["clean_attempted"] = True
             details["clean_returncode"] = clean_result.returncode
         if clean_result is not None and clean_result.stderr:
             details["clean_stderr"] = clean_result.stderr[:400]
@@ -5300,6 +5313,7 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             paths=paths,
             reverted_paths=reverted_paths,
+            cleanup_paths=cleanup_paths,
             operation_start_head=operation_start_head,
             attempted_head=attempted_head,
             branch_restored=branch_restored,
@@ -5349,6 +5363,7 @@ class PullRequestMonitorRunner:
         operation_start_head: str,
     ) -> _ProtectedScopeRollbackDeltaEvidence:
         paths: set[str] = set()
+        cleanup_paths: set[str] = set()
         collection_errors: list[dict[str, object]] = []
         committed = await self._deps.runner.run(
             _git_worktree_command(
@@ -5368,12 +5383,45 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     error=str(exc),
                 )
-                collection_errors.append(
-                    {
-                        "phase": "committed_diff_parse",
-                        "message": str(exc),
-                    }
+                fallback = await self._deps.runner.run(
+                    _git_worktree_command(
+                        worktree_path,
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        f"{operation_start_head}..HEAD",
+                    )
                 )
+                if fallback.ok:
+                    try:
+                        paths.update(_changed_paths_from_name_only_z(fallback.stdout))
+                    except ProtectedScopeDiffError as fallback_exc:
+                        collection_errors.extend(
+                            [
+                                {
+                                    "phase": "committed_diff_parse",
+                                    "message": str(exc),
+                                },
+                                {
+                                    "phase": "committed_diff_name_only_fallback_parse",
+                                    "message": str(fallback_exc),
+                                },
+                            ]
+                        )
+                else:
+                    collection_errors.extend(
+                        [
+                            {
+                                "phase": "committed_diff_parse",
+                                "message": str(exc),
+                            },
+                            {
+                                "phase": "committed_diff_name_only_fallback_command",
+                                "returncode": fallback.returncode,
+                                "stderr": fallback.stderr[:400],
+                            },
+                        ]
+                    )
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_diff_failed",
@@ -5393,6 +5441,7 @@ class PullRequestMonitorRunner:
         )
         if status.ok:
             paths.update(_changed_paths_from_porcelain(status.stdout))
+            cleanup_paths.update(_untracked_paths_from_porcelain(status.stdout))
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_status_failed",
@@ -5409,6 +5458,7 @@ class PullRequestMonitorRunner:
             )
         return _ProtectedScopeRollbackDeltaEvidence(
             reverted_paths=tuple(sorted(paths)),
+            cleanup_paths=tuple(sorted(cleanup_paths)),
             collection_errors=tuple(collection_errors),
         )
 
@@ -8462,6 +8512,16 @@ def _changed_paths_from_name_status_z(diff_stdout: str) -> tuple[str, ...]:
         return _parse_name_status_z(diff_stdout)
     except ValueError as exc:
         raise ProtectedScopeDiffError(str(exc)) from exc
+
+
+def _changed_paths_from_name_only_z(diff_stdout: str) -> tuple[str, ...]:
+    """Extract changed paths from ``git diff --name-only -z`` output."""
+    parts = diff_stdout.split("\0")
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    if any(part == "" for part in parts):
+        raise ProtectedScopeDiffError("empty path in `--name-only -z` output")
+    return tuple(dict.fromkeys(parts))
 
 
 def _quality_gate_violation_paths(violations: Sequence[QualityGateViolation]) -> list[str]:

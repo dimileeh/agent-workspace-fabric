@@ -38,6 +38,13 @@ transactional protected-scope guard, this workflow repair was applied manually:
 all CI `setup-uv` steps now pin `uv` to `0.5.31` and pass an empty
 `github-token` so the action avoids the bad default token path.
 
+After the next review pass on PR #284, the rollback and repair-start behavior
+was tightened again: repair-start dirty worktrees and repair status-inspection
+failures now terminate the monitor instead of retrying every poll, rollback
+cleanup uses literal pathspecs for collected repair-created untracked paths
+instead of global `git clean -fd`, and malformed name-status rollback evidence
+falls back to `git diff --name-only -z` before reporting partial evidence.
+
 ## Coverage Added
 
 - CI repair regression: a local repair commit touching `.github/workflows/ci.yml`
@@ -59,9 +66,14 @@ all CI `setup-uv` steps now pin `uv` to `0.5.31` and pass an empty
   `reverted_path_collection_errors` entry for the parse failure.
 - Dirty-start/rollback-evidence regressions: CI repair refuses to invoke the
   agent when pre-existing dirty worktree state is detected; failed rollback
-  reset evidence omits `clean_returncode` and reports `clean_attempted: false`.
+  reset evidence omits unattempted `clean_*` fields.
 - CI workflow regression: all `setup-uv` steps pin an explicit uv version and
   avoid the action's default GitHub token release lookup.
+- Review follow-up regressions: dirty/status repair-start failures are terminal
+  for CI/comment repair actions; protected-scope rollback cleanup only targets
+  collected untracked repair leftovers; malformed committed-diff name-status
+  output falls back to name-only path collection before reporting partial
+  evidence; failed reset evidence omits unattempted clean metadata.
 
 ## Validation Commands
 
@@ -90,6 +102,15 @@ all CI `setup-uv` steps now pin `uv` to `0.5.31` and pass an empty
   - Result: `All checks passed`
 - `uv run --python 3.12 --extra dev ruff format --check tests/unit/test_ci_workflow_full_coverage.py`
   - Result: `1 file already formatted`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'pre_existing_dirty_worktree or repair_start_failures_are_terminal or failed_reset_omits or protected_scope_delta or protected_scope_commit_repair_rolls_back_delta_without_agent_or_push or execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope'`
+  - Initial review follow-up result: `9 passed, 166 deselected in 12.06s`
+  - Result after formatting: `9 passed, 166 deselected in 16.36s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `All checks passed`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `2 files already formatted`
+- `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py`
+  - Result: `Success: no issues found in 1 source file`
 
 ## Notes
 
