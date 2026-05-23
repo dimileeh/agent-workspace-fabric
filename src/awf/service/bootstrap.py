@@ -8,6 +8,7 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict
 
@@ -28,6 +29,7 @@ from awf.service.status import collect_service_status
 DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
 DEFAULT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 AGENT_RUNTIME_DOCKERFILE = Path("docker/agent-runtime.Dockerfile")
+PACKAGED_BOOTSTRAP_ASSET_ROOT = Path("bootstrap_assets")
 
 
 class CompletedProcessLike(Protocol):
@@ -409,6 +411,8 @@ def _bootstrap_environment_file(assets: _BootstrapAssets) -> Path:
 
     if assets.compose_env_file is not None:
         return assets.compose_env_file
+    if assets.root is not None and is_packaged_bootstrap_asset_root(assets.root):
+        return Path(".env")
     if assets.root is not None:
         return assets.root / LOCAL_SERVICE_COMPOSE_ENV_FILE
     return LOCAL_SERVICE_COMPOSE_ENV_FILE
@@ -420,11 +424,33 @@ def get_bootstrap_asset_root() -> Path | None:
     return _resolve_bootstrap_asset_root()
 
 
+def is_packaged_bootstrap_asset_root(path: Path) -> bool:
+    """Return true when ``path`` is AWF's bundled wheel bootstrap asset root."""
+
+    packaged_root = _packaged_bootstrap_asset_root()
+    return packaged_root is not None and path.resolve() == packaged_root.resolve()
+
+
 def _resolve_bootstrap_asset_root() -> Path | None:
     for candidate in _bootstrap_asset_root_candidates():
         if _is_bootstrap_asset_root(candidate):
             return candidate
+    packaged_root = _packaged_bootstrap_asset_root()
+    if packaged_root is not None:
+        return packaged_root
     return None
+
+
+def _packaged_bootstrap_asset_root() -> Path | None:
+    """Return the bundled bootstrap asset root from an installed package."""
+
+    try:
+        candidate = files("awf").joinpath(PACKAGED_BOOTSTRAP_ASSET_ROOT.as_posix())
+    except (ModuleNotFoundError, TypeError):
+        return None
+    if not isinstance(candidate, Path):
+        return None
+    return candidate if _is_bootstrap_asset_root(candidate) else None
 
 
 def _bootstrap_asset_root_candidates() -> tuple[Path, ...]:
@@ -468,6 +494,8 @@ def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
     """Return the local service compose env file when it exists."""
 
     if asset_root is not None:
+        if is_packaged_bootstrap_asset_root(asset_root):
+            return None
         candidate = asset_root / LOCAL_SERVICE_COMPOSE_ENV_FILE
         return candidate if candidate.exists() else None
 

@@ -1,10 +1,12 @@
 import tomllib
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).parents[3]
+
 
 def test_packaging_metadata() -> None:
     """Test that the pyproject.toml package name and entrypoints match the plan."""
-    pyproject_path = Path(__file__).parents[3] / "pyproject.toml"
+    pyproject_path = REPO_ROOT / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         data = tomllib.load(f)
 
@@ -18,11 +20,53 @@ def test_packaging_metadata() -> None:
 
 def test_readme_install_paths() -> None:
     """Test that the README explicitly documents the primary install paths."""
-    readme_path = Path(__file__).parents[3] / "docs" / "GETTING_STARTED.md"
+    readme_path = REPO_ROOT / "docs" / "GETTING_STARTED.md"
     content = readme_path.read_text()
 
     assert "uv tool install agent-workspace-fabric" in content
-    assert "uv pip install agent-workspace-fabric" in content
+    assert "pipx install agent-workspace-fabric" in content
+    assert "python -m venv .venv" in content
+    assert "pip install agent-workspace-fabric" in content
 
     # 4. README preserves the `git clone` path
     assert "git clone" in content, "README must preserve the git clone contributor path"
+
+
+def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
+    """The built wheel must include the local bootstrap context needed by awf service."""
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+
+    target = data["tool"]["hatch"]["build"]["targets"]["wheel"]
+    force_include = target.get("force-include", {})
+
+    assert force_include["docker/agent-runtime.Dockerfile"] == (
+        "awf/bootstrap_assets/docker/agent-runtime.Dockerfile"
+    )
+    assert force_include["docker/control-plane.Dockerfile"] == (
+        "awf/bootstrap_assets/docker/control-plane.Dockerfile"
+    )
+    assert force_include["docker/compose/local-service.yml"] == (
+        "awf/bootstrap_assets/docker/compose/local-service.yml"
+    )
+    assert force_include["docker/compose/workspace.base.yml.j2"] == (
+        "awf/bootstrap_assets/docker/compose/workspace.base.yml.j2"
+    )
+    assert force_include[".env.example"] == "awf/bootstrap_assets/.env.example"
+    assert force_include["migrations"] == "awf/bootstrap_assets/migrations"
+    assert force_include["src"] == "awf/bootstrap_assets/src"
+    assert force_include["openapi.json"] == "awf/bootstrap_assets/openapi.json"
+
+    excluded = set(target.get("exclude", []))
+    assert "docker/compose/.env" in excluded
+    assert all("docker/compose/.env" not in destination for destination in force_include.values())
+
+    sdist = data["tool"]["hatch"]["build"]["targets"]["sdist"]
+    sdist_includes = set(sdist.get("include", []))
+    assert "/docker/compose/local-service.yml" in sdist_includes
+    assert "/docker/agent-runtime.Dockerfile" in sdist_includes
+    assert "/migrations" in sdist_includes
+    assert "/src" in sdist_includes
+    assert "/openapi.json" in sdist_includes
+    assert "/docker/compose/.env" in set(sdist.get("exclude", []))

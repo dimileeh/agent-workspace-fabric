@@ -1937,6 +1937,38 @@ def test_init_without_path_does_not_seed_current_compose_dir_without_asset_root(
 
 
 @pytest.mark.unit
+def test_init_without_path_seeds_local_env_for_packaged_bootstrap_assets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Installed AWF packages must not try to write env files into package assets."""
+    from awf.service import bootstrap as bootstrap_mod
+
+    packaged_root = tmp_path / "site-packages" / "awf" / "bootstrap_assets"
+    compose = packaged_root / "docker" / "compose"
+    compose.mkdir(parents=True)
+    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (packaged_root / ".env.example").write_text("AWF_API_TOKEN=packaged\n", encoding="utf-8")
+
+    project_dir = tmp_path / "operator-project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        bootstrap_mod,
+        "is_packaged_bootstrap_asset_root",
+        lambda path: path.resolve() == packaged_root.resolve(),
+    )
+    _stub_bootstrap_mode(monkeypatch, asset_root=packaged_root)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert (project_dir / ".env").read_text(encoding="utf-8") == "AWF_API_TOKEN=packaged\n"
+    assert not (compose / ".env").exists()
+    assert "wrote .env from ../site-packages/awf/bootstrap_assets/.env.example" in result.output
+
+
+@pytest.mark.unit
 def test_service_env_resolution_ignores_current_compose_env_without_asset_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

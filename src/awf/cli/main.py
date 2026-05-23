@@ -1268,6 +1268,8 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     if asset_root is not None:
         resolved_asset_root = asset_root.resolve()
         compose_local_service = resolved_asset_root / LOCAL_SERVICE_COMPOSE_FILE
+        if bootstrap_mod.is_packaged_bootstrap_asset_root(resolved_asset_root):
+            return compose_local_service, Path(".env"), resolved_asset_root / ".env.example"
         # get_bootstrap_asset_root() verifies this in production; keep the
         # guard so tests or stubs that bypass validation fall back to the
         # asset-root .env without depending on the launch directory.

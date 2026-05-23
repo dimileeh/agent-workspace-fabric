@@ -1384,6 +1384,41 @@ def test_bootstrap_fails_clearly_when_source_assets_are_unavailable(
 
 
 @pytest.mark.unit
+def test_bootstrap_resolves_packaged_assets_when_source_checkout_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Installed wheels should carry a bootstrap build context."""
+    packaged_root = _write_source_checkout(tmp_path / "packaged-assets")
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: ())
+    monkeypatch.setattr(bootstrap, "_packaged_bootstrap_asset_root", lambda: packaged_root)
+
+    assert bootstrap.get_bootstrap_asset_root() == packaged_root
+
+
+@pytest.mark.unit
+def test_packaged_bootstrap_assets_use_local_env_seed_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Package installs should not write or read env files under site-packages."""
+    packaged_root = _write_source_checkout(tmp_path / "packaged-assets")
+    (packaged_root / ".env.example").write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_bootstrap_asset_root_candidates", lambda: ())
+    monkeypatch.setattr(bootstrap, "_packaged_bootstrap_asset_root", lambda: packaged_root)
+
+    assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+        bootstrap.LOCAL_SERVICE_COMPOSE_FILE,
+        require_agent_runtime=False,
+    )
+
+    assert assets.root == packaged_root
+    assert assets.compose_file == packaged_root / bootstrap.LOCAL_SERVICE_COMPOSE_FILE
+    assert assets.compose_env_file is None
+    assert bootstrap._bootstrap_environment_file(assets) == Path(".env")  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_bootstrap_treats_absolute_asset_root_compose_path_as_default(
     monkeypatch: pytest.MonkeyPatch,
     source_checkout_root: Path,

@@ -146,6 +146,28 @@ def test_public_oss_release_metadata_is_consistent() -> None:
     assert "awf service readiness --format json" in releasing_text
 
 
+def test_public_docs_describe_supported_release_install_channels() -> None:
+    public_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "docs" / "QUICKSTART.md",
+            REPO_ROOT / "docs" / "GETTING_STARTED.md",
+            REPO_ROOT / "docs" / "UPGRADE.md",
+            REPO_ROOT / "RELEASING.md",
+        )
+    )
+
+    assert "uv tool install agent-workspace-fabric" in public_text
+    assert "pipx install agent-workspace-fabric" in public_text
+    assert "python -m venv .venv" in public_text
+    assert "pip install agent-workspace-fabric" in public_text
+    assert "uv tool install . --force" in public_text
+    assert "PyPI Trusted Publishing" in public_text
+    assert "brew install agent-workspace-fabric" not in public_text
+    assert "Homebrew is planned" in public_text
+
+
 def test_primary_public_docs_use_public_brand_and_not_internal_backlog() -> None:
     public_entrypoints = [
         REPO_ROOT / "README.md",
