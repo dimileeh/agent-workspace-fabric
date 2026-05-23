@@ -15,6 +15,10 @@ even when the operator intentionally approved that scope.
 - Expose the same option through the CLI and MCP adoption tool.
 - Reject attaching to a live adoption when the requested owned-path policy
   differs from the existing adoption.
+- Verify the existing direct workspace-create path still accepts protected
+  owned paths for assigned tasks.
+- Unblock the local AWF Docker rebuild by copying all packaging forced-includes
+  before `uv sync` in the control-plane Dockerfile.
 - Keep the existing protected-file guard behavior unchanged.
 
 ## Requirements Checklist
@@ -29,6 +33,10 @@ even when the operator intentionally approved that scope.
 - [ ] CLI `awf workspace adopt-pr` supports repeatable `--owned-path`.
 - [ ] MCP `awf_adopt_pull_request_monitor` exposes and forwards `owned_paths`.
 - [ ] Focused unit tests cover schema/API, service, CLI, and MCP behavior.
+- [ ] Direct workspace create tests prove protected paths such as
+      `.github/workflows/publish.yml` and `pyproject.toml` can be declared.
+- [ ] Docker packaging tests prove all forced bootstrap assets are present
+      before the service image runs `uv sync`.
 
 ## Implementation Steps
 

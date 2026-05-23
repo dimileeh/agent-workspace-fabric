@@ -238,6 +238,10 @@ class TestWorkspaceCreate:
                     "2",
                     "--owned-path",
                     "src/awf/**",
+                    "--owned-path",
+                    ".github/workflows/publish.yml",
+                    "--owned-path",
+                    "pyproject.toml",
                     "--external-id",
                     "ext_123",
                     "--cpu",
@@ -254,7 +258,11 @@ class TestWorkspaceCreate:
         assert kwargs["json"]["task"]["task_class"] == "docs_task"
         assert kwargs["json"]["task"]["priority"] == 10
         assert kwargs["json"]["task"]["human_boost"] == 2
-        assert kwargs["json"]["task"]["owned_paths"] == ["src/awf/**"]
+        assert kwargs["json"]["task"]["owned_paths"] == [
+            "src/awf/**",
+            ".github/workflows/publish.yml",
+            "pyproject.toml",
+        ]
         assert kwargs["json"]["task"]["external_id"] == "ext_123"
         assert kwargs["json"]["resources"]["cpu"] == 2.5
         assert kwargs["json"]["resources"]["memory"] == "4GB"

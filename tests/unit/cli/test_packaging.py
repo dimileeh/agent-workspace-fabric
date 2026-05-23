@@ -70,3 +70,23 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert "/src" in sdist_includes
     assert "/openapi.json" in sdist_includes
     assert "/docker/compose/.env" in set(sdist.get("exclude", []))
+
+
+def test_control_plane_dockerfile_copies_forced_bootstrap_assets_before_uv_sync() -> None:
+    """The service image build must include Hatch forced-includes before uv sync."""
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+    force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    dockerfile_prefix = (
+        (REPO_ROOT / "docker" / "control-plane.Dockerfile")
+        .read_text()
+        .split(
+            "RUN uv sync --frozen --extra dev",
+            maxsplit=1,
+        )[0]
+    )
+
+    for source_path in force_include:
+        assert source_path in dockerfile_prefix
