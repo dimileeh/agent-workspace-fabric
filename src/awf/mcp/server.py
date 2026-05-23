@@ -1458,6 +1458,14 @@ def build_mcp_server(
             default=None,
             description="Optional inline workspace profile dictionary.",
         ),
+        owned_paths: list[OwnedPath] = Field(
+            default_factory=list,
+            max_length=128,
+            description=(
+                "Operator-approved owned paths for the adopted monitor, including "
+                "protected files when review or CI repair is expected to touch them."
+            ),
+        ),
         auto_merge: bool = Field(
             default=True,
             description="Whether AWF may merge the adopted PR once monitor gates are green.",
@@ -1499,6 +1507,7 @@ def build_mcp_server(
                     effort=effort,
                     profile_ref=profile_ref,
                     profile=profile,
+                    owned_paths=owned_paths,
                     auto_merge=auto_merge,
                     initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
                     task_title=task_title,

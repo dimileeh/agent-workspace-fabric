@@ -99,25 +99,36 @@ def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
 
 
 @pytest.mark.unit
-def test_adoption_request_schema_accepts_model_effort_and_openapi_exposes_fields() -> None:
+def test_adoption_request_schema_accepts_model_effort_owned_paths_and_openapi_exposes_fields() -> (
+    None
+):
     payload = PullRequestMonitorAdoptionRequest(
         repo_slug="dimileeh/aira-web",
         pr_number=277,
         model="gpt-5.3-codex",
         effort="high",
+        owned_paths=[".github/workflows/publish.yml", "pyproject.toml"],
     )
 
     assert payload.model == "gpt-5.3-codex"
     assert payload.effort == "high"
+    assert payload.owned_paths == [".github/workflows/publish.yml", "pyproject.toml"]
 
     schema = create_app(use_lifespan=False).openapi()
     props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
     model_schema = _optional_string_schema(props["model"])
     effort_schema = _optional_string_schema(props["effort"])
+    owned_paths_schema = props["owned_paths"]
     assert model_schema["minLength"] == 1
     assert model_schema["maxLength"] == 128
     assert effort_schema["minLength"] == 1
     assert effort_schema["maxLength"] == 64
+    assert owned_paths_schema["maxItems"] == 128
+    assert owned_paths_schema["items"] == {
+        "maxLength": 512,
+        "minLength": 1,
+        "type": "string",
+    }
 
 
 @pytest.mark.unit
@@ -149,6 +160,7 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
             "repo_slug": "dimileeh/aira-web",
             "pr_number": 277,
             "agent": "codex",
+            "owned_paths": [".github/workflows/publish.yml"],
             "auto_merge": False,
             "initial_review_grace_period_seconds": 0,
         },
@@ -169,6 +181,7 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
     session_factory = make_session_factory(engine)
     async with session_factory() as session:
         workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.owned_paths == [".github/workflows/publish.yml"]
     assert workspace.monitor_last_commit_sha == "h" * 40
     assert workspace.base_commit == "b" * 40
 

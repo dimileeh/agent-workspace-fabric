@@ -495,6 +495,7 @@ class TestToolRegistration:
                 "pr_number": 277,
                 "model": "gpt-5.3-codex",
                 "effort": "high",
+                "owned_paths": [".github/workflows/publish.yml", "pyproject.toml"],
             },
         )
 
@@ -503,6 +504,10 @@ class TestToolRegistration:
         assert service.request is not None
         assert service.request.model == "gpt-5.3-codex"
         assert service.request.effort == "high"
+        assert service.request.owned_paths == [
+            ".github/workflows/publish.yml",
+            "pyproject.toml",
+        ]
 
     @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_ignores_destroyed_prior_adoption(
@@ -682,10 +687,17 @@ class TestToolRegistration:
         adopt_props = tools["awf_adopt_pull_request_monitor"].inputSchema["properties"]
         model_schema = _optional_string_schema(adopt_props["model"])
         effort_schema = _optional_string_schema(adopt_props["effort"])
+        owned_paths_schema = adopt_props["owned_paths"]
         assert model_schema["maxLength"] == 128
         assert model_schema["minLength"] == 1
         assert effort_schema["maxLength"] == 64
         assert effort_schema["minLength"] == 1
+        assert owned_paths_schema["maxItems"] == 128
+        assert owned_paths_schema["items"] == {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string",
+        }
 
         create_props = tools["awf_create_workspace"].inputSchema["properties"]
         create_model_schema = _optional_string_schema(create_props["model"])

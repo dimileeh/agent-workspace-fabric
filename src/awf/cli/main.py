@@ -3270,6 +3270,14 @@ def workspace_adopt_pr(
         "--effort",
         help="Optional reasoning effort override for the adopted PR monitor.",
     ),
+    owned_paths: list[str] | None = typer.Option(
+        None,
+        "--owned-path",
+        help=(
+            "Repeatable operator-approved owned path for the adopted monitor. "
+            "Use this when PR review/CI repair is expected to touch protected files."
+        ),
+    ),
     profile_ref: str | None = typer.Option("auto", "--profile"),
     auto_merge: bool = typer.Option(
         True,
@@ -3291,7 +3299,7 @@ def workspace_adopt_pr(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Adopt an already-open GitHub PR into AWF PR monitoring."""
-    body = {
+    body: dict[str, Any] = {
         "repo_url": repo if repo and "github.com" in repo else None,
         "repo_slug": repo if repo and "github.com" not in repo else None,
         "pr_number": pr_number,
@@ -3309,6 +3317,8 @@ def workspace_adopt_pr(
         body["model"] = model
     if effort is not None:
         body["effort"] = effort
+    if owned_paths is not None:
+        body["owned_paths"] = owned_paths
     response = _call(
         "POST",
         "/v1/workspaces/adopt-pr",

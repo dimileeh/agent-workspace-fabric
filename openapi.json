@@ -3918,6 +3918,16 @@
             ],
             "title": "Model"
           },
+          "owned_paths": {
+            "items": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 128,
+            "title": "Owned Paths",
+            "type": "array"
+          },
           "pr_number": {
             "anyOf": [
               {
