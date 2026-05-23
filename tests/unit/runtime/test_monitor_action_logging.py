@@ -986,6 +986,8 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="changed files but failed before summary", returncode=1)
+        cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
         cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
         cmd.queue_result(returncode=0)  # git add -A
         cmd.queue_result(returncode=1)  # git diff --cached --quiet
@@ -1065,6 +1067,8 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="fixed by editing CI")
+        cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
         cmd.queue_result(
             returncode=0,
             stdout=(

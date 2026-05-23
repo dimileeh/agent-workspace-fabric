@@ -15,6 +15,7 @@ DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
+SETUP_UV_VERSION = "0.5.31"
 
 
 def _workflow() -> dict[str, Any]:
@@ -53,6 +54,12 @@ def _step_run(job: dict[str, Any], name: str) -> str:
     run = _named_step(job, name).get("run")
     assert isinstance(run, str)
     return run
+
+
+def _setup_uv_step(workflow: dict[str, Any], job_name: str) -> dict[str, Any]:
+    step = _named_step(_job(workflow, job_name), "Install uv")
+    assert step.get("uses") == "astral-sh/setup-uv@v4"
+    return step
 
 
 def _run_steps(job: dict[str, Any]) -> str:
@@ -179,6 +186,19 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert env.get("AWF_DATABASE_URL") == DB_URL
     assert env.get("AWF_TEST_DATABASE_URL") == DB_URL
     _assert_docker_skip_env_disabled(workflow, job, coverage_step)
+
+
+@pytest.mark.unit
+def test_setup_uv_steps_avoid_github_token_release_lookup() -> None:
+    workflow = _workflow()
+
+    for job_name in ("lint-and-type", "python-full-coverage", "release-artifacts"):
+        step = _setup_uv_step(workflow, job_name)
+        with_config = step.get("with")
+
+        assert isinstance(with_config, dict)
+        assert with_config.get("version") == SETUP_UV_VERSION
+        assert with_config.get("github-token") == ""
 
 
 @pytest.mark.unit

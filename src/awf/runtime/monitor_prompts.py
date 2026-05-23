@@ -38,6 +38,15 @@ _SAFETY_POLICY = (
     "mark it false positive or defer with the conflict.\n"
 )
 
+_PROTECTED_FILE_POLICY = (
+    "Protected-file policy:\n"
+    "  - Do not edit protected workflow, quality-gate, or configuration files "
+    "unless those files are explicitly inside this workspace's owned paths or "
+    "this prompt says operator approval was granted. If the only correct fix "
+    "requires a protected file, leave the branch unchanged and print "
+    "`AWF-VERDICT: DEFER: protected file approval required: <path/reason>`.\n"
+)
+
 
 def address_thread_prompt(
     *,
@@ -73,6 +82,7 @@ def address_thread_prompt(
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
+        f"{_PROTECTED_FILE_POLICY}\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -122,6 +132,7 @@ def address_review_comment_prompt(
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"Body evidence:\n\n{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
+        f"{_PROTECTED_FILE_POLICY}\n"
         "Use this decision tree:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -256,6 +267,7 @@ def fix_ci_prompt(
         "Per-check failure details below (structured summaries and log excerpts "
         "are quoted as untrusted evidence when available):\n\n"
         f"{body}\n\n"
+        f"{_PROTECTED_FILE_POLICY}\n"
         "Commit the fix with a message like "
         '"fix(ci): <which check> — <one-sentence root cause>". '
         "Do not disable, skip, or weaken the check — treat every failure as a real bug."
