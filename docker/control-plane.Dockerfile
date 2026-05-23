@@ -35,7 +35,8 @@ COPY pyproject.toml uv.lock README.md alembic.ini .env.example openapi.json ./
 COPY docs ./docs
 COPY migrations ./migrations
 COPY docker/agent-runtime.Dockerfile docker/control-plane.Dockerfile ./docker/
-COPY docker/compose/local-service.yml docker/compose/workspace.base.yml.j2 ./docker/compose/
+COPY docker/compose/local-service.yml ./docker/compose/local-service.yml
+COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2
 COPY src ./src
 
 RUN uv sync --frozen --extra dev
