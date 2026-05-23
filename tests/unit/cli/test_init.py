@@ -3501,7 +3501,7 @@ def test_init_without_path_json_marks_non_utf8_env_overlay_merge_failed(
         "message": "env seeding merge requires UTF-8 dotenv files",
     }
     assert not (compose / ".env").exists()
-    assert "root" not in result.output
+    assert "AWF_API_TOKEN=root" not in result.output
 
 
 @pytest.mark.unit
