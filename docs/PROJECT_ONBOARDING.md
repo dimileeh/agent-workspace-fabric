@@ -36,9 +36,8 @@ operator:
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
 open a PR, or start project services. Start with:
 
-`awf init .`
-`awf profile preview .`
 `awf init . --write-profile --yes`
+`awf profile preview .`
 
 or use `awf init . --include-smoke-request` for a local copy-paste smoke request
 payload (local-only, no submission). Keep secrets as
@@ -55,7 +54,7 @@ generic for any repository and do not contain project-specific assumptions.
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init .` to inspect the repo and generate `.awf/workspace.yml`.
+1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
 3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
 4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
@@ -68,7 +67,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 I will inspect this repository for AWF onboarding. I will not launch a workspace yet.
 
-1. Run `awf init .` to inspect the repo and generate `.awf/workspace.yml`.
+1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
 3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
 4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
@@ -81,7 +80,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Analyze this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init .` to inspect the repo and generate `.awf/workspace.yml`.
+1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
 3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
 4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
@@ -94,7 +93,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Use `opencode run` to inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init .` to inspect the repo and generate `.awf/workspace.yml`.
+1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
 3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
 4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
@@ -107,7 +106,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Inspect this repository for AWF onboarding via your OpenClaw runtime. Do not launch a workspace yet.
 
-1. Run `awf init .` to inspect the repo and generate `.awf/workspace.yml`.
+1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
 3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
 4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
