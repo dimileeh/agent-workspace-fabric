@@ -4980,18 +4980,20 @@ class PullRequestMonitorRunner:
         operation_type: str,
         fallback_head_sha: str | None = None,
     ) -> tuple[str, _GitPushResult | None]:
-        if fallback_head_sha:
-            return fallback_head_sha, None
         if not worktree_path.exists():
-            candidate_head = await self._open_merge_candidate_head_sha(workspace_id)
-            if candidate_head:
+            source = "status" if fallback_head_sha else "candidate"
+            fallback_head = fallback_head_sha or await self._open_merge_candidate_head_sha(
+                workspace_id
+            )
+            if fallback_head:
                 _log.info(
-                    "monitor.repair_operation_start_head_from_candidate",
+                    "monitor.repair_operation_start_head_from_fallback",
                     workspace_id=workspace_id,
                     operation_type=operation_type,
-                    head_sha=candidate_head[:10],
+                    head_sha=fallback_head[:10],
+                    source=source,
                 )
-                return candidate_head, None
+                return fallback_head, None
         result = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "rev-parse", "HEAD")
         )

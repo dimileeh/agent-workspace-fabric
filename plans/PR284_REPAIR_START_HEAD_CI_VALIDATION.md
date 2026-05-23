@@ -2,10 +2,9 @@
 
 ## Result
 
-Implemented the CI repair for PR #284 by using the already-fetched PR head SHA
-as the repair transaction baseline for normal CI/comment repair paths. The local
-`git rev-parse HEAD` path remains as a fallback only when no PR status or open
-merge-candidate head is available.
+Implemented the CI repair for PR #284 by preserving the local worktree HEAD as
+the repair transaction baseline whenever a worktree exists. The PR status/open
+merge-candidate head is used only as a no-worktree fallback for helper paths.
 
 ## Checks
 

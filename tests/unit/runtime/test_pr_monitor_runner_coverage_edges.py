@@ -2071,6 +2071,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
     cmd.queue_result(
         returncode=0,
@@ -2170,6 +2171,7 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
     cmd.queue_result(
         returncode=0,
@@ -3094,6 +3096,7 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -3174,6 +3177,7 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -3481,6 +3485,7 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
         author="reviewer",
     )
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree after agent run
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
@@ -5244,6 +5249,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -5377,6 +5383,7 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6032,6 +6039,7 @@ async def test_ci_fix_rolls_back_instead_of_committing_verified_protected_revert
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6089,6 +6097,7 @@ async def test_ci_fix_rolls_back_before_protected_revert_baseline_fetch(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6149,6 +6158,8 @@ async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_rea
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
     adapter = FakeAdapter()

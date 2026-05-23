@@ -10,24 +10,22 @@ fake GitHub GraphQL responses being consumed by the newly inserted local
 
 ## Root Cause
 
-The monitor already has the authoritative PR head SHA at decision time, but the
-implementation introduced an additional local `git rev-parse HEAD` call at the
-start of every CI/comment repair. In the fake command runner tests this extra
-command shifts queued responses and, when the fake returns default empty stdout,
-causes a terminal repair-start failure. That is a test-harness regression and a
-weaker product shape than using the PR status head the monitor already fetched.
+The transactional rollback baseline must be the local worktree HEAD at the
+moment a repair starts, because rollback later performs a local hard reset. PR
+#284 correctly added that guard, but existing fake command runner tests did not
+model the new local `git rev-parse HEAD` command. Queued GitHub GraphQL and git
+responses were therefore shifted into the wrong command, causing the full
+coverage failures.
 
 ## Implementation
 
-1. Use the PR status head SHA as the repair operation start head for comment
-   repair and CI repair whenever it is available.
-2. Keep the local `git rev-parse HEAD` fallback only for direct helper calls that
-   lack PR status/candidate head context.
-3. Add a small DB fallback from the open merge candidate head for direct unit
-   helper invocations.
-4. Remove now-stale queued `operation start HEAD` fake command responses from
-   protected rollback tests whose status already supplies the baseline.
-5. Update explicit missing-start-head tests so they still cover the fallback
+1. Keep local `git rev-parse HEAD` as the primary repair operation baseline
+   whenever the worktree exists.
+2. Use the PR status/open merge-candidate head only for no-worktree helper
+   paths so direct tests do not fail before exercising unrelated behavior.
+3. Update fake command queues to include the local repair-start HEAD where the
+   worktree exists, and remove stale queues only for no-worktree helper paths.
+4. Update explicit missing-start-head tests so they still cover the fallback
    failure path by clearing candidate/status head context.
 
 ## Validation
