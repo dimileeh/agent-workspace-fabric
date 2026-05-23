@@ -31,6 +31,54 @@ def test_mcp_serve_help_is_available() -> None:
 
 
 @pytest.mark.unit
+def test_mcp_serve_disposes_engine_when_server_build_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5544/awf"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"AWF_DATABASE_URL={database_url}",
+                "AWF_API_TOKEN=local-dev-token",
+                "AWF_HOST_WORK_DIR=/tmp/awf-mcp-test",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    calls: dict[str, Any] = {}
+
+    class _FakeEngine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    def _make_engine(url: str) -> _FakeEngine:
+        calls["database_url"] = url
+        return _FakeEngine()
+
+    def _make_session_factory(engine: _FakeEngine) -> object:
+        calls["factory_engine"] = engine
+        calls["session_factory"] = object()
+        return calls["session_factory"]
+
+    def _build_mcp_server(*, service: object, settings: object) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
+    monkeypatch.setattr("awf.db.session.make_session_factory", _make_session_factory)
+    monkeypatch.setattr("awf.mcp.server.build_mcp_server", _build_mcp_server)
+
+    result = _runner.invoke(app, ["mcp", "serve", "--env-file", str(env_file)])
+
+    assert result.exit_code != 0
+    assert calls.get("disposed") is True
+
+
+@pytest.mark.unit
 def test_mcp_serve_runs_stdio_with_env_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

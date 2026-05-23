@@ -128,6 +128,16 @@ def test_mcp_and_cli_docs_do_not_claim_effort_is_excluded() -> None:
     assert "is not exposed as a direct input flag" not in combined
     assert "awf_create_workspace" in combined
 
+    import re
+
+    assert not re.search(
+        r"effort\s+(applies|scope|includes)\s+(to\s+)?(PR\s+)?(monitor\s+)?adoption",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    assert "applies to pr adoption" not in combined.lower()
+    assert "effort applies to pr" not in combined.lower()
+
 
 @pytest.mark.unit
 def test_parity_doc_no_longer_claims_read_tool_slice_is_backlog_only() -> None:
