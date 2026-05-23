@@ -1012,11 +1012,18 @@ def _prompt_project_onboarding_choices(
         )
         raise typer.Exit(code=2)
     if template_choice != preview.draft.template:
-        preview = preview_factory(
-            repository,
-            template=template_choice,
-            include_smoke_request=include_smoke_request,
-        )
+        try:
+            preview = preview_factory(
+                repository,
+                template=template_choice,
+                include_smoke_request=include_smoke_request,
+            )
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            typer.echo(f"error: could not build onboarding preview: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
     egress_mode = (
         typer.prompt(

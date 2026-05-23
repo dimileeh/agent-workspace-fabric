@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import typer
 import yaml
 from typer.testing import CliRunner
 
@@ -475,6 +476,69 @@ def test_init_guided_egress_choices_follow_model_enum(
     assert prompt_defaults == ["generic", CustomEgressMode.restricted.value]
     assert captured["egress_mode"] == CustomEgressMode.private
     assert captured["validation_commands"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("preview_error", "expected_code", "expected_message"),
+    (
+        (
+            ValueError("unsupported onboarding template: python"),
+            2,
+            "error: unsupported onboarding template: python",
+        ),
+        (
+            OSError("permission denied reading pyproject.toml"),
+            1,
+            "error: could not build onboarding preview: permission denied reading pyproject.toml",
+        ),
+    ),
+)
+def test_init_guided_template_change_preview_failure_is_reported_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    preview_error: Exception,
+    expected_code: int,
+    expected_message: str,
+) -> None:
+    from awf.cli import main as cli_main
+    from awf.profiles.models import EgressMode
+
+    preview = SimpleNamespace(
+        draft=SimpleNamespace(
+            template="generic",
+            profile=SimpleNamespace(phases=SimpleNamespace(validate_commands=[])),
+        )
+    )
+
+    def _raise_preview_failure(_path: Path, **_kwargs: object) -> object:
+        raise preview_error
+
+    monkeypatch.setattr("awf.cli.main.typer.prompt", lambda *_args, **_kwargs: "python")
+    monkeypatch.setattr(
+        "awf.cli.main.typer.confirm",
+        MagicMock(side_effect=AssertionError("should not continue after preview failure")),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        cli_main._prompt_project_onboarding_choices(  # noqa: SLF001
+            tmp_path,
+            preview=preview,
+            include_smoke_request=False,
+            supported_templates=("generic", "python"),
+            egress_mode_type=EgressMode,
+            preview_factory=_raise_preview_failure,
+            customize_preview=MagicMock(
+                side_effect=AssertionError("should not customize a failed preview")
+            ),
+        )
+
+    captured = capsys.readouterr()
+    assert exc_info.value.exit_code == expected_code
+    assert expected_message in captured.err
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
 
 
 @pytest.mark.unit
