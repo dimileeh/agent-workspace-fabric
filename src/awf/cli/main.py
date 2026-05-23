@@ -1913,9 +1913,13 @@ def _resolve_mcp_settings(*, env_file: Path | None) -> Any:
     if "branch_prefix" in update_dict:
         update_dict["worker_branch_prefix"] = update_dict.pop("branch_prefix")
 
-    # Filter to only include fields defined on the target model
+    # Ensure no fields are silently dropped
     valid_keys = type(base_settings).model_fields.keys()
-    update_dict = {k: v for k, v in update_dict.items() if k in valid_keys}
+    dropped_keys = [k for k in update_dict if k not in valid_keys]
+    if dropped_keys:
+        raise ValueError(
+            f"Unmapped ServiceSettings fields for MCP server: {', '.join(sorted(dropped_keys))}"
+        )
 
     return base_settings.model_copy(update=update_dict)
 
