@@ -108,6 +108,18 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
+def test_project_onboarding_docs_make_awf_init_primary() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
+
+    assert "awf init . --write-profile --yes" in quickstart_text
+    assert "awf init <path> --write-profile --yes" in getting_started_text
+    assert "awf init . --write-profile --yes" in onboarding_text
+    assert "v2 request-shaped" not in onboarding_text
+    assert "awf profile init . --write" not in quickstart_text
+
+
 def test_changelog_and_upgrade_guide_are_discoverable() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
 

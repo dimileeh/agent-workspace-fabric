@@ -287,6 +287,73 @@ def preview_project_onboarding(
     )
 
 
+def supported_onboarding_templates() -> tuple[str, ...]:
+    """Return supported project onboarding template names."""
+    return tuple(sorted(_SUPPORTED_TEMPLATES))
+
+
+def customize_project_onboarding_preview(
+    preview: ProjectOnboardingPreview,
+    *,
+    egress_mode: str | EgressMode | None = None,
+    open_explanation: str | None = None,
+    validation_commands: Sequence[str] | None = None,
+) -> ProjectOnboardingPreview:
+    """Return a preview with safe first-run profile choices applied."""
+    profile = preview.draft.profile.model_copy(deep=True)
+
+    if egress_mode is not None:
+        selected_mode = EgressMode(egress_mode)
+        if selected_mode == EgressMode.restricted:
+            egress = profile.security.egress.model_copy(
+                update={
+                    "mode": selected_mode,
+                    "allowlist_templates": list(_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES),
+                    "open_explanation": None,
+                }
+            )
+        else:
+            egress = profile.security.egress.model_copy(
+                update={
+                    "mode": selected_mode,
+                    "allowlist_templates": [],
+                    "open_explanation": open_explanation
+                    if selected_mode == EgressMode.open
+                    else None,
+                }
+            )
+        profile = profile.model_copy(
+            update={"security": profile.security.model_copy(update={"egress": egress})}
+        )
+
+    if validation_commands is not None:
+        clean_commands = [command.strip() for command in validation_commands if command.strip()]
+        if clean_commands:
+            profile = profile.with_validation_commands(clean_commands)
+
+    diagnostics = _diagnostics_for(
+        preview.inspection,
+        profile=profile,
+        template=preview.draft.template,
+    )
+    draft = DraftProfile(
+        template=preview.draft.template,
+        profile=profile,
+        yaml=_profile_yaml(profile),
+        diagnostics=diagnostics,
+    )
+    smoke_request = (
+        _smoke_request(preview.path, profile) if preview.smoke_request is not None else None
+    )
+    return ProjectOnboardingPreview(
+        path=preview.path,
+        inspection=preview.inspection,
+        draft=draft,
+        diagnostics=diagnostics,
+        smoke_request=smoke_request,
+    )
+
+
 def preview_workspace_profile(
     project: Path,
     resolution: ProfileResolution,
