@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,10 @@ def _ready_status(
     pr_number: int = 93,
     head_sha: str = "head-a",
     checks: tuple[CheckTiming, ...] = (),
+    latest_external_review_activity_at: datetime | None = None,
+    latest_external_review_activity_source: str | None = None,
+    quiet_period_anchor_at: datetime | None = None,
+    quiet_period_anchor_source: str | None = None,
 ) -> PRStatus:
     return PRStatus(
         number=pr_number,
@@ -69,6 +74,10 @@ def _ready_status(
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
+        latest_external_review_activity_at=latest_external_review_activity_at,
+        latest_external_review_activity_source=latest_external_review_activity_source,
+        quiet_period_anchor_at=quiet_period_anchor_at,
+        quiet_period_anchor_source=quiet_period_anchor_source,
     )
 
 
@@ -308,6 +317,141 @@ def test_pr_166_regression_visible_greptile_check_still_waits_for_codex_review()
 
 
 @pytest.mark.unit
+def test_old_review_activity_skips_non_check_reviewer_wait() -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="review_thread_comment",
+            latest_external_review_activity_at=anchor,
+            latest_external_review_activity_source="review_thread_comment",
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=anchor + timedelta(seconds=901),
+    )
+
+    assert decision.action == "elapsed"
+    assert decision.wait_seconds == 0
+    assert decision.activity_anchor_at == anchor
+    assert decision.activity_anchor_source == "review_thread_comment"
+    assert decision.quiet_until == anchor + timedelta(seconds=900)
+    assert decision.remaining_seconds == 0
+
+
+@pytest.mark.unit
+def test_recent_review_activity_waits_only_remaining_quiet_time() -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="review",
+            latest_external_review_activity_at=anchor,
+            latest_external_review_activity_source="review",
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=anchor + timedelta(seconds=840),
+    )
+
+    assert decision.action == "started"
+    assert decision.wait_seconds == 60
+    assert decision.elapsed_seconds == 840
+    assert decision.remaining_seconds == 60
+    assert decision.quiet_until == anchor + timedelta(seconds=900)
+
+
+@pytest.mark.unit
+def test_new_activity_on_same_head_invalidates_prior_elapsed_watermark() -> None:
+    old_anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    new_anchor = datetime(2026, 5, 6, 10, 10, tzinfo=UTC)
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    elapsed = _non_check_reviewer_settle_decision(
+        _ready_status(
+            quiet_period_anchor_at=old_anchor,
+            quiet_period_anchor_source="review",
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=old_anchor + timedelta(seconds=901),
+    )
+    restarted = _non_check_reviewer_settle_decision(
+        _ready_status(
+            quiet_period_anchor_at=new_anchor,
+            quiet_period_anchor_source="review",
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1001.0,
+        now_wall=new_anchor + timedelta(seconds=60),
+    )
+
+    assert elapsed.action == "elapsed"
+    assert restarted.action == "started"
+    assert restarted.wait_seconds == 60
+    assert restarted.remaining_seconds == 840
+
+
+@pytest.mark.unit
+def test_no_comment_head_activity_anchor_uses_activity_clock() -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="head_commit",
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+        now_wall=anchor + timedelta(seconds=120),
+    )
+
+    assert decision.action == "started"
+    assert decision.activity_anchor_source == "head_commit"
+    assert decision.wait_seconds == 60
+    assert decision.remaining_seconds == 780
+
+
+@pytest.mark.unit
 def test_non_check_reviewer_wait_operation_context_centralizes_payload_and_identity() -> None:
     """The settle wait helper owns the persisted payload and idempotency identity."""
     state = MonitorState()
@@ -333,12 +477,19 @@ def test_non_check_reviewer_wait_operation_context_centralizes_payload_and_ident
         "missing_reviewers": ["chatgpt-codex-connector"],
         "visible_reviewers": ["greptile-apps"],
         "elapsed_seconds": 0.0,
+        "remaining_seconds": 900.0,
+        "activity_anchor_at": None,
+        "activity_anchor_source": None,
+        "quiet_until": None,
+        "latest_external_review_activity_at": None,
+        "latest_external_review_activity_source": None,
     }
     assert context.extra_identity == (
         "greptile-apps",
         "chatgpt-codex-connector",
         "chatgpt-codex-connector",
         1000.0,
+        None,
     )
 
 
@@ -576,6 +727,53 @@ async def test_execute_merge_blocks_pr_93_regression_until_non_check_reviewer_se
 
 
 @pytest.mark.unit
+async def test_execute_merge_skips_non_check_wait_when_ci_already_covered_quiet_window(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    anchor = datetime(2026, 5, 6, 10, 0, tzinfo=UTC)
+    ws_id = await seed_monitoring_workspace(factory, pr_number=191, head_sha="head-a")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="merge-sha\n")
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=ws_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=191,
+        status=_ready_status(
+            pr_number=191,
+            head_sha="head-a",
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="head_commit",
+        ),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == []
+    assert any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_execute_merge_skips_extra_wait_when_greptile_has_visible_status(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -704,14 +902,30 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
 
     cmd = FakeCommandRunner()
     thread = thread_node(tid="T_late", author="greptile-apps")
+    recent_activity = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     # Iteration 1: otherwise merge-ready, but Greptile has no visible check.
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="0\n")
-    cmd.queue_result(returncode=0, stdout=pr_payload(head_sha="head-a"))
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            head_sha="head-a",
+            created_at=recent_activity,
+            committed_date=recent_activity,
+        ),
+    )
     # Iteration 2: a Greptile comment arrives during the wait.
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="0\n")
-    cmd.queue_result(returncode=0, stdout=pr_payload(head_sha="head-a", threads=[thread]))
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(
+            head_sha="head-a",
+            threads=[thread],
+            created_at=recent_activity,
+            committed_date=recent_activity,
+        ),
+    )
     # Fix-cycle settle fetch sees the burst quiet down.
     cmd.queue_result(returncode=0, stdout=pr_payload(head_sha="head-b"))
     cmd.queue_result(returncode=0)  # push
@@ -762,3 +976,114 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     assert any(
         entry.get("event") == "monitor.non_check_reviewer_settle_started" for entry in captured
     )
+
+
+@pytest.mark.unit
+async def test_execute_merge_wait_operation_payload_includes_activity_countdown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    anchor = datetime.now(UTC)
+    ws_id = await seed_monitoring_workspace(factory, pr_number=192, head_sha="head-a")
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=ws_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=192,
+        status=_ready_status(
+            pr_number=192,
+            head_sha="head-a",
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="review_comment",
+            latest_external_review_activity_at=anchor,
+            latest_external_review_activity_source="review_comment",
+        ),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    payload = operations[0].payload
+    assert payload["action"] == "reviewer_settle_wait"
+    assert payload["activity_anchor_at"] == anchor.isoformat()
+    assert payload["activity_anchor_source"] == "review_comment"
+    assert payload["quiet_until"] == (anchor + timedelta(seconds=900)).isoformat()
+    assert 0 < payload["remaining_seconds"] <= 900
+    assert payload["latest_external_review_activity_at"] == anchor.isoformat()
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_waits_for_activity_quiet_window_before_notification(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    anchor = datetime.now(UTC)
+    ws_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=193,
+        head_sha="head-a",
+        auto_merge=False,
+    )
+    sleep_fn = RecordedSleep()
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    terminal = await runner._execute(
+        action=runner_mod.NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=193,
+        status=_ready_status(
+            pr_number=193,
+            head_sha="head-a",
+            quiet_period_anchor_at=anchor,
+            quiet_period_anchor_source="review",
+            latest_external_review_activity_at=anchor,
+            latest_external_review_activity_source="review",
+        ),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    assert operations[0].payload["action"] == "reviewer_settle_wait"
+    assert operations[0].payload["requested_action"] == "notify_human"

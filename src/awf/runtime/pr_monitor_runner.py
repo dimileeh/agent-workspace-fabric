@@ -24,6 +24,7 @@ The loop:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -509,6 +510,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
 
 @dataclass(frozen=True)
 class _NonCheckReviewerSettleDecision:
+    """Decision result for non-check reviewer settle scheduling."""
+
     action: str
     wait_seconds: float = 0.0
     configured_reviewers: tuple[str, ...] = ()
@@ -516,6 +519,13 @@ class _NonCheckReviewerSettleDecision:
     visible_reviewers: tuple[str, ...] = ()
     started_at: float | None = None
     elapsed_seconds: float | None = None
+    remaining_seconds: float | None = None
+    activity_anchor_at: datetime | None = None
+    activity_anchor_source: str | None = None
+    quiet_until: datetime | None = None
+    latest_external_review_activity_at: datetime | None = None
+    latest_external_review_activity_source: str | None = None
+    activity_signature: str | None = None
     state_changed: bool = False
 
 
@@ -2909,9 +2919,10 @@ class PullRequestMonitorRunner:
                         current_head_sha=status.head_sha,
                     )
                     manual_ready_handled = None
+                    settle_config = replace(self._config, auto_merge=True)
+                    notify_settle_decision: _NonCheckReviewerSettleDecision | None = None
                     if _gate_requires_validation_recovery(merge_gate):
-                        settle_config = replace(self._config, auto_merge=True)
-                        settle_decision = _non_check_reviewer_settle_decision(
+                        notify_settle_decision = _non_check_reviewer_settle_decision(
                             status,
                             state,
                             settle_config,
@@ -2919,17 +2930,17 @@ class PullRequestMonitorRunner:
                             now=time.monotonic(),
                         )
                         await self._record_non_check_reviewer_settle_decision(
-                            decision=settle_decision,
+                            decision=notify_settle_decision,
                             workspace_id=workspace_id,
                             pr_number=pr_number,
                             status=status,
                             monitor_log=monitor_log,
                         )
-                        if settle_decision.wait_seconds > 0:
+                        if notify_settle_decision.wait_seconds > 0:
                             settle_operation_context = (
                                 _non_check_reviewer_settle_wait_operation_context(
                                     settle_config,
-                                    settle_decision,
+                                    notify_settle_decision,
                                 )
                             )
                             await self._sleep_with_monitor_state_operation(
@@ -2945,7 +2956,7 @@ class PullRequestMonitorRunner:
                                 status=status,
                                 base_branch=base_branch,
                                 remote_branch=remote_branch,
-                                wait_seconds=settle_decision.wait_seconds,
+                                wait_seconds=notify_settle_decision.wait_seconds,
                                 monitor_log=monitor_log,
                                 extra_payload=settle_operation_context.extra_payload,
                                 extra_identity=settle_operation_context.extra_identity,
@@ -2969,8 +2980,51 @@ class PullRequestMonitorRunner:
                                 self._config.non_check_reviewer_settle_seconds > 0
                             ),
                         )
+
                     if manual_ready_handled is not None:
                         return manual_ready_handled
+
+                    if notify_settle_decision is None:
+                        notify_settle_decision = _non_check_reviewer_settle_decision(
+                            status,
+                            state,
+                            settle_config,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                        )
+                    await self._record_non_check_reviewer_settle_decision(
+                        decision=notify_settle_decision,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        status=status,
+                        monitor_log=monitor_log,
+                    )
+                    if notify_settle_decision.wait_seconds > 0:
+                        settle_operation_context = (
+                            _non_check_reviewer_settle_wait_operation_context(
+                                settle_config,
+                                notify_settle_decision,
+                            )
+                        )
+                        await self._sleep_with_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="reviewer_settle_wait",
+                            requested_action="notify_human",
+                            reason=(
+                                "Waiting for configured non-check reviewers to settle "
+                                "before human ready notification."
+                            ),
+                            reason_code="NON_CHECK_REVIEWER_SETTLE",
+                            pr_number=pr_number,
+                            status=status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            wait_seconds=notify_settle_decision.wait_seconds,
+                            monitor_log=monitor_log,
+                            extra_payload=settle_operation_context.extra_payload,
+                            extra_identity=settle_operation_context.extra_identity,
+                        )
+                        return False
 
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
@@ -3791,6 +3845,16 @@ class PullRequestMonitorRunner:
             "visible_reviewers": list(decision.visible_reviewers),
             "started_at": decision.started_at,
             "elapsed_seconds": decision.elapsed_seconds,
+            "remaining_seconds": decision.remaining_seconds,
+            "activity_anchor_at": _datetime_iso(decision.activity_anchor_at),
+            "activity_anchor_source": decision.activity_anchor_source,
+            "quiet_until": _datetime_iso(decision.quiet_until),
+            "latest_external_review_activity_at": _datetime_iso(
+                decision.latest_external_review_activity_at
+            ),
+            "latest_external_review_activity_source": (
+                decision.latest_external_review_activity_source
+            ),
         }
         _log.info(event, **payload)
         await self._write_monitor_log(monitor_log, {"event": event, **payload})
@@ -7366,19 +7430,39 @@ def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
     return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
 
 
-def _non_check_reviewer_settle_started_key(*, pr_number: int, head_sha: str) -> str:
-    return f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
+def _non_check_reviewer_settle_started_key(
+    *,
+    pr_number: int,
+    head_sha: str,
+    activity_signature: str | None = None,
+) -> str:
+    """Build state key for a non-check reviewer settle start marker."""
+    key = f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
+    if activity_signature is not None:
+        return f"{key}:{activity_signature}"
+    return key
 
 
 def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
+    """Build namespace prefix for non-check reviewer settle state keys."""
     return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
 
 
-def _non_check_reviewer_settle_done_key(*, pr_number: int, head_sha: str) -> str:
-    return f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
+def _non_check_reviewer_settle_done_key(
+    *,
+    pr_number: int,
+    head_sha: str,
+    activity_signature: str | None = None,
+) -> str:
+    """Build state key for a completed non-check reviewer settle window."""
+    key = f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
+    if activity_signature is not None:
+        return f"{key}:{activity_signature}"
+    return key
 
 
 def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
+    """Build skip marker key for missing non-check reviewer visibility checks."""
     return f"__awf_non_check_reviewer_settle_skipped_visible__:{pr_number}:{head_sha}"
 
 
@@ -7389,7 +7473,9 @@ def _non_check_reviewer_settle_decision(
     *,
     pr_number: int,
     now: float,
+    now_wall: datetime | None = None,
 ) -> _NonCheckReviewerSettleDecision:
+    """Return settle decision for non-check reviewers, preferring activity clock when available."""
     configured_reviewers = _normalize_non_check_reviewer_logins(config.non_check_reviewer_logins)
     if not config.auto_merge:
         return _NonCheckReviewerSettleDecision(
@@ -7421,6 +7507,18 @@ def _non_check_reviewer_settle_decision(
             configured_reviewers=configured_reviewers,
             visible_reviewers=visible_reviewers,
             state_changed=state_changed,
+        )
+
+    if status.quiet_period_anchor_at is not None:
+        return _non_check_reviewer_activity_settle_decision(
+            status,
+            state,
+            config,
+            pr_number=pr_number,
+            now_wall=now_wall or datetime.now(UTC),
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
         )
 
     done_key = _non_check_reviewer_settle_done_key(
@@ -7464,6 +7562,7 @@ def _non_check_reviewer_settle_decision(
             visible_reviewers=visible_reviewers,
             started_at=started_at,
             elapsed_seconds=elapsed_seconds,
+            remaining_seconds=0.0,
             state_changed=True,
         )
 
@@ -7481,8 +7580,126 @@ def _non_check_reviewer_settle_decision(
         visible_reviewers=visible_reviewers,
         started_at=started_at,
         elapsed_seconds=elapsed_seconds,
+        remaining_seconds=remaining_seconds,
         state_changed=started_now,
     )
+
+
+def _non_check_reviewer_activity_settle_decision(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+    *,
+    pr_number: int,
+    now_wall: datetime,
+    configured_reviewers: tuple[str, ...],
+    missing_reviewers: tuple[str, ...],
+    visible_reviewers: tuple[str, ...],
+) -> _NonCheckReviewerSettleDecision:
+    """Return a settle decision anchored to the latest external review activity."""
+    assert status.quiet_period_anchor_at is not None
+    anchor_at = _utc_datetime(status.quiet_period_anchor_at)
+    now_dt = _utc_datetime(now_wall)
+    quiet_until = anchor_at + timedelta(seconds=config.non_check_reviewer_settle_seconds)
+    elapsed_seconds = max((now_dt - anchor_at).total_seconds(), 0.0)
+    remaining_seconds = max((quiet_until - now_dt).total_seconds(), 0.0)
+    signature = _non_check_reviewer_activity_signature(
+        status,
+        anchor_at=anchor_at,
+    )
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_signature=signature,
+    )
+    if state.threads_addressed_ids.get(done_key) == "elapsed":
+        return _NonCheckReviewerSettleDecision(
+            action="already_elapsed",
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+            elapsed_seconds=elapsed_seconds,
+            remaining_seconds=0.0,
+            activity_anchor_at=anchor_at,
+            activity_anchor_source=status.quiet_period_anchor_source,
+            quiet_until=quiet_until,
+            latest_external_review_activity_at=status.latest_external_review_activity_at,
+            latest_external_review_activity_source=status.latest_external_review_activity_source,
+            activity_signature=signature,
+        )
+    if remaining_seconds <= 0:
+        state.mark_addressed(done_key, "elapsed")
+        return _NonCheckReviewerSettleDecision(
+            action="elapsed",
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+            elapsed_seconds=elapsed_seconds,
+            remaining_seconds=0.0,
+            activity_anchor_at=anchor_at,
+            activity_anchor_source=status.quiet_period_anchor_source,
+            quiet_until=quiet_until,
+            latest_external_review_activity_at=status.latest_external_review_activity_at,
+            latest_external_review_activity_source=status.latest_external_review_activity_source,
+            activity_signature=signature,
+            state_changed=True,
+        )
+
+    wait_seconds = (
+        remaining_seconds
+        if config.poll_interval_seconds <= 0
+        else min(config.poll_interval_seconds, remaining_seconds)
+    )
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+        activity_signature=signature,
+    )
+    state_changed = state.threads_addressed_ids.get(started_key) != "activity_wait"
+    if state_changed:
+        state.mark_addressed(started_key, "activity_wait")
+    return _NonCheckReviewerSettleDecision(
+        action="started" if state_changed else "waiting",
+        wait_seconds=wait_seconds,
+        configured_reviewers=configured_reviewers,
+        missing_reviewers=missing_reviewers,
+        visible_reviewers=visible_reviewers,
+        elapsed_seconds=elapsed_seconds,
+        remaining_seconds=remaining_seconds,
+        activity_anchor_at=anchor_at,
+        activity_anchor_source=status.quiet_period_anchor_source,
+        quiet_until=quiet_until,
+        latest_external_review_activity_at=status.latest_external_review_activity_at,
+        latest_external_review_activity_source=status.latest_external_review_activity_source,
+        activity_signature=signature,
+        state_changed=state_changed,
+    )
+
+
+def _non_check_reviewer_activity_signature(status: PRStatus, *, anchor_at: datetime) -> str:
+    """Return a stable signature for the current settle activity anchor."""
+    payload = "|".join(
+        (
+            status.head_sha,
+            status.quiet_period_anchor_source or "",
+            anchor_at.isoformat(),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    """Normalize datetimes to timezone-aware UTC values."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _datetime_iso(value: datetime | None) -> str | None:
+    """Serialize an optional datetime to ISO-8601 UTC, or ``None``."""
+    if value is None:
+        return None
+    return _utc_datetime(value).isoformat()
 
 
 def _non_check_reviewer_settle_wait_operation_context(
@@ -7497,16 +7714,28 @@ def _non_check_reviewer_settle_wait_operation_context(
             "missing_reviewers": list(decision.missing_reviewers),
             "visible_reviewers": list(decision.visible_reviewers),
             "elapsed_seconds": decision.elapsed_seconds,
+            "remaining_seconds": decision.remaining_seconds,
+            "activity_anchor_at": _datetime_iso(decision.activity_anchor_at),
+            "activity_anchor_source": decision.activity_anchor_source,
+            "quiet_until": _datetime_iso(decision.quiet_until),
+            "latest_external_review_activity_at": _datetime_iso(
+                decision.latest_external_review_activity_at
+            ),
+            "latest_external_review_activity_source": (
+                decision.latest_external_review_activity_source
+            ),
         },
         extra_identity=(
             *decision.configured_reviewers,
             *decision.missing_reviewers,
             decision.started_at,
+            decision.activity_signature,
         ),
     )
 
 
 def _normalize_non_check_reviewer_logins(logins: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Normalize and dedupe configured reviewer logins."""
     normalized: list[str] = []
     seen: set[str] = set()
     for login in logins:
@@ -7523,6 +7752,7 @@ def _non_check_reviewer_visibility(
     configured_reviewers: tuple[str, ...],
     checks: tuple[CheckTiming, ...],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Separate configured reviewers into visible and missing based on checks."""
     visible_identities = _visible_check_identities(checks)
     visible_reviewers: list[str] = []
     missing_reviewers: list[str] = []
@@ -7535,6 +7765,7 @@ def _non_check_reviewer_visibility(
 
 
 def _visible_check_identities(checks: tuple[CheckTiming, ...]) -> frozenset[str]:
+    """Extract normalized identities from check metadata and creator fields."""
     values: set[str] = set()
     for check in checks:
         for raw in (
@@ -7554,6 +7785,7 @@ def _reviewer_has_visible_check(
     *,
     visible_identities: frozenset[str],
 ) -> bool:
+    """Return whether a reviewer has a corresponding visible check identity."""
     aliases = _non_check_reviewer_visible_aliases(reviewer)
     for identity in visible_identities:
         for alias in aliases:
@@ -7565,6 +7797,7 @@ def _reviewer_has_visible_check(
 
 
 def _non_check_reviewer_visible_aliases(reviewer: str) -> frozenset[str]:
+    """Expand reviewer identity variants used for check-name matching."""
     aliases = {reviewer}
     if reviewer == "greptile-apps" or reviewer.startswith("greptile-"):
         aliases.update({"greptile", "greptile-apps"})
@@ -7572,6 +7805,7 @@ def _non_check_reviewer_visible_aliases(reviewer: str) -> frozenset[str]:
 
 
 def _normalize_non_check_reviewer_identity(value: object) -> str:
+    """Normalize a reviewer/caller identity into lowercase token form."""
     if not isinstance(value, str):
         return ""
     text = value.strip().lower()
@@ -7789,6 +8023,7 @@ def _non_check_reviewer_settle_state_for_runtime(
     now_monotonic: float,
     now_wall_seconds: float,
 ) -> dict[str, str]:
+    """Convert settled wait markers to runtime monotonic timestamps."""
     started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
     for started_key, started_raw in list(threads_addressed.items()):
         if not started_key.startswith(started_prefix):
@@ -7817,6 +8052,7 @@ def _non_check_reviewer_settle_state_for_persistence(
     now_monotonic: float,
     now_wall_seconds: float,
 ) -> dict[str, str]:
+    """Convert settled wait markers back to persisted wall-clock form."""
     started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
     for started_key, started_raw in list(threads_addressed.items()):
         if not started_key.startswith(started_prefix):
