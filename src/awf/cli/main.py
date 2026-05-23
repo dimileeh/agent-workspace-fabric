@@ -1877,11 +1877,11 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
 
     settings = _resolve_mcp_settings(env_file=env_file)
     engine = make_engine(settings.database_url)
-    server = build_mcp_server(
-        service=WorkspaceService(make_session_factory(engine), settings=settings),
-        settings=settings,
-    )
     try:
+        server = build_mcp_server(
+            service=WorkspaceService(make_session_factory(engine), settings=settings),
+            settings=settings,
+        )
         server.run("stdio")
     finally:
         asyncio.run(engine.dispose())
