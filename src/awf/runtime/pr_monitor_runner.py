@@ -5262,7 +5262,14 @@ class PullRequestMonitorRunner:
             )
         )
         if committed.ok:
-            paths.update(_changed_paths_from_name_status_z(committed.stdout))
+            try:
+                paths.update(_changed_paths_from_name_status_z(committed.stdout))
+            except ProtectedScopeDiffError as exc:
+                _log.warning(
+                    "monitor.protected_scope_transactional_rollback_diff_parse_failed",
+                    workspace_id=workspace_id,
+                    error=str(exc),
+                )
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_diff_failed",

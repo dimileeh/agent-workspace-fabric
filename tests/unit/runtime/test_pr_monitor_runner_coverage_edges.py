@@ -2162,6 +2162,104 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
 
 
 @pytest.mark.unit
+async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
+    cmd.queue_result(
+        returncode=0,
+        stdout="M\0.github/workflows/ci.yml\0R100\0docs/old.yml\0",
+    )
+    cmd.queue_result(returncode=0, stdout="?? plans/orphan.md\n")
+    cmd.queue_result(returncode=0, stdout="HEAD is now at start-sha\n")
+    cmd.queue_result(returncode=0, stdout="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_protected_parse",
+        path="tests/unit/control/test_ci_workflow_toolchain.py",
+        line=49,
+        body_excerpt="this test requires a protected workflow edit",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _fetch_clean_status(**_kwargs: object) -> PRStatus:
+        return _status_for_helpers()
+
+    async def _protected_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        )
+
+    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("protected-scope rollback must not push")
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_block)
+    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="start-sha",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert result.details is not None
+    assert result.details["branch_restored"] is True
+    assert result.details["reverted_paths"] == ["plans/orphan.md"]
+    assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
+        call.args for call in cmd.calls
+    ]
+
+    async with factory() as session:
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert any(
+        event.payload
+        and event.payload["action"] == "protected_scope_transactional_rollback"
+        and event.payload["outcome"] == "succeeded"
+        for event in events
+    )
+
+
+@pytest.mark.unit
 async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
