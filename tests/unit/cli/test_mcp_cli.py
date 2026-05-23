@@ -152,3 +152,52 @@ def test_mcp_serve_rejects_missing_env_file(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "MCP env file does not exist" in result.stderr
+
+
+@pytest.mark.unit
+def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test mcp serve runs stdio without an env file."""
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5544/awf_no_env"
+    monkeypatch.setenv("AWF_DATABASE_URL", database_url)
+    monkeypatch.setenv("AWF_API_TOKEN", "local-dev-token")
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", "/tmp/awf-mcp-no-env-test")
+
+    calls: dict[str, Any] = {}
+
+    class _FakeEngine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    class _FakeMcpServer:
+        def run(self, transport: str) -> None:
+            calls["transport"] = transport
+
+    def _make_engine(url: str) -> _FakeEngine:
+        calls["database_url"] = url
+        return _FakeEngine()
+
+    def _make_session_factory(engine: _FakeEngine) -> object:
+        calls["factory_engine"] = engine
+        calls["session_factory"] = object()
+        return calls["session_factory"]
+
+    def _build_mcp_server(*, service: object, settings: object) -> _FakeMcpServer:
+        calls["service"] = service
+        calls["settings"] = settings
+        return _FakeMcpServer()
+
+    monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
+    monkeypatch.setattr("awf.db.session.make_session_factory", _make_session_factory)
+    monkeypatch.setattr("awf.mcp.server.build_mcp_server", _build_mcp_server)
+
+    result = _runner.invoke(app, ["mcp", "serve"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["database_url"] == database_url
+    assert calls["transport"] == "stdio"
+    assert calls["disposed"] is True
+    service = cast(Any, calls["service"])
+    settings = cast(Any, calls["settings"])
+    assert service.session_factory is calls["session_factory"]
+    assert settings.database_url == database_url
+    assert settings.work_dir == "/tmp/awf-mcp-no-env-test"
