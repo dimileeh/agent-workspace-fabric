@@ -15,6 +15,7 @@ _runner = CliRunner()
 
 @pytest.mark.unit
 def test_awf_help_lists_mcp_group() -> None:
+    """Test awf help lists mcp group."""
     result = _runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
@@ -23,6 +24,7 @@ def test_awf_help_lists_mcp_group() -> None:
 
 @pytest.mark.unit
 def test_mcp_serve_help_is_available() -> None:
+    """Test mcp serve help is available."""
     result = _runner.invoke(app, ["mcp", "serve", "--help"])
 
     assert result.exit_code == 0
@@ -35,6 +37,7 @@ def test_mcp_serve_disposes_engine_when_server_build_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Test mcp serve disposes engine when server build fails."""
     env_file = tmp_path / ".env"
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5544/awf"
     env_file.write_text(
@@ -83,6 +86,7 @@ def test_mcp_serve_runs_stdio_with_env_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Test mcp serve runs stdio with env file."""
     env_file = tmp_path / ".env"
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5544/awf"
     env_file.write_text(
@@ -141,6 +145,7 @@ def test_mcp_serve_runs_stdio_with_env_file(
 
 @pytest.mark.unit
 def test_mcp_serve_rejects_missing_env_file(tmp_path: Path) -> None:
+    """Test mcp serve rejects missing env file."""
     missing = tmp_path / "missing.env"
 
     result = _runner.invoke(app, ["mcp", "serve", "--env-file", str(missing)])

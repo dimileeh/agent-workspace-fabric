@@ -81,6 +81,7 @@ def _row_for_capability(rows: list[dict[str, str]], capability: str) -> dict[str
 
 @pytest.mark.unit
 def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
+    """Test mcp client parity doc publishes roles and backlog surfaces."""
     doc = PARITY_DOC.read_text(encoding="utf-8")
     mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
 
@@ -103,6 +104,7 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
 
 @pytest.mark.unit
 def test_mcp_setup_publishes_claude_and_codex_stdio_config() -> None:
+    """Test mcp setup publishes claude and codex stdio config."""
     setup_doc = MCP_SETUP.read_text(encoding="utf-8")
     mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
 
@@ -115,6 +117,7 @@ def test_mcp_setup_publishes_claude_and_codex_stdio_config() -> None:
 
 @pytest.mark.unit
 def test_mcp_and_cli_docs_do_not_claim_effort_is_excluded() -> None:
+    """Test mcp and cli docs do not claim effort is excluded."""
     combined = "\n".join(
         [
             PARITY_DOC.read_text(encoding="utf-8"),
@@ -141,6 +144,7 @@ def test_mcp_and_cli_docs_do_not_claim_effort_is_excluded() -> None:
 
 @pytest.mark.unit
 def test_parity_doc_no_longer_claims_read_tool_slice_is_backlog_only() -> None:
+    """Test parity doc no longer claims read tool slice is backlog only."""
     doc = PARITY_DOC.read_text(encoding="utf-8")
 
     assert "this slice does not add MCP tools" not in " ".join(doc.split())
@@ -148,6 +152,7 @@ def test_parity_doc_no_longer_claims_read_tool_slice_is_backlog_only() -> None:
 
 @pytest.mark.unit
 def test_read_only_operator_rows_are_implementation_backed() -> None:
+    """Test read only operator rows are implementation backed."""
     rows = _parity_rows()
 
     for capability, expected_tools in READ_ONLY_OPERATOR_ROWS.items():
@@ -169,6 +174,7 @@ CONTROL_IMPLEMENTED_ROWS = {
 
 @pytest.mark.unit
 def test_control_operations_with_mcp_tools_are_documented() -> None:
+    """Test control operations with mcp tools are documented."""
     rows = _parity_rows()
 
     for capability, (cli_surface, mcp_tool) in CONTROL_IMPLEMENTED_ROWS.items():
@@ -185,6 +191,7 @@ def test_control_operations_with_mcp_tools_are_documented() -> None:
 
 @pytest.mark.unit
 def test_global_operations_safe_read_has_cli_parity() -> None:
+    """Test global operations safe read has cli parity."""
     rows = _parity_rows()
     row = _row_for_capability(rows, "Global operations")
     cli_cell = _strip_backticks(row.get("CLI surface", "")).strip()
@@ -199,6 +206,7 @@ def test_global_operations_safe_read_has_cli_parity() -> None:
 
 @pytest.mark.unit
 def test_operation_read_rows_have_auth_parity_closed() -> None:
+    """Test operation read rows have auth parity closed."""
     rows = _parity_rows()
 
     for capability in ("Workspace operations", "Global operations"):
@@ -213,6 +221,7 @@ def test_operation_read_rows_have_auth_parity_closed() -> None:
 
 @pytest.mark.unit
 def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
+    """Test retry workspace row reflects registered mcp tool."""
     rows = _parity_rows()
     row = _row_for_capability(rows, "Retry workspace")
     tools = set(_split_cell(row.get("MCP tool name", "")))
@@ -226,6 +235,7 @@ def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
 
 @pytest.mark.unit
 def test_mcp_control_idempotency_migration_note_is_published() -> None:
+    """Test mcp control idempotency migration note is published."""
     parity_doc = PARITY_DOC.read_text(encoding="utf-8")
     mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
     combined = f"{parity_doc}\n{mcp_ref}"
@@ -243,6 +253,7 @@ def test_mcp_control_idempotency_migration_note_is_published() -> None:
 
 @pytest.mark.unit
 def test_parity_matrix_has_required_columns() -> None:
+    """Test parity matrix has required columns."""
     doc = PARITY_DOC.read_text(encoding="utf-8")
     lines = doc.splitlines()
     header_line: str | None = None
@@ -258,6 +269,7 @@ def test_parity_matrix_has_required_columns() -> None:
 
 @pytest.mark.unit
 def test_parity_matrix_status_values_are_from_vocabulary() -> None:
+    """Test parity matrix status values are from vocabulary."""
     rows = _parity_rows()
     for row in rows:
         status = row.get("Status", "").strip()
@@ -269,6 +281,7 @@ def test_parity_matrix_status_values_are_from_vocabulary() -> None:
 
 @pytest.mark.unit
 def test_implemented_rows_have_rest_endpoint_and_mcp_tool() -> None:
+    """Test implemented rows have rest endpoint and mcp tool."""
     rows = _parity_rows()
     for row in rows:
         status = row.get("Status", "").strip()
@@ -287,6 +300,7 @@ def test_implemented_rows_have_rest_endpoint_and_mcp_tool() -> None:
 
 @pytest.mark.unit
 def test_partial_or_missing_rows_have_backlog_slice() -> None:
+    """Test partial or missing rows have backlog slice."""
     rows = _parity_rows()
     for row in rows:
         status = row.get("Status", "").strip()
@@ -301,6 +315,7 @@ def test_partial_or_missing_rows_have_backlog_slice() -> None:
 
 @pytest.mark.unit
 def test_security_boundary_column_non_empty() -> None:
+    """Test security boundary column non empty."""
     rows = _parity_rows()
     for row in rows:
         boundary = row.get("Security Boundary", "").strip()
@@ -309,6 +324,7 @@ def test_security_boundary_column_non_empty() -> None:
 
 @pytest.mark.unit
 def test_schema_contract_column_non_empty_for_control_rows() -> None:
+    """Test schema contract column non empty for control rows."""
     rows = _parity_rows()
     for row in rows:
         rest = row.get("Canonical REST surface", "").strip()
@@ -322,6 +338,7 @@ def test_schema_contract_column_non_empty_for_control_rows() -> None:
 
 @pytest.mark.unit
 def test_parity_matrix_matches_real_surfaces() -> None:
+    """Test parity matrix matches real surfaces."""
     from unittest.mock import MagicMock
 
     import typer
