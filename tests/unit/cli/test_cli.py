@@ -38,6 +38,7 @@ def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
     visible_help = click.unstyle(stdout)
     assert "--model" in visible_help
     assert "--effort" in visible_help
+    assert "--owned-path" in visible_help
 
 
 def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
@@ -237,6 +238,10 @@ class TestWorkspaceCreate:
                     "2",
                     "--owned-path",
                     "src/awf/**",
+                    "--owned-path",
+                    ".github/workflows/publish.yml",
+                    "--owned-path",
+                    "pyproject.toml",
                     "--external-id",
                     "ext_123",
                     "--cpu",
@@ -253,7 +258,11 @@ class TestWorkspaceCreate:
         assert kwargs["json"]["task"]["task_class"] == "docs_task"
         assert kwargs["json"]["task"]["priority"] == 10
         assert kwargs["json"]["task"]["human_boost"] == 2
-        assert kwargs["json"]["task"]["owned_paths"] == ["src/awf/**"]
+        assert kwargs["json"]["task"]["owned_paths"] == [
+            "src/awf/**",
+            ".github/workflows/publish.yml",
+            "pyproject.toml",
+        ]
         assert kwargs["json"]["task"]["external_id"] == "ext_123"
         assert kwargs["json"]["resources"]["cpu"] == 2.5
         assert kwargs["json"]["resources"]["memory"] == "4GB"
@@ -1351,6 +1360,30 @@ class TestWorkspaceAdoptPr:
         body = mock.call_args.kwargs["json"]
         assert body["model"] == "gpt-5.3-codex"
         assert body["effort"] == "high"
+
+    @pytest.mark.unit
+    def test_posts_owned_paths_when_requested(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--owned-path",
+                    ".github/workflows/publish.yml",
+                    "--owned-path",
+                    "pyproject.toml",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["owned_paths"] == [".github/workflows/publish.yml", "pyproject.toml"]
 
     @pytest.mark.unit
     def test_posts_model_without_effort_for_server_side_defaulting(self) -> None:

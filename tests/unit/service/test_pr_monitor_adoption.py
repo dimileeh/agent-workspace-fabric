@@ -177,6 +177,7 @@ class TestPullRequestMonitorAdoptionService:
                     repo_slug="dimileeh/aira-web",
                     pr_number=277,
                     agent="codex",
+                    owned_paths=[".github/workflows/publish.yml", "pyproject.toml"],
                     auto_merge=False,
                     initial_review_grace_period_seconds=12,
                     reason="recover external PR",
@@ -216,6 +217,10 @@ class TestPullRequestMonitorAdoptionService:
             assert workspace.pr_url == "https://github.com/dimileeh/aira-web/pull/277"
             assert workspace.pr_number == 277
             assert workspace.monitor_last_commit_sha == "h" * 40
+            assert workspace.owned_paths == [
+                ".github/workflows/publish.yml",
+                "pyproject.toml",
+            ]
             assert workspace.auto_merge is False
             assert workspace.initial_review_grace_period_seconds == 12
             assert "agent_model" not in workspace.task_policy
@@ -249,6 +254,74 @@ class TestPullRequestMonitorAdoptionService:
 
             task = (await session.execute(select(Task))).scalar_one()
             assert task.title == "feature: ready"
+            assert task.owned_paths == [
+                ".github/workflows/publish.yml",
+                "pyproject.toml",
+            ]
+            attempt = (await session.execute(select(TaskAttempt))).scalar_one()
+            assert attempt.owned_paths == [
+                ".github/workflows/publish.yml",
+                "pyproject.toml",
+            ]
+
+    @pytest.mark.unit
+    async def test_attaching_live_adoption_rejects_different_owned_paths(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    owned_paths=["docs/**"],
+                )
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        owned_paths=[".github/workflows/publish.yml"],
+                    )
+                )
+
+        assert first.workspace_id.startswith("ws_")
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            "existing_owned_paths": ["docs/**"],
+            "requested_owned_paths": [".github/workflows/publish.yml"],
+        }
+
+    @pytest.mark.unit
+    async def test_attaching_live_adoption_allows_reordered_owned_paths(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    owned_paths=["docs/**", ".github/workflows/publish.yml"],
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    owned_paths=[".github/workflows/publish.yml", "docs/**"],
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

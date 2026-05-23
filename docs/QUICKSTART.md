@@ -19,13 +19,30 @@ For a released install:
 uv tool install agent-workspace-fabric
 ```
 
+`pipx` is the equivalent isolated install path if you prefer it:
+
+```bash
+pipx install agent-workspace-fabric
+```
+
+Use plain `pip` only inside an active virtualenv:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install agent-workspace-fabric
+```
+
 For contributor or source checkout work:
 
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
-uv tool install .
+uv tool install . --force
 ```
+
+Homebrew is planned after AWF has stable tagged Python artifacts and a passing
+formula audit.
 
 ## Bootstrap AWF
 

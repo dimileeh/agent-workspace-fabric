@@ -240,7 +240,7 @@ async def test_workspace_service_round_trips_policy_metadata(
             "agent": "codex",
             "kind": "feature_branch_pr",
             "task_class": "dependency_task",
-            "owned_paths": ["pyproject.toml", "uv.lock"],
+            "owned_paths": ["pyproject.toml", ".github/workflows/publish.yml", "uv.lock"],
         },
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["uv run pytest -q"], "requested_tier": 1},
@@ -256,12 +256,16 @@ async def test_workspace_service_round_trips_policy_metadata(
     listed = await service.list(limit=10)
 
     assert created.task_class == "dependency_task"
-    assert created.owned_paths == ["pyproject.toml", "uv.lock"]
+    assert created.owned_paths == ["pyproject.toml", ".github/workflows/publish.yml", "uv.lock"]
     assert fetched is not None
     assert fetched.task_class == "dependency_task"
-    assert fetched.owned_paths == ["pyproject.toml", "uv.lock"]
+    assert fetched.owned_paths == ["pyproject.toml", ".github/workflows/publish.yml", "uv.lock"]
     assert listed[0].task_class == "dependency_task"
-    assert listed[0].owned_paths == ["pyproject.toml", "uv.lock"]
+    assert listed[0].owned_paths == [
+        "pyproject.toml",
+        ".github/workflows/publish.yml",
+        "uv.lock",
+    ]
 
 
 @pytest.mark.unit

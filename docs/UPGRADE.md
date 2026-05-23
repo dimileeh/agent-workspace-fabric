@@ -11,12 +11,28 @@ For a released install:
 uv tool upgrade agent-workspace-fabric
 ```
 
+For `pipx` installs:
+
+```bash
+pipx upgrade agent-workspace-fabric
+```
+
+For virtualenv installs (activate your existing venv first):
+
+```bash
+. .venv/bin/activate
+pip install --upgrade agent-workspace-fabric
+```
+
 For a source checkout:
 
 ```bash
 git pull
 uv tool install . --force
 ```
+
+Homebrew is planned after stable tagged artifacts and formula audit coverage;
+there is no supported `brew` upgrade path yet.
 
 ## Local Service Stack
 

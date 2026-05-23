@@ -10,6 +10,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PUBLISH_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 CONTRIBUTING_PATH = REPO_ROOT / "CONTRIBUTING.md"
 DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
@@ -20,6 +21,12 @@ SETUP_UV_VERSION = "0.5.31"
 
 def _workflow() -> dict[str, Any]:
     loaded = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _publish_workflow() -> dict[str, Any]:
+    loaded = yaml.safe_load(PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
 
@@ -267,9 +274,51 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
 def test_release_artifacts_installs_wheel_with_uv_pip() -> None:
     run = _step_run(_job(_workflow(), "release-artifacts"), "Install wheel and verify entrypoints")
 
-    assert "uv pip install --python .venv-install/bin/python dist/*.whl" in run
-    assert ".venv-install/bin/pip install" not in run
-    assert ".venv-install/bin/awf --help" in run
+    assert "cd /tmp" in run
+    assert (
+        'uv pip install --python /tmp/awf-wheel-smoke/bin/python "$GITHUB_WORKSPACE"/dist/*.whl'
+        in run
+    )
+    assert "bin/pip install" not in run
+    assert "/tmp/awf-wheel-smoke/bin/awf --help" in run
+    assert "/tmp/awf-wheel-smoke/bin/awf init --help" in run
+    assert "/tmp/awf-wheel-smoke/bin/awf service bootstrap --help" in run
+    assert "get_bootstrap_asset_root" in run
+    assert "docker/agent-runtime.Dockerfile" in run
+
+
+@pytest.mark.unit
+def test_publish_workflow_builds_on_tags_and_uses_trusted_publishing() -> None:
+    workflow = _publish_workflow()
+    triggers = _workflow_triggers(workflow)
+
+    assert "workflow_dispatch" in triggers
+    dispatch = triggers.get("workflow_dispatch")
+    assert isinstance(dispatch, dict)
+    inputs = dispatch.get("inputs")
+    assert isinstance(inputs, dict)
+    assert "publish_target" in inputs
+    push = triggers.get("push")
+    assert isinstance(push, dict)
+    assert push.get("tags") == ["v*"]
+
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+    assert {"build", "publish"}.issubset(jobs)
+
+    publish_job = _job(workflow, "publish")
+    assert publish_job.get("needs") == "build"
+    assert publish_job.get("permissions", {}).get("id-token") == "write"
+
+    commands = _run_steps(_job(workflow, "build"))
+    assert "python -m build" in commands
+    assert "sha256sum dist/*" in commands
+
+    publish_steps = _steps(publish_job)
+    assert any(
+        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+    )
+    assert "secrets.PYPI_API_TOKEN" not in PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit

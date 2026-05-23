@@ -334,6 +334,7 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
     profile: WorkspaceProfile | None = None
+    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     auto_merge: bool = True
     initial_review_grace_period_seconds: float | None = Field(
         default=None,

@@ -143,6 +143,36 @@ See:
 - [Contributor Guide](CONTRIBUTING.md)
 - [Release Checklist](RELEASING.md)
 
+## Installation
+
+For released CLI installs, prefer an isolated tool environment:
+
+```bash
+uv tool install agent-workspace-fabric
+# or
+pipx install agent-workspace-fabric
+```
+
+Virtualenv installs are supported when you want AWF in an active project
+environment:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install agent-workspace-fabric
+```
+
+For contributor checkouts:
+
+```bash
+git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
+cd aira-agent-workspace-fabric
+uv tool install . --force
+```
+
+Homebrew is planned after the first stable tagged PyPI/GitHub release and a
+formula audit; do not rely on a `brew` install path yet.
+
 ## Supported Client Surfaces (v0.1)
 
 REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not currently ship with a supported Python SDK. Integrators should use one of the supported surfaces (e.g., the CLI for operator convenience or the REST API for control-plane programmatic access). Please do not import internal AWF modules (such as `awf.*` or other internal paths) to build custom API clients, as they are not part of the stable public contract and are subject to change without notice.

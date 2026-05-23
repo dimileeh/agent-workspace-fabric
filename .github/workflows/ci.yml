@@ -150,10 +150,34 @@ jobs:
 
       - name: Install wheel and verify entrypoints
         run: |
-          uv venv --python 3.12 .venv-install
-          uv pip install --python .venv-install/bin/python dist/*.whl
-          .venv-install/bin/awf --help
-          .venv-install/bin/awf service readiness --help
+          uv venv --python 3.12 /tmp/awf-wheel-smoke
+          cd /tmp
+          uv pip install --python /tmp/awf-wheel-smoke/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          /tmp/awf-wheel-smoke/bin/awf --help
+          /tmp/awf-wheel-smoke/bin/awf init --help
+          /tmp/awf-wheel-smoke/bin/awf service bootstrap --help
+          /tmp/awf-wheel-smoke/bin/python - <<'PY'
+          from pathlib import Path
+
+          from awf.service.bootstrap import get_bootstrap_asset_root
+
+          root = get_bootstrap_asset_root()
+          assert root is not None, "packaged bootstrap asset root was not resolved"
+          required = (
+              "docker/agent-runtime.Dockerfile",
+              "docker/control-plane.Dockerfile",
+              "docker/compose/local-service.yml",
+              "docker/compose/workspace.base.yml.j2",
+              ".env.example",
+              "openapi.json",
+              "pyproject.toml",
+              "src/awf/__init__.py",
+              "migrations/env.py",
+          )
+          missing = [relative for relative in required if not (Path(root) / relative).is_file()]
+          assert not missing, f"missing packaged bootstrap assets: {missing}"
+          assert not (Path(root) / "docker/compose/.env").exists()
+          PY
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

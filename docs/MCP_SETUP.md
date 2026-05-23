@@ -20,7 +20,7 @@ For contributor checkouts, install from source instead:
 ```bash
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
-uv tool install .
+uv tool install . --force
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf init
 awf service status --format pretty

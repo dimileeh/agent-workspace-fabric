@@ -68,6 +68,48 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/awf"]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "docker/compose/.env",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+".env.example" = "awf/bootstrap_assets/.env.example"
+"README.md" = "awf/bootstrap_assets/README.md"
+"alembic.ini" = "awf/bootstrap_assets/alembic.ini"
+"docs" = "awf/bootstrap_assets/docs"
+"docker/agent-runtime.Dockerfile" = "awf/bootstrap_assets/docker/agent-runtime.Dockerfile"
+"docker/compose/local-service.yml" = "awf/bootstrap_assets/docker/compose/local-service.yml"
+"docker/compose/workspace.base.yml.j2" = "awf/bootstrap_assets/docker/compose/workspace.base.yml.j2"
+"docker/control-plane.Dockerfile" = "awf/bootstrap_assets/docker/control-plane.Dockerfile"
+"migrations" = "awf/bootstrap_assets/migrations"
+"openapi.json" = "awf/bootstrap_assets/openapi.json"
+"pyproject.toml" = "awf/bootstrap_assets/pyproject.toml"
+"src" = "awf/bootstrap_assets/src"
+"uv.lock" = "awf/bootstrap_assets/uv.lock"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.env.example",
+    "/README.md",
+    "/alembic.ini",
+    "/docs",
+    "/docker/agent-runtime.Dockerfile",
+    "/docker/compose/local-service.yml",
+    "/docker/compose/workspace.base.yml.j2",
+    "/docker/control-plane.Dockerfile",
+    "/migrations",
+    "/openapi.json",
+    "/pyproject.toml",
+    "/src",
+    "/uv.lock",
+]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "/docker/compose/.env",
+]
 
 [tool.ruff]
 line-length = 100

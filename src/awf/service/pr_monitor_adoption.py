@@ -309,6 +309,7 @@ class PullRequestMonitorAdoptionService:
             agent=request.agent.value,
             test_commands=[],
             requires_database=False,
+            owned_paths=list(request.owned_paths),
             task_policy=task_policy,
             auto_merge=request.auto_merge,
             initial_review_grace_period_seconds=request.initial_review_grace_period_seconds,
@@ -1008,6 +1009,16 @@ def _raise_if_policy_conflicts(
                 "workspace_id": workspace.id,
                 "existing_inline_profile_name": _inline_profile_name(workspace.requested_profile),
                 "requested_inline_profile_name": _inline_profile_name(requested_profile),
+            },
+        )
+    if set(workspace.owned_paths) != set(request.owned_paths):
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different owned_paths policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_owned_paths": list(workspace.owned_paths),
+                "requested_owned_paths": list(request.owned_paths),
             },
         )
     if workspace.auto_merge != request.auto_merge:

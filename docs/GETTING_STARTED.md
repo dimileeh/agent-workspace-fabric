@@ -41,10 +41,18 @@ The recommended primary path is to install AWF as an isolated CLI tool via `uv t
 uv tool install agent-workspace-fabric
 ```
 
-If you prefer to install it into an existing environment, use:
+`pipx` provides the same isolated CLI-tool model:
 
 ```bash
-uv pip install agent-workspace-fabric
+pipx install agent-workspace-fabric
+```
+
+If you prefer to install it into an existing virtualenv, use:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install agent-workspace-fabric
 ```
 
 For contributors who want to modify AWF itself:
@@ -52,8 +60,12 @@ For contributors who want to modify AWF itself:
 ```bash
 git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
+uv tool install . --force
 uv sync
 ```
+
+Homebrew is planned after the Python package has stable tagged artifacts and a
+passing formula audit; it is not a supported install channel yet.
 
 ### Recommended Local Bootstrap
 
@@ -104,11 +116,11 @@ In source checkouts that include local Compose assets, `awf init` writes
 Python `awf` commands in package or non-source contexts.
 
 Transition note: `awf service status`, `awf service doctor`, and
-`awf service bootstrap` resolve `docker/compose/.env` only from verified AWF
-source checkouts with local service Compose assets. In package installs or other
-non-source directories, those commands read `.env`; copy any existing
-`docker/compose/.env` values to `.env` or run the service command from the AWF
-source checkout.
+`awf service bootstrap` resolve `docker/compose/.env` from verified AWF source
+checkouts with local service Compose assets. In package installs, AWF uses the
+bundled Compose assets and reads `.env` from the working directory; copy any
+existing `docker/compose/.env` values to `.env` or run `awf init` from the
+directory where you want local service settings to live.
 
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,

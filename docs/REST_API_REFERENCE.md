@@ -755,11 +755,11 @@ The full OpenAPI specification is available at:
 To regenerate the checked-in artifact:
 
 ```bash
-python scripts/generate_openapi.py
+uv run --python 3.12 --extra dev python scripts/generate_openapi.py
 ```
 
 To verify the checked-in artifact has not drifted:
 
 ```bash
-python scripts/generate_openapi.py --check
+uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
 ```
