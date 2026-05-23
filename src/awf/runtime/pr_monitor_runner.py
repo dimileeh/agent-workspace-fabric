@@ -2917,8 +2917,9 @@ class PullRequestMonitorRunner:
                         current_head_sha=status.head_sha,
                     )
                     manual_ready_handled = None
+                    settle_config = replace(self._config, auto_merge=True)
+                    settle_decision: _NonCheckReviewerSettleDecision | None = None
                     if _gate_requires_validation_recovery(merge_gate):
-                        settle_config = replace(self._config, auto_merge=True)
                         settle_decision = _non_check_reviewer_settle_decision(
                             status,
                             state,
@@ -2977,16 +2978,18 @@ class PullRequestMonitorRunner:
                                 self._config.non_check_reviewer_settle_seconds > 0
                             ),
                         )
+
                     if manual_ready_handled is not None:
                         return manual_ready_handled
-                    settle_config = replace(self._config, auto_merge=True)
-                    settle_decision = _non_check_reviewer_settle_decision(
-                        status,
-                        state,
-                        settle_config,
-                        pr_number=pr_number,
-                        now=time.monotonic(),
-                    )
+
+                    if settle_decision is None:
+                        settle_decision = _non_check_reviewer_settle_decision(
+                            status,
+                            state,
+                            settle_config,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                        )
                     await self._record_non_check_reviewer_settle_decision(
                         decision=settle_decision,
                         workspace_id=workspace_id,
