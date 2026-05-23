@@ -412,6 +412,24 @@ def test_init_guided_writes_answers_into_workspace_yml(
 
 
 @pytest.mark.unit
+def test_init_write_profile_guided_declined_confirmation_does_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    monkeypatch.setattr("awf.cli.main._stdio_is_interactive", lambda: True)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--guided"],
+        input="\n\n\nn\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+    assert "Wrote AWF profile" not in result.output
+
+
+@pytest.mark.unit
 def test_init_guided_egress_choices_follow_model_enum(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

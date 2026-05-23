@@ -939,7 +939,7 @@ def _run_init_project_onboarding(
             customize_preview=customize_project_onboarding_preview,
         )
 
-    should_write = write_profile or guided_wants_write
+    should_write = guided_wants_write if effective_guided else write_profile
     written_path: Path | None = None
     if should_write:
         try:
