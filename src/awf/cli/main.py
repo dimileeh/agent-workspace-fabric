@@ -691,6 +691,34 @@ def init(
         "--include-smoke-request",
         help="Include a smoke-workspace request payload (does not submit).",
     ),
+    guided: bool | None = typer.Option(
+        None,
+        "--guided/--no-guided",
+        help=(
+            "Project onboarding: prompt for a short first-run profile setup. "
+            "Defaults to guided only for interactive pretty output when no profile exists."
+        ),
+    ),
+    write_profile: bool = typer.Option(
+        False,
+        "--write-profile",
+        help="Project onboarding: write .awf/workspace.yml from the detected profile.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Project onboarding: approve non-interactive profile writes.",
+    ),
+    template: str = typer.Option(
+        "auto",
+        "--template",
+        help="Project onboarding: template override or auto.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Project onboarding: overwrite an existing .awf/workspace.yml when writing.",
+    ),
     write_env: bool = typer.Option(
         True,
         "--write-env/--no-write-env",
@@ -730,11 +758,31 @@ def init(
     ),
 ) -> None:
     """Bootstrap the local AWF service or run project-onboarding checks."""
+    ctx = click.get_current_context()
+
+    def _explicit(name: str) -> bool:
+        """Return whether an option was explicitly supplied."""
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
     if path is None:
+        project_only_flags: list[str] = []
         if include_smoke_request:
+            project_only_flags.append("--include-smoke-request")
+        if _explicit("guided"):
+            project_only_flags.append("--guided" if guided else "--no-guided")
+        if _explicit("write_profile"):
+            project_only_flags.append("--write-profile")
+        if _explicit("yes"):
+            project_only_flags.append("--yes")
+        if _explicit("template"):
+            project_only_flags.append("--template")
+        if _explicit("force"):
+            project_only_flags.append("--force")
+        if project_only_flags:
             typer.echo(
-                "error: onboarding-only flag --include-smoke-request requires a "
-                "project path; pass `awf init <path> --include-smoke-request`.",
+                "error: project-onboarding flag(s) "
+                f"{', '.join(project_only_flags)} require a project path; pass "
+                "`awf init <path>`.",
                 err=True,
             )
             raise typer.Exit(code=2)
@@ -748,12 +796,6 @@ def init(
         )
         return
 
-    ctx = click.get_current_context()
-
-    def _explicit(name: str) -> bool:
-        """Return whether a bootstrap-only option was explicitly supplied."""
-        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
-
     bootstrap_only_flags: list[str] = []
     if _explicit("skip_agent_runtime_build"):
         bootstrap_only_flags.append("--skip-agent-runtime-build")
@@ -765,8 +807,6 @@ def init(
         bootstrap_only_flags.append("--poll-interval-seconds")
     if _explicit("write_env"):
         bootstrap_only_flags.append("--write-env" if write_env else "--no-write-env")
-    if _explicit("fmt"):
-        bootstrap_only_flags.append("--format")
     if bootstrap_only_flags:
         typer.echo(
             "error: bootstrap-only flag(s) "
@@ -779,6 +819,12 @@ def init(
     _run_init_project_onboarding(
         path,
         include_smoke_request=include_smoke_request,
+        guided=guided,
+        write_profile=write_profile,
+        yes=yes,
+        template=template,
+        force=force,
+        fmt=fmt,
     )
 
 
@@ -786,10 +832,21 @@ def _run_init_project_onboarding(
     path: Path,
     *,
     include_smoke_request: bool,
+    guided: bool | None,
+    write_profile: bool,
+    yes: bool,
+    template: str,
+    force: bool,
+    fmt: OutputFormat,
 ) -> None:
-    """Execute run init project onboarding."""
-
-    from awf.profiles.onboarding import preview_project_onboarding
+    """Run repository onboarding checks and optionally write the workspace profile."""
+    from awf.profiles.models import EgressMode
+    from awf.profiles.onboarding import (
+        customize_project_onboarding_preview,
+        preview_project_onboarding,
+        supported_onboarding_templates,
+        write_workspace_profile,
+    )
     from awf.service.config import (
         ServiceSettings,
         local_service_environ,
@@ -809,15 +866,41 @@ def _run_init_project_onboarding(
         raise typer.Exit(code=2)
 
     existing_profile_path = _existing_project_profile_path(repository)
+    if fmt == OutputFormat.json and guided is True:
+        typer.echo("error: --guided cannot be used with --format json.", err=True)
+        raise typer.Exit(code=2)
+    if yes and not write_profile:
+        typer.echo(
+            "error: --yes requires --write-profile to approve a non-interactive profile write.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if write_profile and not yes and guided is not True:
+        typer.echo(
+            "error: --write-profile requires --yes for non-interactive writes "
+            "or --guided for an interactive confirmation.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    stdio_is_interactive = _stdio_is_interactive()
+    if guided is True and not stdio_is_interactive:
+        typer.echo(
+            "error: --guided requires an interactive terminal; use "
+            "--write-profile --yes for non-interactive writes.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
+    service_status: dict[str, object]
+    doctor_report: DoctorReport | None
+    doctor_error: str | None = None
     try:
         settings = resolve_service_settings()
         service_env = local_service_environ()
         service_name = getattr(settings, "service_name", "unknown")
 
-        async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
-            """Execute collect reports."""
-
+        async def _collect_reports() -> tuple[dict[str, object], DoctorReport | None, str | None]:
+            """Collect service status and doctor diagnostics with one shared status read."""
             service_status_task = asyncio.create_task(
                 collect_service_status(
                     settings,
@@ -833,19 +916,9 @@ def _run_init_project_onboarding(
                 provider_environ: Mapping[str, str] | None = None,
                 **_kwargs: object,
             ) -> dict[str, object]:
-                """Execute collect cached service status."""
-
+                """Serve the in-flight service status result to doctor diagnostics."""
                 _ = settings, strict_providers, provider_environ, _kwargs
-                try:
-                    return await service_status_task
-                except Exception as exc:
-                    return {
-                        "service": service_name,
-                        "status": "fail",
-                        "checks": {},
-                        "agent_readiness": {"status": "fail"},
-                        "detail": str(exc),
-                    }
+                return await service_status_task
 
             service_status_result, doctor_report = await asyncio.gather(
                 service_status_task,
@@ -871,33 +944,267 @@ def _run_init_project_onboarding(
             else:
                 service_status = service_status_result
             if isinstance(doctor_report, BaseException):
-                raise doctor_report
+                return service_status, None, str(doctor_report)
 
-            return service_status, doctor_report
+            return service_status, doctor_report, None
 
-        service_status, doctor_report = asyncio.run(_collect_reports())
+        service_status, doctor_report, doctor_error = asyncio.run(_collect_reports())
+    except Exception as exc:
+        service_status = {
+            "service": "awf",
+            "status": "fail",
+            "checks": {},
+            "agent_readiness": {"status": "fail"},
+            "detail": str(exc),
+        }
+        doctor_report = None
+        doctor_error = str(exc)
+
+    try:
         preview = preview_project_onboarding(
             repository,
+            template=template,
             include_smoke_request=include_smoke_request,
         )
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
-        typer.echo(f"error: could not collect local checks: {exc}", err=True)
+        typer.echo(f"error: could not build onboarding preview: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    doctor_status = getattr(doctor_report, "status", "unknown")
+    doctor_status = (
+        getattr(doctor_report, "status", "fail") if doctor_report is not None else "fail"
+    )
     service_ok = service_status.get("status") == "ok"
     doctor_ok = doctor_status != "fail"
+    local_checks_ready = service_ok and doctor_ok
+    auto_guided = (
+        guided is None
+        and fmt == OutputFormat.pretty
+        and existing_profile_path is None
+        and not write_profile
+        and stdio_is_interactive
+    )
+    effective_guided = guided is True or auto_guided
 
+    guided_wants_write = False
+    if effective_guided:
+        preview, guided_wants_write = _prompt_project_onboarding_choices(
+            repository,
+            preview=preview,
+            include_smoke_request=include_smoke_request,
+            supported_templates=supported_onboarding_templates(),
+            egress_mode_type=EgressMode,
+            preview_factory=preview_project_onboarding,
+            customize_preview=customize_project_onboarding_preview,
+        )
+
+    should_write = guided_wants_write if effective_guided else write_profile
+    written_path: Path | None = None
+    if should_write:
+        try:
+            written_path = write_workspace_profile(preview, force=force)
+        except FileExistsError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from None
+
+    mode = "guided" if effective_guided else "write" if should_write else "preview"
+    payload = _init_project_onboarding_payload(
+        preview=preview,
+        existing_profile_path=existing_profile_path,
+        written_path=written_path,
+        service_status=service_status,
+        doctor_status=str(doctor_status),
+        local_checks_ready=local_checks_ready,
+        guided=effective_guided,
+        mode=mode,
+    )
+
+    if fmt == OutputFormat.json:
+        _emit(payload, fmt)
+        return
+
+    doctor_pretty = (
+        render_doctor_pretty(doctor_report)
+        if doctor_report is not None
+        else f"AWF doctor: fail\n  detail: {doctor_error or 'doctor report unavailable'}\n"
+    )
+    _emit_init_project_onboarding_pretty(
+        preview=preview,
+        payload=payload,
+        doctor_pretty=doctor_pretty,
+        include_smoke_request=include_smoke_request,
+    )
+
+
+def _stdio_is_interactive() -> bool:
+    """Return whether both stdin and stdout are attached to an interactive TTY."""
+    stdin_isatty = getattr(sys.stdin, "isatty", lambda: False)
+    stdout_isatty = getattr(sys.stdout, "isatty", lambda: False)
+    return bool(stdin_isatty() and stdout_isatty())
+
+
+def _prompt_project_onboarding_choices(
+    repository: Path,
+    *,
+    preview: Any,
+    include_smoke_request: bool,
+    supported_templates: tuple[str, ...],
+    egress_mode_type: Any,
+    preview_factory: Any,
+    customize_preview: Any,
+) -> tuple[Any, bool]:
+    """Prompt for template, egress, validation, and profile-write onboarding choices."""
+    typer.echo("AWF init: guided project profile setup")
+    typer.echo(f"Detected template: {preview.draft.template}")
+    template_choice = typer.prompt("Template", default=preview.draft.template).strip()
+    if template_choice not in supported_templates:
+        typer.echo(
+            "error: unsupported onboarding template "
+            f"{template_choice!r}; choose one of {', '.join(supported_templates)}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if template_choice != preview.draft.template:
+        try:
+            preview = preview_factory(
+                repository,
+                template=template_choice,
+                include_smoke_request=include_smoke_request,
+            )
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            typer.echo(f"error: could not build onboarding preview: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    egress_mode = (
+        typer.prompt(
+            "Egress mode",
+            default=egress_mode_type.restricted.value,
+        )
+        .strip()
+        .lower()
+    )
+    supported_egress = {mode.value for mode in egress_mode_type}
+    if egress_mode not in supported_egress:
+        typer.echo(
+            "error: unsupported egress mode "
+            f"{egress_mode!r}; choose one of {', '.join(sorted(supported_egress))}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    open_explanation = None
+    if egress_mode == "open":
+        open_explanation = typer.prompt(
+            "Open egress explanation",
+            default="Project setup or validation needs internet access.",
+        ).strip()
+
+    validation_commands: list[str] = []
+    if not preview.draft.profile.phases.validate_commands and typer.confirm(
+        "Add a validation command now?",
+        default=False,
+    ):
+        while True:
+            validation_command = typer.prompt("Validation command").strip()
+            if validation_command:
+                validation_commands.append(validation_command)
+            if not typer.confirm("Add another validation command?", default=False):
+                break
+
+    preview = customize_preview(
+        preview,
+        egress_mode=egress_mode_type(egress_mode),
+        open_explanation=open_explanation,
+        validation_commands=validation_commands or None,
+    )
+    return preview, typer.confirm("Write .awf/workspace.yml?", default=True)
+
+
+def _init_project_onboarding_payload(
+    *,
+    preview: Any,
+    existing_profile_path: Path | None,
+    written_path: Path | None,
+    service_status: dict[str, object],
+    doctor_status: str,
+    local_checks_ready: bool,
+    guided: bool,
+    mode: str,
+) -> dict[str, object]:
+    """Build the structured project-onboarding payload for pretty and JSON output."""
+    payload = cast(dict[str, object], preview.to_dict())
+    profile_exists = existing_profile_path is not None or written_path is not None
+    payload.update(
+        {
+            "mode": mode,
+            "guided": guided,
+            "selected_template": preview.draft.template,
+            "profile_exists": profile_exists,
+            "service_status": service_status,
+            "doctor_status": doctor_status,
+            "local_checks_ready": local_checks_ready,
+            "next_steps": _init_project_next_steps(
+                existing_profile_path=existing_profile_path,
+                written_path=written_path,
+            ),
+        }
+    )
+    if existing_profile_path is not None:
+        payload["existing_profile_path"] = str(existing_profile_path)
+    if written_path is not None:
+        payload["written_path"] = str(written_path)
+    return payload
+
+
+def _init_project_next_steps(
+    *,
+    existing_profile_path: Path | None,
+    written_path: Path | None,
+) -> list[str]:
+    """Return context-aware follow-up commands for the onboarding result."""
+    if written_path is not None:
+        return [
+            "Run `awf profile preview <path> --profile auto --format pretty` to inspect profile resolution.",
+            "Run `awf smoke run --mocked-local --format pretty` for a local DX proof.",
+        ]
+    if existing_profile_path is not None:
+        return [
+            f"AWF profile already exists: {existing_profile_path}",
+            "Run `awf profile preview <path> --profile auto --format pretty` to inspect profile resolution.",
+            "Run `awf smoke run --mocked-local --format pretty` for a local DX proof.",
+        ]
+    return [
+        "Run `awf init <path> --write-profile --yes` to create `.awf/workspace.yml` with detected defaults.",
+        "Run `awf init <path> --guided` for a short interactive setup.",
+        "Run `awf profile preview <path> --profile <name> --format pretty` to inspect profile resolution.",
+    ]
+
+
+def _emit_init_project_onboarding_pretty(
+    *,
+    preview: Any,
+    payload: Mapping[str, object],
+    doctor_pretty: str,
+    include_smoke_request: bool,
+) -> None:
+    """Render the human-readable project-onboarding readiness report."""
     typer.echo("AWF init: local onboarding readiness check")
-    typer.echo(f"  repository: {repository}")
+    typer.echo(f"  repository: {preview.path}")
     typer.echo(f"  detected profile template: {preview.draft.template}")
+    service_status = _mapping_value(payload.get("service_status"))
     typer.echo(f"  service status: {service_status.get('status', 'unknown')}")
-    typer.echo(f"  doctor status: {doctor_status}")
+    typer.echo(f"  doctor status: {payload.get('doctor_status', 'unknown')}")
     typer.echo("")
-    typer.echo(render_doctor_pretty(doctor_report), nl=False)
+    typer.echo(doctor_pretty, nl=False)
+
+    written_path = payload.get("written_path")
+    if written_path:
+        typer.echo("")
+        typer.echo(f"Wrote AWF profile: {written_path}")
 
     if include_smoke_request and preview.smoke_request is not None:
         typer.echo("")
@@ -906,36 +1213,23 @@ def _run_init_project_onboarding(
 
     typer.echo("")
     typer.echo("Suggested next steps:")
-    if existing_profile_path is not None:
-        typer.echo(f"  - AWF profile already exists: {existing_profile_path}")
-        typer.echo(
-            "  - Run `awf profile preview <path> --profile auto --format pretty` "
-            "to inspect profile resolution."
-        )
-        typer.echo("  - Run `awf smoke run --mocked-local --format pretty` for a local DX proof.")
-    else:
-        typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
-        typer.echo(
-            "  - Run `awf profile preview <path> --profile <name> --format pretty` "
-            "to inspect profile resolution."
-        )
+    for step in _list_value(payload.get("next_steps")):
+        typer.echo(f"  - {step}")
     typer.echo(
         "  - Optional: generate a smoke workspace request locally with "
         "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
         "not submit a workspace."
     )
 
-    if not service_ok or not doctor_ok:
+    if not bool(payload.get("local_checks_ready")):
         typer.echo(
-            "\nLocal prerequisites are not fully ready yet; fix the issues above before "
-            "creating or retrying workspaces."
+            "\nLocal prerequisites are not fully ready yet; profile onboarding can "
+            "continue, but fix the issues above before creating or retrying workspaces."
         )
-        raise typer.Exit(code=1)
 
 
 def _existing_project_profile_path(repository: Path) -> Path | None:
-    """Execute existing project profile path."""
-
+    """Return the first supported project-local AWF profile path if one exists."""
     for relative_path in _PROJECT_PROFILE_MARKER_PATHS:
         candidate = repository / relative_path
         if candidate.is_file():

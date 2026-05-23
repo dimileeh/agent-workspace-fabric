@@ -24,6 +24,7 @@ from awf.profiles.onboarding import (
     _compose_web_port_scheme,
     _diagnostics_for,
     _profile_for_template,
+    customize_project_onboarding_preview,
     draft_workspace_profile,
     inspect_project,
     preview_project_onboarding,
@@ -96,6 +97,43 @@ def test_detects_python_template_and_generates_valid_profile(tmp_path: Path) -> 
     assert draft.profile.name == "python"
     assert [command.command for command in draft.profile.phases.validate_commands] == ["pytest -q"]
     assert WorkspaceProfile.model_validate(draft.profile.model_dump(mode="json")) == draft.profile
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("validation_commands", [[], ["  ", "\t"]])
+def test_customize_preview_empty_validation_commands_clear_detected_commands(
+    tmp_path: Path,
+    validation_commands: list[str],
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
+    preview = preview_project_onboarding(tmp_path, include_smoke_request=True)
+
+    customized = customize_project_onboarding_preview(
+        preview,
+        validation_commands=validation_commands,
+    )
+
+    assert customized.draft.profile.phases.validate_commands == []
+    assert customized.smoke_request is not None
+    assert customized.smoke_request["validation"] == {"commands": [], "requested_tier": 1}
+    assert "No validation command was detected; add lint, test, or build commands." in (
+        customized.diagnostics.missing_validation_commands
+    )
+
+
+@pytest.mark.unit
+def test_customize_onboarding_preview_none_validation_commands_preserves_detected_commands(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
+    preview = preview_project_onboarding(tmp_path)
+
+    customized = customize_project_onboarding_preview(preview, validation_commands=None)
+
+    assert [command.command for command in customized.draft.profile.phases.validate_commands] == [
+        "pytest -q"
+    ]
+    assert customized.diagnostics.missing_validation_commands == ()
 
 
 @pytest.mark.unit
