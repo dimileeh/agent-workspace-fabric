@@ -87,7 +87,11 @@ class _EnvSeedMergeError(ValueError):
 
 
 class _MinRichHelpWidthCommand(typer.core.TyperCommand):
+    """Class for MinRichHelpWidthCommand."""
+
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """Execute format help."""
+
         configured_width = typer_rich_utils.MAX_WIDTH
         terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
         typer_rich_utils.MAX_WIDTH = max(configured_width or terminal_width, _MIN_RICH_HELP_WIDTH)
@@ -166,6 +170,8 @@ def _api_token_option() -> Any:
 
 
 def _control_idempotency_key_option() -> Any:
+    """Execute control idempotency key option."""
+
     return typer.Option(None, "--idempotency-key", help=_CONTROL_IDEMPOTENCY_KEY_HELP)
 
 
@@ -176,6 +182,8 @@ def _control_headers(
     if_match: str | None,
     action: str,
 ) -> dict[str, str]:
+    """Execute control headers."""
+
     generated = idempotency_key is None
     resolved_key = (
         idempotency_key if idempotency_key is not None else f"awf-cli-{action}-{uuid4().hex}"
@@ -331,6 +339,8 @@ async def _run_terminal_workspace_worktree_remove(
 
 
 def _emit(payload: object, fmt: OutputFormat) -> None:
+    """Execute emit."""
+
     if fmt == OutputFormat.json:
         typer.echo(json.dumps(payload, indent=2, default=str))
         return
@@ -349,6 +359,8 @@ def _emit(payload: object, fmt: OutputFormat) -> None:
 
 
 def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
+    """Execute emit pretty dict."""
+
     for key in sorted(d.keys()):
         pretty_key = f"{prefix}.{key}" if prefix else key
         value = d[key]
@@ -363,6 +375,8 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
 
 
 def _emit_profile_preview_pretty(payload: dict[str, Any]) -> None:
+    """Execute emit profile preview pretty."""
+
     profile = _mapping_value(payload.get("profile"))
     profile_name = _text_value(profile.get("name"), "unknown")
     confidence = _text_value(profile.get("confidence"), "unknown")
@@ -426,6 +440,8 @@ def _emit_profile_preview_pretty(payload: dict[str, Any]) -> None:
 
 
 def _emit_smoke_pretty(payload: dict[str, Any]) -> None:
+    """Execute emit smoke pretty."""
+
     status = _text_value(payload.get("status"), "unknown")
     mode = _text_value(payload.get("mode"), "unknown")
     project = _text_value(payload.get("project"), "unknown")
@@ -474,6 +490,8 @@ def _emit_smoke_pretty(payload: dict[str, Any]) -> None:
 
 
 def _profile_runtime_summary(profile: Mapping[str, object]) -> str:
+    """Execute profile runtime summary."""
+
     runtime = _mapping_value(profile.get("runtime"))
     if not runtime:
         return ""
@@ -497,6 +515,8 @@ def _profile_runtime_summary(profile: Mapping[str, object]) -> str:
 
 
 def _profile_services_summary(profile: Mapping[str, object]) -> str:
+    """Execute profile services summary."""
+
     services = _list_value(profile.get("services"))
     names: list[str] = []
     for service in services:
@@ -508,6 +528,8 @@ def _profile_services_summary(profile: Mapping[str, object]) -> str:
 
 
 def _profile_phase_commands(profile: Mapping[str, object], phase_name: str) -> list[str]:
+    """Execute profile phase commands."""
+
     phases = _mapping_value(profile.get("phases"))
     commands = _list_value(phases.get(phase_name))
     rendered: list[str] = []
@@ -522,18 +544,26 @@ def _profile_phase_commands(profile: Mapping[str, object], phase_name: str) -> l
 
 
 def _mapping_value(value: object) -> dict[str, object]:
+    """Execute mapping value."""
+
     return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _list_value(value: object) -> list[object]:
+    """Execute list value."""
+
     return list(value) if isinstance(value, list | tuple) else []
 
 
 def _text_value(value: object, default: str) -> str:
+    """Execute text value."""
+
     return value if isinstance(value, str) and value else default
 
 
 def _profile_coverage_target(coverage: Mapping[str, object]) -> tuple[object, bool] | None:
+    """Execute profile coverage target."""
+
     minimum_percent = coverage.get("minimum_percent")
     if minimum_percent is not None:
         return (minimum_percent, False) if _has_positive_coverage_target(minimum_percent) else None
@@ -545,6 +575,8 @@ def _profile_coverage_target(coverage: Mapping[str, object]) -> tuple[object, bo
 
 
 def _has_positive_coverage_target(value: object) -> bool:
+    """Execute has positive coverage target."""
+
     if isinstance(value, int | float):
         return value > 0
     if isinstance(value, str):
@@ -553,6 +585,8 @@ def _has_positive_coverage_target(value: object) -> bool:
 
 
 def _format_coverage_target(value: object, *, fractional: bool = False) -> str:
+    """Execute format coverage target."""
+
     if isinstance(value, int | float):
         percent = float(value)
         if fractional and 0 <= percent <= 1:
@@ -585,6 +619,8 @@ def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
+    """Execute call."""
+
     url = normalize_api_url(base_url, path)
     try:
         return httpx.request(method, url, timeout=30.0, **kwargs)
@@ -602,6 +638,8 @@ def _handle_response(
     *,
     pretty_items: bool = False,
 ) -> None:
+    """Execute handle response."""
+
     method, request_url = _request_context(response)
     if response.status_code >= 400:
         if request_url is not None:
@@ -749,6 +787,8 @@ def _run_init_project_onboarding(
     *,
     include_smoke_request: bool,
 ) -> None:
+    """Execute run init project onboarding."""
+
     from awf.profiles.onboarding import preview_project_onboarding
     from awf.service.config import (
         ServiceSettings,
@@ -776,6 +816,8 @@ def _run_init_project_onboarding(
         service_name = getattr(settings, "service_name", "unknown")
 
         async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
+            """Execute collect reports."""
+
             service_status_task = asyncio.create_task(
                 collect_service_status(
                     settings,
@@ -791,6 +833,8 @@ def _run_init_project_onboarding(
                 provider_environ: Mapping[str, str] | None = None,
                 **_kwargs: object,
             ) -> dict[str, object]:
+                """Execute collect cached service status."""
+
                 _ = settings, strict_providers, provider_environ, _kwargs
                 try:
                     return await service_status_task
@@ -890,6 +934,8 @@ def _run_init_project_onboarding(
 
 
 def _existing_project_profile_path(repository: Path) -> Path | None:
+    """Execute existing project profile path."""
+
     for relative_path in _PROJECT_PROFILE_MARKER_PATHS:
         candidate = repository / relative_path
         if candidate.is_file():
@@ -2332,6 +2378,8 @@ def service_gc(
     candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
 
     async def _run() -> object:
+        """Execute run."""
+
         try:
             result = await run_terminal_workspace_gc(
                 session_factory,
@@ -2395,6 +2443,8 @@ def service_reconcile_target(
     state_dir = (work_dir or Path(settings.work_dir)).expanduser().resolve()
 
     async def _run() -> TargetBranchMonitorResult:
+        """Execute run."""
+
         return await run_target_branch_reconcile_once(
             runner=AsyncioSubprocessRunner(),
             work_dir=state_dir,
