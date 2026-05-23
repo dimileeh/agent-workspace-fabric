@@ -1491,6 +1491,52 @@ class TestFetchPrStatus:
         assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:20:00+00:00"
 
     @pytest.mark.unit
+    async def test_review_activity_anchor_considers_head_commit_updates(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T10:05:00Z",
+                committed_date="2026-05-06T10:10:00Z",
+                threads=[
+                    {
+                        "id": "T_anchor",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9730,
+                                    "bodyText": "Needs recheck.",
+                                    "author": {"login": "human-reviewer"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T09:15:00Z",
+                                    "updatedAt": "2026-05-06T09:30:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T09:30:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T10:10:00+00:00"
+        assert status.quiet_period_anchor_source == "head_commit"
+
+    @pytest.mark.unit
     async def test_stale_head_commit_uses_pr_updated_at_as_quiet_anchor(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

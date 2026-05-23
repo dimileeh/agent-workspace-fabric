@@ -1674,11 +1674,8 @@ def _quiet_period_anchor(
     pr_updated_at: datetime | None,
     head_committed_at: datetime | None,
 ) -> tuple[datetime | None, str | None]:
-    if latest_external_review_activity_at is not None:
-        return latest_external_review_activity_at, latest_external_review_activity_source
-
-    anchor_at: datetime | None = None
-    anchor_source: str | None = None
+    anchor_at: datetime | None = latest_external_review_activity_at
+    anchor_source: str | None = latest_external_review_activity_source
     for candidate_at, candidate_source in (
         (pr_created_at, "pull_request"),
         (pr_updated_at, "pull_request"),
