@@ -856,6 +856,9 @@ class TestBranchOpenPullRequestResolver:
 def _sample_pr_payload(
     *,
     head_sha: str = "abc123",
+    created_at: str = "2026-05-06T10:00:00Z",
+    updated_at: str = "2026-05-06T10:00:00Z",
+    committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
     merged: bool = False,
     merge_commit_sha: str = "mergecommit1234567890",
@@ -884,6 +887,8 @@ def _sample_pr_payload(
                 "repository": {
                     "pullRequest": {
                         "number": 42,
+                        "createdAt": created_at,
+                        "updatedAt": updated_at,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
@@ -904,7 +909,8 @@ def _sample_pr_payload(
                                                     "hasNextPage": check_contexts_has_next_page
                                                 },
                                             },
-                                        }
+                                        },
+                                        "committedDate": committed_date,
                                     }
                                 }
                             ]
@@ -1301,6 +1307,324 @@ class TestFetchPrStatus:
         assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:9501"]
         assert status.unresolved_review_comments[0].blocks_merge is False
         assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_review_activity_uses_updated_at_across_feedback_surfaces(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:30:00Z",
+                committed_date="2026-05-06T09:10:00Z",
+                threads=[
+                    {
+                        "id": "T_activity",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9701,
+                                    "bodyText": "Inline note.",
+                                    "author": {"login": "greptile-apps[bot]"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "updatedAt": "2026-05-06T10:05:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 9702,
+                        "body": "Review body.",
+                        "state": "COMMENTED",
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-05-06T10:01:00Z",
+                        "updatedAt": "2026-05-06T10:06:00Z",
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 9703,
+                        "body": "Top-level feedback.",
+                        "isMinimized": False,
+                        "viewerDidAuthor": False,
+                        "author": {"login": "coderabbitai[bot]"},
+                        "createdAt": "2026-05-06T10:02:00Z",
+                        "updatedAt": "2026-05-06T10:07:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:07:00+00:00"
+        assert status.latest_external_review_activity_source == "issue_comment"
+        assert status.quiet_period_anchor_at == status.latest_external_review_activity_at
+        assert status.quiet_period_anchor_source == "issue_comment"
+        assert status.unresolved_inline_threads[0].comments[0].updated_at is not None
+        assert (
+            status.unresolved_review_comments[-1].updated_at.isoformat()
+            == "2026-05-06T10:07:00+00:00"
+        )
+
+    @pytest.mark.unit
+    async def test_resolved_thread_comment_activity_counts_for_quiet_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:30:00Z",
+                committed_date="2026-05-06T09:10:00Z",
+                threads=[
+                    {
+                        "id": "T_resolved",
+                        "isResolved": True,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9710,
+                                    "bodyText": "Resolved but still recent.",
+                                    "author": {"login": "human-reviewer"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "updatedAt": "2026-05-06T10:03:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_inline_threads == ()
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:03:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+
+    @pytest.mark.unit
+    async def test_external_review_activity_prevails_over_pr_updated_at_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T10:10:00Z",
+                committed_date="2026-05-06T09:20:00Z",
+                threads=[
+                    {
+                        "id": "T_stale",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9740,
+                                    "bodyText": "Needs final read.",
+                                    "author": {"login": "human-reviewer"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "updatedAt": "2026-05-06T10:03:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:03:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T10:03:00+00:00"
+        assert status.quiet_period_anchor_source == "review_thread_comment"
+
+    @pytest.mark.unit
+    async def test_viewer_authored_feedback_does_not_reset_quiet_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:20:00Z",
+                committed_date="2026-05-06T09:10:00Z",
+                threads=[
+                    {
+                        "id": "T_viewer",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9720,
+                                    "bodyText": "Monitor bookkeeping.",
+                                    "author": {"login": "awf-bot"},
+                                    "viewerDidAuthor": True,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "updatedAt": "2026-05-06T10:30:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 9721,
+                        "body": "Self-authored review.",
+                        "state": "COMMENTED",
+                        "viewerDidAuthor": True,
+                        "author": {"login": "awf-bot"},
+                        "submittedAt": "2026-05-06T10:05:00Z",
+                        "updatedAt": "2026-05-06T10:31:00Z",
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 9722,
+                        "body": "Self-authored issue comment.",
+                        "isMinimized": False,
+                        "viewerDidAuthor": True,
+                        "author": {"login": "awf-bot"},
+                        "createdAt": "2026-05-06T10:06:00Z",
+                        "updatedAt": "2026-05-06T10:32:00Z",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is None
+        assert status.latest_external_review_activity_source is None
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_source == "pull_request"
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:20:00+00:00"
+
+    @pytest.mark.unit
+    async def test_review_activity_anchor_considers_head_commit_updates(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T10:05:00Z",
+                committed_date="2026-05-06T10:10:00Z",
+                threads=[
+                    {
+                        "id": "T_anchor",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9730,
+                                    "bodyText": "Needs recheck.",
+                                    "author": {"login": "human-reviewer"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T09:15:00Z",
+                                    "updatedAt": "2026-05-06T09:30:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T09:30:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T10:10:00+00:00"
+        assert status.quiet_period_anchor_source == "head_commit"
+
+    @pytest.mark.unit
+    async def test_stale_head_commit_uses_pr_updated_at_as_quiet_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:45:00Z",
+                committed_date="2026-05-06T09:10:00Z",
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is None
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_source == "pull_request"
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:45:00+00:00"
+
+    @pytest.mark.unit
+    async def test_no_review_feedback_uses_latest_pr_or_head_activity_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T09:20:00Z",
+                committed_date="2026-05-06T09:45:00Z",
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is None
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T09:45:00+00:00"
+        assert status.quiet_period_anchor_source == "head_commit"
 
     @pytest.mark.unit
     async def test_preserves_full_unresolved_review_thread_comment_history(self) -> None:
@@ -2313,6 +2637,138 @@ class TestFetchPrStatus:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
+
+    @pytest.mark.unit
+    async def test_paginates_comment_history_for_resolved_and_outdated_threads(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_resolved",
+                        "isResolved": True,
+                        "isOutdated": False,
+                        "path": "src/resolved.py",
+                        "line": 10,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 311,
+                                    "bodyText": "Resolved comment history page one",
+                                    "author": {"login": "reviewer-a"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "url": "https://github.example/review/311",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-resolved"},
+                        },
+                    },
+                    {
+                        "id": "T_outdated",
+                        "isResolved": False,
+                        "isOutdated": True,
+                        "path": "src/outdated.py",
+                        "line": 20,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 321,
+                                    "bodyText": "Outdated comment history page one",
+                                    "author": {"login": "reviewer-b"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:01:00Z",
+                                    "url": "https://github.example/review/321",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-outdated"},
+                        },
+                    },
+                    {
+                        "id": "T_live",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/live.py",
+                        "line": 30,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 331,
+                                    "bodyText": "Live thread comment",
+                                    "author": {"login": "reviewer-c"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:02:00Z",
+                                    "url": "https://github.example/review/331",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                ],
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "databaseId": 312,
+                                        "bodyText": "Resolved comment history page two",
+                                        "author": {"login": "reviewer-a"},
+                                        "viewerDidAuthor": False,
+                                        "createdAt": "2026-05-06T10:10:00Z",
+                                        "url": "https://github.example/review/312",
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "databaseId": 322,
+                                        "bodyText": "Outdated comment history page two",
+                                        "author": {"login": "reviewer-b"},
+                                        "viewerDidAuthor": False,
+                                        "createdAt": "2026-05-06T10:05:00Z",
+                                        "url": "https://github.example/review/322",
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:10:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert any("threadId=T_resolved" in " ".join(call.args) for call in fake.calls[1:])
+        assert any("threadId=T_outdated" in " ".join(call.args) for call in fake.calls[1:])
+        assert len(fake.calls) == 3
 
     @pytest.mark.unit
     async def test_skips_review_with_empty_body(self) -> None:
