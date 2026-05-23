@@ -124,6 +124,9 @@ class RecordedSleep:
 def pr_payload(
     *,
     head_sha: str = "abc1234567890def",
+    created_at: str = "2026-05-06T10:00:00Z",
+    updated_at: str = "2026-05-06T10:00:00Z",
+    committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
     merged: bool = False,
     merge_commit_sha: str = "mergecommit1234567890",
@@ -141,6 +144,8 @@ def pr_payload(
                 "repository": {
                     "pullRequest": {
                         "number": 42,
+                        "createdAt": created_at,
+                        "updatedAt": updated_at,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
@@ -156,7 +161,8 @@ def pr_payload(
                                         "statusCheckRollup": {
                                             "state": check_state,
                                             "contexts": {"nodes": check_contexts or []},
-                                        }
+                                        },
+                                        "committedDate": committed_date,
                                     }
                                 }
                             ]

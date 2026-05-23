@@ -104,6 +104,7 @@ class ReviewThreadComment:
     body: str
     author: str | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
     url: str | None = None
     viewer_did_author: bool = False
 
@@ -145,6 +146,7 @@ class ReviewComment:
     body: str | None = None
     url: str | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
     state: str | None = None
     source_kind: str = "review"
     viewer_did_author: bool = False
@@ -219,6 +221,10 @@ class PRStatus:
     closed: bool = False
     merged: bool = False
     merge_commit_sha: str | None = None
+    latest_external_review_activity_at: datetime | None = None
+    latest_external_review_activity_source: str | None = None
+    quiet_period_anchor_at: datetime | None = None
+    quiet_period_anchor_source: str | None = None
 
 
 # ── State — small, serialisable, lives on the workspace row ────────────────
