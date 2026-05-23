@@ -317,6 +317,7 @@ _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
+_REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 # Staleness reason codes that a successful SyncBase legitimately remediates:
@@ -499,6 +500,7 @@ class _GitPushResult:
             in {
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
                 _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+                _REPAIR_START_HEAD_UNAVAILABLE_REASON,
                 _REPAIR_WORKTREE_STATUS_FAILED_REASON,
             }
         )
@@ -531,6 +533,7 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "protected_scope_push_blocked"
     if push_result.reason_code in {
         _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+        _REPAIR_START_HEAD_UNAVAILABLE_REASON,
         _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     }:
         return "repair_start_blocked"
@@ -4042,7 +4045,13 @@ class PullRequestMonitorRunner:
         )
         if dirty_result is not None:
             return dirty_result
-        operation_start_head = await self._rev_parse_head(worktree_path)
+        operation_start_head, head_result = await self._repair_operation_start_head_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="comment_repair",
+        )
+        if head_result is not None:
+            return head_result
 
         for _pass_num in range(self._runner_config.max_fix_cycle_passes):
             # 1) Address each item in the current batch.
@@ -4793,7 +4802,13 @@ class PullRequestMonitorRunner:
         )
         if dirty_result is not None:
             return dirty_result
-        operation_start_head = await self._rev_parse_head(worktree_path)
+        operation_start_head, head_result = await self._repair_operation_start_head_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="ci_repair",
+        )
+        if head_result is not None:
+            return head_result
         prompt = fix_ci_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -4951,6 +4966,49 @@ class PullRequestMonitorRunner:
                 "phase": "repair_start",
                 "operation_type": operation_type,
                 "paths": paths,
+                "pushed": False,
+            },
+        )
+
+    async def _repair_operation_start_head_result(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+    ) -> tuple[str, _GitPushResult | None]:
+        result = await self._deps.runner.run(
+            _git_worktree_command(worktree_path, "rev-parse", "HEAD")
+        )
+        head_sha = result.stdout.strip()
+        if result.ok and head_sha:
+            return head_sha, None
+
+        stdout = result.stdout[:400]
+        stderr = result.stderr[:400]
+        _log.warning(
+            "monitor.repair_operation_start_head_unavailable",
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            returncode=result.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return "", _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=result.returncode if result.returncode != 0 else 1,
+            stderr=(
+                "Could not capture repair operation start HEAD before starting the agent; "
+                "refusing to start repair because protected-scope rollback would not have "
+                "a stable baseline."
+            ),
+            reason_code=_REPAIR_START_HEAD_UNAVAILABLE_REASON,
+            details={
+                "phase": "repair_start",
+                "operation_type": operation_type,
+                "head_stdout": stdout,
+                "head_stderr": stderr,
                 "pushed": False,
             },
         )

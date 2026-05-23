@@ -44,6 +44,9 @@ failures now terminate the monitor instead of retrying every poll, rollback
 cleanup uses literal pathspecs for collected repair-created untracked paths
 instead of global `git clean -fd`, and malformed name-status rollback evidence
 falls back to `git diff --name-only -z` before reporting partial evidence.
+The follow-up operation-start baseline review was also addressed: CI/comment
+repairs now fail terminally before invoking the agent if `git rev-parse HEAD`
+cannot produce a start SHA, preserving the transactional rollback invariant.
 
 ## Coverage Added
 
@@ -73,7 +76,8 @@ falls back to `git diff --name-only -z` before reporting partial evidence.
   for CI/comment repair actions; protected-scope rollback cleanup only targets
   collected untracked repair leftovers; malformed committed-diff name-status
   output falls back to name-only path collection before reporting partial
-  evidence; failed reset evidence omits unattempted clean metadata.
+  evidence; failed reset evidence omits unattempted clean metadata; missing
+  operation-start HEAD aborts CI/comment repair before agent mutation.
 
 ## Validation Commands
 
@@ -94,6 +98,14 @@ falls back to `git diff --name-only -z` before reporting partial evidence.
   - Result: `All checks passed`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py src/awf/runtime/monitor_prompts.py`
   - Result: `Success: no issues found in 2 source files`
+- `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py`
+  - Result: `Success: no issues found in 1 source file`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'operation_start_head or repair_start_failures_are_terminal or pre_existing_dirty_worktree or failed_reset_omits or protected_scope_delta or protected_scope_commit_repair_rolls_back_delta_without_agent_or_push or execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope'`
+  - Result: `11 passed, 166 deselected in 11.07s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `All checks passed`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
+  - Result: `2 files already formatted`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py`
   - Result: `Success: no issues found in 1 source file`
 - `uv run --python 3.12 --extra dev pytest tests/unit/test_ci_workflow_full_coverage.py -q -k 'setup_uv or release_artifacts'`

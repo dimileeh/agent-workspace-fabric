@@ -4935,6 +4935,132 @@ async def test_execute_comment_repair_pre_existing_dirty_worktree_is_terminal(
 
 
 @pytest.mark.unit
+async def test_execute_ci_repair_missing_operation_start_head_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=128, stderr="fatal: cannot resolve HEAD\n")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert adapter.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(worktree, "status", "--porcelain"),
+        _git_worktree_command(worktree, "rev-parse", "HEAD"),
+    ]
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=10)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.events[-1].reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    assert ci_operation.result["outcome"] == "repair_start_blocked"
+    assert ci_operation.result["failure_evidence"]["phase"] == "repair_start"
+
+
+@pytest.mark.unit
+async def test_execute_comment_repair_missing_operation_start_head_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_missing_start",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert adapter.calls == []
+    assert "T_missing_start" not in state.threads_addressed_ids
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(worktree, "status", "--porcelain"),
+        _git_worktree_command(worktree, "rev-parse", "HEAD"),
+    ]
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=10)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.events[-1].reason_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    comment_operation = next(
+        operation for operation in operations if operation.type == "comment_repair"
+    )
+    assert comment_operation.status == OperationStatus.failed.value
+    assert comment_operation.error_code == "REPAIR_START_HEAD_UNAVAILABLE"
+    assert comment_operation.result["outcome"] == "repair_start_blocked"
+    assert comment_operation.result["failure_evidence"]["phase"] == "repair_start"
+
+
+@pytest.mark.unit
 async def test_ci_fix_protected_scope_repair_ownership_repair_failure_returns_failed_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
