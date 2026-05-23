@@ -7735,6 +7735,7 @@ def _non_check_reviewer_settle_wait_operation_context(
 
 
 def _normalize_non_check_reviewer_logins(logins: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Normalize and dedupe configured reviewer logins."""
     normalized: list[str] = []
     seen: set[str] = set()
     for login in logins:
@@ -7751,6 +7752,7 @@ def _non_check_reviewer_visibility(
     configured_reviewers: tuple[str, ...],
     checks: tuple[CheckTiming, ...],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Separate configured reviewers into visible and missing based on checks."""
     visible_identities = _visible_check_identities(checks)
     visible_reviewers: list[str] = []
     missing_reviewers: list[str] = []
@@ -7763,6 +7765,7 @@ def _non_check_reviewer_visibility(
 
 
 def _visible_check_identities(checks: tuple[CheckTiming, ...]) -> frozenset[str]:
+    """Extract normalized identities from check metadata and creator fields."""
     values: set[str] = set()
     for check in checks:
         for raw in (
@@ -7782,6 +7785,7 @@ def _reviewer_has_visible_check(
     *,
     visible_identities: frozenset[str],
 ) -> bool:
+    """Return whether a reviewer has a corresponding visible check identity."""
     aliases = _non_check_reviewer_visible_aliases(reviewer)
     for identity in visible_identities:
         for alias in aliases:
@@ -7793,6 +7797,7 @@ def _reviewer_has_visible_check(
 
 
 def _non_check_reviewer_visible_aliases(reviewer: str) -> frozenset[str]:
+    """Expand reviewer identity variants used for check-name matching."""
     aliases = {reviewer}
     if reviewer == "greptile-apps" or reviewer.startswith("greptile-"):
         aliases.update({"greptile", "greptile-apps"})
@@ -7800,6 +7805,7 @@ def _non_check_reviewer_visible_aliases(reviewer: str) -> frozenset[str]:
 
 
 def _normalize_non_check_reviewer_identity(value: object) -> str:
+    """Normalize a reviewer/caller identity into lowercase token form."""
     if not isinstance(value, str):
         return ""
     text = value.strip().lower()
@@ -8017,6 +8023,7 @@ def _non_check_reviewer_settle_state_for_runtime(
     now_monotonic: float,
     now_wall_seconds: float,
 ) -> dict[str, str]:
+    """Convert settled wait markers to runtime monotonic timestamps."""
     started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
     for started_key, started_raw in list(threads_addressed.items()):
         if not started_key.startswith(started_prefix):
@@ -8045,6 +8052,7 @@ def _non_check_reviewer_settle_state_for_persistence(
     now_monotonic: float,
     now_wall_seconds: float,
 ) -> dict[str, str]:
+    """Convert settled wait markers back to persisted wall-clock form."""
     started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
     for started_key, started_raw in list(threads_addressed.items()):
         if not started_key.startswith(started_prefix):

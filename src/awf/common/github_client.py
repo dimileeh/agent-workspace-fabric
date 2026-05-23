@@ -1595,6 +1595,7 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
 def _parse_review_thread_comments(
     comment_nodes: list[dict[str, Any]],
 ) -> tuple[ReviewThreadComment, ...]:
+    """Parse GraphQL thread-comment nodes and keep timestamps for activity gating."""
     comments: list[ReviewThreadComment] = []
     for node in comment_nodes:
         database_id = node.get("databaseId")
@@ -1619,6 +1620,7 @@ def _newer_activity(
     candidate_at: datetime | None,
     candidate_source: str,
 ) -> tuple[datetime | None, str | None]:
+    """Return the later activity timestamp and source across two candidates."""
     if candidate_at is None:
         return current_at, current_source
     if current_at is None or candidate_at > current_at:
@@ -1632,6 +1634,7 @@ def _latest_activity_from_thread_comments(
     current_at: datetime | None,
     current_source: str | None,
 ) -> tuple[datetime | None, str | None]:
+    """Reduce thread comments to the newest external activity timestamp."""
     latest_at = current_at
     latest_source = current_source
     for comment in comments:
@@ -1652,6 +1655,7 @@ def _latest_activity_from_reviews(
     current_at: datetime | None,
     current_source: str | None,
 ) -> tuple[datetime | None, str | None]:
+    """Reduce review payloads to the newest non-author activity timestamp."""
     latest_at = current_at
     latest_source = current_source
     for review in reviews:
@@ -1674,6 +1678,7 @@ def _quiet_period_anchor(
     pr_updated_at: datetime | None,
     head_committed_at: datetime | None,
 ) -> tuple[datetime | None, str | None]:
+    """Choose the newest available anchor for the quiet-window timer."""
     anchor_at: datetime | None = latest_external_review_activity_at
     anchor_source: str | None = latest_external_review_activity_source
     for candidate_at, candidate_source in (
@@ -1691,6 +1696,7 @@ def _quiet_period_anchor(
 
 
 def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _FetchedReview:
+    """Normalize one GraphQL review node for blocking-review evaluation."""
     raw_body = node.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     body_excerpt = body[:400] if body.strip() else ""
@@ -1725,6 +1731,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
 
 
 def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> str:
+    """Build a stable per-reviewer key for review state deduplication."""
     author = _clean_optional_str(_dig(node, "author", "login"))
     if author is not None:
         return f"author:{author.lower()}"
@@ -1735,6 +1742,7 @@ def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> 
 
 
 def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
+    """Return whether a review should participate in required-review state."""
     # Real GraphQL payloads include this Boolean. Older/fake payloads are treated
     # as counting to preserve conservative merge-gate behavior.
     # This is a push-access heuristic, not a complete GitHub branch-protection
@@ -1746,6 +1754,7 @@ def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
+    """Resolve latest per-reviewer state and return blockers for merge-gating."""
     # DISMISSED must be tracked so a maintainer-dismissed review overwrites that
     # reviewer's prior CHANGES_REQUESTED entry instead of leaving a stale blocker.
     effective_review_states = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
