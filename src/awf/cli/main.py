@@ -790,6 +790,7 @@ def _run_init_project_onboarding(
     force: bool,
     fmt: OutputFormat,
 ) -> None:
+    """Run repository onboarding checks and optionally write the workspace profile."""
     from awf.profiles.models import EgressMode
     from awf.profiles.onboarding import (
         customize_project_onboarding_preview,
@@ -844,6 +845,7 @@ def _run_init_project_onboarding(
         service_name = getattr(settings, "service_name", "unknown")
 
         async def _collect_reports() -> tuple[dict[str, object], DoctorReport | None, str | None]:
+            """Collect service status and doctor diagnostics with one shared status read."""
             service_status_task = asyncio.create_task(
                 collect_service_status(
                     settings,
@@ -859,6 +861,7 @@ def _run_init_project_onboarding(
                 provider_environ: Mapping[str, str] | None = None,
                 **_kwargs: object,
             ) -> dict[str, object]:
+                """Serve the in-flight service status result to doctor diagnostics."""
                 _ = settings, strict_providers, provider_environ, _kwargs
                 return await service_status_task
 
@@ -981,6 +984,7 @@ def _run_init_project_onboarding(
 
 
 def _stdio_is_interactive() -> bool:
+    """Return whether both stdin and stdout are attached to an interactive TTY."""
     stdin_isatty = getattr(sys.stdin, "isatty", lambda: False)
     stdout_isatty = getattr(sys.stdout, "isatty", lambda: False)
     return bool(stdin_isatty() and stdout_isatty())
@@ -996,6 +1000,7 @@ def _prompt_project_onboarding_choices(
     preview_factory: Any,
     customize_preview: Any,
 ) -> tuple[Any, bool]:
+    """Prompt for template, egress, validation, and profile-write onboarding choices."""
     typer.echo("AWF init: guided project profile setup")
     typer.echo(f"Detected template: {preview.draft.template}")
     template_choice = typer.prompt("Template", default=preview.draft.template).strip()
@@ -1065,6 +1070,7 @@ def _init_project_onboarding_payload(
     guided: bool,
     mode: str,
 ) -> dict[str, object]:
+    """Build the structured project-onboarding payload for pretty and JSON output."""
     payload = cast(dict[str, object], preview.to_dict())
     profile_exists = existing_profile_path is not None or written_path is not None
     payload.update(
@@ -1094,6 +1100,7 @@ def _init_project_next_steps(
     existing_profile_path: Path | None,
     written_path: Path | None,
 ) -> list[str]:
+    """Return context-aware follow-up commands for the onboarding result."""
     if written_path is not None:
         return [
             "Run `awf profile preview <path> --profile auto --format pretty` to inspect profile resolution.",
@@ -1119,6 +1126,7 @@ def _emit_init_project_onboarding_pretty(
     doctor_pretty: str,
     include_smoke_request: bool,
 ) -> None:
+    """Render the human-readable project-onboarding readiness report."""
     typer.echo("AWF init: local onboarding readiness check")
     typer.echo(f"  repository: {preview.path}")
     typer.echo(f"  detected profile template: {preview.draft.template}")
@@ -1156,6 +1164,7 @@ def _emit_init_project_onboarding_pretty(
 
 
 def _existing_project_profile_path(repository: Path) -> Path | None:
+    """Return the first supported project-local AWF profile path if one exists."""
     for relative_path in _PROJECT_PROFILE_MARKER_PATHS:
         candidate = repository / relative_path
         if candidate.is_file():
