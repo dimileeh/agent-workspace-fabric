@@ -2,9 +2,9 @@
 
 ## Problem Statement
 
-CodeRabbit's review-level pre-merge check reported low docstring coverage for PR
-#283 and requested docstrings for missing functions. The PR's guided onboarding
-changes added a focused cluster of `awf init <path>` CLI helpers in
+CodeRabbit's review-level pre-merge check reported low docstring coverage for
+PR `#283` and requested docstrings for missing functions. The PR's guided
+onboarding changes added a focused cluster of `awf init <path>` CLI helpers in
 `src/awf/cli/main.py` without docstrings.
 
 ## Scope
