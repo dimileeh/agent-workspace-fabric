@@ -30,6 +30,14 @@ agent runs, and rollback evidence records whether `git clean -fd` actually ran.
 That keeps transactional rollback scoped to the current repair operation and
 avoids reporting a synthetic clean success after a failed reset.
 
+PR #284 then exposed a protected-workflow CI blocker: `astral-sh/setup-uv@v4`
+was using its default `${{ github.token }}` while resolving the broad
+`0.5.x` version range, and GitHub Actions failed before project code ran with
+`Bad credentials`. Because the live AWF worker does not yet have this
+transactional protected-scope guard, this workflow repair was applied manually:
+all CI `setup-uv` steps now pin `uv` to `0.5.31` and pass an empty
+`github-token` so the action avoids the bad default token path.
+
 ## Coverage Added
 
 - CI repair regression: a local repair commit touching `.github/workflows/ci.yml`
@@ -52,6 +60,8 @@ avoids reporting a synthetic clean success after a failed reset.
 - Dirty-start/rollback-evidence regressions: CI repair refuses to invoke the
   agent when pre-existing dirty worktree state is detected; failed rollback
   reset evidence omits `clean_returncode` and reports `clean_attempted: false`.
+- CI workflow regression: all `setup-uv` steps pin an explicit uv version and
+  avoid the action's default GitHub token release lookup.
 
 ## Validation Commands
 
@@ -74,6 +84,12 @@ avoids reporting a synthetic clean success after a failed reset.
   - Result: `Success: no issues found in 2 source files`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor_runner.py`
   - Result: `Success: no issues found in 1 source file`
+- `uv run --python 3.12 --extra dev pytest tests/unit/test_ci_workflow_full_coverage.py -q -k 'setup_uv or release_artifacts'`
+  - Result: `2 passed, 12 deselected in 0.20s`
+- `uv run --python 3.12 --extra dev ruff check tests/unit/test_ci_workflow_full_coverage.py`
+  - Result: `All checks passed`
+- `uv run --python 3.12 --extra dev ruff format --check tests/unit/test_ci_workflow_full_coverage.py`
+  - Result: `1 file already formatted`
 
 ## Notes
 
