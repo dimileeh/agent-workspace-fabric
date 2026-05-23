@@ -17,10 +17,9 @@ For `pipx` installs:
 pipx upgrade agent-workspace-fabric
 ```
 
-For virtualenv installs:
+For virtualenv installs (activate your existing venv first):
 
 ```bash
-python -m venv .venv
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
 ```
