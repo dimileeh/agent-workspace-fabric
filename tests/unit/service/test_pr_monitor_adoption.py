@@ -297,6 +297,33 @@ class TestPullRequestMonitorAdoptionService:
         }
 
     @pytest.mark.unit
+    async def test_attaching_live_adoption_allows_reordered_owned_paths(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    owned_paths=["docs/**", ".github/workflows/publish.yml"],
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    owned_paths=[".github/workflows/publish.yml", "docs/**"],
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("request_kwargs", "expected_policy"),
         [

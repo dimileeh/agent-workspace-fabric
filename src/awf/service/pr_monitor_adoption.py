@@ -1011,7 +1011,7 @@ def _raise_if_policy_conflicts(
                 "requested_inline_profile_name": _inline_profile_name(requested_profile),
             },
         )
-    if list(workspace.owned_paths) != list(request.owned_paths):
+    if set(workspace.owned_paths) != set(request.owned_paths):
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
             message="Existing adopted PR monitor uses a different owned_paths policy.",
