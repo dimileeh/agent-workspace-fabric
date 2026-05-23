@@ -566,6 +566,32 @@ def test_init_write_profile_existing_profile_requires_force(
 
 
 @pytest.mark.unit
+def test_init_write_profile_alternate_profile_marker_requires_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    alternate_profile_path = tmp_path / ".awf" / "workspace.yaml"
+    alternate_profile_path.parent.mkdir()
+    alternate_profile_path.write_text("version: 1\nname: existing\n", encoding="utf-8")
+    canonical_profile_path = tmp_path / ".awf" / "workspace.yml"
+
+    blocked = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes"],
+    )
+    forced = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes", "--force"],
+    )
+
+    assert blocked.exit_code == 1, blocked.output
+    assert f"{alternate_profile_path} already exists" in blocked.output
+    assert forced.exit_code == 0, forced.output
+    assert canonical_profile_path.is_file()
+    assert alternate_profile_path.is_file()
+
+
+@pytest.mark.unit
 def test_init_json_mode_never_prompts_and_reports_structured_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -418,11 +418,23 @@ def preview_workspace_profile(
 def write_workspace_profile(preview: ProjectOnboardingPreview, force: bool = False) -> Path:
     """Write the previewed draft to ``.awf/workspace.yml``."""
     profile_path = preview.path / ".awf" / "workspace.yml"
-    if profile_path.exists() and not force:
-        raise FileExistsError(f"{profile_path} already exists; pass --force to overwrite")
+    existing_profile_path = _existing_workspace_profile_path(preview.path)
+    if existing_profile_path is None and profile_path.exists():
+        existing_profile_path = profile_path
+    if existing_profile_path is not None and not force:
+        raise FileExistsError(f"{existing_profile_path} already exists; pass --force to overwrite")
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(preview.draft.yaml, encoding="utf-8")
     return profile_path
+
+
+def _existing_workspace_profile_path(project: Path) -> Path | None:
+    """Return the first supported workspace profile marker path on disk."""
+    for relative_path in PROFILE_MARKER_PATHS:
+        candidate = project / relative_path
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _profile_for_template(inspection: ProjectInspection, template: str) -> WorkspaceProfile:
