@@ -7555,6 +7555,7 @@ def _non_check_reviewer_settle_decision(
             visible_reviewers=visible_reviewers,
             started_at=started_at,
             elapsed_seconds=elapsed_seconds,
+            remaining_seconds=0.0,
             state_changed=True,
         )
 
