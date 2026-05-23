@@ -83,6 +83,7 @@ class _FetchedReview:
     comment: ReviewComment
     reviewer_key: str
     submitted_at: datetime | None
+    updated_at: datetime | None
     fetch_index: int
     viewer_did_author: bool
     has_body: bool
@@ -97,6 +98,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       number
+      createdAt
+      updatedAt
       headRefOid
       mergeable
       mergeStateStatus
@@ -108,6 +111,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       commits(last: 1) {
         nodes {
           commit {
+            committedDate
             statusCheckRollup {
               state
               contexts(first: 100) {
@@ -159,6 +163,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               author { login }
               viewerDidAuthor
               createdAt
+              updatedAt
               url
             }
             pageInfo { hasNextPage endCursor }
@@ -177,6 +182,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           author { login }
           authorCanPushToRepository
           viewerDidAuthor
+          updatedAt
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -235,6 +241,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
               author { login }
               viewerDidAuthor
               createdAt
+              updatedAt
               url
             }
             pageInfo { hasNextPage endCursor }
@@ -259,6 +266,7 @@ query($threadId: ID!, $cursor: String!) {
           author { login }
           viewerDidAuthor
           createdAt
+          updatedAt
           url
         }
         pageInfo { hasNextPage endCursor }
@@ -284,6 +292,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           author { login }
           authorCanPushToRepository
           viewerDidAuthor
+          updatedAt
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -336,6 +345,7 @@ class RepoRef:
 
     @classmethod
     def from_url(cls, repo_url: str) -> RepoRef:
+        """Parse a GitHub repository URL/slug into a `RepoRef`."""
         value = repo_url.strip()
         slug_match = re.fullmatch(r"([^/\s]+)/([^/\s]+?)(?:\.git)?/?", value)
         if slug_match and "github.com" not in value and ":" not in value:
@@ -370,15 +380,19 @@ class RepoRef:
         raise ValueError(f"Cannot parse GitHub repo from URL: {repo_url!r}")
 
     def slug(self) -> str:
+        """Return the repository slug in `owner/name` format."""
         return f"{self.owner}/{self.name}"
 
     def https_url(self) -> str:
+        """Return HTTPS clone URL for the repository."""
         return f"https://github.com/{self.owner}/{self.name}.git"
 
     def ssh_url(self) -> str:
+        """Return SSH clone URL for the repository."""
         return f"git@github.com:{self.owner}/{self.name}.git"
 
     def clone_url_like(self, repo_url: str) -> str:
+        """Return a clone URL matching the requested transport style."""
         stripped = repo_url.strip()
         if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
             return self.ssh_url()
@@ -625,6 +639,7 @@ class BranchOpenPullRequestResolver:
     """Resolve open PRs for a branch using the GitHub CLI."""
 
     def __init__(self, runner: AsyncCommandRunner) -> None:
+        """Store the command runner used for GH CLI queries."""
         self._runner = runner
 
     async def resolve(
@@ -634,6 +649,7 @@ class BranchOpenPullRequestResolver:
         branch_name: str,
         base_branch: str | None,
     ) -> list[BranchOpenPullRequest]:
+        """Resolve open PRs for a branch, optionally scoped by base branch."""
         try:
             repo = RepoRef.from_url(repo_url)
         except ValueError as exc:
@@ -669,6 +685,7 @@ def _parse_pull_request_adoption_metadata(
     repo: RepoRef,
     pr_number: int,
 ) -> PullRequestAdoptionMetadata:
+    """Parse and validate payload from ``gh pr view`` adoption query."""
     try:
         number = int(payload["number"])
         head_ref = str(payload["headRefName"])
@@ -750,6 +767,7 @@ def _parse_branch_open_pull_request(
     repo: RepoRef,
     branch_name: str,
 ) -> BranchOpenPullRequest:
+    """Parse and validate one ``gh pr list`` branch-open payload item."""
     if not isinstance(payload, dict):
         raise PullRequestMetadataError(
             reason_code="OPEN_PR_LOOKUP_INVALID",
@@ -797,6 +815,7 @@ def _head_repo_slug_from_branch_open_pr_payload(
     repo: RepoRef,
     branch_name: str,
 ) -> str:
+    """Extract branch-open PR head repository slug from payload."""
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
         name_with_owner = _optional_nonempty_str(head_repo.get("nameWithOwner"))
@@ -833,6 +852,7 @@ def _head_repo_owner_login_from_branch_payload(
     payload: dict[str, Any],
     head_repo: dict[str, Any],
 ) -> str | None:
+    """Resolve head repo owner login from payload fallback fields."""
     owner = payload.get("headRepositoryOwner")
     if isinstance(owner, dict):
         login = _optional_nonempty_str(owner.get("login"))
@@ -856,6 +876,7 @@ def _parse_open_pr_head_repo_slug(
     branch_name: str,
     field_name: str,
 ) -> str:
+    """Parse and normalize ``owner/name`` payload value."""
     try:
         return RepoRef.from_url(value).slug()
     except ValueError as exc:
@@ -876,6 +897,7 @@ def _head_repo_slug_from_adoption_payload(
     repo: RepoRef,
     pr_number: int,
 ) -> str:
+    """Resolve PR head repository slug from adoption payload."""
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
         name_with_owner = head_repo.get("nameWithOwner")
@@ -911,6 +933,7 @@ def _required_nonempty_str(
     pr_number: int,
     message: str,
 ) -> str:
+    """Return a required non-empty string or raise a metadata error."""
     if not isinstance(value, str):
         raise PullRequestMetadataError(
             reason_code="PR_METADATA_INVALID",
@@ -928,10 +951,12 @@ def _required_nonempty_str(
 
 
 def _optional_nonempty_str(value: object) -> str | None:
+    """Return trimmed string content or None when value is empty/missing."""
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _looks_like_missing_pr_error(stderr: str) -> bool:
+    """Return True when GH stderr indicates a missing pull request."""
     lower = stderr.lower()
     return (
         "could not resolve to a pullrequest" in lower
@@ -944,6 +969,7 @@ class GitHubClient:
     """Stateless façade over ``gh`` CLI + GraphQL. Re-entrant."""
 
     def __init__(self, runner: AsyncCommandRunner) -> None:
+        """Store the shared command runner for all GitHub operations."""
         self._runner = runner
 
     async def fetch_pr_status(
@@ -992,6 +1018,8 @@ class GitHubClient:
         # ── Mergeable ──────────────────────────────────────────────────
         mergeable = _parse_mergeable(pr.get("mergeable"))
         merge_state_status = _parse_merge_state_status(pr.get("mergeStateStatus"))
+        latest_review_activity_at: datetime | None = None
+        latest_review_activity_source: str | None = None
 
         # ── Review threads: inline ─────────────────────────────────────
         inline: list[ReviewThread] = []
@@ -1008,15 +1036,23 @@ class GitHubClient:
                 continue
             is_resolved = bool(node.get("isResolved"))
             is_outdated = bool(node.get("isOutdated"))
-            if is_resolved or is_outdated:
-                continue
-            comments = _parse_review_thread_comments(
+            comment_connection = _dig(node, "comments")
+            all_comments = _parse_review_thread_comments(
                 await self._fetch_paginated_review_thread_comment_nodes(
                     thread_id=thread_id,
-                    first_page=_dig(node, "comments"),
+                    first_page=comment_connection,
                 )
             )
-            comments = tuple(comment for comment in comments if not comment.viewer_did_author)
+            latest_review_activity_at, latest_review_activity_source = (
+                _latest_activity_from_thread_comments(
+                    all_comments,
+                    current_at=latest_review_activity_at,
+                    current_source=latest_review_activity_source,
+                )
+            )
+            if is_resolved or is_outdated:
+                continue
+            comments = tuple(comment for comment in all_comments if not comment.viewer_did_author)
             if not comments:
                 continue
             first_comment = comments[0] if comments else None
@@ -1051,6 +1087,11 @@ class GitHubClient:
             _parse_fetched_review(node, fetch_index=index)
             for index, node in enumerate(review_nodes)
         ]
+        latest_review_activity_at, latest_review_activity_source = _latest_activity_from_reviews(
+            fetched_reviews,
+            current_at=latest_review_activity_at,
+            current_source=latest_review_activity_source,
+        )
         blocking_reviews = _effective_blocking_reviews(fetched_reviews)
         reviews: list[ReviewComment] = [
             fetched.comment
@@ -1075,6 +1116,14 @@ class GitHubClient:
             if node.get("isMinimized") or node.get("viewerDidAuthor") or not body.strip():
                 continue
             author = _dig(node, "author", "login")
+            created_at = _parse_github_datetime(node.get("createdAt"))
+            updated_at = _parse_github_datetime(node.get("updatedAt"))
+            latest_review_activity_at, latest_review_activity_source = _newer_activity(
+                current_at=latest_review_activity_at,
+                current_source=latest_review_activity_source,
+                candidate_at=updated_at or created_at,
+                candidate_source="issue_comment",
+            )
             reviews.append(
                 ReviewComment(
                     comment_id=f"issue:{node['databaseId']}",
@@ -1083,7 +1132,8 @@ class GitHubClient:
                     is_resolved=False,
                     body=body,
                     url=_clean_optional_str(node.get("url")),
-                    created_at=_parse_github_datetime(node.get("createdAt")),
+                    created_at=created_at,
+                    updated_at=updated_at,
                     source_kind="issue",
                     viewer_did_author=False,
                 )
@@ -1093,6 +1143,15 @@ class GitHubClient:
             repo=repo,
             pr_number=pr_number,
             first_page=_dig(pr, "files"),
+        )
+        quiet_anchor_at, quiet_anchor_source = _quiet_period_anchor(
+            latest_external_review_activity_at=latest_review_activity_at,
+            latest_external_review_activity_source=latest_review_activity_source,
+            pr_created_at=_parse_github_datetime(pr.get("createdAt")),
+            pr_updated_at=_parse_github_datetime(pr.get("updatedAt")),
+            head_committed_at=_parse_github_datetime(
+                _dig(pr, "commits", "nodes", 0, "commit", "committedDate")
+            ),
         )
 
         return PRStatus(
@@ -1111,6 +1170,10 @@ class GitHubClient:
             merged=bool(pr.get("merged")),
             merge_commit_sha=_clean_optional_str(_dig(pr, "mergeCommit", "oid")),
             blocking_reviews=blocking_reviews,
+            latest_external_review_activity_at=latest_review_activity_at,
+            latest_external_review_activity_source=latest_review_activity_source,
+            quiet_period_anchor_at=quiet_anchor_at,
+            quiet_period_anchor_source=quiet_anchor_source,
         )
 
     async def _fetch_paginated_pr_connection_nodes(
@@ -1122,6 +1185,7 @@ class GitHubClient:
         connection_name: str,
         query: str,
     ) -> list[dict[str, Any]]:
+        """Fetch all nodes from a paginated pull-request GraphQL connection."""
         nodes = _connection_nodes(first_page)
         cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
         has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
@@ -1147,6 +1211,7 @@ class GitHubClient:
         thread_id: str,
         first_page: Any,
     ) -> list[dict[str, Any]]:
+        """Fetch all comment nodes for a review thread using cursor pagination."""
         nodes = _connection_nodes(first_page)
         cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
         has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
@@ -1168,6 +1233,7 @@ class GitHubClient:
         pr_number: int,
         first_page: Any,
     ) -> tuple[str, ...]:
+        """Collect changed file paths for the PR across all file pages."""
         changed_path_items = _extract_pr_file_paths(first_page)
         files_page = first_page
 
@@ -1308,6 +1374,7 @@ class GitHubClient:
             )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
+        """Resolve a GitHub review thread by node ID."""
         await self._graphql(
             query=_GQL_RESOLVE_THREAD,
             variables={"threadId": thread_id},
@@ -1454,6 +1521,7 @@ class GitHubClient:
         return payload  # type: ignore[no-any-return]  # json.loads returns Any; the explicit dict type is the caller's contract
 
     async def _gh_json(self, args: list[str], *, operation: str) -> Any:
+        """Run a GH CLI JSON command and decode the stdout body."""
         result = await self._runner.run(args)
         if not result.ok:
             raise GitHubClientError(
@@ -1466,6 +1534,7 @@ class GitHubClient:
         return json.loads(result.stdout)
 
     async def _run_gh(self, args: list[str], *, operation: str, strict: bool) -> Any:
+        """Execute a GH CLI command, optionally enforcing success."""
         result = await self._runner.run(args)
         if not result.ok and strict:
             raise GitHubClientError(
@@ -1497,6 +1566,7 @@ def _dig(obj: Any, *keys: Any) -> Any:
 
 
 def _parse_check_state(value: str) -> CheckState:
+    """Normalize GitHub rollup check state into `CheckState`."""
     # Rollup values per docs: EXPECTED / ERROR / FAILURE / PENDING / SUCCESS.
     upper = (value or "").upper()
     if upper == "SUCCESS":
@@ -1509,6 +1579,7 @@ def _parse_check_state(value: str) -> CheckState:
 
 
 def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
+    """Parse status contexts/check runs from GraphQL rollup payload."""
     checks: list[CheckTiming] = []
     for node in _dig(rollup, "contexts", "nodes") or []:
         if not isinstance(node, dict):
@@ -1550,6 +1621,7 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
 def _parse_review_thread_comments(
     comment_nodes: list[dict[str, Any]],
 ) -> tuple[ReviewThreadComment, ...]:
+    """Parse GraphQL thread-comment nodes and keep timestamps for activity gating."""
     comments: list[ReviewThreadComment] = []
     for node in comment_nodes:
         database_id = node.get("databaseId")
@@ -1560,13 +1632,99 @@ def _parse_review_thread_comments(
                 author=_clean_optional_str(_dig(node, "author", "login")),
                 viewer_did_author=bool(node.get("viewerDidAuthor")),
                 created_at=_parse_github_datetime(node.get("createdAt")),
+                updated_at=_parse_github_datetime(node.get("updatedAt")),
                 url=_clean_optional_str(node.get("url")),
             )
         )
     return tuple(comments)
 
 
+def _newer_activity(
+    *,
+    current_at: datetime | None,
+    current_source: str | None,
+    candidate_at: datetime | None,
+    candidate_source: str,
+) -> tuple[datetime | None, str | None]:
+    """Return the later activity timestamp and source across two candidates."""
+    if candidate_at is None:
+        return current_at, current_source
+    if current_at is None or candidate_at > current_at:
+        return candidate_at, candidate_source
+    return current_at, current_source
+
+
+def _latest_activity_from_thread_comments(
+    comments: tuple[ReviewThreadComment, ...],
+    *,
+    current_at: datetime | None,
+    current_source: str | None,
+) -> tuple[datetime | None, str | None]:
+    """Reduce thread comments to the newest external activity timestamp."""
+    latest_at = current_at
+    latest_source = current_source
+    for comment in comments:
+        if comment.viewer_did_author:
+            continue
+        latest_at, latest_source = _newer_activity(
+            current_at=latest_at,
+            current_source=latest_source,
+            candidate_at=comment.updated_at or comment.created_at,
+            candidate_source="review_thread_comment",
+        )
+    return latest_at, latest_source
+
+
+def _latest_activity_from_reviews(
+    reviews: Sequence[_FetchedReview],
+    *,
+    current_at: datetime | None,
+    current_source: str | None,
+) -> tuple[datetime | None, str | None]:
+    """Reduce review payloads to the newest non-author activity timestamp."""
+    latest_at = current_at
+    latest_source = current_source
+    for review in reviews:
+        if review.viewer_did_author:
+            continue
+        latest_at, latest_source = _newer_activity(
+            current_at=latest_at,
+            current_source=latest_source,
+            candidate_at=review.updated_at or review.submitted_at or review.comment.created_at,
+            candidate_source="review",
+        )
+    return latest_at, latest_source
+
+
+def _quiet_period_anchor(
+    *,
+    latest_external_review_activity_at: datetime | None,
+    latest_external_review_activity_source: str | None,
+    pr_created_at: datetime | None,
+    pr_updated_at: datetime | None,
+    head_committed_at: datetime | None,
+) -> tuple[datetime | None, str | None]:
+    """Choose the newest available anchor for the quiet-window timer."""
+    anchor_at: datetime | None = latest_external_review_activity_at
+    anchor_source: str | None = latest_external_review_activity_source
+    candidates: list[tuple[datetime | None, str]] = [
+        (pr_created_at, "pull_request"),
+        (head_committed_at, "head_commit"),
+    ]
+    if latest_external_review_activity_at is None:
+        candidates.insert(0, (pr_updated_at, "pull_request"))
+    for candidate_at, candidate_source in candidates:
+        anchor_at, anchor_source = _newer_activity(
+            current_at=anchor_at,
+            current_source=anchor_source,
+            candidate_at=candidate_at,
+            candidate_source=candidate_source,
+        )
+    return anchor_at, anchor_source
+
+
 def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _FetchedReview:
+    """Normalize one GraphQL review node for blocking-review evaluation."""
     raw_body = node.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     body_excerpt = body[:400] if body.strip() else ""
@@ -1574,6 +1732,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
     comment_id = str(database_id if database_id is not None else f"missing:{fetch_index}")
     author = _clean_optional_str(_dig(node, "author", "login"))
     submitted_at = _parse_github_datetime(node.get("submittedAt"))
+    updated_at = _parse_github_datetime(node.get("updatedAt"))
     comment = ReviewComment(
         comment_id=comment_id,
         body_excerpt=body_excerpt,
@@ -1582,6 +1741,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         body=body,
         url=_clean_optional_str(node.get("url")),
         created_at=submitted_at,
+        updated_at=updated_at,
         state=(node.get("state") or "").upper(),
         source_kind="review",
         viewer_did_author=bool(node.get("viewerDidAuthor")),
@@ -1590,6 +1750,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         comment=comment,
         reviewer_key=_reviewer_effective_state_key(node, fetch_index=fetch_index),
         submitted_at=submitted_at,
+        updated_at=updated_at,
         fetch_index=fetch_index,
         viewer_did_author=comment.viewer_did_author,
         has_body=bool(body.strip()),
@@ -1598,6 +1759,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
 
 
 def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> str:
+    """Build a stable per-reviewer key for review state deduplication."""
     author = _clean_optional_str(_dig(node, "author", "login"))
     if author is not None:
         return f"author:{author.lower()}"
@@ -1608,6 +1770,7 @@ def _reviewer_effective_state_key(node: dict[str, Any], *, fetch_index: int) -> 
 
 
 def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
+    """Return whether a review should participate in required-review state."""
     # Real GraphQL payloads include this Boolean. Older/fake payloads are treated
     # as counting to preserve conservative merge-gate behavior.
     # This is a push-access heuristic, not a complete GitHub branch-protection
@@ -1619,6 +1782,7 @@ def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
 def _effective_blocking_reviews(
     fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
+    """Resolve latest per-reviewer state and return blockers for merge-gating."""
     # DISMISSED must be tracked so a maintainer-dismissed review overwrites that
     # reviewer's prior CHANGES_REQUESTED entry instead of leaving a stale blocker.
     effective_review_states = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
@@ -1717,6 +1881,7 @@ def _parse_merge_state_status(value: Any) -> MergeStateStatus:
 
 
 def _tail(text: str, n: int) -> str:
+    """Truncate log text to the last `n` characters with a marker."""
     if len(text) <= n:
         return text
     return "…[truncated]…\n" + text[-n:]
