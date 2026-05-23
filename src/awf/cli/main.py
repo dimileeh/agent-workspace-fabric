@@ -1057,12 +1057,13 @@ def _init_project_onboarding_payload(
     mode: str,
 ) -> dict[str, object]:
     payload = cast(dict[str, object], preview.to_dict())
+    profile_exists = existing_profile_path is not None or written_path is not None
     payload.update(
         {
             "mode": mode,
             "guided": guided,
             "selected_template": preview.draft.template,
-            "profile_exists": existing_profile_path is not None,
+            "profile_exists": profile_exists,
             "service_status": service_status,
             "doctor_status": doctor_status,
             "local_checks_ready": local_checks_ready,

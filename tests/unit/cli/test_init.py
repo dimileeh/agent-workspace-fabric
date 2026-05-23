@@ -334,6 +334,26 @@ def test_init_write_profile_yes_creates_default_workspace_yml(
 
 
 @pytest.mark.unit
+def test_init_write_profile_json_reports_profile_exists_after_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--write-profile", "--yes", "--format", "json"],
+    )
+
+    written_path = tmp_path / ".awf" / "workspace.yml"
+    assert result.exit_code == 0, result.output
+    assert written_path.exists()
+    payload = json.loads(result.output)
+    assert payload["mode"] == "write"
+    assert payload["written_path"] == str(written_path)
+    assert payload["profile_exists"] is True
+
+
+@pytest.mark.unit
 def test_init_write_profile_requires_yes_when_not_guided(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
