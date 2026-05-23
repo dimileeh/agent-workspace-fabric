@@ -1424,6 +1424,52 @@ class TestFetchPrStatus:
         assert status.latest_external_review_activity_source == "review_thread_comment"
 
     @pytest.mark.unit
+    async def test_external_review_activity_prevails_over_pr_updated_at_anchor(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                created_at="2026-05-06T09:00:00Z",
+                updated_at="2026-05-06T10:10:00Z",
+                committed_date="2026-05-06T09:20:00Z",
+                threads=[
+                    {
+                        "id": "T_stale",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 9740,
+                                    "bodyText": "Needs final read.",
+                                    "author": {"login": "human-reviewer"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "updatedAt": "2026-05-06T10:03:00Z",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:03:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert status.quiet_period_anchor_at is not None
+        assert status.quiet_period_anchor_at.isoformat() == "2026-05-06T10:03:00+00:00"
+        assert status.quiet_period_anchor_source == "review_thread_comment"
+
+    @pytest.mark.unit
     async def test_viewer_authored_feedback_does_not_reset_quiet_anchor(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

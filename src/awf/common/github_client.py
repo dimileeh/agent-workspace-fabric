@@ -1707,11 +1707,13 @@ def _quiet_period_anchor(
     """Choose the newest available anchor for the quiet-window timer."""
     anchor_at: datetime | None = latest_external_review_activity_at
     anchor_source: str | None = latest_external_review_activity_source
-    for candidate_at, candidate_source in (
+    candidates: list[tuple[datetime | None, str]] = [
         (pr_created_at, "pull_request"),
-        (pr_updated_at, "pull_request"),
         (head_committed_at, "head_commit"),
-    ):
+    ]
+    if latest_external_review_activity_at is None:
+        candidates.insert(0, (pr_updated_at, "pull_request"))
+    for candidate_at, candidate_source in candidates:
         anchor_at, anchor_source = _newer_activity(
             current_at=anchor_at,
             current_source=anchor_source,
