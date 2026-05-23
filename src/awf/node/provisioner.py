@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -627,15 +628,33 @@ def _provision_local_branch_name(
 ) -> str:
     if ws.task_kind == "sync_feature_pr":
         return f"feature-sync/{workspace_id}"
+    if ws.task_kind == "sync_release_pr":
+        return f"release-sync/{workspace_id}"
     return f"{branch_prefix}/{workspace_id}"
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
-    return _sync_feature_pr_pull_head_ref(ws) or _sync_feature_pr_head_ref(ws) or ws.branch_base
+    return (
+        _sync_feature_pr_pull_head_ref(ws)
+        or _sync_feature_pr_head_ref(ws)
+        or _release_sync_source_branch(ws)
+        or ws.branch_base
+    )
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
-    return _sync_feature_pr_head_ref(ws) or ws.remote_push_branch
+    return _sync_feature_pr_head_ref(ws) or _release_sync_source_branch(ws) or ws.remote_push_branch
+
+
+def _release_sync_source_branch(ws: Workspace) -> str | None:
+    """Source branch for a ``sync_release_pr`` worktree (default ``development``).
+
+    The worktree checks out the source branch so the release monitor can drive
+    comment/CI/base-sync against the PR head once the PR is opened.
+    """
+    if ws.task_kind != "sync_release_pr":
+        return None
+    return release_sync_source_branch(ws.task_policy)
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:

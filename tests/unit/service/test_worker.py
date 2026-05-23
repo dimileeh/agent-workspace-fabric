@@ -160,6 +160,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             config: object,
             pr_monitor_factory: object,
             log_store: object,
+            usage_sampler: object = None,
         ) -> None:
             created["executor"] = self
             created["executor_session_factory"] = session_factory
@@ -170,6 +171,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["executor_config"] = config
             created["executor_monitor_factory"] = pr_monitor_factory
             created["executor_log_store"] = log_store
+            created["executor_usage_sampler"] = usage_sampler
 
     class _ControlWorker:
         def __init__(
@@ -258,6 +260,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["stack_auth_mount_resolver"].workspace_owner_gid == 1000
     assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
     assert created["executor_log_store"] is created["validation_log_store"]
+    assert created["executor_usage_sampler"].__class__ is worker_mod.CcusageCollector
+    assert created["executor_usage_sampler"]._runner is created["executor_runner"]
+    assert created["executor_usage_sampler"]._work_dir == work_dir
     assert created["log_root"] == work_dir / "logs"
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"
     assert created["executor_config"].worktrees_root == work_dir / "git" / "worktrees"
@@ -273,7 +278,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     default_monitor = created["executor_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
     assert default_monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
@@ -299,7 +308,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monitor = created["executor_monitor_factory"](
         object(),
         profile,
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert monitor is not None
@@ -331,7 +344,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     manual_monitor = created["executor_monitor_factory"](
         object(),
         profile,
-        SimpleNamespace(auto_merge=False, initial_review_grace_period_seconds=12.5),
+        SimpleNamespace(
+            auto_merge=False,
+            initial_review_grace_period_seconds=12.5,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert manual_monitor is not None
@@ -352,6 +369,24 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         created["release_monitor_kwargs"]["merge_coordinator"]
         is created["feature_monitor_kwargs"]["merge_coordinator"]
     )
+
+    # Regression (PRRT_kwDOSJAM6s6EN6XO): a sync_release_pr workspace must get
+    # the human-gated release monitor even when its persisted auto_merge is True,
+    # so the never-auto-merge guarantee never hinges on that flag staying False.
+    created.pop("feature_monitor_kwargs", None)
+    created.pop("release_monitor_kwargs", None)
+    release_sync_monitor = created["executor_monitor_factory"](
+        object(),
+        profile,
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="sync_release_pr",
+        ),
+    )
+    assert release_sync_monitor is not None
+    assert "feature_monitor_kwargs" not in created
+    assert "release_monitor_kwargs" in created
 
 
 @pytest.mark.unit
@@ -494,7 +529,11 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
     created["pr_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
     reconciler = created["reconciler"]
     _ = asyncio.run(
@@ -581,7 +620,11 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
     created["pr_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
-        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+        SimpleNamespace(
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_kind="feature_branch_pr",
+        ),
     )
 
     assert isinstance(

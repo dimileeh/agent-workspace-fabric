@@ -483,7 +483,7 @@ async def create_provider_recovery_attempt_row(
         idempotency_key=None,
         task_kind=source.task_kind,
         remote_push_branch=source.remote_push_branch
-        if source.task_kind in {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
+        if source.task_kind in {"sync_release_pr", "sync_feature_pr"}
         else None,
     )
 

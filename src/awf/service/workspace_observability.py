@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, TypedDict, cast
@@ -36,6 +39,12 @@ from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_recovery import (
     ProviderRecoveryStateView,
     provider_recovery_state_for_workspace,
+)
+from awf.service.usage_store import (
+    USAGE_SOURCE,
+    UsageSnapshot,
+    read_latest_usage_snapshot,
+    read_latest_usage_snapshots,
 )
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
@@ -264,8 +273,11 @@ async def list_workspace_overview_response(
     )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
+    snapshots = await asyncio.to_thread(read_latest_usage_snapshots, [ws.id for ws in page_rows])
+    with prefetched_usage_snapshots(snapshots):
+        items = [_workspace_overview_item(ws) for ws in page_rows]
     return WorkspaceOverviewListResponse(
-        items=[_workspace_overview_item(ws) for ws in page_rows],
+        items=items,
         next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
         has_more=has_more,
         limit=limit,
@@ -555,7 +567,114 @@ def workspace_lifecycle_summary(
     return summaries
 
 
+# Request-scoped map of pre-read usage snapshots keyed by workspace id. List
+# endpoints populate it (off the event loop) so the synchronous projection below
+# does not block the loop with one file read per workspace; see
+# ``prefetched_usage_snapshots``.
+_PREFETCHED_USAGE_SNAPSHOTS: ContextVar[Mapping[str, UsageSnapshot | None] | None] = ContextVar(
+    "awf_prefetched_usage_snapshots", default=None
+)
+
+
+@contextmanager
+def prefetched_usage_snapshots(
+    snapshots: Mapping[str, UsageSnapshot | None],
+) -> Iterator[None]:
+    """Scope a request-local map of pre-read usage snapshots for this task.
+
+    ``workspace_usage_summary`` consults this map first, so a list endpoint can
+    read every workspace's snapshot once in a worker thread (keeping the
+    blocking file I/O off the async event loop) instead of doing a synchronous
+    read per workspace on the loop. Outside this scope, or for an id absent from
+    the map, the summary falls back to a direct disk read — the map is a pure
+    optimization, never a correctness dependency.
+    """
+
+    token = _PREFETCHED_USAGE_SNAPSHOTS.set(snapshots)
+    try:
+        yield
+    finally:
+        _PREFETCHED_USAGE_SNAPSHOTS.reset(token)
+
+
+def _resolve_usage_snapshot(workspace_id: str | None) -> UsageSnapshot | None:
+    """Resolve a workspace's usage snapshot, preferring a prefetched read.
+
+    Two tiers:
+    1. The request-scoped ``prefetched_usage_snapshots`` map, when this id is
+       present in it.
+    2. A direct ``read_latest_usage_snapshot`` read (a blocking ``Path.read_text``).
+
+    Tier 2 is reachable on the event loop, by design. Callers that resolve a
+    single workspace take this one bounded latest-wins read inline rather than
+    set up a prefetch context: ``GET /workspaces/{id}`` (``_get_workspace_response``
+    → ``workspace_response``), the websocket initial snapshot (``ws._send_initial_state``),
+    and ``WorkspaceService.get``/``create``. The prefetch exists only to spare
+    *multi-row* projections one blocking read per row, so any latency-sensitive
+    caller that fans out over many workspaces must read snapshots in a worker
+    thread and wrap the projection in ``prefetched_usage_snapshots`` (as the task
+    list and workspace overview endpoints do) instead of relying on this fallback.
+    """
+
+    prefetched = _PREFETCHED_USAGE_SNAPSHOTS.get()
+    if prefetched is not None and workspace_id is not None and workspace_id in prefetched:
+        return prefetched[workspace_id]
+    return read_latest_usage_snapshot(workspace_id)
+
+
 def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
+    """Resolve usage for a workspace, preferring ccusage snapshots.
+
+    Tiers (highest precedence first):
+    1. A ccusage snapshot with metrics → trusted live/final usage.
+    2. Operation-provided usage aggregation → compatibility fallback.
+    3. A ccusage snapshot without metrics → surface its reason code so the
+       console can show *why* usage is unavailable.
+    4. ``usage_not_reported``.
+    """
+
+    snapshot = _resolve_usage_snapshot(getattr(workspace, "id", None))
+    if snapshot is not None and snapshot.has_metrics:
+        return LlmUsageSummary(
+            input_tokens=snapshot.input_tokens,
+            output_tokens=snapshot.output_tokens,
+            total_tokens=snapshot.total_tokens,
+            cost_estimate=snapshot.cost_estimate,
+            currency=snapshot.currency,
+            status="available",
+            source=USAGE_SOURCE,
+            reason=snapshot.reason,
+        )
+
+    operations_summary = _operations_usage_summary(workspace)
+    if operations_summary is not None:
+        return operations_summary
+
+    if snapshot is not None:
+        return LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source=USAGE_SOURCE,
+            reason=snapshot.reason or "usage_not_reported",
+        )
+
+    return LlmUsageSummary(
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        cost_estimate=None,
+        currency=None,
+        status="unavailable",
+        source="none",
+        reason="usage_not_reported",
+    )
+
+
+def _operations_usage_summary(workspace: Workspace) -> LlmUsageSummary | None:
     input_tokens = None
     output_tokens = None
     total_tokens = None
@@ -630,16 +749,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
         and total_tokens is None
         and cost_estimate is None
     ):
-        return LlmUsageSummary(
-            input_tokens=None,
-            output_tokens=None,
-            total_tokens=None,
-            cost_estimate=None,
-            currency=None,
-            status="unavailable",
-            source="none",
-            reason="usage_not_reported",
-        )
+        return None
 
     return LlmUsageSummary(
         input_tokens=input_tokens,
@@ -759,7 +869,14 @@ def lifecycle_payload(
 def usage_payload(workspace: Workspace) -> LlmUsagePayload:
     usage = workspace_usage_summary(workspace)
     pricing = workspace_pricing_metadata(workspace)
-    cost, reason = compute_cost_estimate(usage, pricing)
+    cost, cost_reason = compute_cost_estimate(usage, pricing)
+    if cost is None and usage.cost_estimate is not None:
+        # AWF pricing metadata could not derive a cost (commonly: pricing not
+        # configured), but the usage source already reported one — e.g. ccusage's
+        # locally-recorded billing total. Surface that figure instead of dropping
+        # it behind a pricing_* reason that would otherwise force cost_estimate=null.
+        cost = usage.cost_estimate
+        cost_reason = None
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
@@ -768,7 +885,7 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
         "currency": usage.currency or (pricing.currency if pricing is not None else None),
         "status": "available" if cost is not None else usage.status,
         "source": usage.source,
-        "reason": usage.reason or reason,
+        "reason": usage.reason or cost_reason,
     }
 
 

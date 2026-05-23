@@ -6,6 +6,82 @@ import pytest
 from pydantic import ValidationError
 
 from awf.api import schemas as api_schemas
+from awf.db.enums import TaskKind
+
+
+@pytest.mark.unit
+def test_task_kind_enum_drops_deprecated_monitor_release_pr() -> None:
+    values = {member.value for member in TaskKind}
+    assert "monitor_release_pr" not in values
+    assert {"feature_branch_pr", "sync_release_pr", "sync_feature_pr"} <= values
+    assert (
+        frozenset({"feature_branch_pr", "sync_release_pr"})
+        == api_schemas.PUBLIC_DIRECT_CREATE_TASK_KINDS
+    )
+
+
+def _task(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "title": "t",
+        "prompt": "p",
+        "agent": "codex",
+        "kind": "feature_branch_pr",
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["feature_branch_pr", "sync_release_pr"])
+def test_workspace_task_accepts_public_direct_create_kinds(kind: str) -> None:
+    task = api_schemas.WorkspaceTask.model_validate(_task(kind=kind))
+    assert task.kind == kind
+
+
+@pytest.mark.unit
+def test_workspace_task_rejects_unknown_kind() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceTask.model_validate(_task(kind="totally_made_up"))
+    assert "unsupported task kind" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_workspace_task_rejects_deprecated_monitor_release_pr() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceTask.model_validate(_task(kind="monitor_release_pr"))
+    message = str(exc.value)
+    assert "deprecated" in message
+    assert "PR adoption" in message
+    assert "auto_merge=false" in message
+
+
+@pytest.mark.unit
+def test_workspace_task_rejects_direct_sync_feature_pr() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceTask.model_validate(_task(kind="sync_feature_pr"))
+    assert "PR-adoption endpoint" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_workspace_repo_accepts_optional_source_branch() -> None:
+    repo = api_schemas.WorkspaceRepo.model_validate(
+        {"url": "git@github.com:o/r.git", "base_branch": "main", "source_branch": "development"}
+    )
+    assert repo.source_branch == "development"
+    default_repo = api_schemas.WorkspaceRepo.model_validate({"url": "git@github.com:o/r.git"})
+    assert default_repo.source_branch is None
+
+
+@pytest.mark.unit
+def test_workspace_create_request_rejects_deprecated_kind() -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:o/r.git", "base_branch": "main"},
+                "task": _task(kind="monitor_release_pr"),
+                "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+            }
+        )
 
 
 @pytest.mark.unit

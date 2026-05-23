@@ -318,11 +318,16 @@ monitor for any PR whose ``run_awf.py`` process isn't in ``ps``.
 
 ### Release PR (``development → main``)
 
-Dev-to-main PRs must NEVER be auto-merged. Use the
-``monitor_release_pr`` task kind (planned field — currently selected
-via ``build_release_pr_monitor`` instead of
-``build_feature_pr_monitor``). Everything else is identical to the
-feature flow — comment resolution, CI fixes, base sync — except:
+Dev-to-main PRs must NEVER be auto-merged. To open/maintain the release
+PR automatically, create a ``sync_release_pr`` task (it opens or reuses
+the ``development → main`` PR and attaches the release monitor with
+``auto_merge=false``). To monitor an already-open release/manual PR,
+adopt it via the PR-adoption flow with ``auto_merge=false`` — that
+selects ``build_release_pr_monitor`` instead of
+``build_feature_pr_monitor``. (The old ``monitor_release_pr`` task kind
+is deprecated and rejected; use PR adoption instead.) Everything else is
+identical to the feature flow — comment resolution, CI fixes, base sync
+— except:
 
 - No ``gh pr merge`` call. Ever.
 - When all 5 gates are green, AWF posts a "✅ Ready to merge at commit

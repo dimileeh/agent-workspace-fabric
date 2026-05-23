@@ -76,6 +76,44 @@ export function fallbackLlmUsage(
   };
 }
 
+const USAGE_SOURCE_LABELS: Record<string, string> = {
+  ccusage: "ccusage",
+  operations: "operations",
+  none: "none",
+};
+
+const USAGE_REASON_LABELS: Record<string, string> = {
+  usage_not_reported: "not reported",
+  ccusage_source_unsupported: "provider not supported by ccusage",
+  ccusage_unavailable: "ccusage not installed",
+  ccusage_command_failed: "ccusage command failed",
+  ccusage_timeout: "ccusage timed out",
+  ccusage_invalid_json: "ccusage output unreadable",
+  ccusage_no_records: "no usage recorded yet",
+  // compute_cost_estimate reason codes surfaced via usage_payload when AWF
+  // pricing can't derive a cost (workspace_observability.py).
+  pricing_not_configured: "pricing not configured",
+  pricing_stale: "pricing stale",
+  pricing_rates_unavailable: "pricing rates unavailable",
+  no_token_data: "no token data",
+  negative_token_count: "invalid token count",
+  unsupported_pricing_unit: "unsupported pricing unit",
+};
+
+// Friendly provenance line for the LLM usage block: maps the AWF usage source
+// and reason code to human-readable labels without redesigning the dashboard.
+export function formatUsageProvenance(
+  source: string | null | undefined,
+  reason: string | null | undefined,
+): string {
+  const sourceLabel = (source && USAGE_SOURCE_LABELS[source]) || source || "none";
+  if (!reason) {
+    return sourceLabel;
+  }
+  const reasonLabel = USAGE_REASON_LABELS[reason] ?? reason;
+  return `${sourceLabel} / ${reasonLabel}`;
+}
+
 export function formatCostWithPricing(
   cost: number | null,
   currency: string | null | undefined,

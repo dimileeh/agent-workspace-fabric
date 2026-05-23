@@ -18,7 +18,14 @@ from awf.common.callback_targets import (
     is_public_callback_target_host,
     validate_callback_target_url_port,
 )
-from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
+    AgentRuntime,
+    OperationStatus,
+    TaskClass,
+    TaskKind,
+    WorkspaceStatus,
+)
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
@@ -64,6 +71,12 @@ _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
+# Task kinds operators may request directly via REST/MCP workspace creation.
+# ``sync_feature_pr`` is intentionally absent: it is created through the
+# PR-adoption endpoint, not direct workspace creation.
+PUBLIC_DIRECT_CREATE_TASK_KINDS = frozenset(
+    {TaskKind.feature_branch_pr.value, TaskKind.sync_release_pr.value}
+)
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -84,6 +97,9 @@ class WorkspaceRepo(BaseModel):
     base_branch: Annotated[
         str, Field(default=_DEFAULT_REPO_BASE_BRANCH, min_length=1, max_length=256)
     ]
+    source_branch: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    """Optional source branch for ``sync_release_pr`` (defaults to ``development``).
+    The release PR is opened ``source_branch`` → ``base_branch``."""
 
 
 class WorkspaceProviderFallbackTarget(BaseModel):
@@ -147,6 +163,31 @@ class WorkspaceTask(BaseModel):
         le=86400,
     )
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, value: str) -> str:
+        """Admit only the public direct-create task kinds.
+
+        Rejects the deprecated ``monitor_release_pr``, the adoption-only
+        ``sync_feature_pr``, and any unknown string so unsupported kinds can
+        never reach feature provisioning/execution. Covers REST and MCP, which
+        both funnel through this schema.
+        """
+        if value in PUBLIC_DIRECT_CREATE_TASK_KINDS:
+            return value
+        if value == DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND:
+            raise ValueError(
+                "task kind 'monitor_release_pr' is deprecated; monitor an existing "
+                "release/manual PR via PR adoption with auto_merge=false instead."
+            )
+        if value == TaskKind.sync_feature_pr.value:
+            raise ValueError(
+                "task kind 'sync_feature_pr' is created through the PR-adoption "
+                "endpoint, not direct workspace creation."
+            )
+        supported = ", ".join(sorted(PUBLIC_DIRECT_CREATE_TASK_KINDS))
+        raise ValueError(f"unsupported task kind {value!r}; supported kinds are: {supported}.")
 
 
 class WorkspaceProfileSelection(BaseModel):

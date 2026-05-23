@@ -5,6 +5,7 @@ import {
   fallbackLifecycleStages,
   fallbackLlmUsage,
   formatCostWithPricing,
+  formatUsageProvenance,
   pickWorkspaceLogStreams,
   renderLogEntries,
   toneFillClass,
@@ -46,6 +47,40 @@ test("fallbackLifecycleStages preserves active non-terminal status", () => {
   assert.equal(stages.running, "completed");
   assert.equal(stages.validating, "active");
   assert.equal(stages.pushing, "pending");
+});
+
+test("formatUsageProvenance maps ccusage source and reason codes to friendly labels", () => {
+  assert.equal(formatUsageProvenance("ccusage", null), "ccusage");
+  assert.equal(formatUsageProvenance("ccusage", "ccusage_no_records"), "ccusage / no usage recorded yet");
+  assert.equal(formatUsageProvenance("ccusage", "ccusage_timeout"), "ccusage / ccusage timed out");
+  assert.equal(formatUsageProvenance("operations", null), "operations");
+  assert.equal(formatUsageProvenance("none", "usage_not_reported"), "none / not reported");
+});
+
+test("formatUsageProvenance maps pricing cost-reason codes to friendly labels", () => {
+  assert.equal(
+    formatUsageProvenance("ccusage", "pricing_not_configured"),
+    "ccusage / pricing not configured",
+  );
+  assert.equal(formatUsageProvenance("ccusage", "pricing_stale"), "ccusage / pricing stale");
+  assert.equal(
+    formatUsageProvenance("ccusage", "pricing_rates_unavailable"),
+    "ccusage / pricing rates unavailable",
+  );
+  assert.equal(formatUsageProvenance("ccusage", "no_token_data"), "ccusage / no token data");
+  assert.equal(
+    formatUsageProvenance("ccusage", "negative_token_count"),
+    "ccusage / invalid token count",
+  );
+  assert.equal(
+    formatUsageProvenance("ccusage", "unsupported_pricing_unit"),
+    "ccusage / unsupported pricing unit",
+  );
+});
+
+test("formatUsageProvenance passes through unknown source and reason", () => {
+  assert.equal(formatUsageProvenance("custom_src", "weird_reason"), "custom_src / weird_reason");
+  assert.equal(formatUsageProvenance(undefined, undefined), "none");
 });
 
 test("fallbackLlmUsage protects legacy workspace payloads", () => {

@@ -20,6 +20,7 @@ from awf.common.github_client import BranchOpenPullRequestResolver, GitHubClient
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -47,6 +48,7 @@ from awf.service.target_branch_monitor import (
     TargetBranchReconcileMonitor,
     reconcile_and_refresh_stale_candidates,
 )
+from awf.service.usage_collection import CcusageCollector
 
 _log = get_logger(__name__)
 
@@ -76,6 +78,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
     runner = AsyncioSubprocessRunner()
+    usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
@@ -153,8 +156,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         *,
         provider_recovery_default_model: str | None = None,
     ) -> Any:
+        # sync_release_pr's contract is "auto_merge forced False; never merges"
+        # (TaskKind.sync_release_pr). Bind the release monitor to the task kind so
+        # the human-gated guarantee can't hinge on the persisted auto_merge flag
+        # being False at every monitor (re)build.
+        force_release_monitor = workspace.task_kind == TaskKind.sync_release_pr.value
         monitor_builder = (
-            build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
+            build_feature_pr_monitor
+            if workspace.auto_merge and not force_release_monitor
+            else build_release_pr_monitor
         )
         grace_seconds = (
             workspace.initial_review_grace_period_seconds
@@ -200,6 +210,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
+        usage_sampler=usage_collector,
     )
     worker = ControlWorker(
         session_factory=session_factory,

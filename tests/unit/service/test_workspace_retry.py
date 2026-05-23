@@ -1161,11 +1161,44 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     assert retry_created[0].payload["salvage_policy"] == "explicit_salvage_required"
 
 
+async def _seed_failed_source_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    task_kind: str,
+) -> str:
+    """Persist a source workspace for a task kind that bypasses direct create.
+
+    ``sync_feature_pr`` is created through the PR-adoption flow (via
+    ``WorkspaceRepository.create``), not the public request path, so retry
+    coverage seeds the row the same way instead of building a rejected request.
+    """
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.create(
+            repo_url="git@github.com:example/retryable.git",
+            branch_base="development",
+            task_title="Retry flaky validation",
+            task_prompt="Fix the intermittent validation failure.",
+            task_external_id="TICKET-RETRY",
+            task_class="test_task",
+            owned_paths=["src/awf/retry/**"],
+            auto_merge=False,
+            initial_review_grace_period_seconds=30,
+            agent=AgentRuntime.codex.value,
+            profile_ref="python",
+            requested_profile={"source": "retry-test-profile"},
+            resolved_profile={"source": "retry-test-profile"},
+            test_commands=["uv run pytest tests/unit -q"],
+            task_kind=task_kind,
+        )
+        await session.commit()
+        return source.id
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("task_kind", "branch_name", "remote_push_branch"),
     [
-        ("monitor_release_pr", "release-monitor/ws_scope_old", "release/2026-05"),
         ("sync_release_pr", "release-sync/ws_scope_old", "development"),
         ("sync_feature_pr", "feature-sync/ws_scope_old", "contributors/fix-123"),
     ],
@@ -1177,19 +1210,22 @@ async def test_retry_planning_scope_violation_preserves_monitor_and_sync_remote_
     remote_push_branch: str,
 ) -> None:
     service = WorkspaceService(factory)
-    first = await service.create(_request(task_kind=task_kind))
+    if task_kind == "sync_release_pr":
+        first_id = (await service.create(_request(task_kind=task_kind))).id
+    else:
+        first_id = await _seed_failed_source_workspace(factory, task_kind=task_kind)
     await _mark_planning_scope_failed(
         factory,
-        first.id,
+        first_id,
         branch_name=branch_name,
         remote_push_branch=remote_push_branch,
     )
 
-    retry = await _retry_with_preflight_override(service, first.id)
+    retry = await _retry_with_preflight_override(service, first_id)
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
-        original = await repo.get(first.id)
+        original = await repo.get(first_id)
         retried = await repo.get(retry.new_workspace_id)
 
     assert original is not None

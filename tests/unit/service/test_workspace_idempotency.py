@@ -69,6 +69,31 @@ def _v2_request(
     )
 
 
+def _release_sync_request(
+    *, auto_merge: bool = True, source_branch: str = "development"
+) -> WorkspaceCreateRequest:
+    return WorkspaceCreateRequest(
+        repo={
+            "url": "git@github.com:example/idempotency.git",
+            "base_branch": "main",
+            "source_branch": source_branch,
+        },
+        task={
+            "title": "Sync release PR",
+            "prompt": "Exercise serialized idempotency lookup.",
+            "agent": "codex",
+            "kind": "sync_release_pr",
+            "auto_merge": auto_merge,
+        },
+        workspace={"profile_ref": "auto", "profile": None},
+        validation={"commands": ["pytest -q"], "requested_tier": 1},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "idempotency serialization test fixture",
+        },
+    )
+
+
 def _record_idempotency_lock_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[str, str]]:
@@ -594,6 +619,100 @@ async def test_create_replay_conflicts_when_agent_effort_changes(
             request_with_xhigh_effort,
             idempotency_key=idempotency_key,
         )
+
+
+@pytest.mark.unit
+async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Release-PR sync persists auto_merge=False; a same-payload replay (which
+    still carries the request default auto_merge=True) must match instead of
+    raising a spurious idempotency conflict."""
+    service = WorkspaceService(factory)
+    request = _release_sync_request(auto_merge=True)
+    idempotency_key = "service-create-v2-release-sync-auto-merge"
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.auto_merge is False
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_release_sync_legacy_replay_allows_stored_auto_merge_true(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A legacy sync_release_pr row written before auto_merge was forced off at
+    persistence snapshotted the raw request default (auto_merge=True). An identical
+    replay now resolves the effective auto_merge to False, so the matcher must skip
+    the comparison rather than conflict on an otherwise unchanged request."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-legacy-auto-merge"
+    request = _release_sync_request(auto_merge=True)
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.auto_merge = True
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_release_sync_replay_conflicts_when_source_branch_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A sync_release_pr replay that changes repo.source_branch must conflict
+    rather than silently reusing the workspace, which would sync the wrong branch."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-source-branch"
+    request = _release_sync_request(source_branch="development")
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    assert created.id.startswith("ws_")
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+    assert replayed.id == created.id
+
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(
+            _release_sync_request(source_branch="release-candidate"),
+            idempotency_key=idempotency_key,
+        )
+
+
+@pytest.mark.unit
+async def test_create_release_sync_legacy_replay_allows_missing_source_branch(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A legacy sync_release_pr row created before the source_branch snapshot has
+    no recorded value; an identical default-branch replay must still match rather
+    than conflict, because such rows could only have synced the default branch."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-release-sync-legacy-source-branch"
+    request = _release_sync_request(source_branch="development")
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        task_policy = dict(workspace.task_policy)
+        task_policy.pop("release_sync", None)
+        workspace.task_policy = task_policy
+        await session.commit()
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
 
 
 @pytest.mark.unit

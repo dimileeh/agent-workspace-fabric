@@ -43,7 +43,15 @@ from awf.api.schemas import (
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    TaskKind,
+    WorkspaceStatus,
+)
 from awf.db.repositories import TaskExternalIdConflictError, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
@@ -125,6 +133,10 @@ RuntimeHealthSummaryProvider = Callable[
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
+# sync_release_pr omits base_branch -> target the release branch (main), not the
+# legacy development default, so the release PR is opened development -> main
+# instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
+_MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT = "main"
 
 
 class ReadinessProvider(Protocol):
@@ -200,8 +212,10 @@ def build_mcp_server(
             max_length=256,
             json_schema_extra={"default": _MCP_LEGACY_BASE_BRANCH_DEFAULT},
             description=(
-                "Branch to branch FROM; feature branch is created off it. "
-                f"Defaults to {_MCP_LEGACY_BASE_BRANCH_DEFAULT} when omitted."
+                "Target branch: feature_branch_pr branches FROM it; "
+                "sync_release_pr opens the release PR against it. Defaults to "
+                f"{_MCP_LEGACY_BASE_BRANCH_DEFAULT} for feature_branch_pr and "
+                f"{_MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT} for sync_release_pr when omitted."
             ),
         ),
         branch_base: str | None = Field(
@@ -210,11 +224,29 @@ def build_mcp_server(
             max_length=256,
             description="Legacy alias for base_branch.",
         ),
+        source_branch: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            json_schema_extra={"default": DEFAULT_RELEASE_SYNC_SOURCE_BRANCH},
+            description=(
+                "Source branch for sync_release_pr: the release PR is opened "
+                f"source_branch -> base_branch. Defaults to "
+                f"{DEFAULT_RELEASE_SYNC_SOURCE_BRANCH} when omitted. Ignored for "
+                "feature_branch_pr."
+            ),
+        ),
         task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
         task_kind: str = Field(
             default="feature_branch_pr",
-            description="Task kind for scheduling/monitor behavior.",
+            description=(
+                "Task kind: 'feature_branch_pr' (default) or 'sync_release_pr' "
+                "(open/reuse a source->target release PR, monitored without "
+                "auto-merge). The deprecated 'monitor_release_pr' and the "
+                "adoption-only 'sync_feature_pr' are rejected here; to monitor an "
+                "existing PR, adopt it with auto_merge=false."
+            ),
         ),
         agent: AgentRuntime = Field(
             default=AgentRuntime.codex,
@@ -359,13 +391,22 @@ def build_mcp_server(
                 "Provide either requires_database or profile_ref/env_profile='aira'.",
             )
 
-        effective_base_branch = branch_base or base_branch or _MCP_LEGACY_BASE_BRANCH_DEFAULT
+        default_base_branch = (
+            _MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT
+            if task_kind == TaskKind.sync_release_pr.value
+            else _MCP_LEGACY_BASE_BRANCH_DEFAULT
+        )
+        effective_base_branch = branch_base or base_branch or default_base_branch
         effective_validation_commands = (
             test_commands if test_commands is not None else validation_commands or []
         )
         effective_profile_ref = "aira" if requires_database else env_profile or profile_ref
         req = WorkspaceCreateRequest(
-            repo={"url": repo_url, "base_branch": effective_base_branch},
+            repo={
+                "url": repo_url,
+                "base_branch": effective_base_branch,
+                "source_branch": source_branch,
+            },
             task={
                 k: v
                 for k, v in {

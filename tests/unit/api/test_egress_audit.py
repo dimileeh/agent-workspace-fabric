@@ -258,7 +258,7 @@ async def test_readyz_includes_egress_audit_check(
 
     try:
         resp = await client.get("/readyz")
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.json()
         body = resp.json()
 
         checks = body.get("checks", {})

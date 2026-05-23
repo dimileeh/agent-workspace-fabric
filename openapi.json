@@ -9437,6 +9437,19 @@
             "title": "Base Branch",
             "type": "string"
           },
+          "source_branch": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Branch"
+          },
           "url": {
             "maxLength": 512,
             "minLength": 1,

@@ -56,6 +56,7 @@ import {
   fallbackLifecycleStages,
   fallbackLlmUsage,
   formatDateTime,
+  formatUsageProvenance,
   lifecycleStages,
   relativeTime,
   pickWorkspaceLogStreams,
@@ -2296,19 +2297,19 @@ function UsageSummaryBlock({
 
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (
-      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
         <div className="flex items-center justify-between gap-2">
           <span className="font-semibold text-slate-900">LLM usage</span>
           <Badge value="unavailable" />
         </div>
         <div className="mt-2 truncate text-[11px] text-slate-500">
-          {safeUsage.reason ?? "usage unavailable"}
+          {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         </div>
       </div>
     );
   }
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">LLM usage</span>
         <div className="flex items-center gap-1.5">
@@ -2337,7 +2338,7 @@ function UsageSummaryBlock({
         />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
-        {`${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
+        {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         {pricingReason ? (
           <>
             <span className="text-slate-300">|</span>

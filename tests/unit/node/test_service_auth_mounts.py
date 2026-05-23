@@ -228,6 +228,57 @@ def test_service_auth_mounts_preserve_existing_workspace_codex_home(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_exclude_claude_usage_history(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_claude = host_home / ".claude"
+    (host_claude / "projects" / "repo").mkdir(parents=True)
+    (host_claude / "projects" / "repo" / "session.jsonl").write_text('{"usage": "historical"}\n')
+    (host_claude / "todos").mkdir()
+    (host_claude / "todos" / "x.json").write_text("{}\n")
+    (host_claude / "shell-snapshots").mkdir()
+    (host_claude / "statsig").mkdir()
+    (host_claude / "settings.json").write_text('{"theme": "dark"}\n')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    claude_home = Path({m.target: m for m in mounts}["/home/agent/.claude"].source)
+    # Auth survives the copy, but the historical usage/transcript dirs do not —
+    # so ccusage cannot attribute host history to this workspace run.
+    assert (claude_home / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert not (claude_home / "projects").exists()
+    assert not (claude_home / "todos").exists()
+    assert not (claude_home / "shell-snapshots").exists()
+    assert not (claude_home / "statsig").exists()
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_exclude_gemini_usage_history(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_gemini = host_home / ".gemini"
+    (host_gemini / "tmp" / "session").mkdir(parents=True)
+    (host_gemini / "tmp" / "session" / "logs.json").write_text('[{"tokens": 999}]\n')
+    (host_gemini / "settings.json").write_text('{"selectedAuthType": "oauth"}\n')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    gemini_home = Path({m.target: m for m in mounts}["/home/agent/.gemini"].source)
+    assert (gemini_home / "settings.json").read_text() == '{"selectedAuthType": "oauth"}\n'
+    assert not (gemini_home / "tmp").exists()
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_preserve_existing_workspace_claude_auth(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_claude = host_home / ".claude"

@@ -194,7 +194,6 @@ _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
 _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {
-        TaskKind.monitor_release_pr.value,
         TaskKind.sync_release_pr.value,
         TaskKind.sync_feature_pr.value,
     }

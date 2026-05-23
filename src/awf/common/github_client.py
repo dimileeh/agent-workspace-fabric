@@ -1377,6 +1377,45 @@ class GitHubClient:
                 stderr=result.stderr,
             )
 
+    async def create_pull_request(
+        self,
+        *,
+        repo: RepoRef,
+        base: str,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        """Open a PR for an existing ``head`` branch against ``base``.
+
+        Both branches already exist on origin (no worktree push), so this is
+        a plain ``gh pr create`` and returns the new PR URL printed on stdout.
+        """
+        result = await self._runner.run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--repo",
+                repo.slug(),
+                "--base",
+                base,
+                "--head",
+                head,
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+        )
+        if not result.ok:
+            raise GitHubClientError(
+                operation="gh pr create",
+                returncode=result.returncode,
+                stderr=result.stderr,
+            )
+        return result.stdout.strip()
+
     async def merge_pr(
         self,
         *,
