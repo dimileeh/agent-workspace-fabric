@@ -911,7 +911,6 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
         stdout=pr_payload(
             head_sha="head-a",
             created_at=recent_activity,
-            updated_at=recent_activity,
             committed_date=recent_activity,
         ),
     )
@@ -924,7 +923,6 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
             head_sha="head-a",
             threads=[thread],
             created_at=recent_activity,
-            updated_at=recent_activity,
             committed_date=recent_activity,
         ),
     )

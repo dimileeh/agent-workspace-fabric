@@ -125,7 +125,6 @@ def pr_payload(
     *,
     head_sha: str = "abc1234567890def",
     created_at: str = "2026-05-06T10:00:00Z",
-    updated_at: str = "2026-05-06T10:00:00Z",
     committed_date: str = "2026-05-06T10:00:00Z",
     closed: bool = False,
     merged: bool = False,
@@ -145,7 +144,6 @@ def pr_payload(
                     "pullRequest": {
                         "number": 42,
                         "createdAt": created_at,
-                        "updatedAt": updated_at,
                         "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
