@@ -123,6 +123,8 @@ app.add_typer(smoke_app, name="smoke")
 
 
 class OutputFormat(StrEnum):
+    """Output format enumeration."""
+
     json = "json"
     pretty = "pretty"
 
@@ -919,7 +921,6 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
     an overlay during seeding and remains the fallback read source until the
     compose `.env` exists.
     """
-
     from awf.service import bootstrap as bootstrap_mod
     from awf.service.config import LOCAL_SERVICE_COMPOSE_ENV_FILE, LOCAL_SERVICE_COMPOSE_FILE
 
@@ -954,7 +955,6 @@ def _resolve_service_compose_paths() -> tuple[Path, Path, Path]:
 
 def _resolve_existing_service_env_file(env_file: Path) -> Path:
     """Return the existing env file service commands should read."""
-
     if env_file.exists():
         return env_file
     root_env = _compose_root_env_file(env_file)
@@ -969,7 +969,6 @@ def _resolve_service_env_files(
     trusted_compose_env_file: Path | None = None,
 ) -> tuple[Path, Path | None]:
     """Return the env read source and actual Compose env-file path."""
-
     active_env_file = _resolve_existing_service_env_file(env_file)
     return active_env_file, _service_compose_env_file(
         active_env_file,
@@ -984,7 +983,6 @@ def _resolve_service_runtime_env_files(
     paths_verified: bool = False,
 ) -> tuple[Path, Path | None]:
     """Return service env files using compose paths already verified upstream."""
-
     return _resolve_service_env_files(
         env_file,
         trusted_compose_env_file=(
@@ -1000,7 +998,6 @@ def _trusted_service_compose_env_file_from_verified_paths(
     env_file: Path,
 ) -> Path | None:
     """Return the Compose env path from already verified local-service paths."""
-
     from awf.service.config import LOCAL_SERVICE_COMPOSE_FILE
 
     if _compose_root_env_file(env_file) is None:
@@ -1016,7 +1013,6 @@ def _trusted_service_compose_env_file_from_verified_paths(
 
 def _trusted_service_compose_env_file(compose_file: Path, env_file: Path) -> Path | None:
     """Return the Compose env path from `_resolve_service_compose_paths`, if present."""
-
     from awf.service.config import _is_local_service_compose_file_path
 
     if _compose_root_env_file(env_file) is None:
@@ -1034,7 +1030,6 @@ def _service_compose_env_file(
     trusted_compose_env_file: Path | None = None,
 ) -> Path | None:
     """Return the env file that should be passed to Docker Compose, if any."""
-
     if not active_env_file.exists():
         return None
     if trusted_compose_env_file is not None:
@@ -1051,7 +1046,6 @@ def _service_compose_env_file(
 
 def _is_local_service_compose_env_file(path: Path) -> bool:
     """Return true for the verified local-service Compose env file."""
-
     from awf.service.config import _is_local_service_compose_env_path
 
     return _is_local_service_compose_env_path(path)
@@ -1066,7 +1060,6 @@ def _init_env_error_payload(
     exc: Exception,
 ) -> dict[str, str]:
     """Return a machine-readable env seeding failure without env contents."""
-
     return {
         "operation": operation,
         "path": _init_display_path(path),
@@ -1084,7 +1077,6 @@ def _compose_root_env_file(env_file: Path) -> Path | None:
     asset paths, which keeps root-env fallback and `--env-file` forwarding tied
     to absolute paths resolved from the verified bootstrap asset root.
     """
-
     env_file = env_file.expanduser()
     if not env_file.is_absolute():
         return None
@@ -1100,7 +1092,6 @@ def _compose_root_env_file(env_file: Path) -> Path | None:
 
 def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
     """Return the root `.env` overlay used when seeding compose env files."""
-
     root_env = _compose_root_env_file(env_file)
     if root_env is None or env_example == root_env or not root_env.exists():
         return None
@@ -1113,7 +1104,6 @@ def _init_env_overlay_source(env_file: Path, env_example: Path) -> Path | None:
 
 def _env_assignment_key(line: str) -> str | None:
     """Return the key from an env assignment line, ignoring comments."""
-
     if line.lstrip().startswith("#"):
         return None
     match = _ENV_ASSIGNMENT_RE.match(line)
@@ -1124,13 +1114,11 @@ def _env_assignment_key(line: str) -> str | None:
 
 def _env_assignment_key_identity(key: str) -> str:
     """Return the canonical key identity used for seed/overlay matching."""
-
     return key.upper()
 
 
 def _env_assignment_line_with_key(line: str, key: str) -> str:
     """Return a Compose env assignment line with the key spelling replaced."""
-
     match = _ENV_ASSIGNMENT_RE.match(line)
     if match is None:
         return line
@@ -1139,7 +1127,6 @@ def _env_assignment_line_with_key(line: str, key: str) -> str:
 
 def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
     """Return whether the seed owns the merged file header."""
-
     for line in lines:
         if _env_assignment_key(line) is not None:
             return False
@@ -1150,7 +1137,6 @@ def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
 
 def _env_value_has_same_line_closing_quote(value: str, quote: str) -> bool:
     """Return whether a quoted dotenv value closes on its assignment line."""
-
     escaped = False
     for char in value[1:]:
         if quote == '"' and char == "\\" and not escaped:
@@ -1164,7 +1150,6 @@ def _env_value_has_same_line_closing_quote(value: str, quote: str) -> bool:
 
 def _env_contents_have_multiline_values(text: str) -> bool:
     """Return true when dotenv assignments span physical lines."""
-
     for line in text.splitlines(keepends=True):
         key = _env_assignment_key(line)
         if key is None:
@@ -1192,7 +1177,6 @@ def _env_contents_have_multiline_values(text: str) -> bool:
 
 def _env_context_looks_like_file_header(lines: list[str]) -> bool:
     """Return whether leading non-assignment lines look like a file header."""
-
     comment_count = 0
     for line in lines:
         stripped = line.strip()
@@ -1205,7 +1189,6 @@ def _env_context_looks_like_file_header(lines: list[str]) -> bool:
 
 def _env_comment_looks_key_specific(line: str, key: str) -> bool:
     """Return whether a comment appears to document one dotenv assignment key."""
-
     stripped = line.strip()
     if not stripped.startswith("#"):
         return False
@@ -1225,13 +1208,11 @@ def _env_comment_looks_key_specific(line: str, key: str) -> bool:
 
 def _env_context_has_key_specific_comment(lines: list[str], key: str) -> bool:
     """Return whether any context comment appears tied to the given key."""
-
     return any(_env_comment_looks_key_specific(line, key) for line in lines)
 
 
 def _env_context_has_file_header_marker(lines: list[str]) -> bool:
     """Return whether comments explicitly describe dotenv-file-level context."""
-
     comments = [line.strip().lstrip("#").strip().lower() for line in lines]
     return any(
         ".env" in comment
@@ -1250,7 +1231,6 @@ def _split_env_file_header_context(
     seed_has_leading_context: bool,
 ) -> tuple[list[str], list[str]]:
     """Split leading overlay comments into file-header and assignment context."""
-
     if not _env_context_looks_like_file_header(lines):
         return [], lines
     last_blank_index: int | None = None
@@ -1281,19 +1261,16 @@ def _split_env_file_header_context(
 
 def _env_context_looks_like_section_header(lines: list[str]) -> bool:
     """Return whether non-assignment lines look like reusable section documentation."""
-
     return sum(1 for line in lines if line.strip().startswith("#")) > 1
 
 
 def _env_context_is_single_adjacent_comment(lines: list[str]) -> bool:
     """Return whether context is exactly one comment directly above an assignment."""
-
     return len(lines) == 1 and lines[0].strip().startswith("#")
 
 
 def _env_context_has_non_comment_note(lines: list[str]) -> bool:
     """Return whether context contains an operator note outside dotenv comments."""
-
     return any(line.strip() and not line.strip().startswith("#") for line in lines)
 
 
@@ -1302,7 +1279,6 @@ def _merge_env_seed_contents_with_overlay_keys(
     overlay_contents: bytes,
 ) -> tuple[bytes, tuple[str, ...]]:
     """Return merged env contents plus root-only keys appended from the overlay."""
-
     try:
         seed_text = seed_contents.decode("utf-8")
         overlay_text = overlay_contents.decode("utf-8")
@@ -1433,7 +1409,6 @@ def _merge_env_seed_contents_with_overlay_keys(
 
 def _merge_env_seed_contents(seed_contents: bytes, overlay_contents: bytes) -> bytes:
     """Return compose-template env contents with root env assignments overlaid."""
-
     merged_contents, _overlay_only_keys = _merge_env_seed_contents_with_overlay_keys(
         seed_contents,
         overlay_contents,
@@ -1448,7 +1423,6 @@ def _seed_env_file(
     env_overlay: Path | None = None,
 ) -> tuple[str, dict[str, str] | None, tuple[str, ...]]:
     """Seed an env file and return action, failure payload, and copied overlay keys."""
-
     if env_file.exists():
         return "kept_existing", None, ()
 
@@ -1551,7 +1525,6 @@ def _seed_env_file(
 
 def _init_display_path(path: Path | str) -> str:
     """Return a stable human-readable init path from the launch directory."""
-
     candidate = Path(path)
     if not candidate.is_absolute():
         return str(candidate)
@@ -1563,7 +1536,6 @@ def _init_display_path(path: Path | str) -> str:
 
 def _init_env_warning(env_error: Mapping[str, str]) -> str:
     """Return the pretty warning for an env seeding failure payload."""
-
     operation = env_error["operation"]
     message = env_error["message"]
     env_file = env_error["env_file"]
@@ -1593,14 +1565,12 @@ def _add_init_env_overlay_keys(
     env_overlay_keys: tuple[str, ...],
 ) -> None:
     """Add non-secret env overlay audit metadata to a JSON init payload."""
-
     if env_overlay_keys:
         payload["env_overlay_keys"] = list(env_overlay_keys)
 
 
 def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[Path, ...]:
     """Return the env template paths that explain why init skipped seeding."""
-
     search_paths: list[Path] = []
     candidates = [env_file.with_name(".env.example"), env_example]
     seen: set[Path] = set()
@@ -1614,7 +1584,6 @@ def _init_env_example_search_paths(env_file: Path, env_example: Path) -> tuple[P
 
 def _docker_diagnostic_from_report(report: object) -> object | None:
     """Return the docker diagnostic entry from a readiness report if present."""
-
     from typing import cast
 
     diagnostics = getattr(report, "diagnostics", ())
@@ -1630,7 +1599,6 @@ def _init_preflight_environ(
     provider_secret_keys: frozenset[str],
 ) -> dict[str, str]:
     """Return init preflight env without provider credentials."""
-
     secret_keys = {key.upper() for key in provider_secret_keys}
     return {key: value for key, value in environ.items() if key.upper() not in secret_keys}
 
@@ -2197,7 +2165,6 @@ def service_bootstrap(
     ),
 ) -> None:
     """Start the local AWF service stack and emit structured bootstrap output."""
-
     from awf.common.config import Settings
     from awf.service.bootstrap import (
         ServiceBootstrapError,
@@ -3293,6 +3260,7 @@ def smoke_run(
         help="Fallback project path when --project has no profile.",
     ),
 ) -> None:
+    """Run AWF smoke."""
     from awf.service.config import resolve_service_settings
     from awf.service.smoke import collect_smoke_report
 
