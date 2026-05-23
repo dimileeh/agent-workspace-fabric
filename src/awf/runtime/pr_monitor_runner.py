@@ -316,6 +316,7 @@ _CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+_PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 # Staleness reason codes that a successful SyncBase legitimately remediates:
 # the target-derived findings ``evaluate_staleness`` produces from the target
@@ -4036,6 +4037,13 @@ class PullRequestMonitorRunner:
         threads = list(initial_threads)
         reviews = list(initial_reviews)
         worktree_path = self._worktrees_root / workspace_id
+        dirty_result = await self._pre_existing_dirty_repair_worktree_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="comment_repair",
+        )
+        if dirty_result is not None:
+            return dirty_result
         operation_start_head = await self._rev_parse_head(worktree_path)
 
         for _pass_num in range(self._runner_config.max_fix_cycle_passes):
@@ -4780,6 +4788,13 @@ class PullRequestMonitorRunner:
         monitor_log: WorkspaceLogSink | None = None,
     ) -> _GitPushResult:
         worktree_path = self._worktrees_root / workspace_id
+        dirty_result = await self._pre_existing_dirty_repair_worktree_result(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_type="ci_repair",
+        )
+        if dirty_result is not None:
+            return dirty_result
         operation_start_head = await self._rev_parse_head(worktree_path)
         prompt = fix_ci_prompt(
             pr_number=pr_number,
@@ -4879,6 +4894,68 @@ class PullRequestMonitorRunner:
         )
 
     # ── Git plumbing ───────────────────────────────────────────────────────
+
+    async def _pre_existing_dirty_repair_worktree_result(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+    ) -> _GitPushResult | None:
+        if not worktree_path.exists():
+            return None
+        status = await self._deps.runner.run(
+            _git_worktree_command(worktree_path, "status", "--porcelain")
+        )
+        if not status.ok:
+            stderr = status.stderr[:400]
+            _log.warning(
+                "monitor.repair_worktree_status_failed",
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                returncode=status.returncode,
+                stderr=stderr,
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=status.returncode,
+                stderr="Could not inspect repair worktree before starting the agent.",
+                reason_code=_GIT_PUSH_FAILED_REASON,
+                details={
+                    "phase": "repair_start",
+                    "operation_type": operation_type,
+                    "status_stderr": stderr,
+                    "pushed": False,
+                },
+            )
+        if not status.stdout.strip():
+            return None
+
+        paths = sorted(_changed_paths_from_porcelain(status.stdout))
+        _log.warning(
+            "monitor.repair_worktree_pre_existing_dirty",
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            paths=paths,
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                "Repair worktree has pre-existing uncommitted changes; "
+                "refusing to start agent repair because protected-scope rollback "
+                "would not be limited to the current operation."
+            ),
+            reason_code=_PRE_EXISTING_DIRTY_WORKTREE_REASON,
+            details={
+                "phase": "repair_start",
+                "operation_type": operation_type,
+                "paths": paths,
+                "pushed": False,
+            },
+        )
 
     async def _commit_dirty_worktree(
         self,
@@ -5171,12 +5248,14 @@ class PullRequestMonitorRunner:
         reset_result = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
         )
-        clean_result = CommandResult(returncode=0, stdout="", stderr="")
+        clean_result: CommandResult | None = None
+        clean_attempted = False
         if reset_result.ok:
+            clean_attempted = True
             clean_result = await self._deps.runner.run(
                 _git_worktree_command(worktree_path, "clean", "-fd")
             )
-        branch_restored = reset_result.ok and clean_result.ok
+        branch_restored = reset_result.ok and clean_result is not None and clean_result.ok
         details: dict[str, object] = {
             "phase": "pre_push_committed_diff",
             "paths": paths,
@@ -5191,11 +5270,13 @@ class PullRequestMonitorRunner:
             "reverted_paths": reverted_paths,
             "pushed": False,
             "reset_returncode": reset_result.returncode,
-            "clean_returncode": clean_result.returncode,
+            "clean_attempted": clean_attempted,
         }
         if reset_result.stderr:
             details["reset_stderr"] = reset_result.stderr[:400]
-        if clean_result.stderr:
+        if clean_result is not None:
+            details["clean_returncode"] = clean_result.returncode
+        if clean_result is not None and clean_result.stderr:
             details["clean_stderr"] = clean_result.stderr[:400]
         if delta_evidence.collection_errors:
             details["reverted_path_collection_errors"] = list(delta_evidence.collection_errors)
@@ -5248,7 +5329,13 @@ class PullRequestMonitorRunner:
         return _GitPushResult(
             pushed=False,
             failed=True,
-            returncode=reset_result.returncode if not reset_result.ok else clean_result.returncode,
+            returncode=(
+                reset_result.returncode
+                if not reset_result.ok
+                else clean_result.returncode
+                if clean_result is not None
+                else 1
+            ),
             stderr=stderr,
             reason_code=protected_scope_block.reason_code,
             details=details,

@@ -24,6 +24,11 @@ After the follow-up CodeRabbit quick-win on commit `01f7b7ae`, those
 best-effort path collection failures are also preserved in the rollback
 evidence payload, so operators can distinguish "no reverted paths" from
 "diagnostic path collection failed but rollback still ran."
+After the follow-up CodeRabbit review on commit `20bebba0`, monitor repair
+operations now refuse to start if the worktree is already dirty before the
+agent runs, and rollback evidence records whether `git clean -fd` actually ran.
+That keeps transactional rollback scoped to the current repair operation and
+avoids reporting a synthetic clean success after a failed reset.
 
 ## Coverage Added
 
@@ -44,6 +49,9 @@ evidence payload, so operators can distinguish "no reverted paths" from
   logged and ignored while rollback continues, with dirty/untracked paths still
   reported when available. The rollback evidence now includes a structured
   `reverted_path_collection_errors` entry for the parse failure.
+- Dirty-start/rollback-evidence regressions: CI repair refuses to invoke the
+  agent when pre-existing dirty worktree state is detected; failed rollback
+  reset evidence omits `clean_returncode` and reports `clean_attempted: false`.
 
 ## Validation Commands
 
@@ -56,6 +64,8 @@ evidence payload, so operators can distinguish "no reverted paths" from
   - Result: `17 passed in 18.57s`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'protected_scope_delta'`
   - Result: `2 passed, 168 deselected in 2.28s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py -q -k 'pre_existing_dirty_worktree or protected_scope_delta or failed_reset_omits or ci_fix_blocks_committed_protected_quality_gate_edits_after_retry or ci_fix_rolls_back_instead or ci_fix_rolls_back_before_protected_revert_baseline_fetch or execute_ci_fix_rolls_back_whole_delta or ci_fix_blocking_supply_chain or ci_fix_commits_and_pushes_even_if_agent_fails'`
+  - Result: `10 passed, 162 deselected in 11.91s`
 - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py src/awf/runtime/monitor_prompts.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py tests/unit/runtime/test_monitor_prompts.py`
   - Result: `All checks passed`
 - `uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor_runner.py tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py`
