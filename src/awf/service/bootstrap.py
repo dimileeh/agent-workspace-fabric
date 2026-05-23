@@ -448,6 +448,11 @@ def _packaged_bootstrap_asset_root() -> Path | None:
         candidate = files("awf").joinpath(PACKAGED_BOOTSTRAP_ASSET_ROOT.as_posix())
     except (ModuleNotFoundError, TypeError):
         return None
+    # files("awf") yields a Traversable that is only a real Path for
+    # filesystem installs (the wheel/editable case). Zip-imported packages
+    # return a non-Path Traversable lacking Path APIs such as .resolve() that
+    # callers (e.g. is_packaged_bootstrap_asset_root) rely on, so the guard
+    # must stay this strict — do not broaden it to accept any Traversable.
     if not isinstance(candidate, Path):
         return None
     return candidate if _is_bootstrap_asset_root(candidate) else None
