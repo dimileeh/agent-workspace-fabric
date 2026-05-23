@@ -4029,7 +4029,8 @@ class PullRequestMonitorRunner:
         fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
         threads = list(initial_threads)
         reviews = list(initial_reviews)
-        operation_start_head = pr_head_sha
+        worktree_path = self._worktrees_root / workspace_id
+        operation_start_head = await self._rev_parse_head(worktree_path)
 
         for _pass_num in range(self._runner_config.max_fix_cycle_passes):
             # 1) Address each item in the current batch.
@@ -4161,7 +4162,6 @@ class PullRequestMonitorRunner:
         # iteration will re-poll and see what's left.)
 
         # 3) Push everything we committed.
-        worktree_path = self._worktrees_root / workspace_id
         protected_scope_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -4182,6 +4182,7 @@ class PullRequestMonitorRunner:
                 operation_type=operation_type,
                 monitor_log=monitor_log,
                 operation_start_head=operation_start_head,
+                source_head_sha=operation_start_head,
             )
             if protected_scope_block is not None
             else await self._git_push_result(
@@ -4772,7 +4773,8 @@ class PullRequestMonitorRunner:
         operation_type: str | None = None,
         monitor_log: WorkspaceLogSink | None = None,
     ) -> _GitPushResult:
-        operation_start_head = status.head_sha if status is not None else None
+        worktree_path = self._worktrees_root / workspace_id
+        operation_start_head = await self._rev_parse_head(worktree_path)
         prompt = fix_ci_prompt(
             pr_number=pr_number,
             repo_slug=repo.slug(),
@@ -4842,38 +4844,30 @@ class PullRequestMonitorRunner:
             )
         protected_scope_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
-            worktree_path=self._worktrees_root / workspace_id,
+            worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
         )
         if protected_scope_block is not None:
-            try:
-                return await self._repair_protected_scope_commits_before_push(
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    protected_scope_block=protected_scope_block,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    remote_branch=remote_branch,
-                    remote_push_url=remote_push_url,
-                    status=status,
-                    state=state,
-                    base_branch=base_branch,
-                    operation_id=operation_id,
-                    operation_type=operation_type,
-                    monitor_log=monitor_log,
-                    operation_start_head=operation_start_head,
-                )
-            except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=1,
-                    stderr=str(exc),
-                    reason_code=exc.reason_code,
-                )
+            return await self._repair_protected_scope_commits_before_push(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                protected_scope_block=protected_scope_block,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                operation_start_head=operation_start_head,
+                source_head_sha=operation_start_head,
+            )
         return await self._git_push_result(
-            worktree_path=self._worktrees_root / workspace_id,
+            worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_url=remote_push_url,
         )
@@ -5028,6 +5022,7 @@ class PullRequestMonitorRunner:
         operation_type: str | None = None,
         monitor_log: WorkspaceLogSink | None = None,
         operation_start_head: str | None = None,
+        source_head_sha: str | None = None,
     ) -> _GitPushResult:
         """Roll back a protected-scope repair delta before any push occurs."""
 
@@ -5062,6 +5057,7 @@ class PullRequestMonitorRunner:
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
+            source_head_sha=source_head_sha or operation_start_head,
             evidence={
                 "phase": "pre_push_committed_diff",
                 "paths": paths,
@@ -5105,6 +5101,7 @@ class PullRequestMonitorRunner:
                 monitor_log=monitor_log,
                 outcome="failed",
                 reason_code=protected_scope_block.reason_code,
+                source_head_sha=source_head_sha or operation_start_head,
                 details=details,
             )
             return _GitPushResult(
@@ -5134,6 +5131,7 @@ class PullRequestMonitorRunner:
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
+            source_head_sha=source_head_sha or operation_start_head,
         )
 
     async def _rollback_protected_scope_repair_delta_before_push(
@@ -5152,6 +5150,7 @@ class PullRequestMonitorRunner:
         operation_id: str | None = None,
         operation_type: str | None = None,
         monitor_log: WorkspaceLogSink | None = None,
+        source_head_sha: str | None = None,
     ) -> _GitPushResult:
         del remote_push_url
 
@@ -5203,6 +5202,7 @@ class PullRequestMonitorRunner:
             monitor_log=monitor_log,
             outcome="succeeded" if branch_restored else "failed",
             reason_code=protected_scope_block.reason_code,
+            source_head_sha=source_head_sha or operation_start_head,
             details=details,
         )
         _log.warning(
@@ -5256,12 +5256,13 @@ class PullRequestMonitorRunner:
             _git_worktree_command(
                 worktree_path,
                 "diff",
-                "--name-only",
+                "--name-status",
+                "-z",
                 f"{operation_start_head}..HEAD",
             )
         )
         if committed.ok:
-            paths.update(line.strip() for line in committed.stdout.splitlines() if line.strip())
+            paths.update(_changed_paths_from_name_status_z(committed.stdout))
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_diff_failed",
@@ -5296,6 +5297,7 @@ class PullRequestMonitorRunner:
         monitor_log: WorkspaceLogSink | None,
         outcome: str,
         reason_code: str,
+        source_head_sha: str | None,
         details: Mapping[str, object],
     ) -> None:
         await self._write_monitor_log(
@@ -5321,6 +5323,7 @@ class PullRequestMonitorRunner:
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
+            source_head_sha=source_head_sha,
             evidence=details,
         )
 
