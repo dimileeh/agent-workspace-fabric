@@ -1002,7 +1002,14 @@ def _prompt_project_onboarding_choices(
             include_smoke_request=include_smoke_request,
         )
 
-    egress_mode = typer.prompt("Egress mode", default="restricted").strip().lower()
+    egress_mode = (
+        typer.prompt(
+            "Egress mode",
+            default=egress_mode_type.restricted.value,
+        )
+        .strip()
+        .lower()
+    )
     supported_egress = {mode.value for mode in egress_mode_type}
     if egress_mode not in supported_egress:
         typer.echo(

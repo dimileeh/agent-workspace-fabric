@@ -397,7 +397,7 @@ def test_init_guided_egress_choices_follow_model_enum(
     from awf.cli import main as cli_main
 
     class CustomEgressMode(StrEnum):
-        restricted = "restricted"
+        restricted = "private-default"
         private = "private"
 
     preview = SimpleNamespace(
@@ -407,9 +407,14 @@ def test_init_guided_egress_choices_follow_model_enum(
         )
     )
     captured: dict[str, object] = {}
+    prompt_defaults: list[object] = []
     prompt_answers = iter(["generic", "private"])
 
-    monkeypatch.setattr("awf.cli.main.typer.prompt", lambda *_args, **_kwargs: next(prompt_answers))
+    def prompt(_label: str, **kwargs: object) -> str:
+        prompt_defaults.append(kwargs.get("default"))
+        return next(prompt_answers)
+
+    monkeypatch.setattr("awf.cli.main.typer.prompt", prompt)
     monkeypatch.setattr("awf.cli.main.typer.confirm", lambda *_args, **_kwargs: False)
 
     def customize_preview(received_preview: object, **kwargs: object) -> object:
@@ -428,6 +433,7 @@ def test_init_guided_egress_choices_follow_model_enum(
 
     assert result is preview
     assert wants_write is False
+    assert prompt_defaults == ["generic", CustomEgressMode.restricted.value]
     assert captured["egress_mode"] == CustomEgressMode.private
 
 
