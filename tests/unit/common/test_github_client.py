@@ -2593,7 +2593,7 @@ class TestFetchPrStatus:
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
 
     @pytest.mark.unit
-    async def test_skips_paginating_comment_history_for_resolved_and_outdated_threads(self) -> None:
+    async def test_paginates_comment_history_for_resolved_and_outdated_threads(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -2669,7 +2669,16 @@ class TestFetchPrStatus:
                     "data": {
                         "node": {
                             "comments": {
-                                "nodes": [],
+                                "nodes": [
+                                    {
+                                        "databaseId": 312,
+                                        "bodyText": "Resolved comment history page two",
+                                        "author": {"login": "reviewer-a"},
+                                        "viewerDidAuthor": False,
+                                        "createdAt": "2026-05-06T10:10:00Z",
+                                        "url": "https://github.example/review/312",
+                                    }
+                                ],
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
                         }
@@ -2684,7 +2693,16 @@ class TestFetchPrStatus:
                     "data": {
                         "node": {
                             "comments": {
-                                "nodes": [],
+                                "nodes": [
+                                    {
+                                        "databaseId": 322,
+                                        "bodyText": "Outdated comment history page two",
+                                        "author": {"login": "reviewer-b"},
+                                        "viewerDidAuthor": False,
+                                        "createdAt": "2026-05-06T10:05:00Z",
+                                        "url": "https://github.example/review/322",
+                                    }
+                                ],
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
                         }
@@ -2699,7 +2717,12 @@ class TestFetchPrStatus:
         )
 
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
-        assert len(fake.calls) == 1
+        assert status.latest_external_review_activity_at is not None
+        assert status.latest_external_review_activity_at.isoformat() == "2026-05-06T10:10:00+00:00"
+        assert status.latest_external_review_activity_source == "review_thread_comment"
+        assert any("threadId=T_resolved" in " ".join(call.args) for call in fake.calls[1:])
+        assert any("threadId=T_outdated" in " ".join(call.args) for call in fake.calls[1:])
+        assert len(fake.calls) == 3
 
     @pytest.mark.unit
     async def test_skips_review_with_empty_body(self) -> None:
