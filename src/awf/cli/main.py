@@ -1889,6 +1889,8 @@ def _run_mcp_server(*, env_file: Path | None) -> None:
 
 def _resolve_mcp_settings(*, env_file: Path | None) -> Any:
     """Resolve Settings for the local MCP server command."""
+    import dataclasses
+
     from awf.common.config import Settings
     from awf.service.config import local_service_environ, resolve_service_settings
 
@@ -1903,46 +1905,19 @@ def _resolve_mcp_settings(*, env_file: Path | None) -> Any:
         base_settings = Settings(_env_file=resolved_env_file)
         service_settings = resolve_service_settings(base_settings, environ=service_environ)
 
-    return base_settings.model_copy(
-        update={
-            "database_url": service_settings.database_url,
-            "api_base_url": service_settings.api_base_url,
-            "console_url": service_settings.console_url,
-            "api_token": service_settings.api_token,
-            "github_token": service_settings.github_token,
-            "docker_host": service_settings.docker_host,
-            "agent_runtime_image": service_settings.agent_runtime_image,
-            "work_dir": service_settings.work_dir,
-            "min_free_disk_bytes": service_settings.min_free_disk_bytes,
-            "host_home": service_settings.host_home,
-            "worker_poll_interval_seconds": service_settings.worker_poll_interval_seconds,
-            "worker_max_concurrent_provisions": service_settings.worker_max_concurrent_provisions,
-            "worker_max_concurrent_executions": service_settings.worker_max_concurrent_executions,
-            "workspace_steady_cpu": service_settings.workspace_steady_cpu,
-            "workspace_steady_memory_gb": service_settings.workspace_steady_memory_gb,
-            "workspace_peak_cpu": service_settings.workspace_peak_cpu,
-            "workspace_peak_memory_gb": service_settings.workspace_peak_memory_gb,
-            "agent_wall_timeout_seconds": service_settings.agent_wall_timeout_seconds,
-            "agent_idle_timeout_seconds": service_settings.agent_idle_timeout_seconds,
-            "planning_max_iterations_default": service_settings.planning_max_iterations_default,
-            "worker_node_id": service_settings.node_id,
-            "worker_branch_prefix": service_settings.branch_prefix,
-            "completed_workspace_retention_hours": (
-                service_settings.completed_workspace_retention_hours
-            ),
-            "workspace_cleanup_enabled": service_settings.workspace_cleanup_enabled,
-            "workspace_cleanup_scan_interval_seconds": (
-                service_settings.workspace_cleanup_scan_interval_seconds
-            ),
-            "workspace_cleanup_batch_limit": service_settings.workspace_cleanup_batch_limit,
-            "network_posture_open_legacy_cutoff": (
-                service_settings.network_posture_open_legacy_cutoff
-            ),
-            "local_capacity_cpu_cores": service_settings.local_capacity_cpu_cores,
-            "local_capacity_memory_gb": service_settings.local_capacity_memory_gb,
-            "local_capacity_dind_slots": service_settings.local_capacity_dind_slots,
-        }
-    )
+    update_dict = dataclasses.asdict(service_settings)
+
+    # Map renamed fields
+    if "node_id" in update_dict:
+        update_dict["worker_node_id"] = update_dict.pop("node_id")
+    if "branch_prefix" in update_dict:
+        update_dict["worker_branch_prefix"] = update_dict.pop("branch_prefix")
+
+    # Filter to only include fields defined on the target model
+    valid_keys = type(base_settings).model_fields.keys()
+    update_dict = {k: v for k, v in update_dict.items() if k in valid_keys}
+
+    return base_settings.model_copy(update=update_dict)
 
 
 @app.command("worker")
