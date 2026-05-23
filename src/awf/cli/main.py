@@ -131,6 +131,7 @@ _DEFAULT_BASE_URL = "http://localhost:8000"
 
 
 def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
+    """Get request context."""
     try:
         request_obj = cast(object, response.request)
     except RuntimeError:
@@ -141,10 +142,12 @@ def _request_context(response: httpx.Response) -> tuple[str | None, str | None]:
 
 
 def _base_url(override: str | None) -> str:
+    """Get base url."""
     return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
 
 
 def _api_token_headers(override: str | None) -> dict[str, str]:
+    """Get API token headers."""
     token = override if override is not None else os.environ.get("AWF_API_TOKEN")
     if not token:
         return {}
@@ -152,6 +155,7 @@ def _api_token_headers(override: str | None) -> dict[str, str]:
 
 
 def _api_token_option() -> Any:
+    """Get API token option."""
     return typer.Option(
         None,
         "--api-token",

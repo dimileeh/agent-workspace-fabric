@@ -65,6 +65,7 @@ IDEMPOTENT_MCP_CONTROL_TOOLS = {
 
 
 def _split_cell(cell: str) -> list[str]:
+    """Split a cell by comma or semicolon, stripping whitespace and backticks."""
     cell = _strip_backticks(cell)
     # Support both comma and semicolon separation
     cell = cell.replace(";", ",")
@@ -73,6 +74,7 @@ def _split_cell(cell: str) -> list[str]:
 
 
 def _row_for_capability(rows: list[dict[str, str]], capability: str) -> dict[str, str]:
+    """Return the row matching the given capability."""
     for row in rows:
         if row.get("Capability", "").strip() == capability:
             return row
@@ -357,6 +359,7 @@ def test_parity_matrix_matches_real_surfaces() -> None:
 
     # 2. Load real CLI commands
     def get_cli_commands(app: typer.Typer, prefix: str = "awf") -> list[str]:
+        """Extract all CLI commands from the Typer app recursively."""
         commands = []
         if app.registered_commands:
             for cmd in app.registered_commands:

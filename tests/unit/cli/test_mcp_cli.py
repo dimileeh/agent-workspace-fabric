@@ -56,19 +56,25 @@ def test_mcp_serve_disposes_engine_when_server_build_fails(
     calls: dict[str, Any] = {}
 
     class _FakeEngine:
+        """Fake engine."""
+
         async def dispose(self) -> None:
+            """Dispose."""
             calls["disposed"] = True
 
     def _make_engine(url: str) -> _FakeEngine:
+        """Make engine."""
         calls["database_url"] = url
         return _FakeEngine()
 
     def _make_session_factory(engine: _FakeEngine) -> object:
+        """Make session factory."""
         calls["factory_engine"] = engine
         calls["session_factory"] = object()
         return calls["session_factory"]
 
     def _build_mcp_server(*, service: object, settings: object) -> object:
+        """Build MCP server."""
         raise RuntimeError("boom")
 
     monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
@@ -105,23 +111,32 @@ def test_mcp_serve_runs_stdio_with_env_file(
     calls: dict[str, Any] = {}
 
     class _FakeEngine:
+        """Fake engine."""
+
         async def dispose(self) -> None:
+            """Dispose."""
             calls["disposed"] = True
 
     class _FakeMcpServer:
+        """Fake MCP server."""
+
         def run(self, transport: str) -> None:
+            """Run transport."""
             calls["transport"] = transport
 
     def _make_engine(url: str) -> _FakeEngine:
+        """Make engine."""
         calls["database_url"] = url
         return _FakeEngine()
 
     def _make_session_factory(engine: _FakeEngine) -> object:
+        """Make session factory."""
         calls["factory_engine"] = engine
         calls["session_factory"] = object()
         return calls["session_factory"]
 
     def _build_mcp_server(*, service: object, settings: object) -> _FakeMcpServer:
+        """Build MCP server."""
         calls["service"] = service
         calls["settings"] = settings
         return _FakeMcpServer()
@@ -165,23 +180,32 @@ def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) 
     calls: dict[str, Any] = {}
 
     class _FakeEngine:
+        """Fake engine."""
+
         async def dispose(self) -> None:
+            """Dispose."""
             calls["disposed"] = True
 
     class _FakeMcpServer:
+        """Fake MCP server."""
+
         def run(self, transport: str) -> None:
+            """Run transport."""
             calls["transport"] = transport
 
     def _make_engine(url: str) -> _FakeEngine:
+        """Make engine."""
         calls["database_url"] = url
         return _FakeEngine()
 
     def _make_session_factory(engine: _FakeEngine) -> object:
+        """Make session factory."""
         calls["factory_engine"] = engine
         calls["session_factory"] = object()
         return calls["session_factory"]
 
     def _build_mcp_server(*, service: object, settings: object) -> _FakeMcpServer:
+        """Build MCP server."""
         calls["service"] = service
         calls["settings"] = settings
         return _FakeMcpServer()
