@@ -122,6 +122,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 def _status_for_helpers(
     *,
+    head_sha: str = "abc1234567890def",
     threads: tuple[ReviewThread, ...] = (),
     reviews: tuple[ReviewComment, ...] = (),
     blocking_reviews: tuple[ReviewComment, ...] | None = None,
@@ -129,7 +130,7 @@ def _status_for_helpers(
 ) -> PRStatus:
     return PRStatus(
         number=42,
-        head_sha="abc1234567890def",
+        head_sha=head_sha,
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=threads,
@@ -1726,7 +1727,6 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     adapter = FakeAdapter()
     workspace_id = await seed_monitoring_workspace(factory)
     adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout="{}")
@@ -1763,11 +1763,10 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     assert state.threads_addressed_ids["T_retry"] == "fix_committed"
     assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args[5:7] == ["rev-parse", "HEAD"]
-    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[2].args[5] == "push"
-    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -1789,7 +1788,6 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="newsha\n")
@@ -1827,13 +1825,12 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     assert "T_resolve" not in state.threads_addressed_ids
     assert state.last_push_sha == "newsha"
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args[5:7] == ["rev-parse", "HEAD"]
-    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
     assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[3].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[4].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[2].args[5] == "push"
-    assert cmd.calls[3].args[5:7] == ["rev-parse", "HEAD"]
+    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[5:7] == ["rev-parse", "HEAD"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -1869,7 +1866,6 @@ async def test_fix_cycle_reraises_non_transient_settle_poll_error(
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed fix locally.")
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=1, stderr="bad credentials")
     runner = make_runner(
         factory=factory,
@@ -2075,7 +2071,6 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
     cmd.queue_result(
         returncode=0,
@@ -2175,7 +2170,6 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
     cmd.queue_result(
         returncode=0,
@@ -2396,7 +2390,6 @@ async def test_fix_cycle_zero_passes_still_runs_push(
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -2420,10 +2413,9 @@ async def test_fix_cycle_zero_passes_still_runs_push(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert len(cmd.calls) == 2
-    assert cmd.calls[0].args[5:7] == ["rev-parse", "HEAD"]
-    assert cmd.calls[1].args[:5] == _git_worktree_command(tmp_path / "worktrees" / "ws_zero_pass")
-    assert cmd.calls[1].args[5] == "push"
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[:5] == _git_worktree_command(tmp_path / "worktrees" / "ws_zero_pass")
+    assert cmd.calls[0].args[5] == "push"
 
 
 @pytest.mark.unit
@@ -3101,7 +3093,7 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -3181,7 +3173,7 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -3278,7 +3270,7 @@ async def test_monitor_adapter_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert [call.args[5:7] for call in cmd.calls] == [["rev-parse", "HEAD"]]
+    assert cmd.calls == []
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -3326,7 +3318,7 @@ async def test_monitor_comment_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert [call.args[5:7] for call in cmd.calls] == [["rev-parse", "HEAD"]]
+    assert cmd.calls == []
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -3409,7 +3401,6 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
         body_excerpt="please fix",
         author="reviewer",
     )
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=128,
@@ -3489,7 +3480,7 @@ async def test_monitor_comment_diff_baseline_unavailable_terminates_with_diff_re
         body_excerpt="please fix",
         author="reviewer",
     )
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="")  # clean worktree after agent run
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle-window status poll
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
@@ -3881,7 +3872,6 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
     workspace_id = "ws_review_burst"
     first_review = ReviewComment(comment_id="1", body_excerpt="first", author="reviewer")
     second_review = review_node(cid=2, author="reviewer", body="second")
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[second_review]))
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -3946,7 +3936,6 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
             ]
         },
     }
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -4023,7 +4012,6 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
             ]
         },
     }
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     cmd.queue_result(returncode=0, stdout='{"data":{}}')
@@ -4068,11 +4056,10 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
     assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
     assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
     worktree = tmp_path / "worktrees" / "ws_thread_resolution_reply"
-    assert cmd.calls[0].args[5:7] == ["rev-parse", "HEAD"]
-    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]
-    assert cmd.calls[2].args[:5] == _git_worktree_command(worktree)
-    assert cmd.calls[2].args[5] == "push"
-    assert cmd.calls[3].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
 
 
 @pytest.mark.unit
@@ -4965,7 +4952,7 @@ async def test_execute_ci_repair_missing_operation_start_head_is_terminal(
         repo_url="git@github.com:dimileeh/aira-web.git",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        status=_status_for_helpers(),
+        status=_status_for_helpers(head_sha=""),
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
@@ -5029,7 +5016,7 @@ async def test_execute_comment_repair_missing_operation_start_head_is_terminal(
         repo_url="git@github.com:dimileeh/aira-web.git",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        status=_status_for_helpers(threads=(thread,)),
+        status=_status_for_helpers(head_sha="", threads=(thread,)),
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
@@ -5257,7 +5244,6 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -5391,7 +5377,6 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6047,7 +6032,6 @@ async def test_ci_fix_rolls_back_instead_of_committing_verified_protected_revert
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -6105,7 +6089,6 @@ async def test_ci_fix_rolls_back_before_protected_revert_baseline_fetch(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
-    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")

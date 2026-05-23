@@ -4049,6 +4049,7 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             operation_type="comment_repair",
+            fallback_head_sha=pr_head_sha,
         )
         if head_result is not None:
             return head_result
@@ -4802,10 +4803,13 @@ class PullRequestMonitorRunner:
         )
         if dirty_result is not None:
             return dirty_result
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            raise ProviderRecoveryRetryError()
         operation_start_head, head_result = await self._repair_operation_start_head_result(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             operation_type="ci_repair",
+            fallback_head_sha=status.head_sha if status is not None else None,
         )
         if head_result is not None:
             return head_result
@@ -4817,8 +4821,6 @@ class PullRequestMonitorRunner:
         )
         agent_run_err = None
         command_evidence: list[str] = []
-        if await self._provider_recovery_suppresses_cli(workspace_id):
-            raise ProviderRecoveryRetryError()
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -4976,7 +4978,20 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         worktree_path: Path,
         operation_type: str,
+        fallback_head_sha: str | None = None,
     ) -> tuple[str, _GitPushResult | None]:
+        if fallback_head_sha:
+            return fallback_head_sha, None
+        if not worktree_path.exists():
+            candidate_head = await self._open_merge_candidate_head_sha(workspace_id)
+            if candidate_head:
+                _log.info(
+                    "monitor.repair_operation_start_head_from_candidate",
+                    workspace_id=workspace_id,
+                    operation_type=operation_type,
+                    head_sha=candidate_head[:10],
+                )
+                return candidate_head, None
         result = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "rev-parse", "HEAD")
         )
@@ -5012,6 +5027,12 @@ class PullRequestMonitorRunner:
                 "pushed": False,
             },
         )
+
+    async def _open_merge_candidate_head_sha(self, workspace_id: str) -> str | None:
+        async with self._deps.session_factory() as session:
+            repository = MergeCandidateRepository(session)
+            candidate = await repository.get_open_for_workspace_with_merge_inputs(workspace_id)
+            return candidate.head_sha if candidate is not None else None
 
     async def _commit_dirty_worktree(
         self,
