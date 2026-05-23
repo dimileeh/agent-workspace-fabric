@@ -2593,6 +2593,115 @@ class TestFetchPrStatus:
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
 
     @pytest.mark.unit
+    async def test_skips_paginating_comment_history_for_resolved_and_outdated_threads(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_resolved",
+                        "isResolved": True,
+                        "isOutdated": False,
+                        "path": "src/resolved.py",
+                        "line": 10,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 311,
+                                    "bodyText": "Resolved comment history page one",
+                                    "author": {"login": "reviewer-a"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:00:00Z",
+                                    "url": "https://github.example/review/311",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-resolved"},
+                        },
+                    },
+                    {
+                        "id": "T_outdated",
+                        "isResolved": False,
+                        "isOutdated": True,
+                        "path": "src/outdated.py",
+                        "line": 20,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 321,
+                                    "bodyText": "Outdated comment history page one",
+                                    "author": {"login": "reviewer-b"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:01:00Z",
+                                    "url": "https://github.example/review/321",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-outdated"},
+                        },
+                    },
+                    {
+                        "id": "T_live",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/live.py",
+                        "line": 30,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 331,
+                                    "bodyText": "Live thread comment",
+                                    "author": {"login": "reviewer-c"},
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-05-06T10:02:00Z",
+                                    "url": "https://github.example/review/331",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                ],
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
     async def test_skips_review_with_empty_body(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

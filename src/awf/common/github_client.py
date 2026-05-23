@@ -1019,12 +1019,15 @@ class GitHubClient:
                 continue
             is_resolved = bool(node.get("isResolved"))
             is_outdated = bool(node.get("isOutdated"))
-            all_comments = _parse_review_thread_comments(
-                await self._fetch_paginated_review_thread_comment_nodes(
-                    thread_id=thread_id,
-                    first_page=_dig(node, "comments"),
+            comment_connection = _dig(node, "comments")
+            all_comments = _parse_review_thread_comments(_connection_nodes(comment_connection))
+            if not is_resolved and not is_outdated:
+                all_comments = _parse_review_thread_comments(
+                    await self._fetch_paginated_review_thread_comment_nodes(
+                        thread_id=thread_id,
+                        first_page=comment_connection,
+                    )
                 )
-            )
             latest_review_activity_at, latest_review_activity_source = (
                 _latest_activity_from_thread_comments(
                     all_comments,
