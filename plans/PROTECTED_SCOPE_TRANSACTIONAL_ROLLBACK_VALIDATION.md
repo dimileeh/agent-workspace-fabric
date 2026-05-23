@@ -20,6 +20,10 @@ After the follow-up Greptile P1 on commit `c147d2bd`, the diagnostic reverted
 path collection is now best-effort for malformed `git diff --name-status -z`
 output. A parse error is logged, but it cannot prevent the safety-critical
 `git reset --hard <operation-start>` and `git clean -fd` rollback from running.
+After the follow-up CodeRabbit quick-win on commit `01f7b7ae`, those
+best-effort path collection failures are also preserved in the rollback
+evidence payload, so operators can distinguish "no reverted paths" from
+"diagnostic path collection failed but rollback still ran."
 
 ## Coverage Added
 
@@ -38,7 +42,8 @@ output. A parse error is logged, but it cannot prevent the safety-critical
   fix-cycle rollback audit events carry a structured source head SHA.
 - Parse-failure rollback regression: malformed diagnostic name-status output is
   logged and ignored while rollback continues, with dirty/untracked paths still
-  reported when available.
+  reported when available. The rollback evidence now includes a structured
+  `reverted_path_collection_errors` entry for the parse failure.
 
 ## Validation Commands
 

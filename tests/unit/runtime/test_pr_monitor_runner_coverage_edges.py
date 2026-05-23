@@ -2240,6 +2240,12 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     assert result.details is not None
     assert result.details["branch_restored"] is True
     assert result.details["reverted_paths"] == ["plans/orphan.md"]
+    assert result.details["reverted_path_collection_errors"] == [
+        {
+            "phase": "committed_diff_parse",
+            "message": "truncated `--name-status -z` record for status 'R100'",
+        }
+    ]
     assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") in [
         call.args for call in cmd.calls
     ]

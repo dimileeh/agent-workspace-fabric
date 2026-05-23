@@ -432,6 +432,12 @@ class ProtectedScopeDiffError(Exception):
     """Committed diff against the remote PR branch could not be verified."""
 
 
+@dataclass(frozen=True)
+class _ProtectedScopeRollbackDeltaEvidence:
+    reverted_paths: tuple[str, ...]
+    collection_errors: tuple[dict[str, object], ...] = ()
+
+
 @dataclass
 class _RunnerDeps:
     """All side-effect collaborators in one bag — easy to fake in tests."""
@@ -5156,11 +5162,12 @@ class PullRequestMonitorRunner:
 
         violations = list(protected_scope_block.violations)
         paths = _quality_gate_violation_paths(violations)
-        reverted_paths = await self._protected_scope_repair_delta_paths(
+        delta_evidence = await self._protected_scope_repair_delta_paths(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             operation_start_head=operation_start_head,
         )
+        reverted_paths = list(delta_evidence.reverted_paths)
         reset_result = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "reset", "--hard", operation_start_head)
         )
@@ -5190,6 +5197,8 @@ class PullRequestMonitorRunner:
             details["reset_stderr"] = reset_result.stderr[:400]
         if clean_result.stderr:
             details["clean_stderr"] = clean_result.stderr[:400]
+        if delta_evidence.collection_errors:
+            details["reverted_path_collection_errors"] = list(delta_evidence.collection_errors)
 
         await self._record_protected_scope_rollback_result(
             workspace_id=workspace_id,
@@ -5213,6 +5222,7 @@ class PullRequestMonitorRunner:
             operation_start_head=operation_start_head,
             attempted_head=attempted_head,
             branch_restored=branch_restored,
+            reverted_path_collection_errors=delta_evidence.collection_errors,
         )
 
         if branch_restored:
@@ -5250,8 +5260,9 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         worktree_path: Path,
         operation_start_head: str,
-    ) -> list[str]:
+    ) -> _ProtectedScopeRollbackDeltaEvidence:
         paths: set[str] = set()
+        collection_errors: list[dict[str, object]] = []
         committed = await self._deps.runner.run(
             _git_worktree_command(
                 worktree_path,
@@ -5270,12 +5281,25 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     error=str(exc),
                 )
+                collection_errors.append(
+                    {
+                        "phase": "committed_diff_parse",
+                        "message": str(exc),
+                    }
+                )
         else:
             _log.warning(
                 "monitor.protected_scope_transactional_rollback_diff_failed",
                 workspace_id=workspace_id,
                 returncode=committed.returncode,
                 stderr=committed.stderr[:400],
+            )
+            collection_errors.append(
+                {
+                    "phase": "committed_diff_command",
+                    "returncode": committed.returncode,
+                    "stderr": committed.stderr[:400],
+                }
             )
         status = await self._deps.runner.run(
             _git_worktree_command(worktree_path, "status", "--porcelain")
@@ -5289,7 +5313,17 @@ class PullRequestMonitorRunner:
                 returncode=status.returncode,
                 stderr=status.stderr[:400],
             )
-        return sorted(paths)
+            collection_errors.append(
+                {
+                    "phase": "worktree_status_command",
+                    "returncode": status.returncode,
+                    "stderr": status.stderr[:400],
+                }
+            )
+        return _ProtectedScopeRollbackDeltaEvidence(
+            reverted_paths=tuple(sorted(paths)),
+            collection_errors=tuple(collection_errors),
+        )
 
     async def _record_protected_scope_rollback_result(
         self,
