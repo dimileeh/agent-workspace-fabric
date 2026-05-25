@@ -18,8 +18,8 @@ from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
-    _head_repo_slug_from_adoption_payload,
 )
+from awf.common.github_client_adoption import _head_repo_slug_from_adoption_payload
 from awf.db import session as session_mod
 from awf.db.session import make_engine
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator

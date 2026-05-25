@@ -16,13 +16,22 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_text
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
 )
 from awf.common.git_identity import (
     git_safe_directory_config_args,
+)
+from awf.control.executor.constants import (
+    _AUDIT_GIT_PUSH_EVENT,
+    GIT_OBJECT_MISSING_REASON_CODE,
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PR_REEXECUTION_GUARD_REASON_CODE,
+    WORKTREE_MISSING_REASON_CODE,
 )
 from awf.control.executor.git_ops import (
     GIT_AGENT_WRITABILITY_FAILED_REASON_CODE,
@@ -34,38 +43,33 @@ from awf.control.executor.git_ops import (
 from awf.control.executor.helpers import (
     _worktree_missing_message,
 )
+from awf.control.executor.metadata import (
+    _int_or_none,
+    _str_or_none,
+)
 from awf.control.executor.quality_gates import (
     _log,
 )
-from awf.control.executor.shared import (
-    _AUDIT_GIT_PUSH_EVENT,
-    GIT_OBJECT_MISSING_REASON_CODE,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-    PR_REEXECUTION_GUARD_REASON_CODE,
-    WORKTREE_MISSING_REASON_CODE,
-    CommandResult,
-    FailureReason,
-    MonitorOperationHandle,
-    OperationStatus,
-    OperationType,
-    ProtectedFileDiff,
-    WorkspaceRepository,
-    WorkspaceStatus,
+from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
-    _int_or_none,
-    _is_callback_terminal_status,
     _is_validate_only_recovery_payload,
+)
+from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.control.executor.types import (
     _MonitorRebaseRecoveryError,
     _PrReexecutionGuardResult,
     _RebaseRecoveryResult,
-    _str_or_none,
-    async_sessionmaker,
-    redact_audit_text,
 )
 from awf.control.protected_file_diffs import (
     git_show_text,
 )
-from awf.control.quality_gates import diff_classified_protected_paths
+from awf.control.quality_gates import ProtectedFileDiff, diff_classified_protected_paths
+from awf.db.enums import (
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import (
     Operation,
 )
@@ -74,12 +78,14 @@ from awf.db.repositories import (
     OperationRepository,
     StaleReasonRepository,
     ValidationRunRepository,
+    WorkspaceRepository,
     sync_candidate_readiness,
 )
 from awf.runtime.planning import (
     changed_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_operations import (
+    MonitorOperationHandle,
     build_monitor_operation_payload,
     create_or_start_monitor_operation,
     finish_monitor_operation,

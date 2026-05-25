@@ -241,7 +241,7 @@ async def test_readyz_includes_egress_audit_check(
 ) -> None:
     """``/readyz`` must include an ``egress_audit`` check key."""
     from awf.common.commands import FakeCommandRunner
-    from tests.unit.api.test_health import _queue_all_ok
+    from tests.unit.api.test_health_parts.test_health_part_001 import _queue_all_ok
 
     original_get_settings = health_route.get_settings
     original_get_settings.cache_clear()

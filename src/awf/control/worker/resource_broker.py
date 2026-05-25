@@ -12,9 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from awf.control.worker.scheduling import _CapacityQueueDecisionContext
-    from awf.control.worker.shared import WorkerConfig
-
 from awf.common.logging import get_logger
+from awf.control.worker.config import WorkerConfig
 from awf.db.models import QueueDecision, ResourceReservation, Workspace
 from awf.db.repositories import (
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,

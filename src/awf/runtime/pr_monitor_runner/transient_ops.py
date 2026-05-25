@@ -15,6 +15,19 @@ from typing import Any, cast
 
 from awf.common.github_client import (
     GitHubClientError,
+    RepoRef,
+)
+from awf.db.repositories import WorkspaceEventCreate
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import (
+    MonitorState,
+    PRStatus,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+    _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+    _GIT_FETCH_BASE_FAILED_REASON,
+    _GITHUB_TRANSIENT_RETRY_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _base_fetch_retry_wait_seconds,
@@ -26,19 +39,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _transient_github_retry_payload,
     _with_ci_failures,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
-    _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
-    _GIT_FETCH_BASE_FAILED_REASON,
-    _GITHUB_TRANSIENT_RETRY_REASON,
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
-    MonitorState,
-    PRStatus,
-    RepoRef,
-    WorkspaceEventCreate,
-    WorkspaceLogSink,
     _BaseFetchHandlingResult,
-    _log,
 )
 
 

@@ -5,8 +5,34 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import time
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
+from pathlib import Path
 from typing import Any
 
+from awf.common.audit import redact_audit_text
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.db.enums import (
+    FailureReason,
+    WorkspaceStatus,
+)
+from awf.db.models import Workspace
+from awf.db.repositories import (
+    WorkspaceEventCreate,
+    WorkspaceRepository,
+)
+from awf.runtime.pr_monitor import (
+    AbortReason,
+    MonitorState,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _SYNC_BASE_NO_PROGRESS_COUNT_KEY,
+    _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
+)
 from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_state_for_persistence,
     _initial_review_grace_state_for_runtime,
@@ -18,26 +44,8 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _target_reconcile_payload,
     _truncate_target_reconcile_failure_payload,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _SYNC_BASE_NO_PROGRESS_COUNT_KEY,
-    _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
-    EXEC_PROCESS_CLEANUP_FAILED,
-    UTC,
-    AbortReason,
-    FailureReason,
-    MonitorState,
-    Path,
-    Workspace,
-    WorkspaceEventCreate,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _log,
-    datetime,
-    redact_audit_text,
-    run_workspace_filesystem_gc,
-    time,
-    timedelta,
-)
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.service.gc import run_workspace_filesystem_gc
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace:

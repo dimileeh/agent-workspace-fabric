@@ -5,28 +5,69 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
-from dataclasses import replace
+import hashlib
+import json
+import re
+from collections.abc import (
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from dataclasses import dataclass, replace
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
+from pathlib import Path
 from typing import Any
 
 from awf.common.github_client import (
     GitHubClientError,
 )
+from awf.control.protected_file_diffs import (
+    changed_paths_from_name_status_z as _parse_name_status_z,
+)
+from awf.control.quality_gates import QualityGateViolation
+from awf.control.state_machine import WorkspaceStateMachine
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import (
     Operation,
+    Workspace,
+)
+from awf.db.repositories import (
+    WorkspaceRepository,
+    pr_feedback_body_hash,
 )
 from awf.runtime.pr_monitor import (
+    CheckFailure,
     CheckTiming,
+    Merge,
+    MergeStateStatus,
+    MonitorConfig,
+    MonitorState,
+    NotifyHuman,
+    PRStatus,
+    ReviewComment,
+    _agent_can_triage_review_comment,
+    _ci_transient_rerun_count,
+    _ci_transient_rerun_state_key,
+    _is_bot_author,
+    _is_bot_review_thread,
+    _needs_comment_attention,
+    _review_thread_body_hash,
+    _review_thread_body_state_key,
+    decide,
 )
 from awf.runtime.pr_monitor_runner.comments import (
     Verdict,
     VerdictResult,
 )
-from awf.runtime.pr_monitor_runner.gates import (
-    _MergeGateResult,
-    _NonCheckReviewerSettleDecision,
-    _NonCheckReviewerSettleWaitOperationContext,
-)
-from awf.runtime.pr_monitor_runner.shared import (
+from awf.runtime.pr_monitor_runner.constants import (
     _AUTHORIZATION_BEARER_RE,
     _AWF_VERDICT,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
@@ -44,45 +85,15 @@ from awf.runtime.pr_monitor_runner.shared import (
     _VALIDATION_INSUFFICIENT_STALE_REASON,
     _VERDICT_DEFER,
     _VERDICT_FALSE_POSITIVE,
-    UTC,
+)
+from awf.runtime.pr_monitor_runner.gates import (
+    _MergeGateResult,
+    _NonCheckReviewerSettleDecision,
+    _NonCheckReviewerSettleWaitOperationContext,
+)
+from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
-    CheckFailure,
-    Iterable,
-    Mapping,
-    Merge,
-    MergeStateStatus,
-    MonitorConfig,
-    MonitorState,
-    NotifyHuman,
-    OperationStatus,
-    OperationType,
-    Path,
     ProtectedScopeDiffError,
-    PRStatus,
-    QualityGateViolation,
-    ReviewComment,
-    Sequence,
-    Workspace,
-    WorkspaceRepository,
-    WorkspaceStateMachine,
-    WorkspaceStatus,
-    _agent_can_triage_review_comment,
-    _ci_transient_rerun_count,
-    _ci_transient_rerun_state_key,
-    _is_bot_author,
-    _is_bot_review_thread,
-    _needs_comment_attention,
-    _parse_name_status_z,
-    _review_thread_body_hash,
-    _review_thread_body_state_key,
-    dataclass,
-    datetime,
-    decide,
-    hashlib,
-    json,
-    pr_feedback_body_hash,
-    re,
-    timedelta,
 )
 
 

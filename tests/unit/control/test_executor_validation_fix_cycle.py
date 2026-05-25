@@ -36,7 +36,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor.shared import _supply_chain_block_message
+from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     PolicyFindingRepository,

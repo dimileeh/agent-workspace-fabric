@@ -51,7 +51,6 @@ from awf.service.supply_chain_policy import (
     _node_package_version,
     _node_pin_value_is_pinned,
     _node_pin_value_is_semver_range,
-    _normalize_path,
     _package_command,
     _pip_env_registry_hosts,
     _pipe_target_is_interpreter,
@@ -67,6 +66,7 @@ from awf.service.supply_chain_policy import (
     evaluate_supply_chain_policy,
     supply_chain_policy_for_workspace,
 )
+from awf.service.supply_chain_policy_helpers import _normalize_path
 from tests.postgres import postgres_test_engine
 
 

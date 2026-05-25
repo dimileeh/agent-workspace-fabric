@@ -16,6 +16,17 @@ from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _SYNC_BASE_RESOLVABLE_STALE_REASONS,
+)
+from awf.runtime.pr_monitor_runner.types import (
+    BaseBehindCountError,
+    BaseFetchError,
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
+)
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
@@ -184,8 +195,6 @@ async def _fetch_base(
     worktree_path: Path,
     base_branch: str,
 ) -> None:
-    from awf.runtime.pr_monitor_runner.shared import BaseFetchError
-
     result = await runner._fetch_base_once(worktree_path=worktree_path, base_branch=base_branch)
     repairs_attempted = 0
     while not result.ok and repairs_attempted < _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS:
@@ -247,8 +256,6 @@ async def _repair_orphaned_broken_awf_ref(
     worktree_path: Path,
     stderr: str,
 ) -> bool:
-    from awf.runtime.pr_monitor_runner.shared import _GIT_MIRROR_BROKEN_REF_REMOVED_REASON
-
     match = _BROKEN_AWF_REF_RE.search(stderr or "")
     if match is None:
         return False
@@ -316,8 +323,6 @@ async def _can_remove_broken_awf_ref(self: Any, broken_workspace_id: str) -> boo
 
 
 async def _count_base_behind(self: Any, *, worktree_path: Path, base_branch: str) -> int:
-    from awf.runtime.pr_monitor_runner.shared import BaseBehindCountError
-
     result = await self._deps.runner.run(
         [
             "git",
@@ -490,11 +495,6 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
     from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
-    from awf.runtime.pr_monitor_runner.shared import (
-        ProviderRecoveryRetryError,
-        _MonitorAgentRuntimeOwnershipRepairFailedError,
-        _MonitorPolicyBlockedError,
-    )
 
     worktree_path = runner._worktrees_root / workspace_id
 
@@ -611,7 +611,6 @@ async def _refresh_staleness_after_sync_base(
         sync_candidate_readiness,
     )
     from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
-    from awf.runtime.pr_monitor_runner.shared import _SYNC_BASE_RESOLVABLE_STALE_REASONS
 
     try:
         async with runner._deps.session_factory() as session:

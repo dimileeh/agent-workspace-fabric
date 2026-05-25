@@ -38,21 +38,23 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import LogStore
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.pr_monitor import MonitorConfig, MonitorState, decide
+from awf.runtime.pr_monitor_runner.config import (
+    MonitorRunnerConfig,
+    PostMergeTargetReconciler,
+)
+from awf.runtime.pr_monitor_runner.constants import _GIT_BASE_BEHIND_FAILED_REASON
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_base_fetch_retry_state,
     _infer_service_work_dir,
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
-from awf.runtime.pr_monitor_runner.shared import (
-    _GIT_BASE_BEHIND_FAILED_REASON,
+from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
+from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
-    MonitorRunnerConfig,
-    PostMergeTargetReconciler,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
-    _is_active_pr_monitor_recovery_operation,
     _RunnerDeps,
 )
 from awf.runtime.pr_push_remote import (

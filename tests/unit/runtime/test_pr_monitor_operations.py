@@ -19,10 +19,10 @@ from tests.unit.helpers import create_workspace
 
 @pytest.mark.unit
 def test_recovery_runner_reuses_monitor_retryable_statuses() -> None:
-    from awf.runtime.pr_monitor_runner import shared as runner_shared
+    from awf.runtime.pr_monitor_runner import constants as runner_constants
 
     assert (
-        runner_shared._RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES
+        runner_constants._RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES
         is operations.RETRYABLE_MONITOR_OPERATION_STATUSES
     )
 

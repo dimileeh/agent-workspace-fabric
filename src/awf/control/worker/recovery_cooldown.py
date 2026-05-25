@@ -5,15 +5,18 @@ Mechanically extracted from recovery.py; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
 from time import monotonic
 from typing import Any, cast
 
-from awf.control.worker.helpers import (
-    _datetime_from_json,
-    _json_datetime,
-    _utc_datetime,
-)
-from awf.control.worker.shared import (
+from sqlalchemy import select
+
+from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_RESUME_COOLDOWN_REASON_CODE,
@@ -21,16 +24,16 @@ from awf.control.worker.shared import (
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
     _ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT,
     _ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT,
-    UTC,
-    Mapping,
-    WorkspaceEvent,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _log,
-    datetime,
-    select,
-    timedelta,
 )
+from awf.control.worker.helpers import (
+    _datetime_from_json,
+    _json_datetime,
+    _utc_datetime,
+)
+from awf.control.worker.logging import _log
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import WorkspaceEvent
+from awf.db.repositories import WorkspaceRepository
 
 
 def _remember_active_salvage_monitor_recovery_operation_id(self: Any, operation_id: str) -> None:

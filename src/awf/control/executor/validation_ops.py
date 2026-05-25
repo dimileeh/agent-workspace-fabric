@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.audit import redact_audit_text
 from awf.control.executor.helpers import (
     _validation_run_command_records,
 )
@@ -27,20 +28,19 @@ from awf.control.executor.logging_ops import (
 from awf.control.executor.quality_gates import (
     _log,
 )
-from awf.control.executor.shared import (
+from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.db.enums import (
     OperationStatus,
     OperationType,
-    WorkspaceProfile,
-    WorkspaceRepository,
     WorkspaceStatus,
-    _is_callback_terminal_status,
-    redact_audit_text,
 )
 from awf.db.repositories import (
     OperationRepository,
     TaskAttemptRepository,
     ValidationRunRepository,
+    WorkspaceRepository,
 )
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation_identity import (
     environment_identity_digest,
     environment_identity_inputs,

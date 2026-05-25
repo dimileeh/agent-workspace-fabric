@@ -13,6 +13,9 @@ import re as re
 import time as time
 from typing import Any
 
+from awf.db.repositories import WorkspaceEventCreate
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import PRStatus
 from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
@@ -20,12 +23,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _datetime_iso,
     _supply_chain_policy_blocked_message,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    PRStatus,
-    WorkspaceEventCreate,
-    WorkspaceLogSink,
-    _log,
-)
+from awf.runtime.pr_monitor_runner.logging import _log
 
 
 async def _active_policy_block_message(self: Any, workspace_id: str) -> str | None:

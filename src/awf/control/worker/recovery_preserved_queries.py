@@ -5,56 +5,67 @@ Mechanically extracted from recovery_preserved.py; behavior is unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
 from inspect import (
     getattr_static,
 )
+from pathlib import Path
 from typing import Any, cast
+
+from sqlalchemy import (
+    and_,
+    literal,
+    or_,
+    select,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
-from awf.control.worker.helpers import (
-    _expected_open_pr_head_repo_slug,
-    _open_pull_request_summary,
-    _utc_datetime,
-)
-from awf.control.worker.shared import (
+from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
     _ACTIVE_EXECUTION_SALVAGE_SOURCE,
     _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
     _ACTIVE_EXECUTION_STATUSES,
     _PRESERVED_ACTIVE_GIT_TIMEOUT_SECONDS,
-    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-    UTC,
-    AsyncSession,
-    OperationStatus,
-    OperationType,
-    Path,
-    Workspace,
-    WorkspaceEvent,
-    WorkspaceRepository,
-    WorkspaceStatus,
+)
+from awf.control.worker.helpers import (
+    _expected_open_pr_head_repo_slug,
+    _open_pull_request_summary,
+    _utc_datetime,
+)
+from awf.control.worker.logging import _log
+from awf.control.worker.status_values import (
+    _preserved_active_execution_status_values,
+    _salvage_workspace_status_values,
+)
+from awf.control.worker.types import (
     _ActiveExecutionCandidate,
     _BranchOpenPRLookup,
-    _log,
-    _preserved_active_execution_status_values,
     _PreservedWorktreeClassification,
-    _salvage_workspace_status_values,
-    and_,
-    asyncio,
-    datetime,
-    literal,
-    or_,
-    select,
-    timedelta,
+)
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
 )
 from awf.db.models import (
     Operation,
+    Workspace,
+    WorkspaceEvent,
 )
+from awf.db.repositories import WorkspaceRepository
 from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
     OPERATOR_REFRESH_EVENT_TYPE,
     OPERATOR_REFRESH_REASON_CODE,
 )

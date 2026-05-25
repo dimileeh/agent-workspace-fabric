@@ -17,14 +17,14 @@ from __future__ import annotations
 import pytest
 
 from awf.common.commands import CommandResult
-from awf.control.executor.quality_gates import (
-    _build_post_agent_precommit_repair_prompt,
-    _classify_post_agent_commit_failure,
-)
-from awf.control.executor.shared import (
+from awf.control.executor.constants import (
     POST_AGENT_COMMIT_FAILED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+)
+from awf.control.executor.quality_gates import (
+    _build_post_agent_precommit_repair_prompt,
+    _classify_post_agent_commit_failure,
 )
 
 

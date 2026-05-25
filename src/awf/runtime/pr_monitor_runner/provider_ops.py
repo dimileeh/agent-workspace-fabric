@@ -5,46 +5,54 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import json
+from collections.abc import (
+    Iterable,
+    Mapping,
+)
+from datetime import (
+    UTC,
+    datetime,
+)
 from typing import Any, Literal, cast
 
+from awf.adapters.base import AgentRunError
 from awf.common.workspace_policy import (
     agent_model_from_task_policy,
 )
 from awf.db.repositories import (
     ProviderModelCircuitBreakerRepository,
+    WorkspaceEventCreate,
+    WorkspaceRepository,
 )
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import (
+    MonitorState,
+    PRStatus,
+)
+from awf.runtime.pr_monitor_runner.constants import _PR_MONITOR_AUDIT_ACTOR
 from awf.runtime.pr_monitor_runner.helpers import (
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _PR_MONITOR_AUDIT_ACTOR,
-    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
-    PROVIDER_RECOVERY_COOLDOWN_EVENT,
-    UTC,
-    AgentRunError,
-    Iterable,
-    Mapping,
-    MonitorState,
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.recovery_payloads import (
+    _task_policy_with_monitor_circuit_retry_state,
+)
+from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
-    PRStatus,
-    WorkspaceEventCreate,
-    WorkspaceLogSink,
-    WorkspaceRepository,
-    _is_auth_failure_metadata,
-    _log,
-    _task_policy_with_monitor_circuit_retry_state,
-    datetime,
-    json,
-    provider_recovery_metadata_from_failure,
 )
 from awf.service.provider_recovery import (
+    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+    PROVIDER_RECOVERY_COOLDOWN_EVENT,
     PROVIDER_RECOVERY_STATE_KEY,
+    _is_auth_failure_metadata,
     create_provider_recovery_attempt_row,
     provider_cooldown_not_before,
     provider_for_agent_model,
+    provider_recovery_metadata_from_failure,
 )
 
 

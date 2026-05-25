@@ -15,6 +15,7 @@ from awf.runtime.monitor_prompts import (
     address_thread_prompt,
     ready_to_merge_comment,
 )
+from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
@@ -160,8 +161,6 @@ async def _invoke_cli_for_verdict_result(
     cli_failed = False
     command_evidence: list[str] = []
     if await runner._provider_recovery_suppresses_cli(workspace_id):
-        from awf.runtime.pr_monitor_runner.shared import ProviderRecoveryRetryError
-
         raise ProviderRecoveryRetryError()
     agent_run_err = None
     try:

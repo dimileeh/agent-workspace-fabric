@@ -40,68 +40,68 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_hydrates_canonical_request_model",
     ),
     "Workspace list and get": (
-        "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_get_returns_the_workspace_just_created",
-        "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_list_returns_newest_first",
-        "tests/unit/mcp/test_mcp_server.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_002.py::TestGetAndList::test_get_returns_the_workspace_just_created",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_002.py::TestGetAndList::test_list_returns_newest_first",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
     ),
     "Workspace overview": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_overview_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_workspace_overview_tool_matches_rest_payload",
     ),
     "Merge queue": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_merge_queue_tool_matches_rest_payload_and_reason_codes",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_merge_queue_tool_matches_rest_payload_and_reason_codes",
     ),
     "Task attempts": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_task_listing_tool_matches_rest_payload",
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_task_attempts_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_task_listing_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_task_attempts_tool_matches_rest_payload",
     ),
     "Validation provenance": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_validation_provenance_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_validation_provenance_tool_matches_rest_payload",
     ),
     "Stale reasons": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_stale_reasons_tool_matches_rest_active_and_resolved_payloads",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_stale_reasons_tool_matches_rest_active_and_resolved_payloads",
     ),
     "Artifact metadata": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_artifacts_tool_matches_rest_metadata_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_artifacts_tool_matches_rest_metadata_payload",
     ),
     "Failure analysis metrics": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_failure_analysis_metrics_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_failure_analysis_metrics_tool_matches_rest_payload",
     ),
     "Workspace reliability metrics": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_reliability_and_slo_tools_match_rest_payloads",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_workspace_reliability_and_slo_tools_match_rest_payloads",
     ),
     "Resource saturation metrics": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_resource_saturation_tool_matches_rest_payload_with_fake_providers",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_resource_saturation_tool_matches_rest_payload_with_fake_providers",
     ),
     "SLO metrics": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_reliability_and_slo_tools_match_rest_payloads",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_workspace_reliability_and_slo_tools_match_rest_payloads",
     ),
     "Locks and owned-path reservations": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_locks_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_locks_tool_matches_rest_payload",
     ),
     "Advisory overlap graph": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_overlap_graph_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_overlap_graph_tool_matches_rest_payload",
     ),
     "Service health and readiness": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_service_health_tool_returns_healthz_payload",
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_service_readiness_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_service_health_tool_returns_healthz_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_service_readiness_tool_matches_rest_payload",
     ),
     "Core release readiness scorecard": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_core_release_readiness_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_core_release_readiness_tool_matches_rest_payload",
     ),
     "Workspace runtime snapshot": (
-        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceRuntime::test_get_workspace_runtime_returns_container_snapshot",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceRuntime::test_get_workspace_runtime_returns_container_snapshot",
     ),
     "Durable workspace logs": (
-        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
     ),
     "Artifact content/download": (
-        "tests/unit/mcp/test_mcp_server.py::TestReadWorkspaceArtifact::test_reads_safe_small_file_and_returns_base64_content",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py::TestReadWorkspaceArtifact::test_reads_safe_small_file_and_returns_base64_content",
     ),
     "Workspace operations": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_operations_tool_matches_rest_filters_and_detail",
     ),
     "Global operations": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_operations_tool_matches_rest_filters_and_detail",
     ),
     "Cancel workspace": (
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_cancel_invokes_service_with_canonical_kwargs",
@@ -125,16 +125,16 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/mcp/test_mcp_control_contracts.py::TestRealDbPaths::test_rebase_creates_operation_row",
     ),
     "Retry workspace": (
-        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_retry_workspace_provider_preflight_error_and_override",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_002.py::TestCreateWorkspace::test_retry_workspace_provider_preflight_error_and_override",
     ),
     "Existing PR monitor adoption": (
-        "tests/unit/mcp/test_mcp_server.py::TestToolRegistration::test_adopt_pull_request_monitor_tool_creates_adoption",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_001.py::TestToolRegistration::test_adopt_pull_request_monitor_tool_creates_adoption",
     ),
     "Workspace events": (
-        "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_empty_list",
-        "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_events_across_workspaces",
-        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceEvents::test_lists_workspace_events_with_envelope_and_has_more",
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_empty_read_only_operator_surfaces_match_rest_payloads",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestGlobalEvents::test_list_events_returns_empty_list",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestGlobalEvents::test_list_events_returns_events_across_workspaces",
+        "tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::TestWorkspaceEvents::test_lists_workspace_events_with_envelope_and_has_more",
+        "tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py::TestMcpOperatorSurfaceParityPart001::test_empty_read_only_operator_surfaces_match_rest_payloads",
     ),
     "Optimistic concurrency on controls": (
         "tests/unit/contracts/test_if_match_alignment.py::test_mcp_control_tools_expose_optional_expected_version",

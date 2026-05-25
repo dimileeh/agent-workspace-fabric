@@ -16,10 +16,29 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from awf.adapters.base import get_adapter
+from awf.common.audit import redact_audit_text
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
     PullRequestMetadataError,
+    RepoRef,
+)
+from awf.control.executor.constants import (
+    _DEPRECATED_TASK_KIND_REASON_CODE,
+    _EXECUTOR_AUDIT_ACTOR,
+    _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+    _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+    _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
+    _PR_MONITOR_ADOPTED_EVENT,
+    _PR_MONITOR_ADOPTED_REASON_CODE,
+    _RELEASE_SYNC_GITHUB_ERROR_REASON_CODE,
+    _RELEASE_SYNC_NO_CHANGES_EVENT,
+    _RELEASE_SYNC_REPO_INVALID_REASON_CODE,
+    _SUPPORTED_TASK_KINDS,
+    _UNSUPPORTED_TASK_KIND_REASON_CODE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
@@ -39,42 +58,22 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_details,
     _setup_dependency_network_event_payload,
 )
+from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
 )
-from awf.control.executor.shared import (
-    _DEPRECATED_TASK_KIND_REASON_CODE,
-    _EXECUTOR_AUDIT_ACTOR,
-    _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
-    _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
-    _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
-    _PR_MONITOR_ADOPTED_EVENT,
-    _PR_MONITOR_ADOPTED_REASON_CODE,
-    _RELEASE_SYNC_GITHUB_ERROR_REASON_CODE,
-    _RELEASE_SYNC_NO_CHANGES_EVENT,
-    _RELEASE_SYNC_REPO_INVALID_REASON_CODE,
-    _SUPPORTED_TASK_KINDS,
-    _UNSUPPORTED_TASK_KIND_REASON_CODE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
-    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
-    AgentRuntime,
-    ComposeOperationError,
-    FailureReason,
-    OperationStatus,
-    RepoRef,
-    ValidationResult,
-    Workspace,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _get_active_recovery_payload,
-    _metadata_int,
-    _MonitorRunnerProto,
-    get_adapter,
-    redact_audit_text,
-)
+from awf.control.executor.recovery_payloads import _get_active_recovery_payload
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    WorkspaceStatus,
 )
+from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
+from awf.node.compose_manager import ComposeOperationError
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
@@ -86,6 +85,7 @@ from awf.runtime.release_pr_sync import (
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
+    ValidationResult,
 )
 
 

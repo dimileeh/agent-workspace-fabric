@@ -9,7 +9,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
-import awf.service.workspaces as workspace_service
+import awf.service.workspaces_retry as workspace_service
 from awf.common.config import Settings, get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository

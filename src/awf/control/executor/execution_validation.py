@@ -15,6 +15,11 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.control.executor.constants import (
+    POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
+    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
+    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
+)
 from awf.control.executor.git_ops import _git_name_lines
 from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
@@ -33,20 +38,17 @@ from awf.control.executor.quality_gates import (
     _post_validation_conformance_agent_failure_details,
     _post_validation_conformance_agent_failure_message,
 )
-from awf.control.executor.shared import (
-    PLAN_ONLY_OUTPUT_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
+from awf.control.executor.supply_chain_messages import _supply_chain_block_message
+from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
     _PostValidationConformanceReportGitError,
     _PostValidationConformanceReportWriteError,
     _RebaseRecoveryResult,
-    _supply_chain_block_message,
 )
 from awf.control.quality_gates import (
+    PLAN_ONLY_OUTPUT_REASON_CODE,
     find_protected_quality_gate_changes,
     plan_only_output_message,
     quality_gate_violation_message,

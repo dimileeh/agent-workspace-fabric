@@ -5,28 +5,32 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import (
+    UTC,
+    datetime,
+)
 from typing import Any
 
-from awf.control.executor.quality_gates import (
-    _log,
-)
-from awf.control.executor.shared import (
-    EXEC_PROCESS_CLEANUP_FAILED,
-    UTC,
-    FailureReason,
-    Mapping,
-    ValidationCommandResult,
-    Workspace,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _get_active_recovery_payload,
-    _is_callback_terminal_status,
+from awf.common.audit import redact_audit_text
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.control.executor.metadata import (
     _metadata_int,
     _metadata_number,
     _metadata_str,
-    datetime,
-    redact_audit_text,
 )
+from awf.control.executor.quality_gates import (
+    _log,
+)
+from awf.control.executor.recovery_payloads import _get_active_recovery_payload
+from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.db.enums import (
+    FailureReason,
+    WorkspaceStatus,
+)
+from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
+from awf.runtime.validation import ValidationCommandResult
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:

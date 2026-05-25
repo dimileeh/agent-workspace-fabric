@@ -16,11 +16,24 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from awf.adapters.base import (
+    AgentAdapter,
+    AgentRunError,
+)
+from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import (
     append_command_evidence,
 )
+from awf.common.commands import CommandResult
 from awf.common.git_identity import (
     git_safe_directory_config_args,
+)
+from awf.control.executor.constants import (
+    GIT_OBJECT_MISSING_REASON_CODE,
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+    POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+    POST_AGENT_GIT_ADD_FAILED_REASON_CODE,
 )
 from awf.control.executor.git_ops import (
     _git_name_lines,
@@ -35,45 +48,36 @@ from awf.control.executor.quality_gates import (
     _PostAgentCommitClassification,
     _PostAgentCommitStepError,
 )
-from awf.control.executor.shared import (
-    GIT_OBJECT_MISSING_REASON_CODE,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-    PLAN_ONLY_OUTPUT_REASON_CODE,
-    POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
-    POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
-    POST_AGENT_GIT_ADD_FAILED_REASON_CODE,
-    AgentAdapter,
-    AgentRunError,
-    AgentRuntime,
-    CommandResult,
-    FailureReason,
-    SupplyChainPolicyRefreshResult,
-    ValidationCoverageResult,
-    Workspace,
-    WorkspaceProfile,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _CoverageEvidenceResult,
-    _supply_chain_block_message,
-    changed_paths_are_only_internal_plan_artifacts,
-    plan_only_output_message,
-    redact_audit_text,
-)
+from awf.control.executor.supply_chain_messages import _supply_chain_block_message
+from awf.control.executor.types import _CoverageEvidenceResult
 from awf.control.protected_file_diffs import (
     committed_changed_paths_since,
     protected_file_diffs_for_committed_paths,
 )
 from awf.control.quality_gates import (
+    PLAN_ONLY_OUTPUT_REASON_CODE,
+    changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
+    plan_only_output_message,
     quality_gate_violation_message,
 )
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    WorkspaceStatus,
+)
+from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
+    WorkspaceRepository,
 )
+from awf.profiles.models import WorkspaceProfile
+from awf.runtime.validation import ValidationCoverageResult
 from awf.service.provider_recovery import (
     create_provider_recovery_attempt_row,
 )
 from awf.service.supply_chain_policy import (
+    SupplyChainPolicyRefreshResult,
     SupplyChainPolicyRefreshService,
 )
 

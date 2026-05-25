@@ -16,34 +16,36 @@ from typing import Any, cast
 
 from awf.common.github_client import (
     GitHubClientError,
+    RepoRef,
 )
+from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
+    MonitorState,
+    ReviewComment,
+    ReviewThread,
+    _agent_can_triage_review_comment,
     _mark_review_thread_addressed,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
 )
+from awf.runtime.pr_monitor_runner.constants import (
+    _AUDIT_COMMENT_RESOLUTION_EVENT,
+    _AUDIT_GIT_PUSH_EVENT,
+    _GITHUB_TRANSIENT_RETRY_REASON,
+)
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _mark_review_comment_addressed,
     _review_comment_needs_attention,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _AUDIT_COMMENT_RESOLUTION_EVENT,
-    _AUDIT_GIT_PUSH_EVENT,
-    _GITHUB_TRANSIENT_RETRY_REASON,
-    MonitorState,
+from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
-    RepoRef,
-    ReviewComment,
-    ReviewThread,
-    WorkspaceLogSink,
-    _agent_can_triage_review_comment,
-    _log,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )

@@ -321,63 +321,63 @@ async def test_workspace_event_order_migration_reruns_after_column_exists(
         }
 
         def _alembic(*args: str) -> None:
-            with postgres_alembic_subprocess_lock(database_url):
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
         monkeypatch.chdir(repo_root)
-        _alembic("upgrade", "d6e7f8a9b0c1")
+        with postgres_alembic_subprocess_lock(database_url):
+            _alembic("upgrade", "d6e7f8a9b0c1")
 
-        engine = make_engine(database_url)
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text("ALTER TABLE workspace_events ADD COLUMN event_order INTEGER")
-                )
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO workspaces (
-                            id, status, version, repo_url, branch_base,
-                            task_title, task_prompt, agent, test_commands,
-                            requires_database, created_at, updated_at
-                        )
-                        VALUES (
-                            'ws_event_order_rerun', 'failed', 0,
-                            'git@example.com:repo.git', 'main',
-                            'rerun row', 'do work', 'codex', '[]'::json,
-                            false, '2026-05-01 00:00:00+00',
-                            '2026-05-01 00:00:00+00'
-                        )
-                        """
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("ALTER TABLE workspace_events ADD COLUMN event_order INTEGER")
                     )
-                )
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO workspace_events (
-                            id, workspace_id, event_type, old_state,
-                            new_state, reason_code, payload, occurred_at
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base,
+                                task_title, task_prompt, agent, test_commands,
+                                requires_database, created_at, updated_at
+                            )
+                            VALUES (
+                                'ws_event_order_rerun', 'failed', 0,
+                                'git@example.com:repo.git', 'main',
+                                'rerun row', 'do work', 'codex', '[]'::json,
+                                false, '2026-05-01 00:00:00+00',
+                                '2026-05-01 00:00:00+00'
+                            )
+                            """
                         )
-                        VALUES (
-                            'evt_event_order_rerun', 'ws_event_order_rerun',
-                            'workspace.state_changed', 'running',
-                            'failed', 'ONLY_FAILURE', '{}'::json,
-                            '2026-05-01 00:00:01+00'
-                        )
-                        """
                     )
-                )
-        finally:
-            await engine.dispose()
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspace_events (
+                                id, workspace_id, event_type, old_state,
+                                new_state, reason_code, payload, occurred_at
+                            )
+                            VALUES (
+                                'evt_event_order_rerun', 'ws_event_order_rerun',
+                                'workspace.state_changed', 'running',
+                                'failed', 'ONLY_FAILURE', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            )
+                            """
+                        )
+                    )
+            finally:
+                await engine.dispose()
 
-        _alembic("upgrade", "head")
+            _alembic("upgrade", "head")
 
         engine = make_engine(database_url)
         try:
@@ -436,25 +436,25 @@ async def test_workspace_event_order_migration_backfills_existing_events(
         }
 
         def _alembic(*args: str) -> None:
-            with postgres_alembic_subprocess_lock(database_url):
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
         monkeypatch.chdir(repo_root)
-        _alembic("upgrade", "d6e7f8a9b0c1")
+        with postgres_alembic_subprocess_lock(database_url):
+            _alembic("upgrade", "d6e7f8a9b0c1")
 
-        engine = make_engine(database_url)
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            """
                         INSERT INTO workspaces (
                             id, status, version, repo_url, branch_base,
                             task_title, task_prompt, agent, test_commands,
@@ -476,53 +476,53 @@ async def test_workspace_event_order_migration_backfills_existing_events(
                                 '2026-05-01 00:00:00+00'
                             )
                         """
-                    )
-                )
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO workspace_events (
-                            id, workspace_id, event_type, old_state,
-                            new_state, reason_code, payload, occurred_at
                         )
-                        VALUES
-                            (
-                                'evt_a_second', 'ws_event_order_a',
-                                'workspace.state_changed', 'running',
-                                'failed', 'SECOND_FAILURE', '{}'::json,
-                                '2026-05-01 00:00:02+00'
-                            ),
-                            (
-                                'evt_a_first_b', 'ws_event_order_a',
-                                'workspace.state_changed', 'ready',
-                                'running', 'STARTED', '{}'::json,
-                                '2026-05-01 00:00:01+00'
-                            ),
-                            (
-                                'evt_a_first_c', 'ws_event_order_a',
-                                'workspace.phase_started', 'running',
-                                'running', 'PHASE', '{}'::json,
-                                '2026-05-01 00:00:01+00'
-                            ),
-                            (
-                                'evt_a_first_a', 'ws_event_order_a',
-                                'workspace.state_changed', 'requested',
-                                'ready', 'READY', '{}'::json,
-                                '2026-05-01 00:00:01+00'
-                            ),
-                            (
-                                'evt_b_only', 'ws_event_order_b',
-                                'workspace.state_changed', 'running',
-                                'failed', 'ONLY_FAILURE', '{}'::json,
-                                '2026-05-01 00:00:01+00'
-                            )
-                        """
                     )
-                )
-        finally:
-            await engine.dispose()
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspace_events (
+                                id, workspace_id, event_type, old_state,
+                                new_state, reason_code, payload, occurred_at
+                            )
+                            VALUES
+                                (
+                                    'evt_a_second', 'ws_event_order_a',
+                                    'workspace.state_changed', 'running',
+                                    'failed', 'SECOND_FAILURE', '{}'::json,
+                                    '2026-05-01 00:00:02+00'
+                                ),
+                                (
+                                    'evt_a_first_b', 'ws_event_order_a',
+                                    'workspace.state_changed', 'ready',
+                                    'running', 'STARTED', '{}'::json,
+                                    '2026-05-01 00:00:01+00'
+                                ),
+                                (
+                                    'evt_a_first_c', 'ws_event_order_a',
+                                    'workspace.phase_started', 'running',
+                                    'running', 'PHASE', '{}'::json,
+                                    '2026-05-01 00:00:01+00'
+                                ),
+                                (
+                                    'evt_a_first_a', 'ws_event_order_a',
+                                    'workspace.state_changed', 'requested',
+                                    'ready', 'READY', '{}'::json,
+                                    '2026-05-01 00:00:01+00'
+                                ),
+                                (
+                                    'evt_b_only', 'ws_event_order_b',
+                                    'workspace.state_changed', 'running',
+                                    'failed', 'ONLY_FAILURE', '{}'::json,
+                                    '2026-05-01 00:00:01+00'
+                                )
+                            """
+                        )
+                    )
+            finally:
+                await engine.dispose()
 
-        _alembic("upgrade", "head")
+            _alembic("upgrade", "head")
 
         engine = make_engine(database_url)
         try:

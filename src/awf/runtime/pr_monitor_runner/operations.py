@@ -5,27 +5,29 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import (
+    Mapping,
+    Sequence,
+)
 from typing import Any
 
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+)
+from awf.db.repositories import WorkspaceRepository
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import PRStatus
 from awf.runtime.pr_monitor_operations import (
+    MonitorOperationHandle,
+    begin_monitor_state_operation,
     build_monitor_operation_payload,
     create_or_start_monitor_operation,
     finish_monitor_operation,
     monitor_operation_idempotency_key,
-)
-from awf.runtime.pr_monitor_runner.shared import (
-    PROVIDER_AUTH_FAILED,
-    Mapping,
-    MonitorOperationHandle,
-    OperationStatus,
-    OperationType,
-    PRStatus,
-    Sequence,
-    WorkspaceLogSink,
-    WorkspaceRepository,
-    begin_monitor_state_operation,
     record_monitor_state_operation,
 )
+from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
 
 
 async def _begin_monitor_operation(

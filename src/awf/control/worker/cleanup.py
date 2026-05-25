@@ -21,30 +21,32 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from awf.control.worker.helpers import (
-    _worker_exception_is_transient_db_connection,
-)
-from awf.control.worker.shared import (
+from awf.control.worker.constants import (
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
     _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-    Workspace,
-    WorkspaceCleanupResult,
-    WorkspaceEvent,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _log,
-    _TerminalRuntimeCandidate,
-    run_db_operation_with_retry,
 )
+from awf.control.worker.helpers import (
+    _worker_exception_is_transient_db_connection,
+)
+from awf.control.worker.logging import _log
+from awf.control.worker.types import _TerminalRuntimeCandidate
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import (
+    Workspace,
+    WorkspaceEvent,
+)
+from awf.db.repositories import WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
+    run_db_operation_with_retry,
 )
 from awf.db.session import (
     session_scope,
 )
+from awf.node.cleanup import WorkspaceCleanupResult
 from awf.service.failure_causality import (
     attach_primary_failure,
     load_primary_failure_snapshot,

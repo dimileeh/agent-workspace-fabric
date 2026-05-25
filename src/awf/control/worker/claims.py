@@ -18,6 +18,17 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.control.worker.constants import (
+    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    _MONITOR_RECOVERY_EVENT_TYPE,
+    _MONITOR_RECOVERY_REASON_CODE,
+    _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
+    LOCAL_CAPACITY_DEFERRED_REASON,
+    LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
+    LOCAL_CAPACITY_UNSATISFIABLE_REASON,
+    QUEUE_DECISION_DEFERRED,
+    QUEUE_DECISION_ORDERED,
+)
 from awf.control.worker.helpers import (
     _earliest_future_datetime,
     _latest_runtime_stranding_reason,
@@ -29,6 +40,7 @@ from awf.control.worker.helpers import (
     _utc_datetime,
     _workspace_claim_snapshot,
 )
+from awf.control.worker.logging import _log
 from awf.control.worker.resource_broker import (
     _acquire_local_capacity_scheduler_lock,
     _allocated_reservation_signature,
@@ -44,34 +56,26 @@ from awf.control.worker.scheduling import (
     _scheduler_candidate_cursor,
     _scheduler_candidate_fetch_limit,
 )
-from awf.control.worker.shared import (
-    _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
-    _MONITOR_RECOVERY_EVENT_TYPE,
-    _MONITOR_RECOVERY_REASON_CODE,
-    _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
-    LOCAL_CAPACITY_DEFERRED_REASON,
-    LOCAL_CAPACITY_RESERVATION_DEFAULTED_REASON,
-    LOCAL_CAPACITY_UNSATISFIABLE_REASON,
-    QUEUE_DECISION_DEFERRED,
-    QUEUE_DECISION_ORDERED,
-    OperationStatus,
-    OperationType,
-    SchedulerOrderCursor,
-    Workspace,
-    WorkspaceRepository,
-    WorkspaceStatus,
+from awf.control.worker.types import (
     _AllocatedReservationSignature,
-    _log,
     _RequestedCapacityClaimResult,
     _RequestedCapacityQueueSignature,
-    run_db_operation_with_retry,
 )
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    WorkspaceRepository,
 )
+from awf.db.resilience import run_db_operation_with_retry
+from awf.service.scheduler import SchedulerOrderCursor
 
 
 async def _claim_requested_ids(self: Any, workspace_ids: list[str] | None = None) -> list[str]:

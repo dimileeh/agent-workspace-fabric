@@ -1,0 +1,1103 @@
+"use client";
+
+import {
+AlertCircle,
+ArrowDown,
+ArrowUp,
+CheckCircle2,
+ChevronDown,
+ChevronUp,
+CircleDot,
+Clock3,
+FileText,
+GitPullRequest,
+Loader2,
+Server
+} from "lucide-react";
+import {
+useMemo,
+useState
+} from "react";
+
+import {
+bytes,
+compactDuration,
+compactId,
+fallbackLifecycleStages,
+formatDateTime,
+relativeTime,
+statusTone,
+toneClass,
+toneFillClass
+} from "@/lib/format";
+import {
+formatRequiredNextAction,
+mergeQueueMergedAt,
+requiredNextActionTone,
+summarizeReadiness,
+summarizeRecovery,
+summarizeStaleReasons,
+summarizeValidation
+} from "@/lib/merge-queue-format";
+import {
+formatOperationDetail,
+formatOperationFailure,
+formatOperationTitle,
+} from "@/lib/operation-format";
+import {
+isReverseWorkspaceTransition
+} from "@/lib/recovery-format";
+import type {
+CapacityDimension,
+ConcurrencyLane,
+MergeQueueItem,
+Operation,
+ResourceSaturationSummary,
+RuntimeService,
+WorkspaceAppEndpoint,
+WorkspaceEvent,
+WorkspaceLifecycleStage,
+WorkspaceReliabilitySummary,
+WorkspaceRuntime,
+WorkspaceStatus
+} from "@/lib/types";
+import {
+Badge,
+Fact,
+MergeQueueStatus,
+MutedLine,
+Panel,
+SmallExternalAnchor,
+SortDirection,
+Td,
+Th,
+emptyCapacityDimension,
+formatCapacityValue,
+formatGb,
+formatPercent,
+formatPrLinkLabel,
+formatScalar
+} from "./console-dashboard-shared";
+
+export function ResourceCapacityPanel({
+  saturation,
+  error,
+  workspaceSummary,
+  workspaceSummaryError,
+}: {
+  saturation: ResourceSaturationSummary | null;
+  error: string | null;
+  workspaceSummary: WorkspaceReliabilitySummary | null;
+  workspaceSummaryError: string | null;
+}) {
+  const totalReason = workspaceSummary ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count : 0;
+  const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
+  const showOldestQueued =
+    saturation !== null &&
+    saturation.capacity_queue.queued_workspace_count > 0 &&
+    saturation.capacity_queue.oldest_wait_seconds !== null;
+  const queueBlockedReasonEntries = saturation
+    ? Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {})
+    : [];
+  const pressureReasons =
+    saturation === null
+      ? []
+      : saturation.allocated_capacity.pressure_reasons.length > 0
+        ? saturation.allocated_capacity.pressure_reasons
+        : saturation.capacity.pressure_reasons;
+
+  return (
+    <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
+      {!saturation ? (
+        <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
+      ) : (
+        <div className="grid gap-3">
+          {error ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Showing last capacity snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+          {workspaceSummaryError ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Unable to load workspace reliability metrics: {workspaceSummaryError}
+            </div>
+          ) : null}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
+            <Fact
+              label="Stuck"
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+            />
+            <Fact
+              label="Reason Coverage"
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+            />
+            <Fact
+              label="Reserved CPU"
+              value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
+                saturation.reserved_resources.peak_cpu,
+              )} peak`}
+            />
+            <Fact
+              label="Allocated CPU"
+              value={`${formatScalar(saturation.allocated_resources.steady_cpu)} steady / ${formatScalar(
+                saturation.allocated_resources.peak_cpu,
+              )} peak`}
+            />
+            <Fact
+              label="Reserved memory"
+              value={`${formatGb(saturation.reserved_resources.steady_memory_gb)} steady / ${formatGb(
+                saturation.reserved_resources.peak_memory_gb,
+              )} peak`}
+            />
+            <Fact
+              label="Capacity queue"
+              value={`${saturation.capacity_queue.queued_workspace_count} requested`}
+            />
+            {showOldestQueued ? (
+              <Fact
+                label="Oldest queued"
+                value={compactDuration(saturation.capacity_queue.oldest_wait_seconds)}
+              />
+            ) : null}
+            <Fact label="Reserved disk" value={formatCapacityValue(saturation.reserved_resources.disk_mb, "mb")} />
+            <Fact label="DinD slots" value={`${saturation.reserved_resources.dind_slots} reserved`} />
+            <Fact
+              label="Disk free"
+              value={`${bytes(saturation.disk.free_bytes)} / ${formatPercent(saturation.disk.percent_free)}`}
+            />
+          </div>
+          <StatusCountStrip counts={saturation.workspace_counts} />
+          <div className="grid gap-2 md:grid-cols-2">
+            <LaneMeter label="Provision" lane={saturation.concurrency.provision} />
+            <LaneMeter label="Execution" lane={saturation.concurrency.execution} />
+          </div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <ResourceDimensionMeter label="CPU peak" dimension={saturation.allocated_capacity.peak_cpu} unit="cores" />
+            <ResourceDimensionMeter label="Memory peak" dimension={saturation.allocated_capacity.peak_memory_gb} unit="gb" />
+            <ResourceDimensionMeter label="Disk" dimension={saturation.allocated_capacity.disk_mb} unit="mb" />
+            <ResourceDimensionMeter label="DinD" dimension={saturation.allocated_capacity.dind_slots} unit="slots" />
+          </div>
+          {queueBlockedReasonEntries.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {queueBlockedReasonEntries.map(([reason, count]) => (
+                <span
+                  key={reason}
+                  className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
+                    "bad",
+                  )}`}
+                  title="Deferred blockers count the first FIFO frontier per constraint; unsatisfiable requests count each workspace."
+                >
+                  {reason}: {count} frontier-counted blocker{count === 1 ? "" : "s"}
+                </span>
+              ))}
+            </div>
+          ) : pressureReasons.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {pressureReasons.map((reason) => (
+                <span
+                  key={reason}
+                  className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
+                    reason.endsWith("_UNKNOWN") ? "warn" : "bad",
+                  )}`}
+                >
+                  {reason}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <div className="grid gap-2 md:grid-cols-2">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(saturation.disk.ok ? "good" : "bad")}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">Disk {saturation.disk.status}</span>
+                <span className="mono">{saturation.disk.reason}</span>
+              </div>
+              <div className="mt-1 text-slate-600">
+                threshold {bytes(saturation.disk.threshold_bytes)} / checked {saturation.disk.checked_path}
+              </div>
+            </div>
+            <div
+              className={`rounded-md border px-3 py-2 text-xs ${toneClass(
+                saturation.admission.ok
+                  ? saturation.admission.status === "saturated"
+                    ? "warn"
+                    : "good"
+                  : "bad",
+              )}`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">Admission {saturation.admission.status}</span>
+                <span className="mono">{saturation.admission.reason}</span>
+              </div>
+              {saturation.admission.detail ? (
+                <div className="mt-1 text-slate-600">{saturation.admission.detail}</div>
+              ) : null}
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-500">
+            generated {relativeTime(saturation.generated_at)}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export function MergeQueuePanel({
+  items,
+  hasMore,
+  status,
+  error,
+}: {
+  items: MergeQueueItem[];
+  hasMore: boolean;
+  status: MergeQueueStatus;
+  error: string | null;
+}) {
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const hasSnapshot = items.length > 0;
+  const isLoading = status === "loading";
+  const isError = status === "error";
+  const summary =
+    isLoading && !hasSnapshot
+      ? "loading"
+      : isError && !hasSnapshot
+        ? "error"
+        : `${items.length}${hasMore ? "+" : ""} candidate${items.length === 1 ? "" : "s"}`;
+
+  return (
+    <Panel
+      title="Merge Queue"
+      icon={<GitPullRequest size={16} aria-hidden />}
+      action={
+        <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
+          {summary}
+        </span>
+      }
+    >
+      {isLoading && !hasSnapshot ? (
+        <MutedLine>Merge queue snapshot loading.</MutedLine>
+      ) : isError && !hasSnapshot ? (
+        <MutedLine>Unable to load merge queue: {error}</MutedLine>
+      ) : !hasSnapshot ? (
+        <MutedLine>No PR-backed merge candidates are queued.</MutedLine>
+      ) : (
+        <div className="grid gap-2">
+          {error ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Showing last merge queue snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+          {hasMore ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              Showing first {items.length} merge candidates. More are queued.
+            </div>
+          ) : null}
+          <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
+            {items.map((item, index) => {
+              const rowKey = item.candidate_id ?? item.workspace_id;
+              const expanded = expandedRows.has(rowKey);
+              return (
+                <MergeQueueRow
+                  key={rowKey}
+                  item={item}
+                  position={index + 1}
+                  expanded={expanded}
+                  onToggle={() =>
+                    setExpandedRows((current) => {
+                      const next = new Set(current);
+                      if (next.has(rowKey)) {
+                        next.delete(rowKey);
+                      } else {
+                        next.add(rowKey);
+                      }
+                      return next;
+                    })
+                  }
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export function MergeQueueRow({
+  item,
+  position,
+  expanded,
+  onToggle,
+}: {
+  item: MergeQueueItem;
+  position: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const rowDetailsId = `merge-candidate-${item.candidate_id ?? item.workspace_id}`;
+  const actionLabel = formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason);
+  const readiness = summarizeReadiness(item);
+  const stale = summarizeStaleReasons(item);
+  const validation = summarizeValidation(item);
+  const recovery = summarizeRecovery(item);
+  const mergedAt = mergeQueueMergedAt(item);
+  return (
+    <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
+      <div className="flex min-w-0 items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="mono shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-500">
+              #{position}
+            </span>
+            <h3 className="truncate text-sm font-semibold text-slate-950">{item.title}</h3>
+          </div>
+          <div className="mono mt-1 truncate text-[11px] text-slate-500">{item.workspace_id}</div>
+          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span className="truncate">created {formatDateTime(item.created_at)}</span>
+            <span className="truncate">merged {formatDateTime(mergedAt)}</span>
+            <span className="truncate">
+              base <span className="mono text-slate-700">{item.base_branch}</span>
+            </span>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+          <Badge value={item.status} />
+          <SmallExternalAnchor href={item.pr_url} label={formatPrLinkLabel(item.pr_url)} />
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            aria-controls={rowDetailsId}
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+          >
+            {expanded ? <ChevronUp size={13} aria-hidden /> : <ChevronDown size={13} aria-hidden />}
+            {expanded ? "Hide" : "Details"}
+          </button>
+        </div>
+      </div>
+      {expanded ? (
+        <div id={rowDetailsId} className="grid gap-2">
+          <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+            <QueueChip
+              label="Action"
+              value={recovery.recommendedActionLabel}
+              tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+            />
+            <QueueChip
+              label="Blocker"
+              value={recovery.blockerLabel}
+              detail={recovery.blockerDetail}
+              tone={mergeBlockerTone(item.merge_blocker_reason)}
+            />
+            <QueueChip label="Required" value={recovery.requiredTierLabel} detail={item.task_class ?? "task class unknown"} />
+            <QueueChip
+              label="Satisfied"
+              value={recovery.latestSatisfiedTierLabel}
+              detail={recovery.latestSatisfiedTierDetail}
+              tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
+            />
+            <QueueChip
+              label="Freshness"
+              value={recovery.freshnessLabel}
+              detail={recovery.targetRangeLabel}
+              tone={freshnessTone(recovery.freshnessLabel)}
+            />
+            <QueueChip
+              label="Readiness"
+              value={`${readiness.canonicalLabel} / ${readiness.label}`}
+              detail={readiness.detail}
+              tone={readinessTone(readiness.label)}
+            />
+            <QueueChip
+              label="Candidate"
+              value={`${recovery.candidateLabel} / ${recovery.attemptLabel}`}
+              detail={item.candidate_status ?? "unknown"}
+              mono
+            />
+            <QueueChip
+              label="Base"
+              value={recovery.baseShaLabel}
+              detail={item.latest_validation?.target_branch ?? item.base_branch}
+              mono
+            />
+            <QueueChip
+              label="Targets"
+              value={recovery.targetRangeLabel}
+              detail={`${recovery.validatedTargetShaLabel} / ${recovery.currentTargetShaLabel}`}
+              mono
+            />
+            <QueueChip
+              label="Stale"
+              value={recovery.staleReasonLabel}
+              detail={recovery.staleReasonDetail}
+              tone={
+                recovery.staleReasonBlockingCount > 0
+                  ? "warn"
+                  : recovery.staleReasonAdvisoryCount > 0
+                    ? "info"
+                    : "neutral"
+              }
+              mono={recovery.staleReasonCount > 0}
+            />
+            <QueueChip
+              label="Queue"
+              value={recovery.queueBlockerLabel}
+              detail={recovery.queueBlockerDetail}
+              tone={recovery.queueBlockerCount > 0 ? "warn" : "neutral"}
+            />
+            <QueueChip
+              label="Policy"
+              value={recovery.policyFindingLabel}
+              detail={recovery.policyFindingDetail}
+              tone={recovery.policyFindingCount > 0 ? "bad" : "neutral"}
+            />
+            <QueueChip label="Validation" value={validation.label} detail={validation.detail} tone={validationTone(item)} />
+            <QueueChip label="Coverage" value={validation.coverageLabel} detail={validation.headLabel} mono />
+          </div>
+          <div className="grid gap-1 sm:grid-cols-3">
+            <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
+            <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
+            <QueueDatum
+              label="Canonical"
+              value={readiness.canonicalLabel}
+              tone={item.canonical ? statusTone("completed") : statusTone("failed")}
+            />
+            <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
+            <QueueDatum
+              label="Action"
+              value={actionLabel}
+              tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+            />
+            <QueueDatum label="Readiness" value={readiness.detail} mono tone={readinessTone(readiness.label)} />
+            <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
+            <QueueDatum label="Created" value={formatDateTime(item.created_at)} />
+            <QueueDatum label="Merged" value={formatDateTime(mergedAt)} />
+            <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
+            <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+            <QueueDatum label="Required tier" value={recovery.requiredTierLabel} />
+            <QueueDatum label="Latest satisfied" value={recovery.latestSatisfiedTierLabel} tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)} />
+            <QueueDatum label="Validation" value={validation.label} tone={validationTone(item)} />
+            <QueueDatum label="Freshness" value={recovery.freshnessLabel} tone={freshnessTone(recovery.freshnessLabel)} />
+            <QueueDatum label="Base SHA" value={recovery.baseShaLabel} mono />
+            <QueueDatum label="Workspace head" value={recovery.workspaceHeadShaLabel} mono />
+            <QueueDatum label="Validated target" value={recovery.validatedTargetShaLabel} mono />
+            <QueueDatum label="Current target" value={recovery.currentTargetShaLabel} mono />
+            <QueueDatum label="Validation heads" value={recovery.targetRangeLabel} mono />
+            <QueueDatum label="Reason" value={recovery.validationReasonLabel} mono />
+            <QueueDatum label="Command hash" value={recovery.commandHashLabel} mono />
+            <QueueDatum label="Profile" value={recovery.profileLabel} />
+            <QueueDatum label="Env identity" value={recovery.environmentLabel} mono />
+            <QueueDatum label="Coverage" value={validation.coverageLabel} mono />
+          </div>
+          <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+            <span className="truncate">
+              base <span className="mono text-slate-700">{item.base_branch}</span>
+            </span>
+            <span className="truncate">
+              branch <span className="mono text-slate-700">{item.branch_name ?? "none"}</span>
+            </span>
+            <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+          </div>
+          <MergeQueueBlockerDetails blockers={item.queue_blockers ?? []} />
+          <MergeQueueStaleReasonDetails reasons={stale.activeReasons} />
+          <MergeQueuePolicyFindingDetails findings={item.policy_findings ?? []} />
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+export function QueueDatum({
+  label,
+  value,
+  mono = false,
+  tone,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: ReturnType<typeof statusTone>;
+}) {
+  return (
+    <div className={`min-w-0 rounded-md border px-2 py-1.5 ${tone ? toneClass(tone) : "border-slate-200 bg-slate-50"}`}>
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className={`${mono ? "mono" : ""} truncate text-[11px] text-slate-900`}>{value}</div>
+    </div>
+  );
+}
+
+export function QueueChip({
+  label,
+  value,
+  detail,
+  mono = false,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  mono?: boolean;
+  tone?: ReturnType<typeof statusTone>;
+}) {
+  return (
+    <div
+      title={detail ? `${label}: ${value} (${detail})` : `${label}: ${value}`}
+      className={`min-w-0 rounded-md border px-2 py-1 ${toneClass(tone)}`}
+    >
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className={`${mono ? "mono" : ""} truncate text-[11px] font-medium text-slate-900`}>{value}</div>
+      {detail ? <div className="truncate text-[10px] text-slate-500">{detail}</div> : null}
+    </div>
+  );
+}
+
+export function MergeQueueBlockerDetails({ blockers }: { blockers: MergeQueueItem["queue_blockers"] }) {
+  if (blockers.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-amber-900">Queue blockers</div>
+      {blockers.map((blocker) => (
+        <div key={blocker.candidate_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-950">
+          <span className="truncate font-medium">{blocker.title}</span>
+          <span className="mono">{blocker.pr_number ? `#${blocker.pr_number}` : compactId(blocker.candidate_id, 10)}</span>
+          <span className="mono">{blocker.blocker_state}</span>
+          <span className="mono">{blocker.status}</span>
+          <span className="mono truncate">{blocker.reason_code}</span>
+          <SmallExternalAnchor
+            href={blocker.pr_url}
+            label={formatPrLinkLabel(blocker.pr_url, blocker.pr_number)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function MergeQueueStaleReasonDetails({ reasons }: { reasons: MergeQueueItem["stale_reasons"] }) {
+  if (reasons.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-amber-900">Active stale reasons</div>
+      {reasons.map((reason) => (
+        <div key={reason.id} className="grid min-w-0 gap-0.5 text-[11px] text-amber-950">
+          <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
+            <span className="mono font-medium">{reason.reason_code}</span>
+            <span className="mono">{reason.severity}</span>
+            <span className="mono">{reason.trigger_type}</span>
+            <span className="mono truncate">{reason.trigger_ref ?? "no trigger ref"}</span>
+            <span>detected {formatDateTime(reason.detected_at)}</span>
+          </div>
+          <div className="truncate text-amber-900">{reason.explanation}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function MergeQueuePolicyFindingDetails({ findings }: { findings: MergeQueueItem["policy_findings"] }) {
+  if (findings.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-red-900">Policy findings</div>
+      {findings.map((finding) => (
+        <div key={finding.id} className="grid min-w-0 gap-0.5 text-[11px] text-red-950">
+          <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
+            <span className="mono font-medium">{finding.reason_code}</span>
+            <span className="mono">{finding.severity}</span>
+            <span className="mono truncate">{finding.subject_path ?? "no subject path"}</span>
+            <span>detected {formatDateTime(finding.detected_at)}</span>
+          </div>
+          <div className="truncate text-red-900">{finding.explanation}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function lastEventReason(event: WorkspaceEvent | null): string {
+  if (!event) {
+    return "none";
+  }
+  return event.reason_code ?? event.event_type;
+}
+
+export function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): ReturnType<typeof statusTone> {
+  switch (reason) {
+    case "ready_to_merge_or_waiting_for_github":
+    case "completed":
+      return "good";
+    case "manual_merge_required":
+    case "waiting_for_monitor":
+    case "waiting_for_older_candidate":
+    case "stale":
+      return "warn";
+    case "failed_or_cancelled":
+    case "not_canonical":
+    case "policy_blocked":
+      return "bad";
+    case "workspace_not_terminal":
+      return "info";
+    default:
+      return "info";
+  }
+}
+
+export function readinessTone(label: string): ReturnType<typeof statusTone> {
+  switch (label) {
+    case "ready":
+    case "completed":
+      return "good";
+    case "manual":
+    case "waiting":
+    case "stale":
+    case "blocked":
+      return "warn";
+    case "failed/cancelled":
+    case "not canonical":
+      return "bad";
+    case "legacy":
+      return "neutral";
+    default:
+      return "info";
+  }
+}
+
+export function validationTone(item: MergeQueueItem): ReturnType<typeof statusTone> {
+  const validation = item.latest_validation;
+  if (!validation) {
+    return "neutral";
+  }
+  if (validation.status === "failed" || validation.coverage_status === "failed") {
+    return "bad";
+  }
+  if (validation.fresh_for_target === false) {
+    return "warn";
+  }
+  if (validation.status === "succeeded") {
+    return "good";
+  }
+  if (validation.status === "running") {
+    return "info";
+  }
+  return "neutral";
+}
+
+export function freshnessTone(label: string): ReturnType<typeof statusTone> {
+  if (label === "fresh") {
+    return "good";
+  }
+  if (label.includes("stale")) {
+    return "warn";
+  }
+  return "neutral";
+}
+
+export function satisfiedTierTone(label: string): ReturnType<typeof statusTone> {
+  if (label.startsWith("T")) {
+    return "good";
+  }
+  if (label.startsWith("unknown")) {
+    return "warn";
+  }
+  return "neutral";
+}
+
+export function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
+  const items: [string, number][] = [
+    ["requested", counts.requested],
+    ["provisioning", counts.provisioning],
+    ["ready", counts.ready],
+    ["running", counts.running],
+    ["validating", counts.validating],
+    ["pushing", counts.pushing],
+    ["pr", counts.monitoring_pr],
+    ["destroying", counts.destroying],
+  ];
+
+  return (
+    <div className="grid grid-cols-2 gap-1 text-xs sm:grid-cols-4 xl:grid-cols-8">
+      {items.map(([label, value]) => (
+        <div key={label} className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
+          <div className="truncate text-[10px] font-medium text-slate-500">{label}</div>
+          <div className="mono text-sm text-slate-950">{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
+  const hasFiniteLimit = lane.limit > 0;
+  const fill = hasFiniteLimit ? Math.min(100, Math.max(0, (lane.in_use / lane.limit) * 100)) : 0;
+  const saturated = hasFiniteLimit && lane.in_use >= lane.limit;
+  const limitLabel = hasFiniteLimit ? `${lane.in_use}/${lane.limit}` : `${lane.in_use} active`;
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">{label}</span>
+        <span className={saturated ? "font-semibold text-amber-800" : "text-slate-600"}>
+          {hasFiniteLimit ? `${limitLabel} in use` : `${limitLabel} / no limit`}
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+        <div className={saturated ? "h-full bg-amber-500" : "h-full bg-blue-500"} style={{ width: `${fill}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+        <span>{lane.queued} queued</span>
+        <span>{lane.available} available</span>
+      </div>
+    </div>
+  );
+}
+
+export type CapacityUnit = "cores" | "gb" | "mb" | "slots";
+
+export function ResourceDimensionMeter({
+  label,
+  dimension,
+  unit,
+}: {
+  label: string;
+  dimension?: CapacityDimension | null;
+  unit: CapacityUnit;
+}) {
+  const safeDimension = dimension ?? emptyCapacityDimension;
+  const limit = safeDimension.limit;
+  const hasLimit = limit !== null && limit > 0;
+  const fill = hasLimit ? Math.min(100, Math.max(0, (safeDimension.reserved / limit) * 100)) : 0;
+  const tone = safeDimension.reason_code ? (safeDimension.reason_code.endsWith("_UNKNOWN") ? "warn" : "bad") : "good";
+
+  return (
+    <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">{label}</span>
+        <span className="mono text-slate-700">
+          {formatCapacityValue(safeDimension.reserved, unit)}
+          {hasLimit ? ` / ${formatCapacityValue(limit, unit)}` : " / unknown"}
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/70">
+        <div className={`h-full ${toneFillClass(tone)}`} style={{ width: `${fill}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-700">
+        <span>{formatCapacityValue(safeDimension.available, unit)} available</span>
+        <span>{formatCapacityValue(safeDimension.available_after_next_default, unit)} after next</span>
+      </div>
+      {safeDimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{safeDimension.reason_code}</div> : null}
+    </div>
+  );
+}
+
+export function LifecycleRail({
+  status,
+  lifecycle,
+  terminalSourceStage,
+}: {
+  status: WorkspaceStatus;
+  lifecycle: WorkspaceLifecycleStage[];
+  terminalSourceStage: string | null;
+}) {
+  const terminal = status === "failed" || status === "cancelled";
+  const stages: WorkspaceLifecycleStage[] =
+    lifecycle.length > 0 ? lifecycle : fallbackLifecycleStages(status, terminalSourceStage);
+  return (
+    <Panel title="Lifecycle" icon={<GitPullRequest size={16} aria-hidden />}>
+      <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
+        {stages.map((stage) => {
+          return (
+            <div
+              key={stage.stage}
+              className={`min-h-16 rounded-md border p-2 ${
+                stage.status === "active"
+                  ? "border-blue-300 bg-blue-50"
+                  : stage.status === "completed"
+                    ? "border-emerald-200 bg-emerald-50"
+                    : stage.status === "terminal_skipped"
+                      ? "border-amber-200 bg-amber-50"
+                      : "border-slate-200 bg-white"
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                {stage.status === "completed" ? (
+                  <CheckCircle2 size={14} className="text-emerald-700" aria-hidden />
+                ) : stage.status === "active" ? (
+                  <CircleDot size={14} className="text-blue-700" aria-hidden />
+                ) : stage.status === "terminal_skipped" ? (
+                  <AlertCircle size={14} className="text-amber-700" aria-hidden />
+                ) : (
+                  <Clock3 size={14} className="text-slate-400" aria-hidden />
+                )}
+                <span className="truncate text-xs font-medium">{stage.stage}</span>
+              </div>
+              <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
+                <div className="truncate">start {formatDateTime(stage.started_at)}</div>
+                <div className="truncate">
+                  end {stage.status === "active" ? "active" : formatDateTime(stage.ended_at)}
+                </div>
+                <div className="mono">{compactDuration(stage.duration_seconds)}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {terminal ? (
+        <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <AlertCircle size={14} aria-hidden />
+          Terminal state: {status}
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
+
+export function terminalLifecycleSourceStage(
+  status: WorkspaceStatus,
+  events: WorkspaceEvent[],
+  lastEvent: WorkspaceEvent | null,
+  currentPhase: string,
+): string | null {
+  if (status !== "failed" && status !== "cancelled") {
+    return null;
+  }
+  const terminalEvent =
+    events.find((event) => event.event_type === "workspace.state_changed" && event.new_state === status) ??
+    (lastEvent?.event_type === "workspace.state_changed" && lastEvent.new_state === status
+      ? lastEvent
+      : null);
+  return terminalEvent?.old_state ?? currentPhase;
+}
+
+export function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
+  const services = Array.isArray(runtime?.services) ? runtime.services : [];
+  const appEndpoints = Array.isArray(runtime?.app_endpoints) ? runtime.app_endpoints : [];
+
+  return (
+    <Panel title="Runtime" icon={<Server size={16} aria-hidden />}>
+      {!runtime ? (
+        <MutedLine>Runtime snapshot unavailable.</MutedLine>
+      ) : (
+        <div className="grid gap-3">
+          <div className="grid gap-2 sm:grid-cols-3">
+            <Fact label="Compose project" value={runtime.compose_project_name ?? "—"} mono />
+            <Fact label="Stack" value={runtime.stack_state} />
+            <Fact label="Services" value={String(services.length)} />
+          </div>
+          {runtime.reason ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              {runtime.reason}
+            </div>
+          ) : null}
+          {appEndpoints.length > 0 ? (
+            <EndpointTable endpoints={appEndpoints} />
+          ) : null}
+          <div className="overflow-auto rounded-md border border-slate-200">
+            <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[720px]">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <Th>Name</Th>
+                  <Th>State</Th>
+                  <Th>Health</Th>
+                  <Th>Image</Th>
+                  <Th>Ports</Th>
+                  <Th>Started</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {services.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
+                      No active containers reported.
+                    </td>
+                  </tr>
+                ) : (
+                  services.map((service) => <RuntimeRow key={service.name} item={service} />)
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[] }) {
+  return (
+    <div className="overflow-auto rounded-md border border-slate-200">
+      <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[680px]">
+        <thead className="bg-slate-50 text-slate-600">
+          <tr>
+            <Th>Name</Th>
+            <Th>Service</Th>
+            <Th>Visibility</Th>
+            <Th>Internal URL</Th>
+            <Th>Health</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {endpoints.map((endpoint) => (
+            <tr key={endpoint.name} className="border-t border-slate-100">
+              <Td>
+                <div className="font-medium">{endpoint.name}</div>
+              </Td>
+              <Td>
+                <span className="mono">{endpoint.service}</span>
+                <span className="text-slate-500">:{endpoint.port}</span>
+              </Td>
+              <Td>
+                <Badge value={endpoint.visibility} />
+              </Td>
+              <Td className="mono max-w-[280px] truncate">{endpoint.internal_url}</Td>
+              <Td>
+                {endpoint.health ? (
+                  <span className="mono">
+                    {endpoint.health.method} {endpoint.health.path}{" "}
+                    {endpoint.health.expected_status}
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function RuntimeRow({ item }: { item: RuntimeService }) {
+  return (
+    <tr className="border-t border-slate-100">
+      <Td>
+        <div className="font-medium">{item.name}</div>
+        <div className="mono text-[11px] text-slate-500">{compactId(item.container_id, 10)}</div>
+      </Td>
+      <Td>
+        <Badge value={item.state} />
+        <div className="mt-1 text-slate-500">{item.status ?? "—"}</div>
+      </Td>
+      <Td>{item.health ? <Badge value={item.health} /> : "—"}</Td>
+      <Td className="mono max-w-[220px] truncate">{item.image ?? "—"}</Td>
+      <Td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</Td>
+      <Td>{item.started_at ?? "—"}</Td>
+    </tr>
+  );
+}
+
+export function OperationsPanel({ operations }: { operations: Operation[] }) {
+  return (
+    <Panel title="Operations" icon={<Loader2 size={16} aria-hidden />}>
+      {operations.length === 0 ? (
+        <MutedLine>No operations recorded.</MutedLine>
+      ) : (
+        <div className="grid gap-2">
+          {operations.slice(0, 8).map((operation) => {
+            const operationFailure = formatOperationFailure(operation);
+
+            return (
+              <div
+                key={operation.id}
+                className="grid gap-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs sm:grid-cols-[1fr_auto]"
+              >
+                <div>
+                  <span className="font-medium">{formatOperationTitle(operation)}</span>
+                  <span className="mono ml-2 text-slate-500">{compactId(operation.id, 10)}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge value={operation.status} />
+                  <span className="text-slate-500">{formatDateTime(operation.created_at)}</span>
+                </div>
+                <div className="text-slate-600 sm:col-span-2">
+                  {formatOperationDetail(operation)}
+                </div>
+                {operationFailure ? (
+                  <div className="text-red-700 sm:col-span-2">
+                    {operationFailure}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export function EventsPanel({ events }: { events: WorkspaceEvent[] }) {
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const sortedEvents = useMemo(() => {
+    return [...events].sort((left, right) => {
+      const leftTime = Date.parse(left.occurred_at) || 0;
+      const rightTime = Date.parse(right.occurred_at) || 0;
+      const timeDelta = sortDirection === "desc" ? rightTime - leftTime : leftTime - rightTime;
+
+      if (timeDelta !== 0) {
+        return timeDelta;
+      }
+
+      return sortDirection === "desc" ? right.id.localeCompare(left.id) : left.id.localeCompare(right.id);
+    });
+  }, [events, sortDirection]);
+
+  return (
+    <Panel
+      title="Timeline"
+      icon={<FileText size={16} aria-hidden />}
+      action={
+        <button
+          type="button"
+          onClick={() => setSortDirection((current) => (current === "desc" ? "asc" : "desc"))}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
+          title={sortDirection === "desc" ? "Descending" : "Ascending"}
+        >
+          {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
+          {sortDirection}
+        </button>
+      }
+    >
+      {events.length === 0 ? (
+        <MutedLine>No events recorded.</MutedLine>
+      ) : (
+        <div className="max-h-[360px] overflow-auto">
+          {sortedEvents.map((event) => {
+            const reverse = isReverseWorkspaceTransition(event);
+            return (
+              <div
+                key={event.id}
+                className={`grid gap-1 border-b py-2 text-xs ${
+                  reverse
+                    ? "border-amber-100 bg-amber-50/70 px-2"
+                    : "border-slate-100"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">{event.event_type}</span>
+                  <span className="text-slate-500">{formatDateTime(event.occurred_at)}</span>
+                </div>
+                <div className="flex flex-wrap gap-2 text-slate-600">
+                  <span>{event.old_state ?? "—"} → {event.new_state ?? "—"}</span>
+                  {event.reason_code ? <span className="mono">{event.reason_code}</span> : null}
+                  {reverse ? (
+                    <span className="rounded-md border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                      step-back
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Panel>
+  );
+}

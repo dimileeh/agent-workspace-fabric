@@ -15,6 +15,10 @@ from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventCreate
 from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.recovery_payloads import (
+    _is_active_pr_monitor_recovery_operation,
+    _monitor_recovery_conformance_payload,
+)
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
@@ -311,10 +315,6 @@ async def _handle_merge_gate_blocker(
         _operation_observed_at,
         _pr_monitor_recovery_reason,
         _pr_monitor_recovery_reason_code,
-    )
-    from awf.runtime.pr_monitor_runner.shared import (
-        _is_active_pr_monitor_recovery_operation,
-        _monitor_recovery_conformance_payload,
     )
 
     stale_reason = gate.stale_reason

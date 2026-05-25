@@ -5,9 +5,36 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
-from typing import Any
+import hashlib
+import json
+from collections.abc import Mapping
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
+)
+from typing import Any, TypeGuard
 
-from awf.control.worker.shared import (
+from sqlalchemy import (
+    String,
+    and_,
+    func,
+    literal,
+    or_,
+    select,
+)
+from sqlalchemy import (
+    cast as sql_cast,
+)
+from sqlalchemy.dialects.postgresql import (
+    JSONB,
+    aggregate_order_by,
+)
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from awf.common.github_client import RepoRef
+from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE,
     _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE,
     _ACTIVE_EXECUTION_PRESERVED_OWNER,
@@ -36,46 +63,35 @@ from awf.control.worker.shared import (
     _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS,
     _REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT,
     _STALE_ACTIVE_EXECUTION_REASON_CODE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-    AGE_BOOST_MAX,
-    JSONB,
-    RUNTIME_STRANDED_EVENT_TYPE,
-    UTC,
-    AsyncSession,
-    FailureReason,
-    Mapping,
-    OperationType,
-    RepoRef,
-    RuntimeSnapshot,
-    RuntimeWorkspace,
-    SQLAlchemyError,
-    String,
-    TypeGuard,
-    Workspace,
-    WorkspaceEvent,
-    WorkspaceRuntimeFinding,
-    WorkspaceStatus,
+)
+from awf.control.worker.types import (
     _ActiveExecutionCandidate,
     _OpenPullRequestSummary,
     _PreservedWorktreeClassification,
     _RequestedCapacityQueueSignature,
-    aggregate_order_by,
-    and_,
-    datetime,
-    func,
-    hashlib,
-    is_transient_closed_connection_error,
-    json,
-    literal,
-    or_,
-    retry_policy_allows_runtime_recovery,
-    scheduler_order_expressions,
-    select,
-    sql_cast,
-    timedelta,
 )
+from awf.db.enums import (
+    FailureReason,
+    OperationType,
+    WorkspaceStatus,
+)
+from awf.db.models import (
+    Workspace,
+    WorkspaceEvent,
+)
+from awf.db.repositories import scheduler_order_expressions
+from awf.db.resilience import is_transient_closed_connection_error
+from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
+    AGE_BOOST_MAX,
+)
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    RUNTIME_STRANDED_EVENT_TYPE,
+    RuntimeWorkspace,
+    WorkspaceRuntimeFinding,
+    retry_policy_allows_runtime_recovery,
 )
 
 

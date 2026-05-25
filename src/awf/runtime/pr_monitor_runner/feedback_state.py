@@ -13,8 +13,15 @@ import re as re
 import time as time
 from typing import Any, cast
 
+from awf.common.github_client import RepoRef
 from awf.db.repositories import (
     PRFeedbackResolutionRepository,
+    pr_feedback_body_hash,
+)
+from awf.runtime.pr_monitor import (
+    MonitorState,
+    PRStatus,
+    ReviewComment,
 )
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
@@ -26,13 +33,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _monitor_state_verdict,
     _review_comment_needs_attention,
     _review_comment_resolution_body,
-)
-from awf.runtime.pr_monitor_runner.shared import (
-    MonitorState,
-    PRStatus,
-    RepoRef,
-    ReviewComment,
-    pr_feedback_body_hash,
 )
 
 

@@ -5,15 +5,49 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import time
 from dataclasses import (
     replace,
 )
+from pathlib import Path
 from typing import Any, cast
 
+from awf.common.compose_exec import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    ComposeExecCleanupError,
+    cleanup_failure_message,
+)
 from awf.common.github_client import (
     GitHubClientError,
+    RepoRef,
+)
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+)
+from awf.db.repositories import WorkspaceEventCreate
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import (
+    Abort,
+    AddressComments,
+    MonitorAction,
+    MonitorState,
+    NotifyHuman,
+    PRStatus,
+    ReportCiFailure,
+    RerunTransientCI,
+    ShortCircuitCompleted,
+    SyncBase,
+    WaitForCI,
+    _ci_transient_rerun_count,
+    _ci_transient_rerun_state_key,
 )
 from awf.runtime.pr_monitor_runner import merge_loop as _merge_loop
+from awf.runtime.pr_monitor_runner.constants import (
+    _AUDIT_GIT_PUSH_EVENT,
+    _CI_TRANSIENT_RERUN_FAILED_REASON,
+    _CI_TRANSIENT_RERUN_REASON,
+)
 from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
@@ -29,41 +63,15 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _pending_review_feedback_count,
     _redact_and_truncate_github_error,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _AUDIT_GIT_PUSH_EVENT,
-    _CI_TRANSIENT_RERUN_FAILED_REASON,
-    _CI_TRANSIENT_RERUN_REASON,
-    EXEC_PROCESS_CLEANUP_FAILED,
-    Abort,
-    AddressComments,
+from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
-    ComposeExecCleanupError,
-    MonitorAction,
-    MonitorState,
-    NotifyHuman,
-    OperationStatus,
-    OperationType,
-    Path,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
-    PRStatus,
-    RepoRef,
-    ReportCiFailure,
-    RerunTransientCI,
-    ShortCircuitCompleted,
-    SyncBase,
-    WaitForCI,
-    WorkspaceEventCreate,
-    WorkspaceLogSink,
-    _ci_transient_rerun_count,
-    _ci_transient_rerun_state_key,
-    _log,
-    cleanup_failure_message,
-    time,
 )
 
 

@@ -1,16 +1,33 @@
-"""Maintainability guardrails for decomposed AWF core packages."""
+"""Maintainability guardrails for AWF first-party code."""
 
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
-CORE_PACKAGE_DIRS = (
-    Path("src/awf/control/executor"),
-    Path("src/awf/runtime/pr_monitor_runner"),
-    Path("src/awf/control/worker"),
+FIRST_PARTY_ROOTS = (
+    Path("src"),
+    Path("tests"),
+    Path("scripts"),
+    Path("apps/console/app"),
+    Path("apps/console/components"),
+    Path("apps/console/hooks"),
+    Path("apps/console/lib"),
 )
-MAX_CORE_FILE_LINES = 1_500
+FIRST_PARTY_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
+EXCLUDED_PARTS = {
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "coverage",
+    "dist",
+    "htmlcov",
+    "node_modules",
+}
+MAX_FIRST_PARTY_FILE_LINES = 1_500
 PUBLIC_FACADES = {
     Path("src/awf/control/executor/__init__.py"): {
         "ExecutorConfig",
@@ -32,6 +49,11 @@ ORCHESTRATOR_MODULE_IMPORTS = {
     Path("src/awf/runtime/pr_monitor_runner"): "awf.runtime.pr_monitor_runner.runner",
     Path("src/awf/control/worker"): "awf.control.worker.manager",
 }
+BARREL_MODULES = {
+    Path("src/awf/control/executor/shared.py"),
+    Path("src/awf/runtime/pr_monitor_runner/shared.py"),
+    Path("src/awf/control/worker/shared.py"),
+}
 ORCHESTRATOR_FILES = {
     Path("src/awf/control/executor/base.py"): {
         "ExecutorConfig",
@@ -49,32 +71,55 @@ ORCHESTRATOR_FILES = {
 }
 
 
+def _first_party_code_files() -> list[Path]:
+    files: list[Path] = []
+    for root in FIRST_PARTY_ROOTS:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix not in FIRST_PARTY_SUFFIXES:
+                continue
+            if EXCLUDED_PARTS.intersection(path.parts):
+                continue
+            files.append(path)
+    return sorted(files)
+
+
 def _python_files() -> list[Path]:
-    return sorted(path for root in CORE_PACKAGE_DIRS for path in root.glob("*.py"))
+    return [path for path in _first_party_code_files() if path.suffix == ".py"]
 
 
-def test_decomposed_core_files_stay_under_line_limit() -> None:
+def test_first_party_code_files_stay_under_line_limit() -> None:
     oversized = {
         path.as_posix(): len(path.read_text(encoding="utf-8").splitlines())
-        for path in _python_files()
-        if len(path.read_text(encoding="utf-8").splitlines()) > MAX_CORE_FILE_LINES
+        for path in _first_party_code_files()
+        if len(path.read_text(encoding="utf-8").splitlines()) > MAX_FIRST_PARTY_FILE_LINES
     }
 
     assert oversized == {}
 
 
-def test_decomposed_core_has_no_hydration_or_file_level_suppressions() -> None:
+def test_first_party_python_has_no_hydration_or_file_level_suppressions() -> None:
     banned_patterns = (
-        "_hydrate",
-        "globals()",
-        "__dict__.update",
-        "# mypy: ignore-errors",
-        "# ruff: noqa: E402, F401, F821",
+        ("_hydrate helper", re.compile(r"\b(?:def\s+)?_hydrate\s*(?:\(|=)")),
+        ("globals namespace copying", re.compile(r"\bglobals\s*\(\s*\)")),
+        ("module dict namespace copying", re.compile(r"__dict__\.update\s*\(")),
+        ("file-level mypy ignore", re.compile(r"^#\s*mypy:\s*ignore-errors", re.MULTILINE)),
+        (
+            "broad file-level ruff ignore",
+            re.compile(r"^#\s*ruff:\s*noqa:\s*E402,\s*F401,\s*F821", re.MULTILINE),
+        ),
+        (
+            "test namespace proxy helper",
+            re.compile(r"\b(?:def\s+)?_namespace_from_modules\s*(?:\(|=)"),
+        ),
     )
     offenders: dict[str, list[str]] = {}
     for path in _python_files():
         text = path.read_text(encoding="utf-8")
-        matches = [pattern for pattern in banned_patterns if pattern in text]
+        matches = [label for label, pattern in banned_patterns if pattern.search(text)]
         if matches:
             offenders[path.as_posix()] = matches
 
@@ -146,6 +191,12 @@ def test_implementation_modules_do_not_import_from_orchestrators() -> None:
                 offenders[path.as_posix()] = imported_modules
 
     assert offenders == {}
+
+
+def test_core_packages_do_not_use_catch_all_shared_barrels() -> None:
+    offenders = [path.as_posix() for path in BARREL_MODULES if path.exists()]
+
+    assert offenders == []
 
 
 def test_orchestrators_do_not_expose_private_import_barrels() -> None:

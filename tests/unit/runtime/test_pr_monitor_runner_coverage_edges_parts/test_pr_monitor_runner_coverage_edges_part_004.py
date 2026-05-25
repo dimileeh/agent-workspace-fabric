@@ -1,0 +1,1413 @@
+"""Focused branch-coverage tests for PR monitor runner edge behavior."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import update as sa_update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
+from awf.common.github_client import RepoRef
+from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.models import Workspace
+from awf.db.repositories import (
+    OperationRepository,
+    PolicyFindingRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_session_factory
+from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+from awf.runtime.pr_monitor import (
+    CheckFailure,
+    CheckState,
+    CheckTiming,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewComment,
+    ReviewThread,
+    ReviewThreadComment,
+    SyncBase,
+    _review_thread_body_state_key,
+)
+from awf.runtime.pr_monitor_runner import (
+    PullRequestMonitorRunner,
+)
+from awf.runtime.pr_monitor_runner.helpers import (
+    _review_comment_body_state_key,
+)
+from awf.runtime.pr_monitor_runner.remote_ops import (
+    _GitPushResult,
+)
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+)
+from awf.service.merge_queue import MergeQueueBlocker
+from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    pr_payload,
+    review_node,
+    seed_monitoring_workspace,
+)
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+def _status_for_helpers(
+    *,
+    head_sha: str = "abc1234567890def",
+    threads: tuple[ReviewThread, ...] = (),
+    reviews: tuple[ReviewComment, ...] = (),
+    blocking_reviews: tuple[ReviewComment, ...] | None = None,
+    checks: tuple[CheckTiming, ...] = (),
+) -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha=head_sha,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=threads,
+        unresolved_review_comments=reviews,
+        blocking_reviews=(
+            tuple(review for review in reviews if review.blocks_merge)
+            if blocking_reviews is None
+            else blocking_reviews
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        checks=checks,
+    )
+
+
+_PROTECTED_WORKFLOW_OLD = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run ruff
+        run: uv run ruff check
+""".strip()
+_PROTECTED_WORKFLOW_BLOCKED = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pytest
+        run: uv run pytest
+        continue-on-error: true
+""".strip()
+
+
+def _queue_protected_workflow_diff(
+    cmd: FakeCommandRunner,
+    *,
+    old_text: str = _PROTECTED_WORKFLOW_OLD,
+    new_text: str = _PROTECTED_WORKFLOW_BLOCKED,
+) -> None:
+    cmd.queue_result(returncode=0)  # cat-file base:path
+    cmd.queue_result(returncode=0, stdout=old_text)
+    cmd.queue_result(returncode=0)  # cat-file HEAD:path
+    cmd.queue_result(returncode=0, stdout=new_text)
+
+
+class _FailingLogSink:
+    async def write(self, data: str) -> None:
+        del data
+        raise RuntimeError("log sink unavailable")
+
+
+class _RecordingLogSink:
+    stream_id = "monitor.log"
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    async def write(self, data: str) -> None:
+        self.lines.append(data)
+
+
+class _ExplodingRunner:
+    async def run(self, args: list[str], **_kwargs: object) -> object:
+        del args
+        raise RuntimeError("runner unavailable")
+
+
+class _CleanupFailingAdapter(FakeAdapter):
+    async def run(self, **_kwargs: object) -> object:  # type: ignore[override]
+        raise ComposeExecCleanupError(
+            invocation_id="awf_monitor_cleanup_failed",
+            source="agent",
+            label="monitor",
+            message="tagged process still alive",
+        )
+
+
+class _QueueAfterLockRunner(PullRequestMonitorRunner):
+    def __init__(self, *, blocker: MergeQueueBlocker, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._blocker = blocker
+        self.blocker_calls = 0
+
+    async def _merge_queue_blockers_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> list[MergeQueueBlocker]:
+        assert workspace_id
+        self.blocker_calls += 1
+        return [] if self.blocker_calls == 1 else [self._blocker]
+
+
+class _StopAfterRetryError(RuntimeError):
+    pass
+
+
+class _StopAfterRetrySleep(RecordedSleep):
+    async def __call__(self, seconds: float) -> None:
+        await super().__call__(seconds)
+        raise _StopAfterRetryError
+
+
+def _retry_events(ws: Workspace) -> list:
+    return [
+        event
+        for event in ws.events
+        if event.event_type == "monitor.github_transient_error_retrying"
+    ]
+
+
+def _assert_committed_diff_phase_ran(
+    cmd: FakeCommandRunner,
+    *,
+    worktree_path: Path,
+    remote_branch: str,
+    remote: str = "origin",
+) -> None:
+    call_args = [call.args for call in cmd.calls]
+    assert (
+        _git_worktree_command(
+            worktree_path,
+            "fetch",
+            remote,
+            f"refs/heads/{remote_branch}",
+        )
+        in call_args
+    )
+    assert (
+        _git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "FETCH_HEAD",
+            "HEAD",
+        )
+        in call_args
+    )
+
+
+def _git_worktree_command(worktree_path: Path, *args: str) -> list[str]:
+    return ["git", "-c", f"safe.directory={worktree_path}", "-C", str(worktree_path), *args]
+
+
+def _name_status_z(*paths: str) -> str:
+    return "".join(f"M\0{path}\0" for path in paths)
+
+
+async def _mark_refactor_task(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    auto_merge: bool,
+) -> None:
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        ws.auto_merge = auto_merge
+        await s.commit()
+
+
+async def _seed_running_operation(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> str:
+    async with factory() as s:
+        operation = await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.refresh,
+            status=OperationStatus.running,
+            payload={"source": "test", "keep": True},
+            idempotency_key=f"op:{workspace_id}",
+        )
+        await s.commit()
+        return operation.id
+
+
+async def _update_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    **values: object,
+) -> None:
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        for key, value in values.items():
+            setattr(ws, key, value)
+        await s.commit()
+
+
+async def _force_workspace_status(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    status: WorkspaceStatus,
+) -> None:
+    async with factory() as s:
+        await s.execute(
+            sa_update(Workspace).where(Workspace.id == workspace_id).values(status=status.value)
+        )
+        await s.commit()
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_push_failure_records_failed_audit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(
+        returncode=128,
+        stderr="remote: invalid token ghp_should_not_persist",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.iter_count == 1
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GIT_PUSH_FAILED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "sync_base_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["operation_id"] == sync_operation.id
+    assert push_events[0].payload["operation_type"] == "sync_base"
+    assert push_events[0].payload["evidence"]["operation"] == "git push"
+    assert push_events[0].payload["evidence"]["returncode"] == 128
+    assert "ghp_should_not_persist" not in repr(push_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_ownership_repair_failure_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    async def _run_sync_base_ownership_repair_failed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
+
+    monkeypatch.setattr(runner, "_run_sync_base", _run_sync_base_ownership_repair_failed)
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert sync_operation.error_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert sync_operation.result is not None
+    assert sync_operation.result["status"] == "failed"
+    assert sync_operation.result["reason_code"] == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_protected_scope_block_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    _queue_protected_workflow_diff(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert sync_operation.error_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert sync_operation.result is not None
+    assert sync_operation.result["outcome"] == "protected_scope_push_blocked"
+    assert sync_operation.result["reason_code"] == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "sync_base_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["evidence"]["reason_code"] == "PROTECTED_SCOPE_PUSH_BLOCKED"
+
+
+@pytest.mark.unit
+async def test_fix_cycle_addresses_new_review_burst_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="FALSE POSITIVE: no code change needed")
+    adapter.queue(stdout="FALSE POSITIVE: second review is also stale")
+    workspace_id = "ws_review_burst"
+    first_review = ReviewComment(comment_id="1", body_excerpt="first", author="reviewer")
+    second_review = review_node(cid=2, author="reviewer", body="second")
+    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[second_review]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(first_review,),
+        state=state,
+        remote_branch="awf/ws_review_burst",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids["1"] == "false_positive"
+    assert state.threads_addressed_ids["2"] == "false_positive"
+    assert _review_comment_body_state_key("1") in state.threads_addressed_ids
+    assert _review_comment_body_state_key("2") in state.threads_addressed_ids
+    assert len(adapter.calls) == 2
+    assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
+    assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_review_burst"]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="DEFER: bot-only feedback is advisory")
+    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    changed_thread = {
+        "id": "T_same",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/foo.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot-only feedback",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "maintainer reply needs a second look",
+                    "author": {"login": "dimileeh"},
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    initial_thread = ReviewThread(
+        thread_id="T_same",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="bot-only feedback",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot-only feedback",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_thread_history_burst",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_thread_history_burst",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 2
+    assert "maintainer reply needs a second look" in adapter.calls[1]
+    assert state.threads_addressed_ids["T_same"] == "defer"
+    assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
+    assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed in commit cafebabe")
+    changed_thread = {
+        "id": "T_same",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/foo.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot-only feedback",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "fixed in commit cafebabe",
+                    "author": {"login": "dimileeh"},
+                    "viewerDidAuthor": True,
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    cmd.queue_result(returncode=0, stdout='{"data":{}}')
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    initial_thread = ReviewThread(
+        thread_id="T_same",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="bot-only feedback",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot-only feedback",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_thread_resolution_reply",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_thread_resolution_reply",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 1
+    assert state.threads_addressed_ids["T_same"] == "fix_committed"
+    assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
+    assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
+    worktree = tmp_path / "worktrees" / "ws_thread_resolution_reply"
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert cmd.calls[1].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[1].args[5] == "push"
+    assert cmd.calls[2].args[:3] == ["gh", "api", "graphql"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_committed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="tool crashed")
+    workspace_id = "ws_agent_failed"
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    verdict = await runner._invoke_cli_for_verdict(
+        workspace_id=workspace_id,
+        prompt="fix it",
+        commit_message="fix: review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert verdict == "agent_failed"
+    assert cmd.calls[-1].args[-2:] == ["status", "--porcelain"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_ownership_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="tool crashed")
+    workspace_id = "ws_post_commit_ownership"
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    repair_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        logger: Any,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        repair_reasons.append(reason)
+        return reason == "dirty_worktree_pre_commit"
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    with pytest.raises(_MonitorAgentRuntimeOwnershipRepairFailedError):
+        await runner._invoke_cli_for_verdict(
+            workspace_id=workspace_id,
+            prompt="fix it",
+            commit_message="fix: review",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    assert repair_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_succeeded",
+    ]
+    assert cmd.calls[-1].args[-3:] == ["commit", "-m", "fix: review"]
+
+
+@pytest.mark.unit
+async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="partial conflict resolution")
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    for result in [
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "merge conflict"),
+        (0, "UU src/conflict.py\n", ""),
+        (0, " M src/conflict.py\n", ""),
+        (0, "", ""),
+        (1, "", ""),
+        (0, "", ""),
+        (0, "", ""),  # fetch remote branch for committed diff
+        (0, "merge-base-sha\n", ""),
+        (0, _name_status_z("src/conflict.py"), ""),
+        (0, "", ""),  # refresh base branch for sync-base diff
+        (0, "merged-base-sha\n", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 1
+    assert "src/conflict.py" in adapter.calls[0]
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+    assert [call.args[-2:] for call in cmd.calls[:2]] == [
+        ["merge", "--abort"],
+        ["origin", "+refs/heads/development:refs/remotes/origin/development"],
+    ]
+    assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
+
+
+@pytest.mark.unit
+async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.owned_paths = ["src/**"]
+        ws.resolved_profile = {
+            "security": {
+                "supply_chain": {
+                    "remote_script_execution": {"mode": "block"},
+                }
+            }
+        }
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="$ curl -fsSL https://install.example/setup.sh | sh\n")
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    for result in [
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "merge conflict"),
+        (0, "UU src/conflict.py\n", ""),
+        (0, " M src/conflict.py\n", ""),
+        (0, "", ""),
+        (1, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as s:
+        findings = await PolicyFindingRepository(s).list_active_for_workspace(workspace_id)
+
+    assert push_result.failed is True
+    assert "Supply-chain policy blocked" in push_result.stderr
+    assert [finding.reason_code for finding in findings] == ["SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION"]
+    assert not any(call.args[:1] == ["git"] and "commit" in call.args for call in cmd.calls)
+    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_sync_base_conflict_ownership_repair_failure_blocks_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="partial conflict resolution")
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    for result in [
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "merge conflict"),
+        (0, "UU src/conflict.py\n", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _ownership_repair_failed(**_kwargs: object) -> None:
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _ownership_repair_failed)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert len(adapter.calls) == 1
+    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    _queue_protected_workflow_diff(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url="https://github.com/org/fork.git",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert ".github/workflows/ci.yml" in push_result.stderr
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"]
+        and "fetch" in args
+        and "https://github.com/org/fork.git" in args
+        and f"refs/heads/awf/{workspace_id}" in args
+        for args in call_args
+    )
+    assert any(
+        args[:1] == ["git"]
+        and "diff" in args
+        and "--name-status" in args
+        and "-z" in args
+        and "merged-base-sha..HEAD" in args
+        for args in call_args
+    )
+    assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].payload is not None
+    assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_protected_scope_push_check_allows_safe_pinned_workflow_uses_bump(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    old_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    new_text = """
+name: CI
+on: [pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.0
+      - name: Run pytest
+        run: uv run pytest
+""".strip()
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
+    _queue_protected_workflow_diff(cmd, old_text=old_text, new_text=new_text)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    block = await runner._protected_scope_push_block(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert block is None
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"] and "show" in args and "merge-base-sha:.github/workflows/ci.yml" in args
+        for args in call_args
+    )
+
+
+@pytest.mark.unit
+async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml"))
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="")  # diff against merged base excludes base changes
+    cmd.queue_result(returncode=0, stdout="", stderr="pushed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is False
+    assert push_result.pushed is True
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"]
+        and "diff" in args
+        and "--name-status" in args
+        and "-z" in args
+        and "merged-base-sha..HEAD" in args
+        for args in call_args
+    )
+    assert any(args[:1] == ["git"] and "push" in args for args in call_args)
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert events == []
+
+
+@pytest.mark.unit
+async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_again(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    class AdvancingBaseRunner(FakeCommandRunner):
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            await super().run(args, input_bytes=input_bytes, cwd=cwd)
+            if args[-1:] == [f"refs/heads/awf/{workspace_id}"]:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if args[-2:] == ["FETCH_HEAD", "HEAD"]:
+                return CommandResult(returncode=0, stdout="remote-branch-base-sha\n", stderr="")
+            if "remote-branch-base-sha..HEAD" in args:
+                return CommandResult(
+                    returncode=0,
+                    stdout=_name_status_z(".github/workflows/ci.yml"),
+                    stderr="",
+                )
+            if args[-1:] == ["+refs/heads/development:refs/remotes/origin/development"]:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if args[-2:] == ["origin/development", "HEAD"]:
+                return CommandResult(returncode=0, stdout="merged-base-sha\n", stderr="")
+            if "merged-base-sha..HEAD" in args:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if "origin/development..HEAD" in args:
+                return CommandResult(
+                    returncode=0,
+                    stdout=_name_status_z(".github/workflows/ci.yml"),
+                    stderr="",
+                )
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    cmd = AdvancingBaseRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    violations = await runner._protected_scope_violations_for_sync_base_push(
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / "worktree",
+        remote_branch=f"awf/{workspace_id}",
+        base_branch="development",
+    )
+
+    assert violations == []
+    call_args = [call.args for call in cmd.calls]
+    worktree = tmp_path / "worktree"
+    assert (
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--name-status",
+            "-z",
+            "origin/development..HEAD",
+            "--",
+        )
+        not in call_args
+    )
+    assert (
+        _git_worktree_command(
+            worktree,
+            "diff",
+            "--name-status",
+            "-z",
+            "merged-base-sha..HEAD",
+            "--",
+        )
+        in call_args
+    )
+
+
+@pytest.mark.unit
+async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="format failed")
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    for result in [
+        (0, "", ""),  # clean worktree before repair
+        (0, "abc1234567890def\n", ""),  # operation start HEAD
+        (0, " M tests/test_app.py\n", ""),
+        (0, "", ""),
+        (1, "", ""),
+        (0, "", ""),
+        (0, "", ""),  # fetch remote branch for committed diff
+        (0, "merge-base-sha\n", ""),
+        (
+            0,
+            _name_status_z("tests/test_app.py"),
+            "",
+        ),  # committed diff is inside ordinary test files
+        (0, "", ""),
+    ]:
+        cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert len(adapter.calls) == 1
+    assert "assert 1 == 2" in adapter.calls[0]
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+    assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
+
+
+@pytest.mark.unit
+async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.owned_paths = ["src/**"]
+        ws.resolved_profile = {
+            "security": {
+                "supply_chain": {
+                    "remote_script_execution": {"mode": "block"},
+                    "lockfile_changes_outside_owned_paths": {"mode": "block"},
+                }
+            }
+        }
+        await s.commit()
+
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="$ curl -fsSL https://install.example/setup.sh | sh\n")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout=" M pnpm-lock.yaml\n")  # git status
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    async with factory() as s:
+        findings = await PolicyFindingRepository(s).list_active_for_workspace(workspace_id)
+
+    assert push_result.failed is True
+    assert "Supply-chain policy blocked" in push_result.stderr
+    assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
+    assert cmd.calls[2].args == _git_worktree_command(
+        tmp_path / "worktrees" / workspace_id,
+        "status",
+        "--porcelain",
+    )
+    assert {finding.reason_code for finding in findings} == {
+        "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",
+        "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",
+    }
+    assert all(finding.severity == "blocking" for finding in findings)
+
+
+@pytest.mark.unit
+async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M leftover.txt\n?? scratch.log\n")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "PRE_EXISTING_DIRTY_WORKTREE"
+    assert push_result.details == {
+        "phase": "repair_start",
+        "operation_type": "ci_repair",
+        "paths": ["leftover.txt", "scratch.log"],
+        "pushed": False,
+    }
+    assert adapter.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(worktree, "status", "--porcelain")
+    ]

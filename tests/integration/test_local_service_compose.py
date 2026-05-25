@@ -286,7 +286,7 @@ def test_init_env_seeding_uses_real_source_checkout_compose_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise init env target discovery and seeding against real AWF assets."""
-    from awf.cli import main as cli_main
+    from awf.cli import init_ops as cli_init_ops
     from awf.service.config import local_service_environ
 
     checkout = tmp_path / "checkout"
@@ -310,17 +310,17 @@ def test_init_env_seeding_uses_real_source_checkout_compose_paths(
     nested_project.mkdir(parents=True)
     monkeypatch.chdir(nested_project)
 
-    compose_file, env_file, env_example = cli_main._resolve_service_compose_paths()  # noqa: SLF001
+    compose_file, env_file, env_example = cli_init_ops._resolve_service_compose_paths()  # noqa: SLF001
 
     assert compose_file == checkout / "docker" / "compose" / "local-service.yml"
     assert env_file == checkout / "docker" / "compose" / ".env"
     assert env_example == checkout / ".env.example"
     assert not env_file.exists()
 
-    action, error, overlay_keys = cli_main._seed_env_file(  # noqa: SLF001
+    action, error, overlay_keys = cli_init_ops._seed_env_file(  # noqa: SLF001
         env_file,
         env_example,
-        env_overlay=cli_main._init_env_overlay_source(env_file, env_example),  # noqa: SLF001
+        env_overlay=cli_init_ops._init_env_overlay_source(env_file, env_example),  # noqa: SLF001
     )
 
     assert action == "wrote_from_example"
@@ -333,7 +333,7 @@ def test_init_env_seeding_uses_real_source_checkout_compose_paths(
     assert "# Operator Docker socket\nAWF_DOCKER_HOST=unix:///tmp/awf-review.sock\n" in env_text
     assert "AWF_ROOT_ONLY=operator-only\n" in env_text
 
-    active_env_file, compose_env_file = cli_main._resolve_service_env_files(env_file)  # noqa: SLF001
+    active_env_file, compose_env_file = cli_init_ops._resolve_service_env_files(env_file)  # noqa: SLF001
 
     assert active_env_file == env_file
     assert compose_env_file == env_file

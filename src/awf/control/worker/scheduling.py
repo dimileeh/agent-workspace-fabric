@@ -32,7 +32,7 @@ from awf.service.scheduler import (
 )
 
 if TYPE_CHECKING:
-    from awf.control.worker.shared import _ActiveExecutionCandidate
+    from awf.control.worker.types import _ActiveExecutionCandidate
     from awf.db.repositories import QueueDecisionCreate
 
 QUEUE_DECISION_ORDERED = "ordered"

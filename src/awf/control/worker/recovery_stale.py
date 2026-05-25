@@ -5,32 +5,24 @@ Mechanically extracted from recovery.py; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import (
+    UTC,
+    datetime,
+)
+from pathlib import Path
 from time import monotonic
 from typing import Any, cast
 
-from awf.control.worker.helpers import (
-    _candidate_claim_is_stale,
-    _execution_claim_is_stale,
-    _has_running_agent_runtime,
-    _running_monitoring_pr_recovery_finding,
-    _runtime_snapshot_payload,
-    _runtime_stranding_event_payload,
-    _runtime_stranding_failure_message,
-    _runtime_workspace,
-    _secondary_runtime_stranding_payload,
-    _secondary_stale_active_execution_payload,
-    _stale_active_execution_failure_message,
-    _worker_exception_is_transient_db_connection,
-    _workspace_claim_recheck_passes,
+from sqlalchemy import (
+    and_,
+    literal,
+    or_,
+    select,
 )
-from awf.control.worker.scheduling import (
-    _claim_recheck_conditions,
-    _monitor_provider_recovery_resume_pending,
-    _stale_execution_claim_filter,
-    _stale_monitor_claim_filter,
-    _utc_datetime,
-)
-from awf.control.worker.shared import (
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_RECOVERY_EVIDENCE_EVENTS,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_NOT_POSSIBLE_REASON_CODE,
@@ -46,38 +38,51 @@ from awf.control.worker.shared import (
     _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
     _STALE_ACTIVE_EXECUTION_REASON_CODE,
     _STALE_ACTIVE_EXECUTION_RECOVERY_FAILED_REASON_CODE,
-    RUNTIME_STRANDED_EVENT_TYPE,
-    UTC,
-    AsyncSession,
+)
+from awf.control.worker.helpers import (
+    _candidate_claim_is_stale,
+    _execution_claim_is_stale,
+    _has_running_agent_runtime,
+    _running_monitoring_pr_recovery_finding,
+    _runtime_snapshot_payload,
+    _runtime_stranding_event_payload,
+    _runtime_stranding_failure_message,
+    _runtime_workspace,
+    _secondary_runtime_stranding_payload,
+    _secondary_stale_active_execution_payload,
+    _stale_active_execution_failure_message,
+    _worker_exception_is_transient_db_connection,
+    _workspace_claim_recheck_passes,
+)
+from awf.control.worker.logging import _log
+from awf.control.worker.scheduling import (
+    _claim_recheck_conditions,
+    _monitor_provider_recovery_resume_pending,
+    _stale_execution_claim_filter,
+    _stale_monitor_claim_filter,
+    _utc_datetime,
+)
+from awf.control.worker.types import _ActiveExecutionCandidate
+from awf.db.enums import (
     FailureReason,
-    Mapping,
     OperationStatus,
-    Path,
-    RuntimeSnapshot,
-    Workspace,
-    WorkspaceCleanupResult,
-    WorkspaceEvent,
-    WorkspaceRepository,
-    WorkspaceRuntimeFinding,
     WorkspaceStatus,
-    _ActiveExecutionCandidate,
-    _log,
-    and_,
-    datetime,
-    literal,
-    or_,
-    run_db_operation_with_retry,
-    select,
 )
 from awf.db.models import (
     Operation,
+    Workspace,
+    WorkspaceEvent,
 )
+from awf.db.repositories import WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
+    run_db_operation_with_retry,
 )
 from awf.db.session import (
     session_scope,
 )
+from awf.node.cleanup import WorkspaceCleanupResult
+from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
     build_preserved_failure_payload,
@@ -90,6 +95,8 @@ from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_STATE_KEY,
 )
 from awf.service.workspace_runtime_health import (
+    RUNTIME_STRANDED_EVENT_TYPE,
+    WorkspaceRuntimeFinding,
     classify_runtime_snapshot,
     has_open_pr_for_remonitor,
 )

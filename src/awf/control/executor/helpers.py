@@ -5,20 +5,35 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
+import traceback
+from collections.abc import (
+    Callable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import (
     replace,
 )
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
-from awf.control.executor.logging_ops import (
-    _format_duration_for_message,
-    _validation_evidence_size_summary,
+from awf.adapters.base import (
+    AgentAdapter,
+    AgentDefaults,
 )
-from awf.control.executor.quality_gates import (
-    PLAN_CONFORMANCE_UNSATISFIED,
-    _post_validation_conformance_failure_text,
+from awf.common.audit import (
+    redact_audit_text,
+    redact_audit_value,
 )
-from awf.control.executor.shared import (
+from awf.common.github_client import (
+    PullRequestAdoptionMetadata,
+    RepoRef,
+)
+from awf.common.workspace_policy import release_sync_source_branch
+from awf.control.executor.constants import (
     _DEFAULT_RELEASE_SYNC_TARGET_BRANCH,
     _EXCEPTION_TRACEBACK_LIMIT,
     _FILE_DIGEST_CHUNK_SIZE,
@@ -27,46 +42,46 @@ from awf.control.executor.shared import (
     _VALIDATION_EVIDENCE_CORE_KEYS,
     _VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS,
     _VALIDATION_EVIDENCE_JSON_LIMIT,
+    WORKTREE_MISSING_REASON_CODE,
+)
+from awf.control.executor.logging_ops import (
+    _format_duration_for_message,
+    _validation_evidence_size_summary,
+)
+from awf.control.executor.metadata import (
+    _metadata_int,
+    _metadata_str,
+)
+from awf.control.executor.protocols import _MonitorRunnerProto
+from awf.control.executor.quality_gates import (
+    PLAN_CONFORMANCE_UNSATISFIED,
+    _post_validation_conformance_failure_text,
+)
+from awf.control.executor.types import _PlanningRunFailure
+from awf.db.enums import (
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+)
+from awf.db.models import Workspace
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.alembic_validation import (
     ALEMBIC_MIGRATION_POLICY_COMMAND,
     ALEMBIC_MIGRATION_POLICY_PHASE,
+)
+from awf.runtime.pr_push_remote import remote_push_url_for_workspace
+from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
     DB_GENERATED_SETUP_PHASE,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     PYTEST_TEST_FAILURE,
-    WORKTREE_MISSING_REASON_CODE,
-    AgentAdapter,
-    AgentDefaults,
-    Callable,
-    FailureReason,
-    Mapping,
-    OperationStatus,
-    OperationType,
-    Path,
-    PullRequestAdoptionMetadata,
-    RepoRef,
-    Sequence,
-    TaskClass,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
-    Workspace,
-    WorkspaceProfile,
-    _metadata_int,
-    _metadata_str,
-    _MonitorRunnerProto,
-    _PlanningRunFailure,
-    cast,
-    hashlib,
-    inspect,
-    json,
     profile_phase_command_plan,
-    redact_audit_text,
-    redact_audit_value,
-    release_sync_source_branch,
-    remote_push_url_for_workspace,
-    resolve_workspace_profile,
-    traceback,
 )
 
 

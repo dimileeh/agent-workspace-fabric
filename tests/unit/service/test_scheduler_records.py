@@ -17,7 +17,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.service import workspaces
+from awf.service import workspaces, workspaces_create
 from awf.service.disk import DiskCheck
 from awf.service.workspaces import WorkspaceService
 from tests.postgres import postgres_test_engine
@@ -126,7 +126,7 @@ async def test_create_writes_admitted_decision_and_local_reservation(
         local_capacity_memory_gb=None,
         local_capacity_dind_slots=None,
     )
-    monkeypatch.setattr(workspaces, "get_settings", lambda: settings)
+    monkeypatch.setattr(workspaces_create, "get_settings", lambda: settings)
     service = WorkspaceService(factory)
 
     created = await service.create(_request())
@@ -497,9 +497,9 @@ def test_legacy_numeric_memory_without_unit_warns(monkeypatch: pytest.MonkeyPatc
         def warning(self, event: str, **kwargs: object) -> None:
             warnings.append((event, kwargs))
 
-    monkeypatch.setattr(workspaces, "_log", Logger())
+    monkeypatch.setattr(workspaces_create, "_log", Logger())
 
-    parsed = workspaces._parse_memory_gb("1024")
+    parsed = workspaces_create._parse_memory_gb("1024")
 
     assert parsed == 1024.0
     assert warnings == [

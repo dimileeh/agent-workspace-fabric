@@ -14,26 +14,28 @@ import time as time
 from pathlib import Path
 from typing import Any, cast
 
+from awf.adapters.base import AgentRunError
 from awf.common.command_evidence import (
     append_command_evidence,
 )
+from awf.common.github_client import RepoRef
+from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import (
     fix_ci_prompt,
 )
+from awf.runtime.pr_monitor import (
+    CheckFailure,
+    MonitorState,
+    PRStatus,
+)
+from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _MONITOR_POLICY_BLOCKED_REASON,
-    AgentRunError,
-    CheckFailure,
-    MonitorState,
+from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
-    PRStatus,
-    RepoRef,
-    WorkspaceLogSink,
-    _log,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )

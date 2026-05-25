@@ -5,15 +5,38 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
 from typing import Any, cast
 
+from awf.adapters.base import (
+    AgentAdapter,
+    AgentDefaults,
+    AgentRunError,
+    get_adapter,
+)
 from awf.common.command_evidence import (
     append_command_evidence,
 )
+from awf.common.commands import CommandResult
+from awf.common.compose_exec import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    ComposeExecCleanupError,
+    cleanup_failure_message,
+)
 from awf.common.git_identity import (
+    git_identity_config_args,
     git_safe_directory_config_args,
 )
 from awf.control.executor import execution_validation as _execution_validation
+from awf.control.executor.constants import (
+    _AUDIT_GIT_PUSH_EVENT,
+    _AUDIT_PR_CREATED_EVENT,
+    _GIT_PUSH_FAILED_REASON_CODE,
+    _PR_CREATE_FAILED_REASON_CODE,
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+)
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
     _git_name_lines,
@@ -32,58 +55,47 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
+from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
     _log,
     _PostAgentCommitStepError,
 )
-from awf.control.executor.shared import (
-    _AUDIT_GIT_PUSH_EVENT,
-    _AUDIT_PR_CREATED_EVENT,
-    _GIT_PUSH_FAILED_REASON_CODE,
-    _PR_CREATE_FAILED_REASON_CODE,
-    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-    EXEC_PROCESS_CLEANUP_FAILED,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-    AgentAdapter,
-    AgentDefaults,
-    AgentRunError,
-    AgentRuntime,
-    CommandResult,
-    ComposeExecCleanupError,
-    FailureReason,
-    Mapping,
-    OperationStatus,
-    Path,
-    PullRequestError,
-    ValidationCoverageResult,
-    ValidationResult,
-    WorkspaceProfile,
-    WorkspaceRepository,
-    WorkspaceStatus,
+from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
-    _MonitorRebaseRecoveryError,
-    _MonitorRunnerProto,
     _planning_validation_handoff_from_recovery_payload,
+    _recovery_needs_existing_pr_push,
+)
+from awf.control.executor.supply_chain_messages import _supply_chain_block_message
+from awf.control.executor.types import (
+    _MonitorRebaseRecoveryError,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
-    _recovery_needs_existing_pr_push,
-    _supply_chain_block_message,
-    changed_paths_are_only_internal_plan_artifacts,
-    cleanup_failure_message,
-    datetime,
-    get_adapter,
-    git_identity_config_args,
 )
 from awf.control.quality_gates import (
+    changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
     quality_gate_violation_message,
 )
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    WorkspaceStatus,
+)
+from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
+)
+from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION
+from awf.runtime.pr_creator import PullRequestError
+from awf.runtime.validation import (
+    ValidationCoverageResult,
+    ValidationResult,
 )
 
 

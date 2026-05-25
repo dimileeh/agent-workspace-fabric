@@ -15,6 +15,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from awf.adapters.base import AgentRunError
+from awf.common.audit import redact_audit_text
+from awf.common.commands import CommandResult
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
@@ -23,6 +26,8 @@ from awf.control.protected_file_diffs import (
     protected_file_diffs_for_committed_paths,
 )
 from awf.control.quality_gates import (
+    ProtectedFileDiff,
+    QualityGateViolation,
     diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
@@ -30,13 +35,29 @@ from awf.control.quality_gates import (
 )
 from awf.db.repositories import (
     MergeCandidateRepository,
+    WorkspaceEventCreate,
+    WorkspaceRepository,
 )
+from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor import (
+    MonitorState,
+    PRStatus,
+)
 from awf.runtime.pr_monitor_runner.comments import (
     _git_worktree_command,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _AUDIT_GIT_PUSH_EVENT,
+    _PRE_EXISTING_DIRTY_WORKTREE_REASON,
+    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+    _REPAIR_START_HEAD_UNAVAILABLE_REASON,
+    _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_name_only_z,
@@ -48,36 +69,19 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _untracked_paths_from_porcelain,
     _untracked_paths_from_porcelain_z,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
     _ProtectedScopePushBlock,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _AUDIT_GIT_PUSH_EVENT,
-    _PRE_EXISTING_DIRTY_WORKTREE_REASON,
-    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-    _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
-    _REPAIR_START_HEAD_UNAVAILABLE_REASON,
-    _REPAIR_WORKTREE_STATUS_FAILED_REASON,
-    AgentRunError,
+from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
-    CommandResult,
-    MonitorState,
-    ProtectedFileDiff,
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
-    PRStatus,
-    QualityGateViolation,
-    WorkspaceEventCreate,
-    WorkspaceLogSink,
-    WorkspaceRepository,
-    _log,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
-    redact_audit_text,
 )
 
 

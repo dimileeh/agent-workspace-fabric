@@ -5,25 +5,19 @@ Mechanically extracted from recovery_preserved.py; behavior is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import (
     replace,
 )
+from datetime import (
+    UTC,
+    datetime,
+)
 from typing import Any, cast
 
-from awf.control.worker.helpers import (
-    _active_execution_preservation_claim_cleanup_payload,
-    _active_execution_preservation_payload,
-    _active_execution_salvage_idempotency_key,
-    _active_execution_salvage_payload,
-    _execution_claim_is_stale,
-    _extract_pr_number,
-    _nonempty_str,
-    _payload_preservation_event_id,
-    _pr_adoption_expected_head_repo_slug,
-    _preserved_active_replacement_remote_push_branch,
-    _workspace_claim_snapshot,
-)
-from awf.control.worker.shared import (
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_PRESERVED_SUBPHASE,
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_BLOCKED_REASON_CODE,
@@ -42,35 +36,50 @@ from awf.control.worker.shared import (
     _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_EVENT_TYPE,
     _ACTIVE_EXECUTION_SALVAGE_VALIDATION_REQUESTED_REASON_CODE,
     _ACTIVE_EXECUTION_STATUSES,
-    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
-    UTC,
-    AsyncSession,
-    Mapping,
-    OperationStatus,
-    OperationType,
-    RuntimeSnapshot,
-    WorkspaceEvent,
-    WorkspaceRepository,
-    WorkspaceStatus,
+)
+from awf.control.worker.helpers import (
+    _active_execution_preservation_claim_cleanup_payload,
+    _active_execution_preservation_payload,
+    _active_execution_salvage_idempotency_key,
+    _active_execution_salvage_payload,
+    _execution_claim_is_stale,
+    _extract_pr_number,
+    _nonempty_str,
+    _payload_preservation_event_id,
+    _pr_adoption_expected_head_repo_slug,
+    _preserved_active_replacement_remote_push_branch,
+    _workspace_claim_snapshot,
+)
+from awf.control.worker.logging import _log
+from awf.control.worker.types import (
     _ActiveExecutionCandidate,
-    _log,
     _OpenPullRequestSummary,
     _PreservedWorktreeClassification,
-    datetime,
+)
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
 )
 from awf.db.models import (
     Operation,
+    WorkspaceEvent,
 )
 from awf.db.repositories import (
     OperationRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkspaceRepository,
 )
+from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
     load_primary_failure_snapshot,
+)
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
 )
 
 

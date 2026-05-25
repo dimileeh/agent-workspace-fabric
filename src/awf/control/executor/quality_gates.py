@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from awf.control.executor import WorkspaceExecutor
-    from awf.control.executor.shared import (
-        _CoverageEvidenceResult,
-        _PlanningRunFailure,
-    )
     from awf.profiles.models import WorkspaceProfile
 
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
+from awf.control.executor.types import (
+    _CoverageEvidenceResult,
+    _PlanningRunFailure,
+)
 from awf.db.enums import FailureReason
 from awf.runtime.validation import ValidationCoverageResult
 
@@ -347,9 +347,6 @@ async def _run_final_coverage_gate(
     from awf.control.executor.helpers import (
         _coverage_result_from_metadata,
         _validation_run_command_records,
-    )
-    from awf.control.executor.shared import (
-        _CoverageEvidenceResult,
     )
     from awf.db.repositories import ValidationRunRepository
     from awf.db.validation_runs import validation_run_coverage_payload

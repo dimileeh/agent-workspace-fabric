@@ -16,12 +16,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from awf.adapters.base import (
+    AgentAdapter,
+    AgentRunError,
+)
 from awf.common.command_evidence import (
     append_command_evidence,
 )
 from awf.common.git_identity import (
+    git_identity_config_args,
     git_safe_directory_config_args,
 )
+from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE
 from awf.control.executor.git_ops import (
     _git_name_lines,
 )
@@ -31,44 +37,41 @@ from awf.control.executor.helpers import (
     _read_text_if_present,
     _validation_evidence_json,
 )
+from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
     PLAN_CONFORMANCE_UNSATISFIED,
     _log,
 )
-from awf.control.executor.shared import (
-    _FILE_DIGEST_CHUNK_SIZE,
-    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-    CONFORMANCE_REQUIRES_AWF_VALIDATION,
-    AgentAdapter,
-    AgentRunError,
-    ConformanceStallEvidence,
-    FailureReason,
-    PlanConformanceReport,
-    Workspace,
-    WorkspaceProfile,
-    WorkspaceRepository,
-    WorkspaceStatus,
-    _build_planning_scope_failure,
+from awf.control.executor.time_utils import _monotonic
+from awf.control.executor.types import (
     _ConformanceSalvageExecutionResult,
-    _monotonic,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
     _PostValidationConformanceReportGitError,
     _PostValidationConformanceReportWriteError,
-    git_identity_config_args,
-    render_workspace_path,
 )
+from awf.db.enums import (
+    FailureReason,
+    WorkspaceStatus,
+)
+from awf.db.models import Workspace
 from awf.db.repositories import (
     ValidationRunRepository,
+    WorkspaceRepository,
 )
 from awf.db.validation_runs import (
     validation_run_coverage_payload,
 )
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     ConformanceIterationRecord,
+    ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
+    PlanConformanceReport,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -78,6 +81,7 @@ from awf.runtime.planning import (
     classify_conformance_stall,
     conformance_requires_awf_validation,
     parse_conformance_report,
+    render_workspace_path,
 )
 from awf.runtime.workspace_prompt_context import (
     render_workspace_runtime_context,

@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
+import time
+from pathlib import Path
 from typing import Any, cast
 
-from awf.common.github_client import GitHubClientError
+from awf.common.github_client import GitHubClientError, RepoRef
+from awf.db.enums import (
+    OperationStatus,
+    OperationType,
+)
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.pr_monitor import (
+    Merge,
+    MonitorAction,
+    MonitorState,
+    NotifyHuman,
+    PRStatus,
+    decide,
+)
+from awf.runtime.pr_monitor_operations import MonitorOperationHandle
+from awf.runtime.pr_monitor_runner.constants import (
+    _AUDIT_MERGE_ATTEMPT_EVENT,
+    _AUDIT_MERGE_RESULT_EVENT,
+    _GIT_BASE_BEHIND_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
 )
@@ -18,28 +39,12 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _pending_review_feedback_count,
     _redact_and_truncate_github_error,
 )
-from awf.runtime.pr_monitor_runner.shared import (
-    _AUDIT_MERGE_ATTEMPT_EVENT,
-    _AUDIT_MERGE_RESULT_EVENT,
-    _GIT_BASE_BEHIND_FAILED_REASON,
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
-    Merge,
-    MergeQueueBlocker,
-    MonitorAction,
-    MonitorOperationHandle,
-    MonitorState,
-    NotifyHuman,
-    OperationStatus,
-    OperationType,
-    Path,
-    PRStatus,
-    RepoRef,
-    WorkspaceLogSink,
-    _log,
-    decide,
-    time,
 )
+from awf.service.merge_queue import MergeQueueBlocker
 
 
 async def handle_merge_action(

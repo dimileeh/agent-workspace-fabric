@@ -12,12 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from awf.control.executor import WorkspaceExecutor
-    from awf.control.executor.shared import _ConformanceSalvageExecutionResult
     from awf.db.models import Workspace
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.control.executor.constants import _VALIDATE_ONLY_RECOVERY_SOURCES
+from awf.control.executor.types import _ConformanceSalvageExecutionResult
 from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
@@ -175,8 +176,6 @@ def _read_ref_sha(mirror_path: Path, ref: str) -> str | None:
 def _rebase_recovery_operation_payload_identities(
     recovery_payload: Mapping[str, Any],
 ) -> tuple[dict[str, Any], ...]:
-    from awf.control.executor.shared import _VALIDATE_ONLY_RECOVERY_SOURCES
-
     recovery_payload_dict = dict(recovery_payload)
     identity: dict[str, Any] = {
         key: recovery_payload_dict[key]
@@ -223,8 +222,6 @@ async def _prepare_conformance_salvage_for_execution(
     workspace: Workspace,
     worktree_path: Path,
 ) -> _ConformanceSalvageExecutionResult | None:
-    from awf.control.executor.shared import _ConformanceSalvageExecutionResult
-
     salvage = conformance_salvage_from_task_policy(workspace.task_policy)
     if salvage is None:
         return None
