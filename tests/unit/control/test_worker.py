@@ -25,13 +25,25 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import awf.control.worker as worker_module
 import awf.db.repositories as repositories_module
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
+)
+from awf.control.worker import claims as worker_claims
+from awf.control.worker import cleanup as worker_cleanup
+from awf.control.worker import dispatch_methods as worker_dispatch_methods
+from awf.control.worker import helpers as worker_helpers
+from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
+from awf.control.worker import recovery_preserved_flow as worker_recovery_preserved_flow
+from awf.control.worker import recovery_preserved_queries as worker_recovery_preserved_queries
+from awf.control.worker import recovery_stale as worker_recovery_stale
+from awf.control.worker import resource_broker as worker_resource_broker
+from awf.control.worker import scheduler_methods as worker_scheduler_methods
+from awf.control.worker import scheduling as worker_scheduling
+from awf.control.worker import shared as worker_shared
+from awf.control.worker.helpers import (
     _active_execution_preservation_claim_cleanup_payload,
-    _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _execution_claim_is_stale,
     _extract_pr_number,
@@ -39,14 +51,19 @@ from awf.control.worker import (
     _json_datetime,
     _monitor_claim_is_stale,
     _monitor_recovery_claim_cleanup_payload,
-    _scheduler_candidate_cursor,
-    _scheduler_candidate_fetch_limit,
     _scheduler_items_are_workspace_ids,
     _scheduler_items_are_workspaces,
-    _SchedulerCandidateFilterResult,
     _stale_active_execution_failure_message,
-    _TerminalRuntimeCandidate,
     _utc_datetime,
+)
+from awf.control.worker.scheduling import (
+    _scheduler_candidate_cursor,
+    _scheduler_candidate_fetch_limit,
+)
+from awf.control.worker.shared import (
+    _ActiveExecutionCandidate,
+    _SchedulerCandidateFilterResult,
+    _TerminalRuntimeCandidate,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import QueueDecision, Workspace
@@ -71,6 +88,8 @@ from awf.node.cleanup import (
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service import provider_recovery as provider_recovery_module
+from awf.service import resource_capacity as resource_capacity_module
 from awf.service.controls import WorkspaceControlService
 from awf.service.scheduler import (
     SchedulerOrderCursor,
@@ -79,6 +98,42 @@ from awf.service.scheduler import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
+
+
+def _namespace_from_modules(*modules: object, **extra: object) -> SimpleNamespace:
+    namespace = SimpleNamespace()
+    for module in modules:
+        for name in dir(module):
+            if not name.startswith("__"):
+                setattr(namespace, name, getattr(module, name))
+    for name, value in extra.items():
+        setattr(namespace, name, value)
+    return namespace
+
+
+worker_module = _namespace_from_modules(
+    worker_claims,
+    worker_cleanup,
+    worker_dispatch_methods,
+    worker_helpers,
+    worker_recovery_cooldown,
+    worker_recovery_preserved_flow,
+    worker_recovery_preserved_queries,
+    worker_recovery_stale,
+    worker_resource_broker,
+    worker_scheduler_methods,
+    worker_scheduling,
+    worker_shared,
+    provider_recovery_module,
+    resource_capacity_module,
+    repositories_module,
+    claims=worker_claims,
+    helpers=worker_helpers,
+    recovery_stale=worker_recovery_stale,
+    scheduler_methods=worker_scheduler_methods,
+    subprocess=worker_recovery_preserved_queries.subprocess,
+    monotonic=worker_recovery_cooldown.monotonic,
+)
 
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
@@ -1342,7 +1397,7 @@ class TestRunOnce:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        monkeypatch.setattr(worker_module, "_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT", 3)
+        monkeypatch.setattr(worker_module.helpers, "_REQUESTED_CAPACITY_QUEUE_SIGNATURE_LIMIT", 3)
         generated_ids = iter(
             [
                 "ws_000000000000000000000000",
@@ -1634,13 +1689,17 @@ class TestRunOnce:
             return (0, None, None, None, "")
 
         monkeypatch.setattr(
-            worker_module, "WorkspaceRepository", lambda _session: EmptyWorkspaceRepository()
+            worker_module.claims, "WorkspaceRepository", lambda _session: EmptyWorkspaceRepository()
         )
         monkeypatch.setattr(
-            worker_module, "ResourceReservationRepository", lambda _session: object()
+            worker_module.claims, "ResourceReservationRepository", lambda _session: object()
         )
-        monkeypatch.setattr(worker_module, "_allocated_totals_for_capacity_gate", allocated_totals)
-        monkeypatch.setattr(worker_module, "_requested_capacity_queue_signature", queue_signature)
+        monkeypatch.setattr(
+            worker_module.claims, "_allocated_totals_for_capacity_gate", allocated_totals
+        )
+        monkeypatch.setattr(
+            worker_module.claims, "_requested_capacity_queue_signature", queue_signature
+        )
 
         worker = ControlWorker(
             session_factory=object(),  # type: ignore[arg-type]
@@ -1848,7 +1907,7 @@ class TestRunOnce:
             now=now,
         )
 
-        monkeypatch.setattr(worker_module, "AGE_BOOST_MAX", 0)
+        monkeypatch.setattr(worker_module.helpers, "AGE_BOOST_MAX", 0)
         assert not await worker_module._requested_capacity_age_boost_changed(  # noqa: SLF001
             NoSqlSession(),  # type: ignore[arg-type]
             node_id="local",
@@ -3276,7 +3335,8 @@ class TestRunOnce:
                     return cls.current.replace(tzinfo=None)
                 return cls.current.astimezone(tz)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.claims, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.scheduler_methods, "datetime", FrozenDatetime)
         candidate_window = _scheduler_candidate_fetch_limit(1)
         scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
         blocked_ids: list[str] = []
@@ -3433,7 +3493,8 @@ class TestRunOnce:
                     return cls.current.replace(tzinfo=None)
                 return cls.current.astimezone(tz)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.claims, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.scheduler_methods, "datetime", FrozenDatetime)
         not_before = frozen_now + timedelta(minutes=5)
         candidate_window = _scheduler_candidate_fetch_limit(1)
         scanned_page_limit = 1 + worker_module._SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
@@ -3519,7 +3580,8 @@ class TestRunOnce:
                     return cls.current.replace(tzinfo=None)
                 return cls.current.astimezone(tz)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(worker_module, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.claims, "datetime", FrozenDatetime)
+        monkeypatch.setattr(worker_module.scheduler_methods, "datetime", FrozenDatetime)
         circuit_cooldown_seconds = 300
         circuit_until = frozen_now + timedelta(seconds=circuit_cooldown_seconds)
         candidate_window = _scheduler_candidate_fetch_limit(1)
@@ -4464,7 +4526,7 @@ class TestRunOnceExecution:
                 cls.calls += 1
                 return base_time + timedelta(seconds=cls.calls)
 
-        monkeypatch.setattr("awf.control.worker.datetime", _RetryClock)
+        monkeypatch.setattr("awf.control.worker.claims.datetime", _RetryClock)
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -4778,7 +4840,8 @@ class TestRunOnceExecution:
             del session, limit, scoring_at
             return [workspace.id for workspace in workspaces]
 
-        monkeypatch.setattr(worker_module, "datetime", DriftedDateTime)
+        monkeypatch.setattr(worker_module.claims, "datetime", DriftedDateTime)
+        monkeypatch.setattr(worker_module.scheduler_methods, "datetime", DriftedDateTime)
         monkeypatch.setattr(
             WorkspaceRepository,
             "list_schedulable_workspaces",
@@ -18323,7 +18386,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         origin_repo: Path,
     ) -> None:
         current_time = 1_000.0
-        monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+        monkeypatch.setattr("awf.control.worker.recovery_stale.monotonic", lambda: current_time)
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
@@ -18834,6 +18897,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         class RecordingSession:
             committed = False
+            info: dict[str, Any] = {}
 
             async def __aenter__(self) -> RecordingSession:
                 return self
@@ -18898,12 +18962,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         recording_session = RecordingSession()
         monkeypatch.setattr(
-            worker_module,
+            worker_module.recovery_stale,
             "load_failure_causality_snapshot",
             _refresh_claim_during_failure_causality_load,
         )
         monkeypatch.setattr(
-            worker_module,
+            worker_module.recovery_stale,
             "WorkspaceRepository",
             RecordingWorkspaceRepository,
         )
@@ -18965,6 +19029,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         class RecordingSession:
             committed = False
+            info: dict[str, Any] = {}
 
             async def __aenter__(self) -> RecordingSession:
                 return self
@@ -19033,12 +19098,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         recording_session = RecordingSession()
         monkeypatch.setattr(
-            worker_module,
+            worker_module.recovery_stale,
             "load_failure_causality_snapshot",
             _refresh_claim_during_failure_causality_load,
         )
         monkeypatch.setattr(
-            worker_module,
+            worker_module.recovery_stale,
             "WorkspaceRepository",
             RecordingWorkspaceRepository,
         )
@@ -19795,7 +19860,7 @@ async def test_db_connection_closed_event_skips_stale_workspace(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
     monkeypatch.setattr(
-        "awf.control.worker.WorkspaceRepository",
+        "awf.control.worker.recovery_stale.WorkspaceRepository",
         StaleWorkspaceRepository,
     )
 
@@ -19866,7 +19931,7 @@ def test_active_salvage_monitor_resume_cooldowns_are_bounded_and_expired_entries
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_time = 1_000.0
-    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    monkeypatch.setattr("awf.control.worker.recovery_cooldown.monotonic", lambda: current_time)
     limit = worker_module._ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT  # noqa: SLF001
     worker._active_salvage_monitor_resume_cooldowns["expired-workspace"] = (  # noqa: SLF001
         current_time - 1.0
@@ -20057,7 +20122,7 @@ async def test_finish_monitor_recovery_operation_handles_missing_state(
     assert empty_session.entered is False
 
     monkeypatch.setattr(
-        "awf.control.worker.OperationRepository",
+        "awf.control.worker.claims.OperationRepository",
         EmptyOperationRepository,
     )
     await worker._finish_monitor_recovery_operation(  # noqa: SLF001
@@ -20118,7 +20183,7 @@ async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_time = 1_000.0
-    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
     expiration_attempts = 0
 
     async def _raise_expiration_failure() -> None:
@@ -20150,7 +20215,7 @@ async def test_stale_active_execution_scan_skips_transient_closed_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_time = 1_000.0
-    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    monkeypatch.setattr("awf.control.worker.recovery_stale.monotonic", lambda: current_time)
     recovery_attempts = 0
 
     async def _raise_recovery_failure() -> None:
@@ -20226,7 +20291,7 @@ async def test_expire_due_secret_leases_preserves_commit_error_when_close_fails(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
     monkeypatch.setattr(
-        "awf.control.worker.SecretLeaseService",
+        "awf.control.worker.cleanup.SecretLeaseService",
         EmptySecretLeaseService,
     )
 
@@ -20284,7 +20349,7 @@ async def test_db_connection_closed_event_rolls_back_when_event_write_fails(
         config=WorkerConfig(poll_interval_seconds=0.01),
     )
     monkeypatch.setattr(
-        "awf.control.worker.WorkspaceRepository",
+        "awf.control.worker.recovery_stale.WorkspaceRepository",
         FailingEventRepository,
     )
 
@@ -21306,7 +21371,7 @@ class TestTerminalRuntimeRelease:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         current_time = 1_000.0
-        monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+        monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: current_time)
         release_attempts = 0
 
         async def _raise_release_failure() -> None:

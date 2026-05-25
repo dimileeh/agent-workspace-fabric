@@ -28,7 +28,6 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime import pr_monitor_runner
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor import (
     AddressComments,
@@ -50,21 +49,25 @@ from awf.runtime.pr_monitor import (
     _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
-    BaseBehindCountError,
-    BaseFetchError,
     MonitorRunnerConfig,
-    ProtectedScopeDiffError,
-    ProviderRecoveryFallbackError,
-    ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
+)
+from awf.runtime.pr_monitor_runner import comments as pr_monitor_runner_comments
+from awf.runtime.pr_monitor_runner import lifecycle as pr_lifecycle
+from awf.runtime.pr_monitor_runner import remote_repair as pr_monitor_runner_remote_repair
+from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
+from awf.runtime.pr_monitor_runner import shared as pr_monitor_runner_shared
+from awf.runtime.pr_monitor_runner.gates import (
+    _has_successful_validation_for_pr_head,
+    _NonCheckReviewerSettleDecision,
+)
+from awf.runtime.pr_monitor_runner.helpers import (
     _as_utc,
     _candidate_stale_required_action,
     _changed_paths_from_name_status_z,
     _changed_paths_from_porcelain,
     _changed_paths_from_porcelain_z,
     _collect_defer_items,
-    _GitPushResult,
-    _has_successful_validation_for_pr_head,
     _increment_base_fetch_retry_count,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
@@ -77,16 +80,11 @@ from awf.runtime.pr_monitor_runner import (
     _is_transient_base_fetch_error,
     _is_transient_github_client_error,
     _merge_rejection_reason,
-    _MonitorAgentRuntimeOwnershipRepairFailedError,
-    _MonitorPolicyBlockedError,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
-    _NonCheckReviewerSettleDecision,
     _notify_human_reason,
-    _ProtectedScopePushBlock,
     _redact_and_truncate_github_error,
-    _remote_push_url_for_workspace,
     _review_comment_body_state_key,
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
@@ -94,6 +92,22 @@ from awf.runtime.pr_monitor_runner import (
     _untracked_paths_from_porcelain,
     _untracked_paths_from_porcelain_z,
     _with_ci_failures,
+)
+from awf.runtime.pr_monitor_runner.remote_ops import (
+    _GitPushResult,
+    _ProtectedScopePushBlock,
+)
+from awf.runtime.pr_monitor_runner.shared import (
+    BaseBehindCountError,
+    BaseFetchError,
+    ProtectedScopeDiffError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
+)
+from awf.runtime.pr_push_remote import (
+    remote_push_url_for_workspace as _remote_push_url_for_workspace,
 )
 from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
 from awf.service.merge_queue import MergeQueueBlocker
@@ -111,6 +125,22 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     pr_payload,
     review_node,
     seed_monitoring_workspace,
+)
+
+
+def _namespace_from_modules(*modules: object) -> SimpleNamespace:
+    namespace = SimpleNamespace()
+    for module in modules:
+        for name in dir(module):
+            if not name.startswith("__"):
+                setattr(namespace, name, getattr(module, name))
+    return namespace
+
+
+pr_monitor_runner = _namespace_from_modules(
+    pr_monitor_runner_comments,
+    pr_monitor_runner_remote_repair,
+    pr_monitor_runner_shared,
 )
 
 
@@ -2897,7 +2927,7 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
         return True
 
     monkeypatch.setattr(
-        pr_monitor_runner,
+        pr_remote_repair,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -2948,7 +2978,7 @@ async def test_commit_dirty_worktree_logs_commit_stderr_when_failed_commit_repai
         return reason != "dirty_worktree_post_commit_failed"
 
     monkeypatch.setattr(
-        pr_monitor_runner,
+        pr_remote_repair,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -3010,7 +3040,7 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
         return reason != "dirty_worktree_post_commit_succeeded"
 
     monkeypatch.setattr(
-        pr_monitor_runner,
+        pr_remote_repair,
         "repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
@@ -3072,7 +3102,7 @@ async def test_commit_dirty_worktree_stops_before_add_when_runtime_repair_fails(
         return False
 
     monkeypatch.setattr(
-        "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
         _raise_repair,
     )
 
@@ -4136,7 +4166,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
         return reason == "dirty_worktree_pre_commit"
 
     monkeypatch.setattr(
-        "awf.runtime.pr_monitor_runner.repair_agent_runtime_ownership",
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
         _repair_agent_runtime_ownership,
     )
 
@@ -7227,7 +7257,7 @@ def test_load_state_normalizes_naive_started_at_without_database(
             assert tz is UTC
             return datetime(2026, 4, 27, 12, 1, tzinfo=UTC)
 
-    mocker.patch.object(pr_monitor_runner, "datetime", FrozenDateTime)
+    mocker.patch.object(pr_lifecycle, "datetime", FrozenDateTime)
     mocker.patch("time.monotonic", return_value=30.0)
 
     runner = make_runner(
@@ -8486,7 +8516,7 @@ async def test_sync_base_protected_scope_wraps_committed_diff_read_failure(
     monkeypatch.setattr(runner, "_merge_base_with_head", _merged_base)
     monkeypatch.setattr(runner, "_changed_paths_between_ref_and_head", _base_changes)
     monkeypatch.setattr(
-        pr_monitor_runner,
+        pr_remote_repair,
         "protected_file_diffs_for_committed_paths",
         _raise_committed_diff_read,
     )

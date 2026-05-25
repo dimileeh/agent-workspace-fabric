@@ -37,7 +37,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_operations import monitor_operation_idempotency_key
-from awf.runtime.pr_monitor_runner import _initial_review_grace_started_key
+from awf.runtime.pr_monitor_runner.helpers import _initial_review_grace_started_key
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,

@@ -22,13 +22,16 @@ from awf.adapters import registry as _registry  # noqa: F401 - populates adapter
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
-from awf.control import executor as executor_mod
 from awf.control.executor import (
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
+)
+from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
+)
+from awf.control.executor.shared import (
+    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
+    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
 )
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
@@ -2544,8 +2547,10 @@ class TestHappyPath:
             retry_calls.append((workspace_id, kwargs))
             return SimpleNamespace(new_workspace=SimpleNamespace(id="ws_retry"))
 
+        from awf.control.executor import planning_ops as executor_planning_ops
+
         monkeypatch.setattr(
-            executor_mod,
+            executor_planning_ops,
             "retry_workspace_row",
             _fake_retry_workspace_row,
             raising=False,
@@ -2607,7 +2612,7 @@ class TestHappyPath:
         from awf.adapters import base as adapter_base
         from awf.adapters.base import AgentRunResult
         from awf.common.commands import CommandResult
-        from awf.control import executor as executor_module
+        from awf.control.executor import planning_ops as executor_planning_ops
         from awf.db.enums import AgentRuntime
         from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
@@ -2637,7 +2642,7 @@ class TestHappyPath:
             clock[0] += 700.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
         class _IdleConformanceAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
@@ -2786,7 +2791,7 @@ class TestHappyPath:
         from awf.adapters import base as adapter_base
         from awf.adapters.base import AgentRunResult
         from awf.common.commands import CommandResult
-        from awf.control import executor as executor_module
+        from awf.control.executor import planning_ops as executor_planning_ops
         from awf.db.enums import AgentRuntime
         from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
@@ -2825,7 +2830,7 @@ class TestHappyPath:
             clock[0] += 700.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
         class _IdleConformanceAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
@@ -3017,7 +3022,7 @@ class TestHappyPath:
         factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from awf.control import executor as executor_module
+        from awf.control.executor import planning_ops as executor_planning_ops
         from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
         ws_id = await _seed_ready_workspace(
@@ -3043,7 +3048,7 @@ class TestHappyPath:
             clock[0] += 30.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
@@ -3298,7 +3303,7 @@ class TestHappyPath:
         factory: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from awf.control import executor as executor_module
+        from awf.control.executor import planning_ops as executor_planning_ops
         from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
         ws_id = await _seed_ready_workspace(
@@ -3327,7 +3332,7 @@ class TestHappyPath:
             clock[0] += 30.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_planning_ops, "_monotonic", _fake_monotonic)
 
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD baseline
@@ -4369,7 +4374,7 @@ class TestPrNumberExtraction:
         ],
     )
     def test_extract_pr_number(self, url: str, expected: int | None) -> None:
-        from awf.control.executor import _extract_pr_number
+        from awf.control.executor.helpers import _extract_pr_number
 
         assert _extract_pr_number(url) == expected
 

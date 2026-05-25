@@ -16,7 +16,6 @@ from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository
 from awf.db.session import make_session_factory
-from awf.runtime import pr_monitor_runner as runner_mod
 from awf.runtime.pr_monitor import (
     CheckState,
     CheckTiming,
@@ -25,9 +24,11 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
 )
-from awf.runtime.pr_monitor_runner import (
+from awf.runtime.pr_monitor_runner import merge_loop as runner_merge_loop
+from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_decision,
     _non_check_reviewer_settle_done_key,
     _non_check_reviewer_settle_skip_visible_key,
@@ -832,7 +833,7 @@ async def test_elapsed_non_check_wait_proceeds_to_existing_merge_path(
     tmp_path: Path,
 ) -> None:
     ws_id = await seed_monitoring_workspace(factory, pr_number=95, head_sha="head-a")
-    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: 1181.0)
+    monkeypatch.setattr(runner_merge_loop.time, "monotonic", lambda: 1181.0)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="merge-sha\n")
@@ -898,7 +899,7 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
             self.now += seconds
 
     clock = _ClockSleep()
-    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(runner_merge_loop.time, "monotonic", lambda: clock.now)
 
     cmd = FakeCommandRunner()
     thread = thread_node(tid="T_late", author="greptile-apps")
@@ -1059,7 +1060,7 @@ async def test_manual_ready_handoff_waits_for_activity_quiet_window_before_notif
     )
 
     terminal = await runner._execute(
-        action=runner_mod.NotifyHuman(),
+        action=NotifyHuman(),
         workspace_id=ws_id,
         repo_url=REPO_URL,
         repo=RepoRef.from_url(REPO_URL),

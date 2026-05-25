@@ -2,7 +2,7 @@
 explicit refspec.
 
 The 2026-04-23 aira-web incident happened because
-``pr_monitor_runner._git_push`` issued ``git push origin HEAD``.
+``pr_monitor_runner.remote_ops._git_push`` issued ``git push origin HEAD``.
 That command's destination depends on ``push.default`` and
 ``branch.<current>.merge`` — both of which had been polluted on the
 shared bare mirror by prior sync workspaces. The polluted config
@@ -107,7 +107,7 @@ def test_no_bare_push_origin_head_in_codebase() -> None:  # noqa: N802 — histo
 
 def test_monitor_git_push_arguments_carry_refspec() -> None:
     """Narrower assertion on the exact function that caused the
-    incident: ``pr_monitor_runner._git_push``. The push command it
+    incident: ``pr_monitor_runner.remote_ops._git_push``. The push command it
     issues must include a ``refs/heads/`` refspec.
 
     We parse the function's AST and scan only the string constants in
@@ -115,11 +115,11 @@ def test_monitor_git_push_arguments_carry_refspec() -> None:
     leave ``HEAD:refs/heads/`` in the docstring while the actual code
     reverted to bare ``git push origin HEAD`` and this test would
     silently pass."""
-    from awf.runtime import pr_monitor_runner
+    from awf.runtime.pr_monitor_runner import remote_ops
 
-    source = Path(pr_monitor_runner.__file__).read_text(encoding="utf-8")
+    source = Path(remote_ops.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
-    # Locate ``_git_push`` (async method on ``PullRequestMonitorRunner``).
+    # Locate the implementation helper mixed into ``PullRequestMonitorRunner``.
     target: ast.AsyncFunctionDef | None = None
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_git_push":

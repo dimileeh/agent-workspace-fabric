@@ -25,6 +25,8 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+)
+from awf.control.executor.shared import (
     _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
 )
@@ -1309,7 +1311,7 @@ async def test_runtime_ownership_repair_runs_before_recovery_setup(
         return True
 
     monkeypatch.setattr(
-        "awf.control.executor.repair_agent_runtime_ownership",
+        "awf.control.executor.execution_flow.repair_agent_runtime_ownership",
         _repair,
     )
 
@@ -1340,7 +1342,7 @@ async def test_runtime_ownership_repair_failure_blocks_recovery_setup(
         return False
 
     monkeypatch.setattr(
-        "awf.control.executor.repair_agent_runtime_ownership",
+        "awf.control.executor.execution_flow.repair_agent_runtime_ownership",
         _repair,
     )
 

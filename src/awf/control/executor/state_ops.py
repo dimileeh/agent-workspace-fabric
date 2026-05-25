@@ -1,0 +1,308 @@
+"""WorkspaceExecutor state operations.
+
+Mechanically extracted from the original orchestrator; behavior is unchanged.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from awf.control.executor.quality_gates import (
+    _log,
+)
+from awf.control.executor.shared import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    UTC,
+    FailureReason,
+    Mapping,
+    ValidationCommandResult,
+    Workspace,
+    WorkspaceRepository,
+    WorkspaceStatus,
+    _get_active_recovery_payload,
+    _is_callback_terminal_status,
+    _metadata_int,
+    _metadata_number,
+    _metadata_str,
+    datetime,
+    redact_audit_text,
+)
+
+
+async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
+    async with self._session_factory() as session:
+        return await WorkspaceRepository(session).get(workspace_id)
+
+
+async def _claim_ready(
+    self: Any,
+    workspace_id: str,
+    *,
+    execution_owner_id: str | None = None,
+    execution_lease_expires_at: datetime | None = None,
+) -> Workspace | None:
+    """Atomically transition a ready workspace to running before execution."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.ready,
+            to=WorkspaceStatus.running,
+            reason_code="EXECUTOR_CLAIMED",
+        )
+        if ws is not None:
+            ws.execution_claimed_by = execution_owner_id
+            ws.execution_claim_expires_at = execution_lease_expires_at
+            await session.commit()
+            return ws
+
+        current: Workspace | None = None
+        if execution_owner_id is not None and execution_lease_expires_at is not None:
+            current = await repo.claim_worker_restart_recovery_execution(
+                workspace_id,
+                owner_id=execution_owner_id,
+                lease_expires_at=execution_lease_expires_at,
+                claim_cutoff=datetime.now(UTC),
+            )
+            if current is not None:
+                await session.commit()
+                return current
+
+        current = await repo.get_with_operations(workspace_id)
+        if current is None:
+            _log.warning("executor.skip_unknown", workspace_id=workspace_id)
+            return None
+        recovery = _get_active_recovery_payload(current)
+        if (
+            current.status == WorkspaceStatus.running.value
+            and recovery is not None
+            and recovery.get("source") == "worker_restart"
+        ):
+            _log.info(
+                "executor.skip_active_execution_claim",
+                workspace_id=workspace_id,
+                execution_claimed_by=current.execution_claimed_by,
+            )
+            return None
+        _log.info(
+            "executor.skip_not_ready",
+            workspace_id=workspace_id,
+            status=current.status,
+        )
+        return None
+
+
+async def _update_subphase(self: Any, workspace_id: str, subphase: str) -> None:
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        await repo.update_activity(workspace_id, subphase=subphase)
+        await session.commit()
+
+
+async def _recheck_status(
+    self: Any,
+    workspace_id: str,
+    *,
+    expected: WorkspaceStatus,
+    action: str,
+    reason_code: str = "EXECUTOR_STALE_STATUS",
+) -> bool:
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - destroyed mid-flight
+            _log.warning(
+                "executor.skip_unknown",
+                workspace_id=workspace_id,
+                action=action,
+            )
+            return False
+        if ws.status == expected.value:
+            return True
+        await self._record_stale_action_skip(
+            repo,
+            ws,
+            action=action,
+            expected=expected,
+            reason_code=reason_code,
+        )
+        if _is_callback_terminal_status(ws.status):
+            await self._finish_ignored_stale_callback_operations_in_session(
+                session,
+                workspace_id=workspace_id,
+                callback_source="executor",
+                callback_action=action,
+                expected_status=expected,
+                actual_status=ws.status,
+            )
+        await session.commit()
+        return False
+
+
+async def _transition_if_current(
+    self: Any,
+    workspace_id: str,
+    *,
+    from_status: WorkspaceStatus,
+    to: WorkspaceStatus,
+    reason: str,
+    action: str,
+) -> bool:
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - destroyed mid-flight
+            return False
+        if ws.status != from_status.value:
+            await self._record_stale_action_skip(
+                repo,
+                ws,
+                action=action,
+                expected=from_status,
+                reason_code="EXECUTOR_STALE_STATUS",
+            )
+            if _is_callback_terminal_status(ws.status):
+                await self._finish_ignored_stale_callback_operations_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    callback_source="executor",
+                    callback_action=action,
+                    expected_status=from_status,
+                    actual_status=ws.status,
+                )
+            await session.commit()
+            return False
+        await repo.transition(ws, to=to, reason_code=reason)
+        await session.commit()
+        return True
+
+
+async def _record_stale_action_skip(
+    _self: Any,
+    repo: WorkspaceRepository,
+    ws: Workspace,
+    *,
+    action: str,
+    expected: WorkspaceStatus,
+    reason_code: str,
+) -> None:
+    _log.info(
+        "executor.skip_stale_status",
+        workspace_id=ws.id,
+        action=action,
+        expected_status=expected.value,
+        status=ws.status,
+    )
+    if _is_callback_terminal_status(ws.status):
+        await repo.record_ignored_stale_callback(
+            ws,
+            callback_source="executor",
+            callback_action=action,
+            expected_status=expected,
+            reason_code=reason_code,
+        )
+    await repo.add_event(
+        ws,
+        event_type="workspace.stale_action_skipped",
+        reason_code=reason_code,
+        payload={
+            "action": action,
+            "expected_status": expected.value,
+            "actual_status": ws.status,
+        },
+    )
+
+
+async def _record_health_check_failed_event(
+    self: Any,
+    *,
+    workspace_id: str,
+    failure: ValidationCommandResult,
+) -> None:
+    metadata = failure.metadata
+    stream_ids = metadata.get("stream_ids")
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None or ws.status != WorkspaceStatus.validating.value:
+            return
+        await repo.add_event(
+            ws,
+            event_type="workspace.health_check_failed",
+            reason_code=failure.reason_code,
+            payload={
+                "healthcheck_name": _metadata_str(metadata, "healthcheck_name"),
+                "healthcheck_kind": _metadata_str(metadata, "healthcheck_kind"),
+                "target": _metadata_str(metadata, "target") or failure.command,
+                "attempts": _metadata_int(metadata, "attempts"),
+                "timeout_seconds": _metadata_number(metadata, "timeout_seconds"),
+                "stream_ids": dict(stream_ids) if isinstance(stream_ids, dict) else {},
+            },
+        )
+        await session.commit()
+
+
+async def _mark_failed(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    failure_reason: FailureReason,
+    message: str,
+    reason_code: str | None = None,
+    details: Mapping[str, Any] | None = None,
+    salvage: Mapping[str, Any] | None = None,
+) -> None:
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover
+            return
+        if ws.status != from_status.value:
+            # Already moved (e.g. cancelled) — respect it.
+            await self._record_stale_action_skip(
+                repo,
+                ws,
+                action="mark_failed",
+                expected=from_status,
+                reason_code="EXECUTOR_MARK_FAILED_SKIPPED",
+            )
+            if _is_callback_terminal_status(ws.status):
+                await self._finish_ignored_stale_callback_operations_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    callback_source="executor",
+                    callback_action="mark_failed",
+                    expected_status=from_status,
+                    actual_status=ws.status,
+                )
+            await session.commit()
+            return
+        safe_message = redact_audit_text(message, limit=2000)
+        ws.failure_reason = failure_reason.value
+        ws.failure_message = safe_message
+        if reason_code == EXEC_PROCESS_CLEANUP_FAILED:
+            await repo.add_event(
+                ws,
+                event_type="workspace.exec_process_cleanup_failed",
+                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                payload={"message": safe_message[:1000]},
+            )
+        payload: dict[str, Any] | None = None
+        if details is not None or salvage is not None:
+            payload = {
+                "failure_reason": failure_reason.value,
+                "reason_code": reason_code or failure_reason.value.upper(),
+                "message": safe_message,
+            }
+            if details is not None:
+                payload["details"] = dict(details)
+            if salvage is not None:
+                payload["salvage"] = dict(salvage)
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.failed,
+            reason_code=reason_code or failure_reason.value.upper(),
+            payload=payload,
+        )
+        await session.commit()

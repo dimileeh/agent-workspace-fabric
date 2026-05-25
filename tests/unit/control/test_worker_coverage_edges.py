@@ -15,27 +15,41 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import awf.control.worker as worker_module
+import awf.db.repositories as repositories_module
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.control.worker import (
-    _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-    _STALE_ACTIVE_EXECUTION_REASON_CODE,
-    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
     ControlWorker,
     WorkerConfig,
+)
+from awf.control.worker import claims as worker_claims
+from awf.control.worker import cleanup as worker_cleanup
+from awf.control.worker import dispatch_methods as worker_dispatch_methods
+from awf.control.worker import helpers as worker_helpers
+from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
+from awf.control.worker import recovery_preserved_flow as worker_recovery_preserved_flow
+from awf.control.worker import recovery_preserved_queries as worker_recovery_preserved_queries
+from awf.control.worker import recovery_stale as worker_recovery_stale
+from awf.control.worker import resource_broker as worker_resource_broker
+from awf.control.worker import scheduler_methods as worker_scheduler_methods
+from awf.control.worker import scheduling as worker_scheduling
+from awf.control.worker import shared as worker_shared
+from awf.control.worker.helpers import (
     _active_execution_preservation_claim_cleanup_payload,
-    _ActiveExecutionCandidate,
     _exception_chain_has_sqlalchemy_error,
     _execution_claim_is_stale,
     _has_running_agent_runtime,
     _json_datetime,
     _monitor_claim_is_stale,
-    _record_scheduler_queue_decision,
     _stale_active_execution_failure_message,
     _utc_datetime,
     _worker_exception_is_transient_db_connection,
+)
+from awf.control.worker.scheduling import _record_scheduler_queue_decision
+from awf.control.worker.shared import (
+    _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+    _STALE_ACTIVE_EXECUTION_REASON_CODE,
+    _ActiveExecutionCandidate,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
@@ -55,7 +69,49 @@ from awf.db.resilience import (
 )
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service import provider_recovery as provider_recovery_module
+from awf.service import resource_capacity as resource_capacity_module
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+)
 from tests.postgres import postgres_test_engine
+
+
+def _namespace_from_modules(*modules: object, **extra: object) -> SimpleNamespace:
+    namespace = SimpleNamespace()
+    for module in modules:
+        for name in dir(module):
+            if not name.startswith("__"):
+                setattr(namespace, name, getattr(module, name))
+    for name, value in extra.items():
+        setattr(namespace, name, value)
+    return namespace
+
+
+worker_module = _namespace_from_modules(
+    worker_claims,
+    worker_cleanup,
+    worker_dispatch_methods,
+    worker_helpers,
+    worker_recovery_cooldown,
+    worker_recovery_preserved_flow,
+    worker_recovery_preserved_queries,
+    worker_recovery_stale,
+    worker_resource_broker,
+    worker_scheduler_methods,
+    worker_scheduling,
+    worker_shared,
+    provider_recovery_module,
+    resource_capacity_module,
+    repositories_module,
+    claims=worker_claims,
+    helpers=worker_helpers,
+    recovery_stale=worker_recovery_stale,
+    scheduler_methods=worker_scheduler_methods,
+    subprocess=worker_recovery_preserved_queries.subprocess,
+    monotonic=worker_recovery_cooldown.monotonic,
+)
 
 
 class _NoopProvisioner:
@@ -1557,7 +1613,7 @@ async def test_fail_stale_active_execution_restores_primary_failure_row_fields(
         return SimpleNamespace(primary_failure=primary_failure, secondary_failures=())
 
     monkeypatch.setattr(
-        worker_module,
+        worker_module.recovery_stale,
         "load_failure_causality_snapshot",
         _load_preserved_primary,
     )

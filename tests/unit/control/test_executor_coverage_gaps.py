@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.control.executor import (
+from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
     _coverage_result_from_metadata,
     _extract_string_tokens,

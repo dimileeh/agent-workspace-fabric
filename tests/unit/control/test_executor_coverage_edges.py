@@ -12,17 +12,29 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import awf.control.executor as executor_mod
 from awf.adapters.base import AgentDefaults, AgentRunError
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.control.executor import (
-    GIT_OBJECT_MISSING_REASON_CODE,
-    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
-    PLAN_ONLY_OUTPUT_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
-    _agent_defaults_for_workspace,
+)
+from awf.control.executor import git_methods as executor_git_methods
+from awf.control.executor import git_ops as executor_git_ops
+from awf.control.executor import helpers as executor_helpers
+from awf.control.executor import logging_ops as executor_logging_ops
+from awf.control.executor import planning_ops as executor_planning_ops
+from awf.control.executor import quality_gates as executor_quality_gates
+from awf.control.executor import shared as executor_shared
+from awf.control.executor import state_ops as executor_state_ops
+from awf.control.executor.git_ops import (
     _agent_git_writability_preflight_script,
+    _git_error_indicates_missing_head_object,
+    _GitObjectRecoveryResult,
+    _read_ref_sha,
+    _recover_missing_head_from_filesystem,
+)
+from awf.control.executor.helpers import (
+    _agent_defaults_for_workspace,
     _agent_model_for_workspace,
     _agent_pr_identity,
     _apply_baseline_coverage_ratchet,
@@ -33,27 +45,28 @@ from awf.control.executor import (
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _format_failing_test_evidence,
-    _get_active_recovery_payload,
-    _git_error_indicates_missing_head_object,
-    _GitObjectRecoveryResult,
-    _MonitorRebaseRecoveryError,
-    _planning_validation_handoff_from_recovery_payload,
-    _PlanningValidationHandoff,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
-    _read_ref_sha,
     _read_text_if_present,
-    _RebaseRecoveryResult,
-    _recover_missing_head_from_filesystem,
-    _recovery_needs_existing_pr_push,
     _should_run_local_coverage,
     _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
     _validation_run_coverage_metadata,
-    _validation_run_log_stream_refs,
     _validation_run_reason_code,
     _validation_tier_for_workspace,
+)
+from awf.control.executor.logging_ops import _validation_run_log_stream_refs
+from awf.control.executor.shared import (
+    GIT_OBJECT_MISSING_REASON_CODE,
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PLAN_ONLY_OUTPUT_REASON_CODE,
+    _get_active_recovery_payload,
+    _MonitorRebaseRecoveryError,
+    _planning_validation_handoff_from_recovery_payload,
+    _PlanningValidationHandoff,
+    _RebaseRecoveryResult,
+    _recovery_needs_existing_pr_push,
 )
 from awf.db.enums import (
     AgentRuntime,
@@ -73,6 +86,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
+from awf.runtime import planning as runtime_planning
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
@@ -90,6 +104,25 @@ from awf.runtime.validation_identity import (
     resolved_profile_digest,
 )
 from tests.postgres import create_postgres_test_engine
+
+
+def _namespace_from_modules(*modules: object) -> SimpleNamespace:
+    namespace = SimpleNamespace()
+    for module in modules:
+        for name in dir(module):
+            if not name.startswith("__"):
+                setattr(namespace, name, getattr(module, name))
+    return namespace
+
+
+executor_mod = _namespace_from_modules(
+    executor_helpers,
+    executor_logging_ops,
+    executor_planning_ops,
+    executor_quality_gates,
+    executor_shared,
+    runtime_planning,
+)
 
 
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
@@ -748,7 +781,7 @@ def test_validation_evidence_json_returns_minimal_payload_when_compact_payload_i
 def test_validation_evidence_json_has_final_floor_when_limit_is_tiny(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(executor_mod, "_VALIDATION_EVIDENCE_JSON_LIMIT", 10)
+    monkeypatch.setattr(executor_helpers, "_VALIDATION_EVIDENCE_JSON_LIMIT", 10)
 
     evidence = executor_mod._validation_evidence_json(
         {
@@ -1963,7 +1996,7 @@ def test_validation_command_records_raise_when_coverage_predicate_loses_invarian
             "phases": {"validate": ["pytest tests/unit -q"]},
         }
     )
-    monkeypatch.setattr(executor_mod, "_should_run_local_coverage", lambda _: True)
+    monkeypatch.setattr(executor_helpers, "_should_run_local_coverage", lambda _: True)
 
     with pytest.raises(RuntimeError, match="coverage.command is None"):
         _validation_run_command_records(
@@ -2808,7 +2841,7 @@ async def test_planning_required_skips_digest_fallback_when_git_reports_plan_fil
         digest_paths.append(path.relative_to(worktree))
         return None
 
-    monkeypatch.setattr(executor_mod, "_digest_file_if_present", _digest)
+    monkeypatch.setattr(executor_planning_ops, "_digest_file_if_present", _digest)
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
@@ -3731,7 +3764,7 @@ async def test_repair_agent_git_ownership_reports_repair_exceptions(
     def _raise(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("cannot repair")
 
-    monkeypatch.setattr(executor_mod, "repair_agent_writable_worktree", _raise)
+    monkeypatch.setattr(executor_git_ops, "repair_agent_writable_worktree", _raise)
 
     assert not await executor._repair_agent_git_ownership(
         workspace_id="ws_repair_exception",
@@ -3877,7 +3910,7 @@ async def test_recover_missing_git_head_or_mark_failed_handles_terminal_paths(
 
     executor._mark_failed.reset_mock()  # type: ignore[attr-defined]
     monkeypatch.setattr(
-        executor_mod,
+        executor_git_methods,
         "_recover_missing_head_from_filesystem",
         AsyncMock(return_value=None),
     )
@@ -3898,7 +3931,7 @@ async def test_recover_missing_git_head_or_mark_failed_handles_terminal_paths(
         recovered_head_sha="c" * 40,
     )
     monkeypatch.setattr(
-        executor_mod,
+        executor_git_methods,
         "_recover_missing_head_from_filesystem",
         AsyncMock(return_value=recovery),
     )
@@ -3931,7 +3964,7 @@ async def test_recover_missing_git_head_or_mark_failed_fails_when_event_recordin
         recovered_head_sha="c" * 40,
     )
     monkeypatch.setattr(
-        executor_mod,
+        executor_git_methods,
         "_recover_missing_head_from_filesystem",
         AsyncMock(return_value=recovery),
     )
@@ -3968,7 +4001,7 @@ async def test_recover_missing_git_head_or_mark_failed_fails_when_filesystem_rec
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
     executor._record_git_object_recovery_event = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr(
-        executor_mod,
+        executor_git_methods,
         "_recover_missing_head_from_filesystem",
         AsyncMock(side_effect=RuntimeError("repair exploded")),
     )
@@ -5695,7 +5728,7 @@ async def test_healthcheck_failure_event_noops_when_workspace_is_not_validating(
         async def add_event(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("stale healthcheck failures should not add events")
 
-    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", FakeWorkspaceRepository)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
 
@@ -5767,7 +5800,8 @@ async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
     ) -> None:
         finished_callbacks.append(kwargs)
 
-    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(executor_git_methods, "WorkspaceRepository", FakeWorkspaceRepository)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -5854,7 +5888,7 @@ async def test_record_rebase_recovery_success_ignores_terminal_callback(
     ) -> None:
         finished_callbacks.append(kwargs)
 
-    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(executor_git_methods, "WorkspaceRepository", FakeWorkspaceRepository)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -5935,10 +5969,12 @@ async def test_record_rebase_recovery_success_updates_candidate_and_operation(
     async def finish_operation(_session: object, **kwargs: object) -> None:
         finished_operations.append(kwargs)
 
-    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
-    monkeypatch.setattr(executor_mod, "MergeCandidateRepository", FakeMergeCandidateRepository)
-    monkeypatch.setattr(executor_mod, "sync_candidate_readiness", sync_readiness)
-    monkeypatch.setattr(executor_mod, "finish_monitor_operation", finish_operation)
+    monkeypatch.setattr(executor_git_methods, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(
+        executor_git_methods, "MergeCandidateRepository", FakeMergeCandidateRepository
+    )
+    monkeypatch.setattr(executor_git_methods, "sync_candidate_readiness", sync_readiness)
+    monkeypatch.setattr(executor_git_methods, "finish_monitor_operation", finish_operation)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
     monkeypatch.setattr(executor, "_add_executor_pr_audit_event", AsyncMock())
@@ -6002,9 +6038,11 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
     def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
         readiness_calls.append(candidate_arg)
 
-    monkeypatch.setattr(executor_mod, "MergeCandidateRepository", FakeMergeCandidateRepository)
-    monkeypatch.setattr(executor_mod, "StaleReasonRepository", FakeStaleReasonRepository)
-    monkeypatch.setattr(executor_mod, "sync_candidate_readiness", sync_readiness)
+    monkeypatch.setattr(
+        executor_git_methods, "MergeCandidateRepository", FakeMergeCandidateRepository
+    )
+    monkeypatch.setattr(executor_git_methods, "StaleReasonRepository", FakeStaleReasonRepository)
+    monkeypatch.setattr(executor_git_methods, "sync_candidate_readiness", sync_readiness)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
 

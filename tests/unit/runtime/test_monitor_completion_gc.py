@@ -446,7 +446,7 @@ async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_relea
 
     with (
         patch(
-            "awf.runtime.pr_monitor_runner.run_workspace_filesystem_gc",
+            "awf.runtime.pr_monitor_runner.lifecycle.run_workspace_filesystem_gc",
             new=AsyncMock(return_value=fake_result),
         ),
         structlog.testing.capture_logs() as captured,

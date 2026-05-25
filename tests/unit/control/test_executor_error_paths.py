@@ -31,7 +31,6 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import awf.control.executor as executor_module
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
@@ -39,6 +38,11 @@ from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+)
+from awf.control.executor import execution_flow as executor_execution_flow
+from awf.control.executor import helpers as executor_helpers
+from awf.control.executor import shared as executor_shared
+from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
     _release_sync_source_branch,
     _release_sync_target_branch,
@@ -1493,7 +1497,7 @@ class TestAgentWatchdogConfig:
             captured.update(kwargs)
             return _Adapter()
 
-        monkeypatch.setattr(executor_module, "get_adapter", _get_adapter)
+        monkeypatch.setattr(executor_execution_flow, "get_adapter", _get_adapter)
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -2060,7 +2064,7 @@ class TestPullRequestUnexpectedError:
         def _get_adapter(_runtime: AgentRuntime, **_kwargs: Any) -> _CaptureAdapter:
             return _CaptureAdapter()
 
-        monkeypatch.setattr(executor_module, "get_adapter", _get_adapter)
+        monkeypatch.setattr(executor_execution_flow, "get_adapter", _get_adapter)
         executor = _make_executor(
             AsyncioSubprocessRunner(),
             factory,
@@ -2937,14 +2941,14 @@ class TestPrMonitorFactoryPath:
             calls.append((adapter, profile))
             return "monitor"
 
-        original_signature = executor_module.inspect.signature
+        original_signature = executor_helpers.inspect.signature
 
         def _signature(callable_: object) -> object:
             if callable_ is _monitor_factory:
                 raise ValueError("signature unavailable")
             return original_signature(callable_)
 
-        monkeypatch.setattr(executor_module.inspect, "signature", _signature)
+        monkeypatch.setattr(executor_helpers.inspect, "signature", _signature)
 
         assert (
             _call_pr_monitor_factory(
@@ -3933,12 +3937,12 @@ class TestExecutorCoverageEdges:
         try:
             raise RuntimeError(f"factory exploded Authorization: Bearer {secret}\n" + ("x" * 5000))
         except RuntimeError as exc:
-            redacted_traceback = executor_module._redacted_exception_traceback(exc)
+            redacted_traceback = executor_helpers._redacted_exception_traceback(exc)
 
         assert "Authorization: Bearer [redacted]" in redacted_traceback
         assert secret not in redacted_traceback
         assert redacted_traceback.endswith("...[truncated]")
-        assert len(redacted_traceback) <= executor_module._EXCEPTION_TRACEBACK_LIMIT + len(
+        assert len(redacted_traceback) <= executor_shared._EXCEPTION_TRACEBACK_LIMIT + len(
             "...[truncated]"
         )
 

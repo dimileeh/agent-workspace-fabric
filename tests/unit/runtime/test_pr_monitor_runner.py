@@ -72,21 +72,17 @@ from awf.runtime.pr_monitor import (
     _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
-    BaseBehindCountError,
-    BaseFetchError,
     MonitorRunnerConfig,
-    ProtectedScopeDiffError,
-    ProviderRecoveryAuthError,
-    ProviderRecoveryFallbackError,
-    ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
-    VerdictResult,
+)
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.gates import _MergeGateResult
+from awf.runtime.pr_monitor_runner.helpers import (
     _as_utc,
     _ci_transient_rerun_attempt,
     _collect_defer_items,
     _drop_stale_review_comment_addressed_state,
     _drop_stale_review_thread_addressed_state,
-    _GitPushResult,
     _infer_service_work_dir,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
@@ -98,7 +94,6 @@ from awf.runtime.pr_monitor_runner import (
     _is_pending_check,
     _mark_review_comment_addressed,
     _merge_rejection_reason,
-    _MergeGateResult,
     _monitor_state_verdict,
     _non_check_reviewer_settle_started_key,
     _notify_human_reason,
@@ -110,6 +105,15 @@ from awf.runtime.pr_monitor_runner import (
     _stale_pending_check_warnings,
     _target_reconcile_payload,
     _with_ci_failures,
+)
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.shared import (
+    BaseBehindCountError,
+    BaseFetchError,
+    ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -252,7 +256,7 @@ async def test_workspace_test_commands_ignores_null_and_malformed_shapes(
             return SimpleNamespace(test_commands=raw_test_commands)
 
     monkeypatch.setattr(
-        "awf.runtime.pr_monitor_runner.WorkspaceRepository",
+        "awf.runtime.pr_monitor_runner.provider_ops.WorkspaceRepository",
         _WorkspaceRepository,
     )
     runner = _monitor_runner(tmp_path, FakeCommandRunner(), session_factory=_SessionContext)
@@ -4135,7 +4139,7 @@ async def test_provider_agent_error_still_raises_full_fallback_for_non_monitor_r
         max_same_provider_retries=0,
     )
     mocker.patch(
-        "awf.runtime.pr_monitor_runner.create_provider_recovery_attempt_row",
+        "awf.runtime.pr_monitor_runner.provider_ops.create_provider_recovery_attempt_row",
         return_value=SimpleNamespace(action="fallback", in_place=False),
     )
     runner = make_runner(
@@ -5541,7 +5545,7 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
     )
 
     mocker.patch(
-        "awf.runtime.pr_monitor_runner.create_provider_recovery_attempt_row",
+        "awf.runtime.pr_monitor_runner.provider_ops.create_provider_recovery_attempt_row",
         return_value=None,
     )
 

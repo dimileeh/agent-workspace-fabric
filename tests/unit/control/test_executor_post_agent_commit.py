@@ -35,6 +35,10 @@ from awf.adapters import base as adapter_base
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+)
+from awf.control.executor.shared import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     POST_AGENT_COMMIT_FAILED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
@@ -42,8 +46,6 @@ from awf.control.executor import (
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
     POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
     POST_AGENT_GIT_ADD_FAILED_REASON_CODE,
-    ExecutorConfig,
-    WorkspaceExecutor,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
