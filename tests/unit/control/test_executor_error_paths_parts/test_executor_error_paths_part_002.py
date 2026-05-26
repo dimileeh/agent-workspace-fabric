@@ -34,8 +34,14 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import execution_flow as executor_execution_flow
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.repositories import (
+    OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -1139,3 +1145,42 @@ class TestValidationInfrastructureError:
             and call.args[-1] == "HEAD"
             for call in fake.calls
         )
+
+    @pytest.mark.unit
+    async def test_validation_runner_exception_finishes_recovery_validate_operation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _ExplodingValidation()
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="a.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=128, stderr="fatal: not a git repository")
+
+        async with factory() as s:
+            op = await OperationRepository(s).create(
+                workspace_id=ws_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+                payload={"source": "test", "recovery_mode": "validate_only"},
+                idempotency_key="test:validation-recovery",
+            )
+            op_id = op.id
+            await s.commit()
+
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            op = await OperationRepository(s).get(op_id)
+            assert op is not None
+            assert op.status == OperationStatus.failed.value
+            assert op.error_code == "VALIDATION_INFRASTRUCTURE_ERROR"
+            assert op.finished_at is not None

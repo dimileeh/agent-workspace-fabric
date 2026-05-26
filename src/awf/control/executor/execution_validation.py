@@ -235,6 +235,7 @@ async def run_validation_and_fix_cycle(
                 has_known_non_plan_output=has_known_non_plan_output,
             )
         except Exception as exc:
+            message = f"unexpected error during validation run: {exc!r}"[:2000]
             _log.exception(
                 "executor.validation_run_unexpected_failed",
                 workspace_id=workspace_id,
@@ -256,11 +257,19 @@ async def run_validation_and_fix_cycle(
                 status="failed",
                 reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
             )
+            await self._finish_pending_validate_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                error_message=message,
+            )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"unexpected error during validation run: {exc!r}"[:2000],
+                message=message,
                 reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
             )
             return ExecutionValidationResult(
