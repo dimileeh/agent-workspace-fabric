@@ -110,6 +110,24 @@ def test_compose_teardown_surfaces_os_errors(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_compose_teardown_surfaces_timeouts(monkeypatch, tmp_path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    candidate = SimpleNamespace(compose=SimpleNamespace(path=compose_file), workspace_id="ws")
+
+    def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired("docker compose down", timeout=60)
+
+    monkeypatch.setattr(cli_common.subprocess, "run", _run)
+
+    result = cli_common._run_terminal_workspace_compose_teardown(candidate)
+
+    assert result.status == "failed"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_FAILED"
+    assert result.error == "docker compose down timed out after 60s"
+
+
+@pytest.mark.unit
 def test_compose_teardown_covers_skipped_and_success_paths(monkeypatch, tmp_path) -> None:
     missing = SimpleNamespace(
         compose_file_path=tmp_path / "missing.yml",
@@ -148,7 +166,12 @@ def test_compose_teardown_covers_skipped_and_success_paths(monkeypatch, tmp_path
         "down",
         "--remove-orphans",
     ]
-    assert seen["kwargs"] == {"check": False, "capture_output": True, "text": True}
+    assert seen["kwargs"] == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 60,
+    }
 
 
 class _FakeSession:
