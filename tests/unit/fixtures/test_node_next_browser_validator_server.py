@@ -24,6 +24,7 @@ _FIXTURE_ROOT = (
 )
 _VALIDATOR_SERVER = _FIXTURE_ROOT / "browser" / "validator-server.mjs"
 _HEALTHCHECK_PROCESS_TIMEOUT_SECONDS = 10
+_VALIDATOR_START_ATTEMPTS = 10
 
 pytestmark = pytest.mark.unit
 
@@ -53,6 +54,46 @@ def _wait_for_healthz(port: int, process: subprocess.Popen[str]) -> None:
             last_error = error
             time.sleep(0.05)
     raise AssertionError(f"validator server did not become healthy: {last_error!r}")
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    process.terminate()
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=5)
+
+
+def _start_validator_server(
+    validator_server: Path,
+    env: dict[str, str],
+) -> tuple[int, subprocess.Popen[str]]:
+    last_error: AssertionError | None = None
+    for _ in range(_VALIDATOR_START_ATTEMPTS):
+        port = _free_port()
+        process = subprocess.Popen(
+            ["node", str(validator_server)],
+            env={**env, "PORT": str(port)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _wait_for_healthz(port, process)
+            return port, process
+        except AssertionError as error:
+            _terminate_process(process)
+            last_error = error
+            message = str(error)
+            if "EADDRINUSE" not in message and "address already in use" not in message:
+                raise
+            time.sleep(0.05)
+
+    raise AssertionError(
+        f"validator server could not bind an available port after "
+        f"{_VALIDATOR_START_ATTEMPTS} attempts"
+    ) from last_error
 
 
 def _write_playwright_stub(node_modules: Path) -> Path:
@@ -225,7 +266,6 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
     tmp_path: Path,
 ) -> None:
     """Concurrent validations should share one browser process."""
-    port = _free_port()
     launch_log = tmp_path / "launches.log"
     browser_dir = tmp_path / "browser"
     browser_dir.mkdir()
@@ -236,19 +276,12 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
     env = {
         **os.environ,
         "APP_BASE_URL": "http://fixture-app.invalid",
+        "AWF_VALIDATOR_HOST": "127.0.0.1",
         "PLAYWRIGHT_STUB_LOG": str(launch_log),
-        "PORT": str(port),
     }
-    process = subprocess.Popen(
-        ["node", str(validator_server)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    port, process = _start_validator_server(validator_server, env)
 
     try:
-        _wait_for_healthz(port, process)
         validate_url = f"http://127.0.0.1:{port}/validate"
 
         def validate() -> str:
@@ -261,9 +294,4 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
         assert responses == ["browser validated awf-node-profile-fixture\n"] * 6
         assert launch_log.read_text(encoding="utf-8").splitlines() == ["launch"]
     finally:
-        process.terminate()
-        try:
-            process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate(timeout=5)
+        _terminate_process(process)

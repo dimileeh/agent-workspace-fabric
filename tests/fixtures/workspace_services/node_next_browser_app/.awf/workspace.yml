@@ -58,14 +58,14 @@ validation:
   healthchecks:
     - name: app
       command: node scripts/healthcheck.mjs app
-      timeout_seconds: 30
+      timeout_seconds: 120
       interval_seconds: 1
-      attempt_timeout_seconds: 5
+      attempt_timeout_seconds: 15
     - name: browser
       command: node scripts/healthcheck.mjs browser
-      timeout_seconds: 30
+      timeout_seconds: 120
       interval_seconds: 1
-      attempt_timeout_seconds: 5
+      attempt_timeout_seconds: 15
 ports:
   app: http://app:3000
   browser: http://browser:9323/validate

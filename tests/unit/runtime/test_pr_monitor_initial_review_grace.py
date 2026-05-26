@@ -16,7 +16,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     decide,
 )
-from awf.runtime.pr_monitor_runner import (
+from awf.runtime.pr_monitor_runner.helpers import (
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_wait_seconds,

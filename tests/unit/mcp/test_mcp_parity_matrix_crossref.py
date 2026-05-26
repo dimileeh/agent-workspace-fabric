@@ -43,8 +43,11 @@ def _extract_rest_paths_from_app() -> dict[str, str]:
 
 
 def _extract_mcp_tool_names() -> set[str]:
-    server_content = (SRC_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
-    return set(re.findall(r'@mcp\.tool\(name="([^"]+)"\)', server_content))
+    tool_names: set[str] = set()
+    for mcp_file in (SRC_ROOT / "mcp").glob("*.py"):
+        content = mcp_file.read_text(encoding="utf-8")
+        tool_names.update(re.findall(r'@mcp\.tool\(name="([^"]+)"\)', content))
+    return tool_names
 
 
 def _extract_cli_commands() -> set[str]:
@@ -129,8 +132,9 @@ FRAMEWORK_RESPONSE_TYPES = {
 
 def _extract_schema_class_names() -> set[str]:
     names: set[str] = set()
-    schemas_content = (SRC_ROOT / "api" / "schemas.py").read_text(encoding="utf-8")
-    names.update(re.findall(r"^class\s+(\w+)\b", schemas_content, re.MULTILINE))
+    for schema_file in (SRC_ROOT / "api").glob("schemas*.py"):
+        schemas_content = schema_file.read_text(encoding="utf-8")
+        names.update(re.findall(r"^class\s+(\w+)\b", schemas_content, re.MULTILINE))
     for route_file in (SRC_ROOT / "api" / "routes").glob("*.py"):
         content = route_file.read_text(encoding="utf-8")
         names.update(re.findall(r"^class\s+(\w+)\b", content, re.MULTILINE))

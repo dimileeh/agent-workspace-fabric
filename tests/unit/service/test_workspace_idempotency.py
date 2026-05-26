@@ -15,7 +15,7 @@ from awf.db.models import TaskAttempt, Workspace
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.models import DockerMode, ProfileDocker, ProfileResolution, WorkspaceProfile
-from awf.service import workspaces
+from awf.service import workspaces, workspaces_create
 from awf.service.disk import DiskCheck
 from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
@@ -350,7 +350,7 @@ async def test_create_locks_idempotency_key_before_lookup_for_legacy_payload(
 ) -> None:
     calls = _record_idempotency_lock_order(monkeypatch)
     monkeypatch.setattr(
-        workspaces,
+        workspaces_create,
         "_selected_provider_preflight_for_task_async",
         _ready_provider_preflight,
     )
@@ -445,7 +445,7 @@ async def test_create_auto_profile_replays_matching_legacy_payload_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        workspaces,
+        workspaces_create,
         "_selected_provider_preflight_for_task_async",
         _ready_provider_preflight,
     )
@@ -836,7 +836,7 @@ async def test_create_named_profile_replay_uses_policy_tier_when_profile_unresol
             candidates_considered=["registry:high-perf"],
         )
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", resolve_named_profile)
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
@@ -879,7 +879,7 @@ async def test_create_named_profile_legacy_replay_allows_missing_unresolved_tier
             candidates_considered=["registry:high-perf"],
         )
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", resolve_named_profile)
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
@@ -920,7 +920,7 @@ async def test_create_named_profile_replay_prefers_policy_tier_over_stale_profil
             candidates_considered=["registry:high-perf"],
         )
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", resolve_named_profile)
     request = _v2_request(requested_tier=2, profile_ref="high-perf")
     service = WorkspaceService(factory)
 
@@ -1199,7 +1199,7 @@ async def test_create_named_profile_replay_preserves_stored_dind_mode(
             candidates_considered=["registry:mutable-docker-mode"],
         )
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_mutable_profile)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", resolve_mutable_profile)
     data = _v2_request().model_dump(mode="python")
     data["workspace"] = {"profile_ref": "mutable-docker-mode", "profile": None}
     request = WorkspaceCreateRequest.model_validate(data)
@@ -1240,7 +1240,7 @@ async def test_create_named_profile_replay_uses_stored_resource_snapshot(
             candidates_considered=["registry:mutable-dind"],
         )
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", resolve_named_profile)
     request = _v2_request(profile_ref="mutable-dind")
     service = WorkspaceService(factory)
 
@@ -1252,7 +1252,7 @@ async def test_create_named_profile_replay_uses_stored_resource_snapshot(
     def fail_profile_resolution(**_: object) -> ProfileResolution:
         raise AssertionError("idempotency replay should not resolve mutable profiles")
 
-    monkeypatch.setattr(workspaces, "resolve_workspace_profile", fail_profile_resolution)
+    monkeypatch.setattr(workspaces_create, "resolve_workspace_profile", fail_profile_resolution)
 
     replayed = await service.create(
         request,

@@ -38,8 +38,8 @@ from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
-    _non_check_reviewer_settle_started_key,
 )
+from awf.runtime.pr_monitor_runner.helpers import _non_check_reviewer_settle_started_key
 from tests.postgres import postgres_test_engine
 
 

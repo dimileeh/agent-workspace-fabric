@@ -26,13 +26,16 @@ from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 from tests.postgres import postgres_test_engine
+from tests.util import _positive_int_env
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
-_POSTGRES_TEST_TIMEOUT_SECONDS = 120
+
+_POSTGRES_TEST_TIMEOUT_SECONDS = _positive_int_env("AWF_POSTGRES_TEST_TIMEOUT_SECONDS", 120)
+_DOCKER_TEST_TIMEOUT_SECONDS = _positive_int_env("AWF_DOCKER_TEST_TIMEOUT_SECONDS", 1200)
 _SESSION_PATH = os.environ.get("PATH")
 _POSTGRES_FIXTURE_NAMES = frozenset(
     {
@@ -236,6 +239,16 @@ def pytest_collection_modifyitems(
     del config
     source_cache: dict[Path, bool] = {}
     for item in items:
+        if item.get_closest_marker("docker") is not None:
+            timeout_marker = item.get_closest_marker("timeout")
+            timeout_seconds = (
+                timeout_marker.args[0] if timeout_marker and timeout_marker.args else 0
+            )
+            if not isinstance(timeout_seconds, int | float) or (
+                timeout_seconds < _DOCKER_TEST_TIMEOUT_SECONDS
+            ):
+                item.add_marker(pytest.mark.timeout(_DOCKER_TEST_TIMEOUT_SECONDS), append=False)
+            continue
         if item.get_closest_marker("timeout") is not None:
             continue
         if not _uses_postgres_test_database(item, source_cache):

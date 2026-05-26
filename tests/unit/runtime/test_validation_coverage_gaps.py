@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from awf.profiles.models import ProfileCoverage
+from awf.runtime import validation_coverage as coverage_helpers
 from awf.runtime.validation import (
     HEALTHCHECK_COMMAND_FAILED,
     HEALTHCHECK_INVALID_CONFIGURATION,
@@ -415,3 +417,49 @@ def test_parse_term_missing_handles_missing_column_with_no_lines(
 @pytest.mark.unit
 def test_missing_line_count_treats_malformed_tokens_as_single_gaps() -> None:
     assert _missing_line_count([object(), " 4 ", "10-12", "bad-range", "abc"]) == 6
+
+
+@pytest.mark.unit
+def test_coverage_command_plan_handles_no_command_and_non_pytest_commands() -> None:
+    assert coverage_helpers.coverage_command_plan(ProfileCoverage()).command == ""
+
+    plan = coverage_helpers.coverage_command_plan(
+        ProfileCoverage(command="coverage report", parallel_workers=5),
+        parallel_worker_cpu_limit=2,
+    )
+
+    assert plan.command == "coverage report"
+    assert plan.parallel_workers_requested == 5
+    assert plan.parallel_workers_effective is None
+    assert plan.parallel_distribution is None
+
+
+@pytest.mark.unit
+def test_inject_pytest_parallel_workers_keeps_unparseable_or_non_pytest_commands() -> None:
+    assert (
+        coverage_helpers._inject_pytest_parallel_workers(
+            "pytest 'unterminated", workers=3, distribution="loadscope"
+        )
+        == "pytest 'unterminated"
+    )
+    assert (
+        coverage_helpers._inject_pytest_parallel_workers(
+            "python -m unittest",
+            workers=3,
+            distribution="loadscope",
+        )
+        == "python -m unittest"
+    )
+    assert (
+        coverage_helpers._inject_pytest_parallel_workers(
+            "coverage report",
+            workers=3,
+            distribution="loadscope",
+        )
+        == "coverage report"
+    )
+
+
+@pytest.mark.unit
+def test_read_text_if_present_handles_missing_paths(tmp_path: Path) -> None:
+    assert coverage_helpers._read_text_if_present(tmp_path / "missing.txt") is None

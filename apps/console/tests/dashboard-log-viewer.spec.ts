@@ -1,8 +1,18 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import type { AwfStreamFrame } from "@/lib/types";
+
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
 const activeOpenedAt = "2026-05-21T10:00:10.000Z";
+const quietStreamId = "quiet.stdout";
+
+type MockAwfApiOptions = {
+  advanceActiveTailAfterFirstRead?: boolean;
+  quietTailBytes?: number;
+  streamNoiseBytes?: number;
+  streamResponseDelayMs?: number;
+};
 
 test("fullscreen logs default to ascending, preserve manual scroll, and order tails by stream activity", async ({
   page,
@@ -40,13 +50,77 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   await expect.poll(async () => output.evaluate((node) => node.scrollTop)).toBeLessThan(24);
 });
 
+test("fullscreen logs refresh selected tails when stream metadata advances", async ({ page }) => {
+  const api = await mockAwfApi(page, { advanceActiveTailAfterFirstRead: true });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText("active line 119 poll 1");
+
+  const streamPollsBefore = api.streamPolls;
+  await expect.poll(() => api.streamPolls, { timeout: 8_000 }).toBeGreaterThan(streamPollsBefore);
+  await expect.poll(async () => output.textContent() ?? "", { timeout: 8_000 }).toContain("active line 139 poll 2");
+});
+
+test("fullscreen logs keep selected stream history when unselected stream tails are oversized", async ({ page }) => {
+  const modalSelector = ".fixed.inset-0.z-50";
+  const streamName = "quiet.stdout";
+  const activeExpectedText = "active.stdout";
+
+  await mockAwfApi(page, {
+    streamNoiseBytes: 220_000,
+    streamResponseDelayMs: 150,
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(modalSelector);
+  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+  const output = modal.getByTestId("log-output");
+
+  await modal.getByRole("checkbox", { name: streamName }).uncheck();
+
+  await expect.poll(async () => output.textContent() ?? "").toContain(activeExpectedText);
+});
+
+test("fullscreen logs reload tails after clearing and reselecting the same streams", async ({ page }) => {
+  const api = await mockAwfApi(page);
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText("active.stdout");
+
+  await modal.getByRole("button", { name: "Clear" }).click();
+  await expect(output).toContainText("No log data loaded.");
+
+  api.activeTailPoll = 99;
+  await modal.getByRole("button", { name: "All", exact: true }).click();
+
+  await expect(output).toContainText("active line 000 poll 99");
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
 }
 
-async function mockAwfApi(page: Page) {
-  const state = { streamPolls: 0 };
+async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
+  const { advanceActiveTailAfterFirstRead, quietTailBytes, streamNoiseBytes, streamResponseDelayMs } = options;
+  const state: { activeTailPoll: number | null; activeTailReads: number; streamPolls: number } = {
+    activeTailPoll: null,
+    activeTailReads: 0,
+    streamPolls: 0,
+  };
   await page.route("**/api/awf/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -89,15 +163,21 @@ async function mockAwfApi(page: Page) {
     }
     if (path === "/api/awf/workspaces/ws_logs/logs") {
       state.streamPolls += 1;
-      await fulfillJson(route, listEnvelope(logStreams(state.streamPolls)));
+      const activeMetadataAdvanced = advanceActiveTailAfterFirstRead ? state.activeTailReads > 0 : undefined;
+      await fulfillJson(route, listEnvelope(logStreams(state.streamPolls, activeMetadataAdvanced)));
       return;
     }
     if (path.endsWith("/logs/active.stdout")) {
-      await fulfillJson(route, logRead("active.stdout", activeLogData(state.streamPolls)));
+      let poll = state.activeTailPoll ?? state.streamPolls;
+      if (advanceActiveTailAfterFirstRead) {
+        poll = state.activeTailReads > 0 ? 2 : 1;
+      }
+      state.activeTailReads += 1;
+      await fulfillJson(route, logRead("active.stdout", activeLogData(poll)));
       return;
     }
     if (path.endsWith("/logs/quiet.stdout")) {
-      await fulfillJson(route, logRead("quiet.stdout", quietLogData()));
+      await fulfillJson(route, logRead("quiet.stdout", quietLogData(state.streamPolls, quietTailBytes)));
       return;
     }
     if (path === "/api/awf/workspaces/ws_logs") {
@@ -105,13 +185,33 @@ async function mockAwfApi(page: Page) {
       return;
     }
     if (path === "/api/awf/workspaces/ws_logs/stream") {
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: "ws_logs" },
+      ];
+      if (typeof streamNoiseBytes === "number") {
+        frames.push({
+          type: "log",
+          seq: 0,
+          workspace_id: "ws_logs",
+          stream_id: quietStreamId,
+          source: "monitor",
+          fd: "stdout",
+          offset: 0,
+          next_offset: streamNoiseBytes,
+          data: quietLogData(0, streamNoiseBytes),
+        });
+      }
+      const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("");
+      if (typeof streamResponseDelayMs === "number" && streamResponseDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, streamResponseDelayMs));
+      }
       await route.fulfill({
         status: 200,
         headers: {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-cache",
         },
-        body: `data: ${JSON.stringify({ type: "connected", workspace_id: "ws_logs" })}\n\n`,
+        body,
       });
       return;
     }
@@ -164,8 +264,8 @@ function workspaceOverview() {
   };
 }
 
-function logStreams(poll: number) {
-  const activeLineCount = poll > 1 ? 140 : 120;
+function logStreams(poll: number, activeMetadataAdvanced = poll > 1) {
+  const activeLineCount = activeMetadataAdvanced ? 140 : 120;
   return [
     logStream("quiet.stdout", 2_400, 120, quietOpenedAt),
     logStream("active.stdout", activeLineCount * 24, activeLineCount, activeOpenedAt),
@@ -196,7 +296,14 @@ function logRead(streamId: string, data: string) {
   };
 }
 
-function quietLogData() {
+function quietLogData(_poll: number, forcedBytes?: number) {
+  if (typeof forcedBytes === "number") {
+    const prefix = "quiet line 000";
+    if (forcedBytes <= prefix.length) {
+      return prefix;
+    }
+    return `${prefix}${"x".repeat(forcedBytes - prefix.length)}`;
+  }
   return Array.from({ length: 120 }, (_, index) => `quiet line ${index.toString().padStart(3, "0")}`).join("\n");
 }
 

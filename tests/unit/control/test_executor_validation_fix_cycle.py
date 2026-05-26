@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -35,8 +36,8 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
-    _supply_chain_block_message,
 )
+from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     PolicyFindingRepository,
@@ -177,6 +178,68 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
+
+
+async def _insert_pending_validate_operation(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    operation_id: str,
+) -> None:
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO operations (
+                    id,
+                    workspace_id,
+                    type,
+                    status,
+                    payload,
+                    created_at
+                )
+                VALUES (
+                    :operation_id,
+                    :workspace_id,
+                    'validate',
+                    'pending',
+                    '{"reason":"manual_validate"}',
+                    :created_at
+                )
+                """
+            ),
+            {
+                "operation_id": operation_id,
+                "workspace_id": workspace_id,
+                "created_at": datetime.now(UTC),
+            },
+        )
+        await session.commit()
+
+
+async def _fetch_operation(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    operation_id: str,
+) -> dict[str, object]:
+    async with factory() as session:
+        row = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT status, error_code, error_message, result
+                        FROM operations
+                        WHERE id = :operation_id
+                        """
+                    ),
+                    {"operation_id": operation_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
 
 
 class _CancelBeforeFixValidation:
@@ -594,6 +657,73 @@ class TestFixCycleMissingWorktree:
         assert fix_commit_calls == []
 
 
+class TestFixPassGitCommandFailures:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("failure_stage", "reason_code", "message_fragment"),
+        [
+            ("add", "VALIDATION_FIX_GIT_ADD_FAILED", "git add -A failed"),
+            ("diff", "VALIDATION_FIX_GIT_DIFF_FAILED", "git diff --cached failed"),
+            ("commit", "VALIDATION_FIX_GIT_COMMIT_FAILED", "git commit failed"),
+        ],
+    )
+    async def test_fix_pass_git_failure_fails_workspace_and_validate_operation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        failure_stage: str,
+        reason_code: str,
+        message_fragment: str,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        operation_id = f"op_validate_fix_git_{failure_stage}"
+        await _insert_pending_validate_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+        )
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+        fake.queue_result(returncode=0)  # adapter.run (fix pass)
+        if failure_stage == "add":
+            fake.queue_result(returncode=128, stderr="fatal: index.lock denied")
+        elif failure_stage == "diff":
+            fake.queue_result(returncode=0)  # git add -A
+            fake.queue_result(returncode=128, stderr="fatal: diff failed")
+        else:
+            fake.queue_result(returncode=0)  # git add -A
+            fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+            fake.queue_result(returncode=1, stderr="pre-commit hook failed")  # git commit
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+        operation = await _fetch_operation(factory, operation_id=operation_id)
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert message_fragment in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == reason_code
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == reason_code
+        assert message_fragment in str(operation["error_message"] or "")
+        assert isinstance(operation["result"], dict)
+        assert operation["result"]["reason_code"] == reason_code
+        assert operation["result"]["validation_run_id"]
+        warning_event = {
+            "add": "executor.fix_pass_add_failed",
+            "diff": "executor.fix_pass_diff_failed",
+            "commit": "executor.fix_pass_commit_failed",
+        }[failure_stage]
+        assert any(event.get("event") == warning_event for event in captured)
+
+
 class TestProtectedQualityGateChanges:
     @pytest.mark.unit
     async def test_initial_agent_can_commit_allowed_pyproject_dependency_addition(
@@ -748,31 +878,51 @@ dependencies = [
             assert ws.failure_reason == "policy_failure"
             assert "pyproject.toml" in (ws.failure_message or "")
 
+    class TestSupplyChainPolicy:
+        @pytest.mark.unit
+        def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
+            evidence: list[str] = []
+            append_command_evidence(None, stdout="ignored", stderr="ignored")
+            append_command_evidence(evidence, stdout="out", stderr="err")
+            findings = [
+                SupplyChainFinding(
+                    reason_code=f"SUPPLY_CHAIN_TEST_{index}",
+                    severity="blocking",
+                    subject_path=f"lock{index}.lock" if index == 0 else None,
+                    explanation=f"finding {index}",
+                    details={"recovery_guidance": f"fix {index}"} if index != 1 else {},
+                )
+                for index in range(6)
+            ]
 
-class TestSupplyChainPolicy:
-    @pytest.mark.unit
-    def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
-        evidence: list[str] = []
-        append_command_evidence(None, stdout="ignored", stderr="ignored")
-        append_command_evidence(evidence, stdout="out", stderr="err")
-        findings = [
-            SupplyChainFinding(
-                reason_code=f"SUPPLY_CHAIN_TEST_{index}",
-                severity="blocking",
-                subject_path=f"lock{index}.lock" if index == 0 else None,
-                explanation=f"finding {index}",
-                details={"recovery_guidance": f"fix {index}"} if index != 1 else {},
+            message = _supply_chain_block_message(findings)
+
+            assert evidence == ["out", "err"]
+            assert _supply_chain_block_message([]) == (
+                "Supply-chain policy blocked workspace output."
             )
-            for index in range(6)
-        ]
+            assert "SUPPLY_CHAIN_TEST_0 (lock0.lock)" in message
+            assert "Recovery: fix 0" in message
+            assert "1 additional blocking finding" in message
 
-        message = _supply_chain_block_message(findings)
+        @pytest.mark.unit
+        def test_supply_chain_block_message_allows_none_details(self) -> None:
+            findings = [
+                SupplyChainFinding(
+                    reason_code="SUPPLY_CHAIN_TEST_NONE",
+                    severity="blocking",
+                    subject_path=None,
+                    explanation="finding with bad details",
+                    details=None,  # type: ignore[arg-type]
+                )
+            ]
 
-        assert evidence == ["out", "err"]
-        assert _supply_chain_block_message([]) == ("Supply-chain policy blocked workspace output.")
-        assert "SUPPLY_CHAIN_TEST_0 (lock0.lock)" in message
-        assert "Recovery: fix 0" in message
-        assert "1 additional blocking finding" in message
+            message = _supply_chain_block_message(findings)
+
+            assert message == (
+                "Supply-chain policy blocked workspace output:\n"
+                "- SUPPLY_CHAIN_TEST_NONE: finding with bad details"
+            )
 
     @pytest.mark.unit
     async def test_initial_agent_blocking_supply_chain_finding_fails_before_commit(

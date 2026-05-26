@@ -723,7 +723,7 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "awf.service.workspaces.get_settings",
+        "awf.service.workspaces_retry.get_settings",
         lambda: Settings(
             workspace_steady_cpu=3.0,
             workspace_steady_memory_gb=10.0,
@@ -1008,7 +1008,7 @@ async def test_retry_agent_idle_timeout_salvage_unavailable_errors_abort_retry(
             detail={"base_commit": "missing"},
         )
 
-    monkeypatch.setattr("awf.service.workspaces.capture_conformance_salvage", _raise)
+    monkeypatch.setattr("awf.service.workspaces_retry.capture_conformance_salvage", _raise)
 
     async with factory() as session:
         with pytest.raises(WorkspaceRetrySalvageUnavailableError) as exc_info:

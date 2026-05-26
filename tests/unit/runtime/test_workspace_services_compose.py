@@ -452,6 +452,7 @@ async def test_rendered_python_postgres_compose_expresses_db_backed_service_sema
     assert postgres["image"] == "postgres:16-alpine"
     assert postgres["environment"] == {
         "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
         "POSTGRES_PASSWORD": "deterministic-postgres-password",
         "POSTGRES_USER": "awf",
     }

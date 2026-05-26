@@ -74,7 +74,7 @@ def test_postgres_fixture_tests_get_extended_timeout(tmp_path: Any) -> None:
     assert len(item.markers) == 1
     marker = item.markers[0]
     assert marker.name == "timeout"
-    assert marker.args == (120,)
+    assert marker.args == (root_conftest._POSTGRES_TEST_TIMEOUT_SECONDS,)
 
 
 def test_admin_url_keeps_pooling_for_cleanup_connection_reuse() -> None:
@@ -99,7 +99,7 @@ def test_make_test_engine_uses_short_connect_timeout(monkeypatch: pytest.MonkeyP
     assert isinstance(engine, _FakeEngine)
     assert calls == {
         "url": "postgresql+asyncpg://u:p@localhost/db",
-        "kwargs": {"connect_args": {"timeout": 10}},
+        "kwargs": {"connect_args": {"timeout": postgres.POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS}},
     }
 
 

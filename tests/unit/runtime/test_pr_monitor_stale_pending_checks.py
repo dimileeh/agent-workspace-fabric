@@ -21,7 +21,10 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
-from awf.runtime.pr_monitor_runner import _is_pending_check, _stale_pending_check_warning_key
+from awf.runtime.pr_monitor_runner.helpers import (
+    _is_pending_check,
+    _stale_pending_check_warning_key,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,

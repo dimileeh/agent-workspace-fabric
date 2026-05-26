@@ -20,6 +20,7 @@ def test_ci_failure_evidence_handles_empty_logs_with_warning() -> None:
         "GitHub Actions log unavailable for failed check python-full-coverage.",
     )
     assert evidence.failing_commands == ()
+    assert ci_failure_evidence.redact_ci_log("") == ""  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -260,6 +261,30 @@ def test_ci_failure_evidence_rejects_wrapped_pytest_node_ids() -> None:
     line = "Failed: (tests/unit/runtime/test_prompt.py::test_x), and {tests/unit/runtime/test_prompt.py::test_y}"
 
     assert ci_failure_evidence._pytest_node_candidates(line) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_pytest_node_shape_rejects_missing_parts_prefix_space_and_urls() -> None:
+    assert not ci_failure_evidence._looks_like_pytest_node("tests/unit/test_example.py::")  # noqa: SLF001
+    assert not ci_failure_evidence._looks_like_pytest_node("(tests/unit/test_example.py::test_x")  # noqa: SLF001
+    assert not ci_failure_evidence._looks_like_pytest_node("tests/unit bad/test_example.py::test_x")  # noqa: SLF001
+    assert not ci_failure_evidence._looks_like_pytest_node(
+        "https://example.test/test_example.py::test_x"
+    )  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_pytest_node_boundary_covers_suffix_and_whitespace_edges() -> None:
+    node = "tests/unit/test_example.py::test_case"
+
+    assert ci_failure_evidence._has_pytest_node_boundary(node, 0, len(node))  # noqa: SLF001
+    assert not ci_failure_evidence._has_pytest_node_boundary(f"{node})", 0, len(node))  # noqa: SLF001
+    assert ci_failure_evidence._has_pytest_node_boundary(f"{node}, next", 0, len(node))  # noqa: SLF001
+    assert not ci_failure_evidence._has_pytest_node_boundary(  # noqa: SLF001
+        f"{node} extra text",
+        0,
+        len(node),
+    )
 
 
 @pytest.mark.unit

@@ -287,6 +287,33 @@ async def test_prior_snapshot_without_baseline_captures_fresh(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+async def test_safe_write_reading_reraises_cancellation(tmp_path: Path) -> None:
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = usage_collection._CcusageSampleContext(  # noqa: SLF001
+        collector=collector,
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cancel",
+        provider=AgentRuntime.claude_code,
+        source="claude",
+    )
+
+    async def _cancel_write(**_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    ctx._write_reading = _cancel_write  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        await ctx._safe_write_reading(  # noqa: SLF001
+            usage=None,
+            reason=usage_collection.REASON_COMMAND_FAILED,
+            model=None,
+            phase="live",
+            run_status="running",
+        )
+
+
+@pytest.mark.unit
 async def test_failed_baseline_does_not_leak_host_usage(tmp_path: Path) -> None:
     # Baseline capture times out, then the final read succeeds with a large total
     # that includes copied host history. Without a trustworthy baseline we must
@@ -795,6 +822,82 @@ async def test_sampler_errors_are_swallowed(tmp_path: Path) -> None:
     assert seed.status == "unavailable"
     assert seed.reason == "ccusage_command_failed"  # baseline failure, not a reading
     assert seed.total_tokens is None  # no prior-run metrics reported as this run's
+
+
+@pytest.mark.unit
+async def test_drain_pending_write_noops_without_pending_task(tmp_path: Path) -> None:
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_pending_write",
+        provider=AgentRuntime.claude_code,
+    )
+
+    ctx._pending_write = None
+    await ctx._drain_pending_write()
+    await ctx.finalize(status="success")
+
+
+@pytest.mark.unit
+async def test_safe_write_reading_logs_non_cancel_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_safe_write_error",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_write(**_kwargs: object) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(ctx, "_write_reading", _raise_write)
+    await ctx._safe_write_reading(
+        usage=None,
+        reason="unavailable",
+        model=None,
+        phase="live",
+        run_status="running",
+    )
+    await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+async def test_timeout_cleanup_logs_non_cancel_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cleanup_error",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(usage_collection, "cleanup_compose_exec_invocation", _raise_cleanup)
+    invocation = usage_collection.TrackedComposeExec(
+        args=["docker", "compose", "exec"],
+        invocation_id="inv",
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        service="agent",
+        workdir="/workspace",
+        source="usage",
+        label="awf=usage",
+        wrapper_script="wrapper",
+        cleanup_script="cleanup",
+    )
+    await ctx._cleanup_timed_out_invocation(invocation)
+    await ctx.finalize(status="failed")
 
 
 @pytest.mark.unit

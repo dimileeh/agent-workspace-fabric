@@ -18,8 +18,8 @@ from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
-    _head_repo_slug_from_adoption_payload,
 )
+from awf.common.github_client_adoption import _head_repo_slug_from_adoption_payload
 from awf.db import session as session_mod
 from awf.db.session import make_engine
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
@@ -196,6 +196,26 @@ def test_postgres_test_run_uid_ignores_awf_exec_invocation_id(
 
 
 @pytest.mark.unit
+def test_positive_int_env_uses_default_and_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_name = "AWF_POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS"
+    monkeypatch.delenv(env_name, raising=False)
+    assert postgres_mod._positive_int_env(env_name, 10) == 10
+
+    monkeypatch.setenv(env_name, "45")
+    assert postgres_mod._positive_int_env(env_name, 10) == 45
+
+    monkeypatch.setenv(env_name, "0")
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        postgres_mod._positive_int_env(env_name, 10)
+
+    monkeypatch.setenv(env_name, "nope")
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        postgres_mod._positive_int_env(env_name, 10)
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_stale_postgres_schema_listing_scans_all_inactive_test_namespaces(
     monkeypatch: pytest.MonkeyPatch,
@@ -270,6 +290,48 @@ def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namesp
 
 
 @pytest.mark.unit
+def test_stale_postgres_cleanup_reuses_done_marker_for_active_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-active-run")
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    database_key = postgres_mod._postgres_database_key(database_url)
+    marker_path = tmp_path / (f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done")
+    marker_path.touch()
+    dropped_urls: list[str] = []
+    active_urls: list[str] = []
+
+    async def _drop_stale(url: str) -> None:
+        dropped_urls.append(url)
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod, "_drop_stale_postgres_test_schemas", _drop_stale)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_is_postgres_test_schema_namespace_active",
+        lambda url, active_namespace: url == database_url and active_namespace == namespace,
+    )
+    monkeypatch.setattr(
+        postgres_mod,
+        "_ensure_postgres_test_run_active",
+        lambda url: active_urls.append(url),
+    )
+    postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+    try:
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+    finally:
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+
+    assert dropped_urls == []
+    assert active_urls == [database_url, database_url]
+
+
+@pytest.mark.unit
 def test_stale_postgres_cleanup_marks_run_active_after_drop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -296,6 +358,40 @@ def test_stale_postgres_cleanup_marks_run_active_after_drop(
         postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
 
     assert events == [("drop", database_url), ("active", database_url)]
+
+
+@pytest.mark.unit
+def test_stale_postgres_cleanup_retryable_connect_failure_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-retryable-timeout")
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    database_key = postgres_mod._postgres_database_key(database_url)
+    marker_path = tmp_path / (f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done")
+    events: list[tuple[str, str]] = []
+
+    async def _drop_stale(url: str) -> None:
+        events.append(("drop", url))
+        raise TimeoutError("transient connect timeout")
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod, "_drop_stale_postgres_test_schemas", _drop_stale)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_ensure_postgres_test_run_active",
+        lambda url: events.append(("active", url)),
+    )
+    postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+    try:
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+    finally:
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+
+    assert events == [("drop", database_url), ("active", database_url)]
+    assert marker_path.exists()
 
 
 @pytest.mark.unit
@@ -651,8 +747,10 @@ async def test_postgres_test_url_marks_yielded_url_null_pool(
 
     assert parsed.query["awf_search_path"].strip('"').startswith("awf_test_")
     assert parsed.query["awf_null_pool"] == "1"
-    assert parsed.query["awf_connect_timeout"] == "10"
-    assert parsed.query["awf_connect_retries"] == "3"
+    assert parsed.query["awf_connect_timeout"] == str(
+        postgres_mod.POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS
+    )
+    assert parsed.query["awf_connect_retries"] == str(postgres_mod.POSTGRES_TEST_CONNECT_ATTEMPTS)
 
 
 @pytest.mark.unit
