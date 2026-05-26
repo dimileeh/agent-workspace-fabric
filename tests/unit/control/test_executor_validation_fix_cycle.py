@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -697,7 +698,8 @@ class TestFixPassGitCommandFailures:
             fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
             fake.queue_result(returncode=1, stderr="pre-commit hook failed")  # git commit
 
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
 
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
@@ -714,6 +716,12 @@ class TestFixPassGitCommandFailures:
         assert isinstance(operation["result"], dict)
         assert operation["result"]["reason_code"] == reason_code
         assert operation["result"]["validation_run_id"]
+        warning_event = {
+            "add": "executor.fix_pass_add_failed",
+            "diff": "executor.fix_pass_diff_failed",
+            "commit": "executor.fix_pass_commit_failed",
+        }[failure_stage]
+        assert any(event.get("event") == warning_event for event in captured)
 
 
 class TestProtectedQualityGateChanges:
