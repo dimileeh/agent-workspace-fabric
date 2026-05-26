@@ -25,3 +25,11 @@ def test_workspace_retry_imports_without_module_cycle() -> None:
     _clear_cached_workspace_modules()
     retry_module = importlib.import_module("awf.service.workspaces_retry")
     assert hasattr(retry_module, "retry_workspace_row")
+
+
+@pytest.mark.unit
+def test_workspace_create_imports_without_module_cycle() -> None:
+    """Importing `workspaces_create` from a clean module state should not fail."""
+    _clear_cached_workspace_modules()
+    create_module = importlib.import_module("awf.service.workspaces_create")
+    assert hasattr(create_module, "create_workspace_row")

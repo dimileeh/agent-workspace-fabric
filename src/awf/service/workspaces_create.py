@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
@@ -58,26 +58,9 @@ from awf.service.scheduler import (
 from awf.service.scheduler import (
     task_class_priority as scheduler_task_class_priority,
 )
-from awf.service.workspaces import (
-    _REDACTED_TEXT,
-    LEGACY_DATABASE_PROFILE_REF,
-    OWNED_PATH_OVERLAP_PAYLOAD_FIELDS,
-    OWNED_PATH_OVERLAP_RISK_CODE,
-    OWNED_PATH_OVERLAP_RISK_EVENT_TYPE,
-    OWNED_PATH_OVERLAP_RISK_MESSAGE,
-    PROVIDER_READINESS_OVERRIDE_REASON,
-    PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE,
-    PROVIDER_READINESS_READY_REASON,
-    QUEUE_DECISION_ADMITTED,
-    QUEUE_DECISION_ADMITTED_LOCAL_REASON,
-    RELEASE_SYNC_POLICY_KEY,
-    RESOURCE_RESERVATION_REQUEST_POLICY_KEY,
-    VALIDATION_POLICY_KEY,
-    VALIDATION_REQUESTED_TIER_POLICY_KEY,
-    ResourceReservationPlan,
-    WorkspaceProviderReadinessBlockedError,
-    _log,
-)
+
+if TYPE_CHECKING:
+    from awf.service.workspaces import ResourceReservationPlan
 
 
 async def create_workspace_row(
@@ -173,6 +156,11 @@ async def create_workspace_row(
         phase=reservation_plan.phase,
     )
     scheduler_score = scheduler_score_from_workspace(ws, now=ws.created_at)
+    from awf.service.workspaces import (  # noqa: E402
+        QUEUE_DECISION_ADMITTED,
+        QUEUE_DECISION_ADMITTED_LOCAL_REASON,
+    )
+
     await QueueDecisionRepository(session).create(
         workspace_id=ws.id,
         task_id=task.id,
@@ -271,6 +259,8 @@ def _release_sync_source_branch_matches(
     if payload.task.kind != TaskKind.sync_release_pr.value:
         return True
     requested = payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
+    from awf.service.workspaces import RELEASE_SYNC_POLICY_KEY  # noqa: E402
+
     release_sync = _stored_task_policy(existing).get(RELEASE_SYNC_POLICY_KEY)
     stored = release_sync.get("source_branch") if isinstance(release_sync, Mapping) else None
     if stored is None:
@@ -318,6 +308,8 @@ def _legacy_database_profile_ref_matches(
     payload: WorkspaceCreateRequest,
 ) -> bool:
     """Check whether a legacy requires_database row matches the database profile."""
+    from awf.service.workspaces import LEGACY_DATABASE_PROFILE_REF  # noqa: E402
+
     return bool(
         getattr(existing, "requires_database", False) is True
         and payload.workspace.profile_ref == LEGACY_DATABASE_PROFILE_REF
@@ -454,6 +446,8 @@ def _stored_resource_reservation_request_values(
     existing: Workspace,
 ) -> dict[str, int | float] | None:
     """Extract the resource reservation request values stored in a workspace's task policy."""
+    from awf.service.workspaces import RESOURCE_RESERVATION_REQUEST_POLICY_KEY  # noqa: E402
+
     resource_request = _stored_task_policy(existing).get(RESOURCE_RESERVATION_REQUEST_POLICY_KEY)
     if not isinstance(resource_request, dict):
         return None
@@ -517,6 +511,11 @@ def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReser
 
 def _stored_validation_requested_tier(existing: Workspace) -> int | None:
     """Return the requested validation tier stored in the workspace's task policy or resolved profile."""
+    from awf.service.workspaces import (  # noqa: E402
+        VALIDATION_POLICY_KEY,
+        VALIDATION_REQUESTED_TIER_POLICY_KEY,
+    )
+
     validation_policy = _stored_task_policy(existing).get(VALIDATION_POLICY_KEY)
     if isinstance(validation_policy, dict):
         tier = validation_policy.get(VALIDATION_REQUESTED_TIER_POLICY_KEY)
@@ -679,6 +678,8 @@ def _override_reasons_match(
     if stored_redaction_parts is None:
         return False
 
+    from awf.service.workspaces import _REDACTED_TEXT  # noqa: E402
+
     if _REDACTED_TEXT.join(stored_redaction_parts) != stored_reason:
         return False
     pattern = ".+".join(re.escape(part) for part in stored_redaction_parts)
@@ -750,6 +751,8 @@ async def _selected_provider_preflight_for_task_async(
 def _raise_if_provider_preflight_blocks(preflight: Mapping[str, Any]) -> None:
     """Raise an error if the provider readiness preflight result blocks launch."""
     if preflight.get("blocks_launch") is True:
+        from awf.service.workspaces import WorkspaceProviderReadinessBlockedError  # noqa: E402
+
         raise WorkspaceProviderReadinessBlockedError(preflight)
 
 
@@ -759,6 +762,12 @@ async def _record_provider_readiness_preflight(
     preflight: Mapping[str, Any],
 ) -> None:
     """Record a provider readiness preflight event on the workspace."""
+    from awf.service.workspaces import (  # noqa: E402
+        PROVIDER_READINESS_OVERRIDE_REASON,
+        PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE,
+        PROVIDER_READINESS_READY_REASON,
+    )
+
     await repo.add_event(
         workspace,
         event_type=PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE,
@@ -786,6 +795,11 @@ async def _record_owned_path_overlap_risk(
     """Record an owned-path overlap risk event on the workspace if overlaps exist."""
     if not overlaps:
         return
+    from awf.service.workspaces import (  # noqa: E402
+        OWNED_PATH_OVERLAP_RISK_CODE,
+        OWNED_PATH_OVERLAP_RISK_EVENT_TYPE,
+    )
+
     await repo.add_event(
         workspace,
         event_type=OWNED_PATH_OVERLAP_RISK_EVENT_TYPE,
@@ -796,6 +810,11 @@ async def _record_owned_path_overlap_risk(
 
 def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
     """Build a warning payload dict from a list of owned-path overlap records."""
+    from awf.service.workspaces import (  # noqa: E402
+        OWNED_PATH_OVERLAP_RISK_CODE,
+        OWNED_PATH_OVERLAP_RISK_MESSAGE,
+    )
+
     workspace_ids: dict[str, None] = {}
     overlap_items: list[dict[str, str]] = []
     for overlap in overlaps:
@@ -818,6 +837,8 @@ def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict
 
 def overlap_risk_summary(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
     """Build a summary dict describing owned-path overlap risk, or a zero-risk placeholder."""
+    from awf.service.workspaces import OWNED_PATH_OVERLAP_RISK_CODE  # noqa: E402
+
     if not overlaps:
         return {
             "warning_code": None,
@@ -856,6 +877,8 @@ def resource_reservation_plan(
     settings: Settings,
 ) -> ResourceReservationPlan:
     """Build a resource reservation plan from a rich create request and settings."""
+    from awf.service.workspaces import ResourceReservationPlan  # noqa: E402
+
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
     _, resolved_profile = workspace_create_profile_snapshots(payload)
@@ -957,6 +980,8 @@ def _parse_memory_gb(value: str | None) -> float | None:
         memory_gb = float(normalized)
     except ValueError:
         return None
+    from awf.service.workspaces import _log  # noqa: E402
+
     _log.warning(
         "workspace.resources.memory_unit_missing",
         raw_value=normalized,
@@ -967,6 +992,8 @@ def _parse_memory_gb(value: str | None) -> float | None:
 
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
     """Extract owned-path overlap warning responses from workspace events."""
+    from awf.service.workspaces import OWNED_PATH_OVERLAP_RISK_EVENT_TYPE  # noqa: E402
+
     warnings: list[WorkspaceWarningResponse] = []
     for event in getattr(workspace, "events", ()) or ():
         if event.event_type != OWNED_PATH_OVERLAP_RISK_EVENT_TYPE:
@@ -982,6 +1009,11 @@ def _owned_path_overlap_warning_response(
     payload: dict[str, Any],
 ) -> WorkspaceWarningResponse:
     """Build a WorkspaceWarningResponse from an owned-path overlap warning payload."""
+    from awf.service.workspaces import (  # noqa: E402
+        OWNED_PATH_OVERLAP_RISK_CODE,
+        OWNED_PATH_OVERLAP_RISK_MESSAGE,
+    )
+
     return WorkspaceWarningResponse(
         warning_code=str(payload.get("warning_code", OWNED_PATH_OVERLAP_RISK_CODE)),
         message=str(payload.get("message", OWNED_PATH_OVERLAP_RISK_MESSAGE)),
@@ -1018,6 +1050,8 @@ def _owned_path_overlap_payload_responses(
 
 def _has_owned_path_overlap_payload_fields(item: Any) -> bool:
     """Check whether a dict item contains all required owned-path overlap fields."""
+    from awf.service.workspaces import OWNED_PATH_OVERLAP_PAYLOAD_FIELDS  # noqa: E402
+
     return isinstance(item, dict) and all(
         field in item for field in OWNED_PATH_OVERLAP_PAYLOAD_FIELDS
     )
@@ -1074,6 +1108,13 @@ def _effective_auto_merge(payload: WorkspaceCreateRequest) -> bool:
 
 def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> dict[str, Any]:
     """Build a task policy dictionary from a rich create request."""
+    from awf.service.workspaces import (  # noqa: E402
+        RELEASE_SYNC_POLICY_KEY,
+        RESOURCE_RESERVATION_REQUEST_POLICY_KEY,
+        VALIDATION_POLICY_KEY,
+        VALIDATION_REQUESTED_TIER_POLICY_KEY,
+    )
+
     policy: dict[str, Any] = {}
     resource_request = _requested_resource_reservation_values(payload)
     # Persist empty requests so idempotent replays do not re-plan against
