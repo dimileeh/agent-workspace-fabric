@@ -799,35 +799,46 @@ export function compareLogEntries(left: LogEntry, right: LogEntry): number {
   return left.offset - right.offset;
 }
 
-export function trimLogEntries(entries: LogEntry[]): LogEntry[] {
-  const entriesByStream = new Map<string, LogEntry[]>();
-  for (const entry of entries) {
-    const existing = entriesByStream.get(entry.streamId);
-    if (existing) {
-      existing.push(entry);
-    } else {
-      entriesByStream.set(entry.streamId, [entry]);
-    }
-  }
+function trimStreamEntries(entries: readonly LogEntry[], capacity: number): { entries: LogEntry[]; used: number } {
   const kept: LogEntry[] = [];
-  for (const streamEntries of entriesByStream.values()) {
-    const streamKept: LogEntry[] = [];
-    let keptChars = 0;
-    for (let index = streamEntries.length - 1; index >= 0; index -= 1) {
-      const entry = streamEntries[index];
-      const remaining = maxLogChars - keptChars;
-      if (remaining <= 0) {
-        break;
-      }
-      if (entry.data.length <= remaining) {
-        streamKept.push(entry);
-        keptChars += entry.data.length;
-      } else {
-        streamKept.push({ ...entry, data: entry.data.slice(-remaining) });
-        break;
-      }
-    }
-    kept.push(...streamKept.reverse());
+  if (capacity <= 0) {
+    return { entries: kept, used: 0 };
   }
-  return kept;
+  let keptChars = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    const remaining = capacity - keptChars;
+    if (remaining <= 0) {
+      break;
+    }
+    if (entry.data.length <= remaining) {
+      kept.push(entry);
+      keptChars += entry.data.length;
+      continue;
+    }
+    kept.push({ ...entry, data: entry.data.slice(-remaining) });
+    keptChars += remaining;
+    break;
+  }
+  return { entries: kept.reverse(), used: keptChars };
+}
+
+export function trimLogEntries(
+  entries: LogEntry[],
+  selectedStreamIds: readonly string[] = [],
+): LogEntry[] {
+  const ordered = [...entries].sort(compareLogEntries);
+  if (selectedStreamIds.length === 0) {
+    const trimmed = trimStreamEntries(ordered, maxLogChars);
+    return trimmed.entries;
+  }
+
+  const selectedStreams = new Set(selectedStreamIds);
+  const selected = ordered.filter((entry) => selectedStreams.has(entry.streamId));
+  const unselected = ordered.filter((entry) => !selectedStreams.has(entry.streamId));
+
+  const selectedTrimmed = trimStreamEntries(selected, maxLogChars);
+  const unselectedTrimmed = trimStreamEntries(unselected, Math.max(0, maxLogChars - selectedTrimmed.used));
+
+  return [...selectedTrimmed.entries, ...unselectedTrimmed.entries].sort(compareLogEntries);
 }

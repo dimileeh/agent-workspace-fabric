@@ -132,6 +132,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const [fullscreenTailSignal, setFullscreenTailSignal] = useState(0);
   const [logSortDirection, setLogSortDirection] = useState<SortDirection>("asc");
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
+  const selectedStreamsRef = useRef<string[]>([]);
   const [statusFilters, setStatusFilters] = useState<string[]>([]);
   const [agentFilters, setAgentFilters] = useState<string[]>([]);
   const [modelFilters, setModelFilters] = useState<string[]>([]);
@@ -163,6 +164,10 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const availableModels = useMemo(() => {
     return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
   }, [overview]);
+
+  useEffect(() => {
+    selectedStreamsRef.current = selectedStreams;
+  }, [selectedStreams]);
 
   useEffect(() => {
     setOperatorPreferences(readStoredOperatorPreferences());
@@ -404,7 +409,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   );
 
   const loadLogTail = useCallback(
-    async (workspaceId: string, stream: WorkspaceLogStream) => {
+    async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -414,7 +419,8 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       );
       if (!result.ok) {
         setLogEntries((current) =>
-          trimLogEntries([
+          trimLogEntries(
+            [
             ...current.filter(
               (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
             ),
@@ -430,7 +436,9 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
               order: Date.now(),
               kind: "tail",
             },
-          ]),
+            ],
+            selectedStreamIds,
+          ),
         );
         return;
       }
@@ -447,15 +455,18 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
         kind: "tail" as const,
       };
       setLogEntries((current) =>
-        trimLogEntries([
-          ...current.filter(
-            (entry) =>
-              entry.workspaceId !== workspaceId ||
-              entry.streamId !== stream.stream_id ||
-              (entry.kind === "live" && entry.offset >= result.data.next_offset),
-          ),
-          tailEntry,
-        ]),
+        trimLogEntries(
+          [
+            ...current.filter(
+              (entry) =>
+                entry.workspaceId !== workspaceId ||
+                entry.streamId !== stream.stream_id ||
+                (entry.kind === "live" && entry.offset >= result.data.next_offset),
+            ),
+            tailEntry,
+          ],
+          selectedStreamIds,
+        ),
       );
       setStreamOffsets((current) => ({
         ...current,
@@ -520,7 +531,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     }
     for (const stream of detail.streams) {
       if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream);
+        void loadLogTail(selectedId, stream, selectedStreams);
       }
     }
   }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
@@ -570,7 +581,8 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       if (frame.type === "log") {
         setStreamState("live");
         setLogEntries((current) =>
-          trimLogEntries([
+          trimLogEntries(
+            [
             ...current,
             {
               key: `live:${frame.workspace_id}:${frame.stream_id}:${frame.offset}:${frame.next_offset ?? frame.offset}:${frame.seq}`,
@@ -584,7 +596,9 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
               order: Date.parse(frame.occurred_at ?? "") || Date.now(),
               kind: "live",
             },
-          ]),
+            ],
+            selectedStreamsRef.current,
+          ),
         );
         setStreamOffsets((current) => ({
           ...current,
