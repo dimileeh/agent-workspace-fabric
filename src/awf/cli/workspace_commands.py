@@ -131,7 +131,7 @@ def workspace_create(
 ) -> None:
     """Submit a workspace creation request."""
     if branch_base is None:
-        branch_base = "main" if task_kind is TaskKind.sync_release_pr else "development"
+        branch_base = "main" if task_kind == TaskKind.sync_release_pr else "development"
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
@@ -141,7 +141,7 @@ def workspace_create(
             "title": task_title,
             "prompt": task_prompt,
             "agent": agent,
-            "kind": task_kind.value,
+            "kind": task_kind if isinstance(task_kind, str) else task_kind.value,
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         },

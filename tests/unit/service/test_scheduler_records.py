@@ -497,7 +497,9 @@ def test_legacy_numeric_memory_without_unit_warns(monkeypatch: pytest.MonkeyPatc
         def warning(self, event: str, **kwargs: object) -> None:
             warnings.append((event, kwargs))
 
-    monkeypatch.setattr(workspaces_create, "_log", Logger())
+    import awf.service.workspaces as _ws
+
+    monkeypatch.setattr(_ws, "_log", Logger())
 
     parsed = workspaces_create._parse_memory_gb("1024")
 

@@ -73,12 +73,12 @@ class TestDigHelper:
 
 class TestExecutorFixPassWarnings:
     """Lines 425 + 452: the fix-cycle logs a warning when ``git add -A``
-    or ``git commit`` in a fix pass fails. Both are non-fatal — they
-    let the next retry's validation confirm or refute that the CLI did
-    useful work — but we still want the operator to see the warning."""
+    or ``git commit`` in a fix pass fails. Both are fatal for the
+    workspace — the executor marks it as infrastructure_failure — but
+    the operator sees the structured log warning."""
 
     @pytest.mark.unit
-    async def test_fix_pass_add_and_commit_failures_log_and_continue(self, tmp_path: Path) -> None:
+    async def test_fix_pass_add_failure_marks_workspace_failed(self, tmp_path: Path) -> None:
         from awf.adapters import base as _adapter_base
         from awf.adapters import registry as _registry  # noqa: F401
         from awf.adapters.codex import CodexAdapter
@@ -126,13 +126,9 @@ class TestExecutorFixPassWarnings:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
-        # Fix pass 1: adapter → fix_add FAILS (warning) → cached diff →
-        # commit FAILS (warning) → validation GREEN.
+        # Fix pass 1: adapter → fix_add FAILS (infrastructure_failure) → stop.
         fake.queue_result(returncode=0)  # adapter (fix pass)
         fake.queue_result(returncode=1, stderr="index.lock held")  # fix_add FAILS
-        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
-        fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
 
         class _FixPassValidation:
             def __init__(self, artifacts_dir: Path) -> None:
@@ -228,21 +224,12 @@ class TestExecutorFixPassWarnings:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            # Landed at completed despite fix-pass sub-failures.
-            assert ws.status == WorkspaceStatus.completed.value, {
-                "failure_reason": ws.failure_reason,
-                "failure_message": ws.failure_message,
-                "events": [(event.event_type, event.reason_code) for event in ws.events],
-                "calls": [call.args for call in fake.calls],
-            }
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "index.lock held" in (ws.failure_message or "")
         assert any(
             event.get("event") == "executor.fix_pass_add_failed"
             and event.get("stderr") == "index.lock held"
-            for event in captured
-        )
-        assert any(
-            event.get("event") == "executor.fix_pass_commit_failed"
-            and event.get("stderr") == "commit would be empty"
             for event in captured
         )
         await engine.dispose()

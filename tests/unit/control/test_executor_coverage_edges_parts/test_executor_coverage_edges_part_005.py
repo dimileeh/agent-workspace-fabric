@@ -885,7 +885,7 @@ async def test_healthcheck_failure_event_handles_none_metadata(
     assert session.commits == 1
     assert len(captured_events) == 1
     assert captured_events[0]["event_type"] == "workspace.health_check_failed"
-    assert captured_events[0]["stream_ids"] == {}
+    assert captured_events[0].get("payload", {}).get("stream_ids") == {}
 
 
 @pytest.mark.unit
