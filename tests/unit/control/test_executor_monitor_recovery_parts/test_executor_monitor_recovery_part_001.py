@@ -12,6 +12,7 @@ feature task prompt.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -625,6 +626,52 @@ def test_get_active_recovery_payload_returns_payload_when_pending() -> None:
     assert _get_active_recovery_payload(_FakeWorkspace([wrong_type])) is None
     assert _get_active_recovery_payload(_FakeWorkspace([invalid_payload])) is None
     assert _get_active_recovery_payload(_FakeWorkspace([])) is None
+
+
+@pytest.mark.unit
+def test_get_active_recovery_payload_prefers_latest_recovery_operation() -> None:
+    """When multiple active recovery operations exist, choose the most recent one."""
+
+    class _FakeOperation:
+        def __init__(
+            self,
+            *,
+            status: str,
+            payload: object,
+            operation_type: str = OperationType.validate.value,
+            created_at: datetime | None = None,
+            started_at: datetime | None = None,
+            op_id: str = "",
+        ) -> None:
+            self.status = status
+            self.payload = payload
+            self.type = operation_type
+            self.created_at = created_at
+            self.started_at = started_at
+            self.id = op_id
+
+    class _FakeWorkspace:
+        def __init__(self, ops: list[_FakeOperation]) -> None:
+            self.operations = ops
+
+    older = _FakeOperation(
+        status=OperationStatus.pending.value,
+        payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+        created_at=datetime(2026, 5, 1, tzinfo=UTC),
+        started_at=datetime(2026, 5, 1, tzinfo=UTC),
+        op_id="111",
+    )
+    newer = _FakeOperation(
+        status=OperationStatus.running.value,
+        payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+        created_at=datetime(2026, 5, 2, tzinfo=UTC),
+        started_at=datetime(2026, 5, 2, tzinfo=UTC),
+        op_id="222",
+    )
+
+    # Ensure ordering is independent of list materialization order.
+    assert _get_active_recovery_payload(_FakeWorkspace([older, newer])) == newer.payload
+    assert _get_active_recovery_payload(_FakeWorkspace([newer, older])) == newer.payload
 
 
 @pytest.mark.unit
