@@ -76,10 +76,15 @@ from awf.db.models import (
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    StaleReasonCreate,
     StaleReasonRepository,
     ValidationRunRepository,
     WorkspaceRepository,
     sync_candidate_readiness,
+)
+from awf.runtime.merge_eligibility import (
+    DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
 )
 from awf.runtime.planning import (
     changed_paths_from_porcelain,
@@ -90,6 +95,13 @@ from awf.runtime.pr_monitor_operations import (
     create_or_start_monitor_operation,
     finish_monitor_operation,
     monitor_operation_idempotency_key,
+)
+from awf.service.staleness import (
+    REASON_BUILD_CONFIG,
+    REASON_DEPENDENCY,
+    REASON_OVERLAP,
+    REASON_SCHEMA,
+    REASON_TARGET_ADVANCED,
 )
 
 
@@ -999,15 +1011,56 @@ async def _clear_rebase_recovery_staleness(
         ).get_open_for_workspace_with_merge_inputs(workspace_id)
         if candidate is None:
             return
+
+        active_stale_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+            candidate.id
+        )
+        preserved_active = [
+            stale_reason
+            for stale_reason in active_stale_reasons
+            if stale_reason.reason_code != REASON_TARGET_ADVANCED
+        ]
         await StaleReasonRepository(session).replace_active_findings(
             workspace_id=candidate.workspace_id,
             candidate_id=candidate.id,
             attempt_id=candidate.attempt_id,
             task_id=candidate.task_id,
-            findings=[],
+            findings=[
+                StaleReasonCreate(
+                    reason_code=f.reason_code,
+                    trigger_type=f.trigger_type,
+                    trigger_ref=f.trigger_ref,
+                    explanation=f.explanation,
+                )
+                for f in preserved_active
+            ],
         )
-        candidate.stale = False
-        candidate.stale_reason = None
+        stale_blockers = [r for r in preserved_active if r.blocks_merge]
+        if stale_blockers:
+            prioritized_blocking_reasons = {
+                REASON_OVERLAP: 0,
+                REASON_SCHEMA: 1,
+                REASON_DEPENDENCY: 2,
+                REASON_BUILD_CONFIG: 3,
+                REASON_TARGET_ADVANCED: 4,
+            }
+            primary_blocking = min(
+                (
+                    (prioritized_blocking_reasons.get(reason.reason_code, 99), index, reason)
+                    for index, reason in enumerate(stale_blockers)
+                ),
+                key=lambda item: (item[0], item[1]),
+            )[2]
+            candidate.stale = True
+            candidate.stale_reason = primary_blocking.reason_code
+        elif candidate.stale_reason in {
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+        }:
+            candidate.stale = True
+        else:
+            candidate.stale = False
+            candidate.stale_reason = None
         sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,

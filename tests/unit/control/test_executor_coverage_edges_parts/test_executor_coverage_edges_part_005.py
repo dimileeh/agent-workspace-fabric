@@ -37,12 +37,16 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.merge_eligibility import VALIDATION_INSUFFICIENT_TIER_STALE_REASON
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
+)
+from awf.service.staleness import (
+    REASON_TARGET_ADVANCED,
 )
 
 
@@ -1160,6 +1164,14 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
         workspace=SimpleNamespace(id="ws_rebase"),
         attempt=SimpleNamespace(id="attempt"),
     )
+    active_stale = [
+        SimpleNamespace(
+            reason_code=REASON_TARGET_ADVANCED,
+            trigger_type="target_advanced",
+            trigger_ref="abc123",
+            explanation="base moved",
+        )
+    ]
     replaced_findings: list[dict[str, object]] = []
     readiness_calls: list[object] = []
 
@@ -1177,6 +1189,10 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
 
         async def replace_active_findings(self, **kwargs: object) -> None:
             replaced_findings.append(kwargs)
+
+        async def list_active_for_candidate(self, candidate_id: str) -> list[object]:
+            assert candidate_id == candidate.id
+            return active_stale
 
     def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
         readiness_calls.append(candidate_arg)
@@ -1203,4 +1219,68 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
     assert candidate.stale is False
     assert candidate.stale_reason is None
     assert readiness_calls == [candidate]
+    assert session.commits == 1
+
+
+@pytest.mark.unit
+async def test_clear_rebase_recovery_staleness_preserves_validation_tier_stale_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    candidate = SimpleNamespace(
+        id="candidate",
+        workspace_id="ws_rebase",
+        attempt_id="attempt",
+        task_id="task",
+        stale=True,
+        stale_reason=VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        workspace=SimpleNamespace(id="ws_rebase"),
+        attempt=SimpleNamespace(id="attempt"),
+    )
+    active_stale = [
+        SimpleNamespace(
+            reason_code=REASON_TARGET_ADVANCED,
+            trigger_type="target_advanced",
+            trigger_ref="abc123",
+            explanation="base moved",
+        )
+    ]
+
+    class FakeMergeCandidateRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_open_for_workspace_with_merge_inputs(self, workspace_id: str) -> object:
+            assert workspace_id == candidate.workspace_id
+            return candidate
+
+    class FakeStaleReasonRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def replace_active_findings(self, **kwargs: object) -> None:
+            active = kwargs["findings"]
+            assert isinstance(active, list)
+            assert active == []
+
+        async def list_active_for_candidate(self, candidate_id: str) -> list[object]:
+            assert candidate_id == candidate.id
+            return active_stale
+
+    def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
+        assert candidate_arg is candidate
+
+    monkeypatch.setattr(
+        executor_git_methods, "MergeCandidateRepository", FakeMergeCandidateRepository
+    )
+    monkeypatch.setattr(executor_git_methods, "StaleReasonRepository", FakeStaleReasonRepository)
+    monkeypatch.setattr(executor_git_methods, "sync_candidate_readiness", sync_readiness)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    await executor._clear_rebase_recovery_staleness(workspace_id="ws_rebase")
+
+    assert candidate.stale is True
+    assert candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
     assert session.commits == 1
