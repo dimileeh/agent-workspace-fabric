@@ -387,7 +387,15 @@ export function applyOperatorPreferenceAttributes(
 }
 
 export function openExternalHref(href: string) {
-  window.open(href, "_blank", "noopener,noreferrer");
+  try {
+    const url = new URL(href, window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return;
+    }
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  } catch {
+    // Ignore invalid URLs.
+  }
 }
 
 export function ErrorBanner({ message }: { message: string }) {
