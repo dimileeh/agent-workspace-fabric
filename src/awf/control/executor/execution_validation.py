@@ -857,6 +857,44 @@ async def run_validation_and_fix_cycle(
                 has_known_non_plan_output=has_known_non_plan_output,
             )
 
+        async def _fail_fix_pass_git_command(
+            *,
+            current_validation_run_id: str,
+            current_validation_coverage: dict[str, object] | None,
+            reason_code: str,
+            operation: str,
+            result: CommandResult,
+        ) -> None:
+            command_output = (result.stderr or result.stdout).strip()
+            message = (
+                f"validation fix pass {operation} failed with exit {result.returncode}"
+                + (f": {command_output}" if command_output else "")
+            )[:2000]
+            details: dict[str, Any] = {
+                "validation_run_id": current_validation_run_id,
+                "operation": operation,
+                "returncode": result.returncode,
+            }
+            if result.reason_code is not None:
+                details["command_reason_code"] = result.reason_code
+            await self._finish_pending_validate_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                validation_run_id=current_validation_run_id,
+                requested_tier=validation_tier,
+                reason_code=reason_code,
+                coverage=current_validation_coverage,
+                error_message=message,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.validating,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=message,
+                reason_code=reason_code,
+                details=details,
+            )
+
         # Commit whatever the fix pass produced. Simpler than the initial
         # post-agent commit block — orphan-history recovery isn't possible
         # here (HEAD already descends from base after the initial run
@@ -872,6 +910,13 @@ async def run_validation_and_fix_cycle(
                 "executor.fix_pass_add_failed",
                 workspace_id=workspace_id,
                 stderr=fix_add.stderr[:400],
+            )
+            await _fail_fix_pass_git_command(
+                current_validation_run_id=validation_run_id,
+                current_validation_coverage=validation_coverage,
+                reason_code="VALIDATION_FIX_GIT_ADD_FAILED",
+                operation="git add -A",
+                result=fix_add,
             )
             return ExecutionValidationResult(
                 stop=True,
@@ -899,6 +944,13 @@ async def run_validation_and_fix_cycle(
                 "executor.fix_pass_diff_failed",
                 workspace_id=workspace_id,
                 stderr=fix_cached.stderr[:400],
+            )
+            await _fail_fix_pass_git_command(
+                current_validation_run_id=validation_run_id,
+                current_validation_coverage=validation_coverage,
+                reason_code="VALIDATION_FIX_GIT_DIFF_FAILED",
+                operation="git diff --cached",
+                result=fix_cached,
             )
             return ExecutionValidationResult(
                 stop=True,
@@ -1046,6 +1098,13 @@ async def run_validation_and_fix_cycle(
                     "executor.fix_pass_commit_failed",
                     workspace_id=workspace_id,
                     stderr=fix_commit.stderr[:400],
+                )
+                await _fail_fix_pass_git_command(
+                    current_validation_run_id=validation_run_id,
+                    current_validation_coverage=validation_coverage,
+                    reason_code="VALIDATION_FIX_GIT_COMMIT_FAILED",
+                    operation="git commit",
+                    result=fix_commit,
                 )
                 return ExecutionValidationResult(
                     stop=True,

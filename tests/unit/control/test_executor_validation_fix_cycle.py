@@ -179,6 +179,68 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
 
 
+async def _insert_pending_validate_operation(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    operation_id: str,
+) -> None:
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO operations (
+                    id,
+                    workspace_id,
+                    type,
+                    status,
+                    payload,
+                    created_at
+                )
+                VALUES (
+                    :operation_id,
+                    :workspace_id,
+                    'validate',
+                    'pending',
+                    '{"reason":"manual_validate"}',
+                    :created_at
+                )
+                """
+            ),
+            {
+                "operation_id": operation_id,
+                "workspace_id": workspace_id,
+                "created_at": datetime.now(UTC),
+            },
+        )
+        await session.commit()
+
+
+async def _fetch_operation(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    operation_id: str,
+) -> dict[str, object]:
+    async with factory() as session:
+        row = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT status, error_code, error_message, result
+                        FROM operations
+                        WHERE id = :operation_id
+                        """
+                    ),
+                    {"operation_id": operation_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
 class _CancelBeforeFixValidation:
     def __init__(
         self,
@@ -592,6 +654,66 @@ class TestFixCycleMissingWorktree:
         assert ws.failure_reason == "infrastructure_failure"
         assert "validation_fix_git_commit" in (ws.failure_message or "")
         assert fix_commit_calls == []
+
+
+class TestFixPassGitCommandFailures:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("failure_stage", "reason_code", "message_fragment"),
+        [
+            ("add", "VALIDATION_FIX_GIT_ADD_FAILED", "git add -A failed"),
+            ("diff", "VALIDATION_FIX_GIT_DIFF_FAILED", "git diff --cached failed"),
+            ("commit", "VALIDATION_FIX_GIT_COMMIT_FAILED", "git commit failed"),
+        ],
+    )
+    async def test_fix_pass_git_failure_fails_workspace_and_validate_operation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        failure_stage: str,
+        reason_code: str,
+        message_fragment: str,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        operation_id = f"op_validate_fix_git_{failure_stage}"
+        await _insert_pending_validate_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+        )
+
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+        fake.queue_result(returncode=0)  # adapter.run (fix pass)
+        if failure_stage == "add":
+            fake.queue_result(returncode=128, stderr="fatal: index.lock denied")
+        elif failure_stage == "diff":
+            fake.queue_result(returncode=0)  # git add -A
+            fake.queue_result(returncode=128, stderr="fatal: diff failed")
+        else:
+            fake.queue_result(returncode=0)  # git add -A
+            fake.queue_result(returncode=0, stdout="src/fix.py\n")  # diff --cached
+            fake.queue_result(returncode=1, stderr="pre-commit hook failed")  # git commit
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+        operation = await _fetch_operation(factory, operation_id=operation_id)
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert message_fragment in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == reason_code
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == reason_code
+        assert message_fragment in str(operation["error_message"] or "")
+        assert isinstance(operation["result"], dict)
+        assert operation["result"]["reason_code"] == reason_code
+        assert operation["result"]["validation_run_id"]
 
 
 class TestProtectedQualityGateChanges:
