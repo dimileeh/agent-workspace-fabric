@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,12 +29,10 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
-if TYPE_CHECKING:
-    from awf.service.controls import WorkspaceCleanerProtocol, WorkspaceStackStopError
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
-CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
+CleanerFactory = Callable[[], WorkspaceCleaner]
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
@@ -466,7 +464,7 @@ async def _finish_stack_stop_failed_operation(
     operation: Operation,
     *,
     workspace: Workspace,
-    exc: WorkspaceStackStopError,
+    exc: Exception,
 ) -> None:
     repo = WorkspaceRepository(session)
     operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
