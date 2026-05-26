@@ -47,3 +47,9 @@ class ExecutorConfig:
     planning_max_iterations_default: int = 3
     """Default plan-conformance remediation iterations when a profile omits
     planning.max_iterations. Explicit profile values win."""
+
+    def __post_init__(self) -> None:
+        if not self.worktrees_root.is_absolute():
+            raise ValueError("worktrees_root must be an absolute path")
+        if not self.compose_projects_root.is_absolute():
+            raise ValueError("compose_projects_root must be an absolute path")

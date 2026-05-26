@@ -27,7 +27,7 @@ def _dig(obj: Any, *keys: Any) -> Any:
         if cur is None:
             return None
         if isinstance(k, int):
-            if not isinstance(cur, list) or k >= len(cur):
+            if not isinstance(cur, list) or k < 0 or k >= len(cur):
                 return None
             cur = cur[k]
         else:
@@ -216,7 +216,11 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         url=_clean_optional_str(node.get("url")),
         created_at=submitted_at,
         updated_at=updated_at,
-        state=(node.get("state") or "").upper(),
+        state=(
+            raw_state.upper()
+            if isinstance(raw_state := node.get("state"), str)
+            else ""
+        ),
         source_kind="review",
         viewer_did_author=bool(node.get("viewerDidAuthor")),
     )
@@ -335,7 +339,7 @@ def _parse_github_datetime(value: Any) -> datetime | None:
 
 
 def _parse_mergeable(value: Any) -> MergeableState:
-    upper = (value or "").upper()
+    upper = value.upper() if isinstance(value, str) else ""
     if upper == "MERGEABLE":
         return MergeableState.MERGEABLE
     if upper == "CONFLICTING":
@@ -347,7 +351,7 @@ def _parse_merge_state_status(value: Any) -> MergeStateStatus:
     """GraphQL returns one of: CLEAN / BEHIND / DIRTY / BLOCKED / HAS_HOOKS
     / UNSTABLE / UNKNOWN. Default to UNKNOWN for anything we don't
     recognise — decide() treats UNKNOWN as "wait, don't act"."""
-    upper = (value or "").upper()
+    upper = value.upper() if isinstance(value, str) else ""
     try:
         return MergeStateStatus(upper)
     except ValueError:
