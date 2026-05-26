@@ -1218,6 +1218,72 @@
         "title": "HttpExceptionErrorResponse",
         "type": "object"
       },
+      "LocalCapacitySourceResponse": {
+        "properties": {
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "memory_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Gb"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "cpu_cores",
+          "memory_gb",
+          "source"
+        ],
+        "title": "LocalCapacitySourceResponse",
+        "type": "object"
+      },
       "MergeCandidateReadinessResponse": {
         "properties": {
           "completed": {
@@ -4626,6 +4692,10 @@
             "title": "Generated At",
             "type": "string"
           },
+          "local_capacity": {
+            "$ref": "#/components/schemas/LocalCapacitySourceResponse",
+            "description": "Local runtime capacity source used for reservation pressure reporting. For Docker-backed local AWF, this describes the Docker daemon capacity, not necessarily the host machine's physical capacity."
+          },
           "orphan_resources": {
             "$ref": "#/components/schemas/OrphanResourceSummaryResponse",
             "description": "Read-only orphan AWF Docker resource and worktree cleanup readiness."
@@ -4674,6 +4744,7 @@
           "generated_at",
           "workspace_counts",
           "worker",
+          "local_capacity",
           "resource_defaults",
           "reserved_resources",
           "capacity",
@@ -7792,6 +7863,17 @@
       },
       "WorkspaceLlmUsageSummaryResponse": {
         "properties": {
+          "cached_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cached Input Tokens"
+          },
           "cost_estimate": {
             "anyOf": [
               {
@@ -7847,6 +7929,17 @@
             ],
             "default": "usage_not_reported",
             "title": "Reason"
+          },
+          "reasoning_output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Output Tokens"
           },
           "source": {
             "default": "none",

@@ -66,7 +66,9 @@ export function fallbackLlmUsage(
   const hasReason = usage !== undefined && usage !== null && "reason" in usage;
   return {
     input_tokens: usage?.input_tokens ?? null,
+    cached_input_tokens: usage?.cached_input_tokens ?? null,
     output_tokens: usage?.output_tokens ?? null,
+    reasoning_output_tokens: usage?.reasoning_output_tokens ?? null,
     total_tokens: usage?.total_tokens ?? null,
     cost_estimate: usage?.cost_estimate ?? null,
     currency: usage?.currency ?? null,
@@ -143,7 +145,11 @@ export function formatCostWithPricing(
 
 export function pricingAvailabilityReason(
   pricing: PricingMetadata | null | undefined,
+  usage?: LlmUsageSummary | null,
 ): string | null {
+  if (usage?.cost_estimate !== null && usage?.cost_estimate !== undefined) {
+    return null;
+  }
   if (!pricing) {
     return "pricing not configured";
   }

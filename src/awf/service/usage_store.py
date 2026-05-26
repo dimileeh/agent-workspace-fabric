@@ -48,7 +48,9 @@ _PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
 }
 
 _INPUT_TOKEN_KEYS = ("inputTokens", "input_tokens")
+_CACHED_INPUT_TOKEN_KEYS = ("cachedInputTokens", "cached_input_tokens")
 _OUTPUT_TOKEN_KEYS = ("outputTokens", "output_tokens")
+_REASONING_OUTPUT_TOKEN_KEYS = ("reasoningOutputTokens", "reasoning_output_tokens")
 _TOTAL_TOKEN_KEYS = ("totalTokens", "total_tokens")
 _COST_KEYS = ("totalCost", "costUSD", "cost", "cost_estimate")
 
@@ -64,7 +66,9 @@ class NormalizedUsage:
     """Normalized token/cost accounting extracted from ccusage output."""
 
     input_tokens: int | None = None
+    cached_input_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
     total_tokens: int | None = None
     cost_estimate: float | None = None
     currency: str | None = None
@@ -73,7 +77,9 @@ class NormalizedUsage:
     def as_baseline_dict(self) -> dict[str, Any]:
         return {
             "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
             "output_tokens": self.output_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
             "total_tokens": self.total_tokens,
             "cost_estimate": self.cost_estimate,
             "currency": self.currency,
@@ -84,7 +90,9 @@ class NormalizedUsage:
     def from_baseline_dict(cls, data: dict[str, Any]) -> NormalizedUsage:
         return cls(
             input_tokens=data.get("input_tokens"),
+            cached_input_tokens=data.get("cached_input_tokens"),
             output_tokens=data.get("output_tokens"),
+            reasoning_output_tokens=data.get("reasoning_output_tokens"),
             total_tokens=data.get("total_tokens"),
             cost_estimate=data.get("cost_estimate"),
             currency=data.get("currency"),
@@ -119,23 +127,37 @@ def _first(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> Any:
 
 def _usage_from_record(record: dict[str, Any], *, model: str | None) -> NormalizedUsage | None:
     input_tokens = _first(record, _INPUT_TOKEN_KEYS, _coerce_int)
+    cached_input_tokens = _first(record, _CACHED_INPUT_TOKEN_KEYS, _coerce_int)
     output_tokens = _first(record, _OUTPUT_TOKEN_KEYS, _coerce_int)
+    reasoning_output_tokens = _first(record, _REASONING_OUTPUT_TOKEN_KEYS, _coerce_int)
     total_tokens = _first(record, _TOTAL_TOKEN_KEYS, _coerce_int)
-    cost_estimate = _first(record, _COST_KEYS, _coerce_float)
-    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
-        total_tokens = (input_tokens if input_tokens is not None else 0) + (
-            output_tokens if output_tokens is not None else 0
+    if total_tokens is None and (
+        input_tokens is not None
+        or cached_input_tokens is not None
+        or output_tokens is not None
+        or reasoning_output_tokens is not None
+    ):
+        output_component = output_tokens if output_tokens is not None else reasoning_output_tokens
+        total_tokens = (
+            (input_tokens if input_tokens is not None else 0)
+            + (cached_input_tokens if cached_input_tokens is not None else 0)
+            + (output_component if output_component is not None else 0)
         )
+    cost_estimate = _first(record, _COST_KEYS, _coerce_float)
     if (
         input_tokens is None
+        and cached_input_tokens is None
         and output_tokens is None
+        and reasoning_output_tokens is None
         and total_tokens is None
         and cost_estimate is None
     ):
         return None
     return NormalizedUsage(
         input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
         total_tokens=total_tokens,
         cost_estimate=cost_estimate,
         currency="USD" if cost_estimate is not None else None,
@@ -155,8 +177,16 @@ def _usage_from_daily(daily: list[Any], *, model: str | None) -> NormalizedUsage
         seen = True
         if usage.input_tokens is not None:
             totals["inputTokens"] = (totals.get("inputTokens", 0)) + usage.input_tokens
+        if usage.cached_input_tokens is not None:
+            totals["cachedInputTokens"] = (
+                totals.get("cachedInputTokens", 0) + usage.cached_input_tokens
+            )
         if usage.output_tokens is not None:
             totals["outputTokens"] = (totals.get("outputTokens", 0)) + usage.output_tokens
+        if usage.reasoning_output_tokens is not None:
+            totals["reasoningOutputTokens"] = (
+                totals.get("reasoningOutputTokens", 0) + usage.reasoning_output_tokens
+            )
         if usage.total_tokens is not None:
             totals["totalTokens"] = (totals.get("totalTokens", 0)) + usage.total_tokens
         if usage.cost_estimate is not None:
@@ -229,7 +259,12 @@ def subtract_baseline(
         return current
     return NormalizedUsage(
         input_tokens=_delta(current.input_tokens, baseline.input_tokens),
+        cached_input_tokens=_delta(current.cached_input_tokens, baseline.cached_input_tokens),
         output_tokens=_delta(current.output_tokens, baseline.output_tokens),
+        reasoning_output_tokens=_delta(
+            current.reasoning_output_tokens,
+            baseline.reasoning_output_tokens,
+        ),
         total_tokens=_delta(current.total_tokens, baseline.total_tokens),
         cost_estimate=_delta_float(current.cost_estimate, baseline.cost_estimate),
         currency=current.currency,
@@ -285,7 +320,9 @@ class UsageSnapshot:
     run_status: str | None = None
     model: str | None = None
     input_tokens: int | None = None
+    cached_input_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
     total_tokens: int | None = None
     cost_estimate: float | None = None
     currency: str | None = None
@@ -299,7 +336,9 @@ class UsageSnapshot:
             value is not None
             for value in (
                 self.input_tokens,
+                self.cached_input_tokens,
                 self.output_tokens,
+                self.reasoning_output_tokens,
                 self.total_tokens,
                 self.cost_estimate,
             )
@@ -319,7 +358,9 @@ class UsageSnapshot:
             "phase": self.phase,
             "captured_at": self.captured_at,
             "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
             "output_tokens": self.output_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
             "total_tokens": self.total_tokens,
             "cost_estimate": self.cost_estimate,
             "currency": self.currency,
@@ -342,7 +383,9 @@ class UsageSnapshot:
             run_status=_require_str(data.get("run_status")),
             model=_require_str(data.get("model")),
             input_tokens=_require_int(data.get("input_tokens")),
+            cached_input_tokens=_require_int(data.get("cached_input_tokens")),
             output_tokens=_require_int(data.get("output_tokens")),
+            reasoning_output_tokens=_require_int(data.get("reasoning_output_tokens")),
             total_tokens=_require_int(data.get("total_tokens")),
             cost_estimate=_require_float(data.get("cost_estimate")),
             currency=_require_str(data.get("currency")),

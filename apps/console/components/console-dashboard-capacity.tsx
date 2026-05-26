@@ -105,9 +105,14 @@ export function ResourceCapacityPanel({
       : saturation.allocated_capacity.pressure_reasons.length > 0
         ? saturation.allocated_capacity.pressure_reasons
         : saturation.capacity.pressure_reasons;
+  const runtimeCapacitySource = saturation ? localCapacitySourceLabel(saturation.local_capacity.source) : "";
+  const runtimeCapacityLimits = saturation ? localCapacityLimitLabel(saturation) : "";
+  const runtimeCapacityDetail = saturation
+    ? localCapacityDetail(saturation.local_capacity.source)
+    : "";
 
   return (
-    <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
+    <Panel title="Resource / Runtime Capacity" icon={<Server size={16} aria-hidden />}>
       {!saturation ? (
         <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
       ) : (
@@ -122,6 +127,15 @@ export function ResourceCapacityPanel({
               Unable to load workspace reliability metrics: {workspaceSummaryError}
             </div>
           ) : null}
+          <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-950">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold">Scheduler capacity source</span>
+              <span className="mono">{runtimeCapacitySource}</span>
+            </div>
+            <div className="mt-1 text-blue-900">
+              {runtimeCapacityDetail}: {runtimeCapacityLimits}.
+            </div>
+          </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
             <Fact
@@ -133,13 +147,13 @@ export function ResourceCapacityPanel({
               value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
             />
             <Fact
-              label="Reserved CPU"
+              label="Reserved runtime CPU"
               value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
                 saturation.reserved_resources.peak_cpu,
               )} peak`}
             />
             <Fact
-              label="Allocated CPU"
+              label="Allocated runtime CPU"
               value={`${formatScalar(saturation.allocated_resources.steady_cpu)} steady / ${formatScalar(
                 saturation.allocated_resources.peak_cpu,
               )} peak`}
@@ -173,8 +187,8 @@ export function ResourceCapacityPanel({
             <LaneMeter label="Execution" lane={saturation.concurrency.execution} />
           </div>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-            <ResourceDimensionMeter label="CPU peak" dimension={saturation.allocated_capacity.peak_cpu} unit="cores" />
-            <ResourceDimensionMeter label="Memory peak" dimension={saturation.allocated_capacity.peak_memory_gb} unit="gb" />
+            <ResourceDimensionMeter label="Runtime CPU peak" dimension={saturation.allocated_capacity.peak_cpu} unit="cores" />
+            <ResourceDimensionMeter label="Runtime memory peak" dimension={saturation.allocated_capacity.peak_memory_gb} unit="gb" />
             <ResourceDimensionMeter label="Disk" dimension={saturation.allocated_capacity.disk_mb} unit="mb" />
             <ResourceDimensionMeter label="DinD" dimension={saturation.allocated_capacity.dind_slots} unit="slots" />
           </div>
@@ -241,6 +255,47 @@ export function ResourceCapacityPanel({
       )}
     </Panel>
   );
+}
+
+function localCapacitySourceLabel(source: string | null): string {
+  if (source === "docker") {
+    return "Docker runtime";
+  }
+  if (source === "operator_config") {
+    return "operator config";
+  }
+  if (source === "mixed") {
+    return "mixed config/runtime";
+  }
+  return "runtime capacity";
+}
+
+function localCapacityLimitLabel(saturation: ResourceSaturationSummary): string {
+  const cpuLimit = saturation.local_capacity.cpu_cores ?? saturation.allocated_capacity.peak_cpu.limit;
+  const memoryLimit =
+    saturation.local_capacity.memory_gb ?? saturation.allocated_capacity.peak_memory_gb.limit;
+  const cpu =
+    cpuLimit !== null
+      ? `${formatScalar(cpuLimit)} cores`
+      : "CPU unknown";
+  const memory =
+    memoryLimit !== null
+      ? formatGb(memoryLimit)
+      : "memory unknown";
+  return `${cpu} / ${memory}`;
+}
+
+function localCapacityDetail(source: string | null): string {
+  if (source === "docker") {
+    return "Limits are read from Docker Desktop via docker info, so host hardware may be larger";
+  }
+  if (source === "operator_config") {
+    return "Limits are the AWF_LOCAL_CAPACITY_* operator overrides used by the scheduler";
+  }
+  if (source === "mixed") {
+    return "Limits combine AWF_LOCAL_CAPACITY_* overrides with Docker runtime detection";
+  }
+  return "Limits are the runtime capacity AWF reports for scheduling; host hardware may be larger";
 }
 
 export function MergeQueuePanel({

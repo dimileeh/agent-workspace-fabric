@@ -249,6 +249,16 @@ class WorkerConcurrencySettingsResponse(BaseModel):
     max_concurrent_executions: int
 
 
+class LocalCapacitySourceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    cpu_cores: float | None
+    memory_gb: float | None
+    source: str | None
+    reason_code: str | None = None
+    detail: str | None = None
+
+
 class WorkspaceResourceDefaultsResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -435,6 +445,13 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     worker: WorkerConcurrencySettingsResponse = Field(
         description="Configured local worker concurrency limits.",
+    )
+    local_capacity: LocalCapacitySourceResponse = Field(
+        description=(
+            "Local runtime capacity source used for reservation pressure reporting. "
+            "For Docker-backed local AWF, this describes the Docker daemon capacity, "
+            "not necessarily the host machine's physical capacity."
+        ),
     )
     resource_defaults: WorkspaceResourceDefaultsResponse = Field(
         description="Configured per-workspace steady and peak resource defaults.",

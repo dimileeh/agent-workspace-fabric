@@ -29,6 +29,7 @@ from awf.service.metrics_types import (
     FailedWorkspaceExample,
     FailureAction,
     FailureReasonGroup,
+    LocalCapacitySourceSummary,
     ProviderCircuitBreakerSummary,
     ProviderRecoveryStateSummary,
     ResourceConcurrency,
@@ -94,6 +95,30 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(
         WorkspaceStatus.destroyed.value,
     }
 )
+
+
+def _local_capacity_source_summary(
+    settings: Settings,
+    detected_local_capacity: LocalCapacityLimits | None,
+) -> LocalCapacitySourceSummary:
+    detected = detected_local_capacity or LocalCapacityLimits()
+    cpu_configured = settings.local_capacity_cpu_cores is not None
+    memory_configured = settings.local_capacity_memory_gb is not None
+    source: str | None
+    if cpu_configured and memory_configured:
+        source = "operator_config"
+    elif cpu_configured or memory_configured:
+        source = "mixed"
+    else:
+        source = detected.source
+    return LocalCapacitySourceSummary(
+        cpu_cores=(settings.local_capacity_cpu_cores if cpu_configured else detected.cpu_cores),
+        memory_gb=(settings.local_capacity_memory_gb if memory_configured else detected.memory_gb),
+        source=source,
+        reason_code=detected.reason_code,
+        detail=detected.detail,
+    )
+
 
 PROVISION_IN_USE_STATUSES = frozenset({WorkspaceStatus.provisioning.value})
 PROVISION_QUEUE_STATUSES = frozenset({WorkspaceStatus.requested.value})
@@ -335,6 +360,7 @@ async def summarize_resource_saturation_for_session(
         generated_at=generated_at,
         workspace_counts=workspace_counts,
         worker=worker,
+        local_capacity=_local_capacity_source_summary(settings, detected_local_capacity),
         resource_defaults=resource_defaults,
         reserved_resources=reserved_resources,
         capacity=capacity,

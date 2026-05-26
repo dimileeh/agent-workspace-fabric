@@ -89,6 +89,13 @@ export function fallbackResourceSaturation(
       max_concurrent_provisions: saturation.worker?.max_concurrent_provisions ?? 0,
       max_concurrent_executions: saturation.worker?.max_concurrent_executions ?? 0,
     },
+    local_capacity: {
+      cpu_cores: saturation.local_capacity?.cpu_cores ?? null,
+      memory_gb: saturation.local_capacity?.memory_gb ?? null,
+      source: saturation.local_capacity?.source ?? null,
+      reason_code: saturation.local_capacity?.reason_code ?? null,
+      detail: saturation.local_capacity?.detail ?? null,
+    },
     resource_defaults: {
       steady_cpu: saturation.resource_defaults?.steady_cpu ?? 0,
       steady_memory_gb: saturation.resource_defaults?.steady_memory_gb ?? 0,
@@ -420,7 +427,7 @@ export function formatScalar(value: number): string {
 }
 
 export function formatGb(value: number): string {
-  return `${formatScalar(value)} GB`;
+  return `${formatScalar(value)} GiB`;
 }
 
 export function formatCapacityValue(value: number | null, unit: CapacityUnit): string {

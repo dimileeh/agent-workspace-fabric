@@ -192,6 +192,9 @@ async def test_resource_saturation_reports_reserved_disk_dind_and_available_capa
 
     assert legacy_workspace_id
     assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.local_capacity.cpu_cores == 24.0
+    assert summary.local_capacity.memory_gb == 96.0
+    assert summary.local_capacity.source == "operator_config"
     assert summary.reserved_resources.steady_cpu == 7.0
     assert summary.reserved_resources.peak_cpu == 14.0
     assert summary.reserved_resources.steady_memory_gb == 22.0

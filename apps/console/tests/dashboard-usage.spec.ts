@@ -16,7 +16,18 @@ function llmUsageFor(usage: UsageKind) {
     case "available":
       return { status: "available", input_tokens: 10, output_tokens: 20, total_tokens: 30, cost_estimate: 0.05, currency: "USD", source: "mock", reason: null };
     case "ccusage":
-      return { status: "available", input_tokens: 111, output_tokens: 222, total_tokens: 333, cost_estimate: null, currency: null, source: "ccusage", reason: null };
+      return {
+        status: "available",
+        input_tokens: 111,
+        cached_input_tokens: 900,
+        output_tokens: 222,
+        reasoning_output_tokens: 77,
+        total_tokens: 1233,
+        cost_estimate: 0.0123,
+        currency: "USD",
+        source: "ccusage",
+        reason: null,
+      };
     case "ccusage_timeout":
       return { status: "unavailable", input_tokens: null, output_tokens: null, total_tokens: null, cost_estimate: null, currency: null, source: "ccusage", reason: "ccusage_timeout" };
     default:
@@ -80,7 +91,11 @@ test("dashboard renders ccusage-backed totals and source label", async ({ page }
   // which would otherwise trip strict-mode on a substring match for "ccusage".
   const usageBlock = page.getByTestId("llm-usage");
   await expect(usageBlock).toBeVisible();
-  await expect(usageBlock.getByText("333", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("900", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("77", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("1,233", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("$0.0123", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("pricing not configured", { exact: false })).not.toBeVisible();
   // The ccusage source is surfaced as a friendly provenance label.
   await expect(usageBlock.getByText("ccusage", { exact: false })).toBeVisible();
 });

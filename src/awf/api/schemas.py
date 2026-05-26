@@ -447,7 +447,9 @@ class WorkspaceLifecycleStageResponse(BaseModel):
 
 class WorkspaceLlmUsageSummaryResponse(BaseModel):
     input_tokens: int | None = None
+    cached_input_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
     total_tokens: int | None = None
     cost_estimate: float | None = None
     currency: str | None = None

@@ -412,7 +412,9 @@ def test_usage_payload_surfaces_reported_cost_when_pricing_absent() -> None:
     # dropped behind a pricing_not_configured reason.
     usage = LlmUsageSummary(
         input_tokens=10,
+        cached_input_tokens=90,
         output_tokens=20,
+        reasoning_output_tokens=7,
         total_tokens=30,
         cost_estimate=0.05,
         currency="USD",
@@ -436,6 +438,8 @@ def test_usage_payload_surfaces_reported_cost_when_pricing_absent() -> None:
     assert result["status"] == "available"
     assert result["reason"] is None
     assert result["source"] == "ccusage"
+    assert result["cached_input_tokens"] == 90
+    assert result["reasoning_output_tokens"] == 7
 
 
 @pytest.mark.unit

@@ -360,7 +360,9 @@ def _assert_effective_identity(
 def _assert_usage_unavailable(row: dict[str, Any]) -> None:
     assert row["llm_usage"] == {
         "input_tokens": None,
+        "cached_input_tokens": None,
         "output_tokens": None,
+        "reasoning_output_tokens": None,
         "total_tokens": None,
         "cost_estimate": None,
         "currency": None,

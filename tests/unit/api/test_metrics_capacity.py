@@ -311,7 +311,15 @@ async def test_resource_saturation_endpoint_uses_detected_docker_capacity_when_u
     response = await client.get("/v1/metrics/resources/saturation")
 
     assert response.status_code == 200
-    capacity = response.json()["capacity"]
+    body = response.json()
+    assert body["local_capacity"] == {
+        "cpu_cores": 8.0,
+        "memory_gb": 24.0,
+        "source": "docker",
+        "reason_code": None,
+        "detail": None,
+    }
+    capacity = body["capacity"]
     assert capacity["peak_cpu"] == {
         "limit": 8.0,
         "reserved": 6.0,
@@ -465,6 +473,13 @@ async def test_resource_saturation_endpoint_reports_allocated_capacity_and_queue
 
     assert response.status_code == 200
     body = response.json()
+    assert body["local_capacity"] == {
+        "cpu_cores": 8.0,
+        "memory_gb": 24.0,
+        "source": "operator_config",
+        "reason_code": None,
+        "detail": None,
+    }
     assert body["reserved_resources"]["active_workspace_count"] == 2
     assert body["allocated_resources"] == {
         "active_workspace_count": 1,
