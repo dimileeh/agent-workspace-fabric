@@ -425,6 +425,13 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
     assert body["admission"]["ok"] is True
     assert body["admission"]["status"] == "saturated"
     assert body["admission"]["reason"] == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+    assert body["local_capacity"] == {
+        "cpu_cores": None,
+        "memory_gb": None,
+        "source": None,
+        "reason_code": None,
+        "detail": None,
+    }
 
 
 @pytest.mark.unit
