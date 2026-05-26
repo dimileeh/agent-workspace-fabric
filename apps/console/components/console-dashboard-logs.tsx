@@ -249,9 +249,9 @@ export function WorkspaceLogColumn({
   const [offsets, setOffsets] = useState<Record<string, number>>({});
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const previousTailSignal = useRef(tailSignal);
   const streamActivityRef = useRef<LogStreamActivityMap>({});
+  const previousTailSelection = useRef("");
 
   const selectedStreamMetas = useMemo(
     () => streams.filter((stream) => selectedStreams.includes(stream.stream_id)),
@@ -301,7 +301,6 @@ export function WorkspaceLogColumn({
   }, [selectedStreams, streams, workspace.workspace_id]);
 
   const loadStreams = useCallback(async () => {
-    setLoading(true);
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
       `/api/awf/workspaces/${workspace.workspace_id}/logs`,
     );
@@ -309,7 +308,6 @@ export function WorkspaceLogColumn({
       setError(result.message);
       setStreams([]);
       setSelectedStreams([]);
-      setLoading(false);
       return;
     }
     setError(null);
@@ -320,7 +318,6 @@ export function WorkspaceLogColumn({
     );
     setStreams(result.data.items);
     setSelectedStreams((current) => pickWorkspaceLogStreams(result.data.items, current));
-    setLoading(false);
   }, [workspace.workspace_id]);
 
   useEffect(() => {
@@ -330,10 +327,16 @@ export function WorkspaceLogColumn({
   }, [loadStreams]);
 
   useEffect(() => {
-    if (!loading) {
-      void loadSelectedTails();
+    const selection = selectedStreams.join(",");
+    if (!selection) {
+      return;
     }
-  }, [loadSelectedTails, loading]);
+    if (previousTailSelection.current === selection) {
+      return;
+    }
+    previousTailSelection.current = selection;
+    void loadSelectedTails();
+  }, [loadSelectedTails, selectedStreams]);
 
   useEffect(() => {
     if (previousTailSignal.current === tailSignal) {
