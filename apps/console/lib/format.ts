@@ -124,34 +124,33 @@ export function formatCostWithPricing(
   if (cost === null || cost === undefined) {
     return "—";
   }
-  if (pricing && !pricing.is_current) {
-    return "—";
-  }
   const c = currency || pricing?.currency || "USD";
+  let formatted: string;
   try {
-    return new Intl.NumberFormat(undefined, {
+    formatted = new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: c,
       minimumFractionDigits: 4,
       maximumFractionDigits: 4,
     }).format(cost);
   } catch {
-    return new Intl.NumberFormat(undefined, {
+    formatted = new Intl.NumberFormat(undefined, {
       minimumFractionDigits: 4,
       maximumFractionDigits: 4,
     }).format(cost);
   }
+  if (pricing && !pricing.is_current) {
+    return `${formatted} (stale pricing)`;
+  }
+  return formatted;
 }
 
 export function pricingAvailabilityReason(
   pricing: PricingMetadata | null | undefined,
   usage?: LlmUsageSummary | null,
 ): string | null {
-  if (usage?.cost_estimate !== null && usage?.cost_estimate !== undefined) {
-    return null;
-  }
   if (!pricing) {
-    return "pricing not configured";
+    return usage?.cost_estimate == null ? "pricing not configured" : null;
   }
   if (!pricing.is_current) {
     return "pricing stale";
