@@ -275,11 +275,11 @@ function localCapacityLimitLabel(saturation: ResourceSaturationSummary): string 
   const memoryLimit =
     saturation.local_capacity.memory_gb ?? saturation.allocated_capacity.peak_memory_gb.limit;
   const cpu =
-    cpuLimit !== null
-      ? `${formatScalar(cpuLimit)} cores`
+    cpuLimit != null
+      ? formatScalar(cpuLimit) + " cores"
       : "CPU unknown";
   const memory =
-    memoryLimit !== null
+    memoryLimit != null
       ? formatGb(memoryLimit)
       : "memory unknown";
   return `${cpu} / ${memory}`;
