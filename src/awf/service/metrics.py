@@ -12,7 +12,7 @@ from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
-from awf.db.enums import FailureReason, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -419,11 +419,6 @@ async def _cluster_root_causes(
         )
         for k, wids in clusters.items()
     ]
-
-
-_RECOVERY_OPERATION_TYPES = frozenset(
-    {OperationType.remonitor.value, OperationType.rebase.value, OperationType.retry.value}
-)
 
 
 from awf.service.metrics_capacity import (  # noqa: E402

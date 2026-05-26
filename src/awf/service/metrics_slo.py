@@ -13,7 +13,6 @@ from sqlalchemy.sql import expression
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
-from awf.service.metrics import _RECOVERY_OPERATION_TYPES
 from awf.service.metrics_types import (
     FailureAction,
     SloMetricsSummary,
@@ -126,6 +125,13 @@ _FAILURE_ACTIONS: dict[str, FailureAction] = {
     ),
 }
 _KNOWN_FAILURE_REASONS = frozenset(reason.value for reason in FailureReason)
+_RECOVERY_OPERATION_TYPES = frozenset(
+    {
+        OperationType.remonitor.value,
+        OperationType.rebase.value,
+        OperationType.retry.value,
+    }
+)
 
 
 async def summarize_slo_metrics(
