@@ -140,7 +140,7 @@ export function formatCostWithPricing(
       maximumFractionDigits: 4,
     }).format(cost);
   }
-  if (pricing && !pricing.is_current && source !== "ccusage") {
+  if (pricing && !pricing.is_current && source !== "ccusage" && source !== "operations") {
     return `${formatted} (stale pricing)`;
   }
   return formatted;
