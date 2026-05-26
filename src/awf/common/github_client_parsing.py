@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from awf.common.github_client import _FetchedReview
 from awf.runtime.pr_monitor import (
     CheckState,
     CheckTiming,
@@ -17,6 +16,9 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
 )
 
+if TYPE_CHECKING:
+    from awf.common.github_client import _FetchedReview
+
 
 def _dig(obj: Any, *keys: Any) -> Any:
     """Like ``obj.get(k1, {}).get(k2, {}) ...`` but survives lists + None."""
@@ -25,7 +27,7 @@ def _dig(obj: Any, *keys: Any) -> Any:
         if cur is None:
             return None
         if isinstance(k, int):
-            if not isinstance(cur, list) or k >= len(cur):
+            if not isinstance(cur, list) or k < 0 or k >= len(cur):
                 return None
             cur = cur[k]
         else:
@@ -195,6 +197,8 @@ def _quiet_period_anchor(
 
 def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _FetchedReview:
     """Normalize one GraphQL review node for blocking-review evaluation."""
+    from awf.common.github_client import _FetchedReview
+
     raw_body = node.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     body_excerpt = body[:400] if body.strip() else ""
@@ -212,7 +216,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         url=_clean_optional_str(node.get("url")),
         created_at=submitted_at,
         updated_at=updated_at,
-        state=(node.get("state") or "").upper(),
+        state=(raw_state.upper() if isinstance(raw_state := node.get("state"), str) else ""),
         source_kind="review",
         viewer_did_author=bool(node.get("viewerDidAuthor")),
     )
@@ -331,7 +335,7 @@ def _parse_github_datetime(value: Any) -> datetime | None:
 
 
 def _parse_mergeable(value: Any) -> MergeableState:
-    upper = (value or "").upper()
+    upper = value.upper() if isinstance(value, str) else ""
     if upper == "MERGEABLE":
         return MergeableState.MERGEABLE
     if upper == "CONFLICTING":
@@ -343,7 +347,7 @@ def _parse_merge_state_status(value: Any) -> MergeStateStatus:
     """GraphQL returns one of: CLEAN / BEHIND / DIRTY / BLOCKED / HAS_HOOKS
     / UNSTABLE / UNKNOWN. Default to UNKNOWN for anything we don't
     recognise — decide() treats UNKNOWN as "wait, don't act"."""
-    upper = (value or "").upper()
+    upper = value.upper() if isinstance(value, str) else ""
     try:
         return MergeStateStatus(upper)
     except ValueError:

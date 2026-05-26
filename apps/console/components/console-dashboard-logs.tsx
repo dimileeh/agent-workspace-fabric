@@ -11,6 +11,7 @@ X
 import {
 useCallback,
 useEffect,
+useId,
 useLayoutEffect,
 useMemo,
 useRef,
@@ -148,6 +149,9 @@ export function MultiWorkspaceLogsFullscreen({
   onRemoveWorkspace: (workspaceId: string) => void;
   onClose: () => void;
 }) {
+  const dialogTitleId = useId();
+  const dialogDescriptionId = useId();
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -164,15 +168,23 @@ export function MultiWorkspaceLogsFullscreen({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/40 p-3 md:p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={dialogTitleId}
+      aria-describedby={dialogDescriptionId}
+      className="fixed inset-0 z-50 bg-slate-950/40 p-3 md:p-4"
+    >
       <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-3">
           <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
+            <h2 id={dialogTitleId} className="flex items-center gap-2 text-sm font-semibold">
               <Terminal size={16} aria-hidden />
               Logs
             </h2>
-            <p className="text-[11px] text-slate-500">{workspaces.length} workspace columns</p>
+            <p id={dialogDescriptionId} className="text-[11px] text-slate-500">
+              {workspaces.length} workspace columns
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -375,7 +387,10 @@ export function WorkspaceLogColumn({
         );
         setOffsets((current) => ({
           ...current,
-          [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
+          [frame.stream_id]: Math.max(
+            current[frame.stream_id] ?? 0,
+            frame.next_offset ?? frame.offset,
+          ),
         }));
         return;
       }

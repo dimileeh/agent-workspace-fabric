@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +15,19 @@ if TYPE_CHECKING:
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
+from awf.control.executor.constants import (
+    _AWF_RUFF_CHECK_HOOK_ID,
+    _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
+    _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS,
+    _PRE_COMMIT_FIXING_PATH_PATTERN,
+    _PRE_COMMIT_HOOK_ID_PATTERN,
+    _PRE_COMMIT_WOULD_REFORMAT_PATTERN,
+    _RUFF_DIAGNOSTIC_PATH_PATTERN,
+    _RUFF_DIAGNOSTIC_PATTERN,
+    POST_AGENT_COMMIT_FAILED_REASON_CODE,
+    POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+)
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
@@ -24,25 +36,6 @@ from awf.db.enums import FailureReason
 from awf.runtime.validation import ValidationCoverageResult
 
 _log = get_logger(__name__)
-
-_AWF_RUFF_FORMAT_CHECK_HOOK_ID = "awf-ruff-format-check"
-_AWF_RUFF_CHECK_HOOK_ID = "awf-ruff-check"
-_PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS = frozenset(
-    {
-        "trailing-whitespace",
-        "end-of-file-fixer",
-        _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
-    }
-)
-_PRE_COMMIT_HOOK_ID_PATTERN = re.compile(r"^-\s*hook id:\s*(?P<hook_id>\S+)", re.MULTILINE)
-_PRE_COMMIT_WOULD_REFORMAT_PATTERN = re.compile(r"^Would reformat:\s*(?P<path>\S.*)$", re.MULTILINE)
-_PRE_COMMIT_FIXING_PATH_PATTERN = re.compile(r"^Fixing\s+(?P<path>\S.*)$", re.MULTILINE)
-_RUFF_DIAGNOSTIC_PATTERN = re.compile(r"^\s*[A-Z]+[0-9]+\s*(?P<fixable>\[\*\])?")
-_RUFF_DIAGNOSTIC_PATH_PATTERN = re.compile(r"^\s*-->\s+(?P<path>.+?):\d+:\d+")
-PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
-POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE = "POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED"
-POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_PRECOMMIT_FAILED"
-POST_AGENT_COMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_FAILED"
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,12 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.git_identity import (
+    git_identity_config_args,
+    git_safe_directory_config_args,
+)
 from awf.control.executor.constants import (
+    PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
@@ -33,7 +38,6 @@ from awf.control.executor.helpers import (
     _validation_tier_for_workspace,
 )
 from awf.control.executor.quality_gates import (
-    PLAN_CONFORMANCE_UNSATISFIED,
     _log,
     _post_validation_conformance_agent_failure_details,
     _post_validation_conformance_agent_failure_message,
@@ -235,6 +239,7 @@ async def run_validation_and_fix_cycle(
                 has_known_non_plan_output=has_known_non_plan_output,
             )
         except Exception as exc:
+            message = f"unexpected error during validation run: {exc!r}"[:2000]
             _log.exception(
                 "executor.validation_run_unexpected_failed",
                 workspace_id=workspace_id,
@@ -256,11 +261,19 @@ async def run_validation_and_fix_cycle(
                 status="failed",
                 reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
             )
+            await self._finish_pending_validate_operations(
+                workspace_id=workspace_id,
+                status=OperationStatus.failed,
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+                reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                error_message=message,
+            )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"unexpected error during validation run: {exc!r}"[:2000],
+                message=message,
                 reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
             )
             return ExecutionValidationResult(
@@ -860,6 +873,12 @@ async def run_validation_and_fix_cycle(
                 workspace_id=workspace_id,
                 stderr=fix_add.stderr[:400],
             )
+            return ExecutionValidationResult(
+                stop=True,
+                successful_validation_run_id=successful_validation_run_id,
+                successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
         if not await self._ensure_worktree_available(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
@@ -875,6 +894,18 @@ async def run_validation_and_fix_cycle(
                 has_known_non_plan_output=has_known_non_plan_output,
             )
         fix_cached = await git_in_worktree(["diff", "--cached", "--name-only"])
+        if not fix_cached.ok:
+            _log.warning(
+                "executor.fix_pass_diff_failed",
+                workspace_id=workspace_id,
+                stderr=fix_cached.stderr[:400],
+            )
+            return ExecutionValidationResult(
+                stop=True,
+                successful_validation_run_id=successful_validation_run_id,
+                successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                has_known_non_plan_output=has_known_non_plan_output,
+            )
         fix_staged_paths = _git_name_lines(fix_cached.stdout) if fix_cached.stdout.strip() else []
         supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
             workspace_id=workspace_id,
@@ -994,8 +1025,10 @@ async def run_validation_and_fix_cycle(
             fix_commit = await self._runner.run(
                 [
                     "git",
+                    *git_safe_directory_config_args(worktree_path),
                     "-C",
                     str(worktree_path),
+                    *git_identity_config_args(),
                     "commit",
                     "-m",
                     commit_msg,
@@ -1013,6 +1046,12 @@ async def run_validation_and_fix_cycle(
                     "executor.fix_pass_commit_failed",
                     workspace_id=workspace_id,
                     stderr=fix_commit.stderr[:400],
+                )
+                return ExecutionValidationResult(
+                    stop=True,
+                    successful_validation_run_id=successful_validation_run_id,
+                    successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                    has_known_non_plan_output=has_known_non_plan_output,
                 )
         # Loop back to re-validate.
 

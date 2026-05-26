@@ -867,6 +867,31 @@ def test_validation_run_command_records_include_alembic_policy_before_healthchec
     }
 
 
+def test_validation_run_command_records_skips_alembic_policy_if_validation_alembic_is_none() -> (
+    None
+):
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-alembic-none",
+            "phases": {"validate": ["pytest -q"]},
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+    profile.validation.alembic = None  # type: ignore[assignment]
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=False,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("validate", 1),
+    ]
+
+
 @pytest.mark.unit
 def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> None:
     profile = WorkspaceProfile.model_validate(

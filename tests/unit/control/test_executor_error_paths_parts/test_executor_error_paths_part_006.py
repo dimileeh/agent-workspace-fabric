@@ -37,6 +37,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import monitor_handoff as executor_monitor_handoff
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, WorkspaceEvent
 from awf.db.repositories import (
@@ -1056,6 +1057,48 @@ class TestExecutorCoverageEdgesPart002:
                 for event in ws.events
                 if event.event_type == "workspace.monitor_runtime_restart_failed"
             ]
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_passes_timeouts_to_adapter(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        captured: dict[str, Any] = {}
+
+        def _get_adapter(_runtime: AgentRuntime, **kwargs: Any) -> object:
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(executor_monitor_handoff, "get_adapter", _get_adapter)
+
+        monitor_calls: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+        await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert captured["agent_wall_timeout_seconds"] == executor._config.agent_wall_timeout_seconds
+        assert captured["agent_idle_timeout_seconds"] == executor._config.agent_idle_timeout_seconds
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(

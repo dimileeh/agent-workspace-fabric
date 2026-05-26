@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +29,21 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
-from awf.service.controls import WorkspaceCleanerProtocol, WorkspaceStackStopError
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
-CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
+CleanerFactory = Callable[[], WorkspaceCleaner]
+
+
+class _WorkspaceStackStopErrorLike(Protocol):
+    operation: str
+    returncode: int
+    stdout: str
+    stderr: str
+    message: str
+    error_code: str
+
+
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
@@ -92,6 +102,8 @@ async def stop_project_containers(compose_project_name: str | None) -> None:
 
 
 async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Process:
+    from awf.service.controls import WorkspaceStackStopError
+
     try:
         return await asyncio.create_subprocess_exec(
             "docker",
@@ -120,6 +132,8 @@ async def _communicate(
     *,
     operation: str,
 ) -> tuple[str, str]:
+    from awf.service.controls import WorkspaceStackStopError
+
     stdout_bytes, stderr_bytes = await proc.communicate()
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -461,7 +475,7 @@ async def _finish_stack_stop_failed_operation(
     operation: Operation,
     *,
     workspace: Workspace,
-    exc: WorkspaceStackStopError,
+    exc: _WorkspaceStackStopErrorLike,
 ) -> None:
     repo = WorkspaceRepository(session)
     operation_payload = operation.payload if isinstance(operation.payload, dict) else {}

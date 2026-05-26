@@ -119,28 +119,27 @@ async def _recover_missing_head_from_filesystem(
     diff = await worktree_git(["diff", "--cached", "--quiet"])
     if diff.returncode not in {0, 1}:
         return None
-    if diff.returncode == 0:
-        return None
-    commit = await runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            *git_identity_config_args(),
-            "commit",
-            "-m",
-            f"awf: recover {workspace_id} from missing git object"[:72],
-            "-m",
-            (
-                f"AWF recovered workspace {workspace_id} after HEAD pointed at "
-                "a commit object missing from the canonical mirror. The commit "
-                f"squashes the workspace filesystem state onto base {base_commit[:10]}."
-            ),
-        ]
-    )
-    if not commit.ok:
-        return None
+    if diff.returncode == 1:
+        commit = await runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                f"awf: recover {workspace_id} from missing git object"[:72],
+                "-m",
+                (
+                    f"AWF recovered workspace {workspace_id} after HEAD pointed at "
+                    "a commit object missing from the canonical mirror. The commit "
+                    f"squashes the workspace filesystem state onto base {base_commit[:10]}."
+                ),
+            ]
+        )
+        if not commit.ok:
+            return None
     await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
     head = await worktree_git(["rev-parse", "HEAD"])
     recovered_head_sha = head.stdout.strip()
@@ -228,6 +227,7 @@ async def _prepare_conformance_salvage_for_execution(
 
     patch_path_value = salvage.get("patch_path")
     expected_sha = salvage.get("patch_sha256")
+    salvage_artifacts_dir = executor._config.compose_projects_root.parent / "artifacts" / "salvage"
     if not isinstance(patch_path_value, str) or not patch_path_value.strip():
         return await executor._fail_conformance_salvage_execution(
             workspace_id=workspace_id,
@@ -243,7 +243,26 @@ async def _prepare_conformance_salvage_for_execution(
             salvage=salvage,
         )
 
-    patch_path = Path(patch_path_value)
+    try:
+        patch_path = Path(patch_path_value).resolve()
+        if not patch_path.is_relative_to(salvage_artifacts_dir):
+            return await executor._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message=(
+                    "conformance salvage patch path is outside managed artifact directory: "
+                    f"{patch_path}"
+                ),
+                salvage=salvage,
+            )
+    except OSError as exc:
+        return await executor._fail_conformance_salvage_execution(
+            workspace_id=workspace_id,
+            reason_code=SALVAGE_PATCH_UNAVAILABLE,
+            message=f"conformance salvage patch path is unavailable: {exc}",
+            salvage=salvage,
+        )
+
     if not patch_path.is_file():
         return await executor._fail_conformance_salvage_execution(
             workspace_id=workspace_id,
@@ -252,7 +271,15 @@ async def _prepare_conformance_salvage_for_execution(
             salvage=salvage,
         )
 
-    patch_bytes = patch_path.read_bytes()
+    try:
+        patch_bytes = patch_path.read_bytes()
+    except OSError as exc:
+        return await executor._fail_conformance_salvage_execution(
+            workspace_id=workspace_id,
+            reason_code=SALVAGE_PATCH_UNAVAILABLE,
+            message=f"conformance salvage patch is unavailable: {exc}",
+            salvage=salvage,
+        )
     actual_sha = hashlib.sha256(patch_bytes).hexdigest()
     if actual_sha != expected_sha:
         return await executor._fail_conformance_salvage_execution(
@@ -276,9 +303,25 @@ async def _prepare_conformance_salvage_for_execution(
             ]
         )
 
-    check = await git(["apply", "--check", str(patch_path)])
+    try:
+        check = await git(["apply", "--check", str(patch_path)])
+    except OSError as exc:
+        return await executor._fail_conformance_salvage_execution(
+            workspace_id=workspace_id,
+            reason_code=SALVAGE_PATCH_UNAVAILABLE,
+            message=f"conformance salvage patch is unavailable: {exc}",
+            salvage=salvage,
+        )
     if check.ok:
-        applied = await git(["apply", str(patch_path)])
+        try:
+            applied = await git(["apply", str(patch_path)])
+        except OSError as exc:
+            return await executor._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message=f"conformance salvage patch is unavailable: {exc}",
+                salvage=salvage,
+            )
         if not applied.ok:
             return await executor._fail_conformance_salvage_execution(
                 workspace_id=workspace_id,

@@ -145,7 +145,7 @@ def _first_str(*sources: dict[str, Any], key: str) -> str | None:
 def _first_int(*sources: dict[str, Any], key: str) -> int | None:
     for source in sources:
         value = source.get(key)
-        if isinstance(value, int):
+        if type(value) is int:
             return value
     return None
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import Final, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +14,32 @@ from sqlalchemy.orm import selectinload
 
 from awf.db.models import MergeCandidate, Workspace
 from awf.db.repositories import owned_paths_overlap
-from awf.service.supply_chain_policy import _LOCKFILE_NAMES, _URL_CREDENTIAL_PATTERN, PolicySeverity
+
+PolicySeverity = Literal["warning", "blocking"]
+
+_LOCKFILE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "poetry.lock",
+        "uv.lock",
+        "Pipfile.lock",
+        "Cargo.lock",
+        "go.sum",
+        "composer.lock",
+        "Gemfile.lock",
+        "mix.lock",
+        "gradle.lockfile",
+        "packages.lock.json",
+    }
+)
+_URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(https?://)[^/@\\s]+(?::[^/@\\s]+)?@"
+)
 
 
 def _command_token_segments(

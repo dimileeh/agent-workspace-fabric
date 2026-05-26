@@ -522,8 +522,24 @@ def _queue_already_synced_rebase_recovery(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0)  # git fetch origin <base>
     fake.queue_result(returncode=0)  # git switch <branch>
     fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(
+        returncode=0
+    )  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
     fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
     fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
+
+
+def _queue_synced_base_local_missing_remote_check(fake: FakeCommandRunner) -> None:
+    fake.queue_result(returncode=0)  # git fetch origin <base>
+    fake.queue_result(returncode=0)  # git switch <branch>
+    fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(
+        returncode=1
+    )  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
+    fake.queue_result(returncode=0)  # git rebase origin/<base>
+    fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
+    fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0)  # git push --force-with-lease
 
 
 def _all_adapter_args(fake: FakeCommandRunner) -> list[list[str]]:
@@ -655,6 +671,38 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
         "pushed": False,
         "rebased": False,
     }
+
+
+@pytest.mark.unit
+async def test_rebase_only_recovery_rebases_when_remote_pr_branch_needs_push(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
+
+    _queue_synced_base_local_missing_remote_check(fake)
+    result = await executor._run_monitor_rebase_recovery(
+        workspace_id=ws_id,
+        worktree_path=_test_worktrees_root(factory) / ws_id,
+        base_branch="development",
+        branch_name=f"awf/{ws_id}",
+        remote_branch=f"awf/{ws_id}",
+        reason="validation_insufficient_tier",
+        recovery_payload={
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+            "pr_number": 1,
+            "source_base_sha": "a" * 40,
+            "source_head_sha": "d" * 40,
+        },
+    )
+
+    assert result.base_sha == "b" * 40
+    assert result.head_sha == "c" * 40
+    git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
+    assert any("rebase" in call and "origin/development" in call for call in git_calls)
+    assert any("push" in call and "--force-with-lease" in call for call in git_calls)
 
 
 @pytest.mark.unit

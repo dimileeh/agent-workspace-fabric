@@ -129,6 +129,8 @@ def upgrade() -> None:
     # transaction. Keep the data backfill transactional above, then release the
     # transaction before building the read-path index without blocking writers.
     with op.get_context().autocommit_block():
+        op.execute(sa.text("SET lock_timeout = '30s'"))
+        op.execute(sa.text("SET statement_timeout = '10min'"))
         op.execute(
             sa.text(
                 "SELECT pg_advisory_lock("
@@ -137,8 +139,27 @@ def upgrade() -> None:
             )
         )
         try:
-            op.execute(sa.text("SET lock_timeout = '30s'"))
-            op.execute(sa.text("SET statement_timeout = '10min'"))
+            bind = op.get_bind()
+            invalid_index = bind.execute(
+                sa.text(
+                    """
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_index i ON i.indexrelid = c.oid
+                    WHERE c.relname = :index_name
+                      AND pg_catalog.pg_table_is_visible(c.oid)
+                      AND NOT i.indisvalid
+                    LIMIT 1
+                    """
+                ),
+                {"index_name": "ix_workspace_events_workspace_occurred_order"},
+            ).scalar_one_or_none()
+            if invalid_index is not None:
+                op.execute(
+                    sa.text(
+                        'DROP INDEX CONCURRENTLY "ix_workspace_events_workspace_occurred_order"'
+                    )
+                )
             op.create_index(
                 "ix_workspace_events_workspace_occurred_order",
                 "workspace_events",

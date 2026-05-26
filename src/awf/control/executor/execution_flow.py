@@ -714,7 +714,16 @@ async def execute(
                     classification=None,
                 )
             cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
-            staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+            if not cached.ok:
+                _log.warning(
+                    "executor.post_agent_cached_diff_failed",
+                    workspace_id=workspace_id,
+                    reason="git diff --cached --name-only failed; assuming no staged paths for policy checks",
+                    stderr=cached.stderr,
+                )
+                staged_paths = []
+            else:
+                staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
             supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
                 workspace_id=workspace_id,
                 command_evidence=agent_command_evidence,
@@ -826,7 +835,12 @@ async def execute(
             # Regardless of whether we just committed, verify HEAD has advanced
             # past the base commit. If not, the agent produced no change.
             rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
-            if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
+            if not rev_count.ok:
+                raise RuntimeError(
+                    f"post-agent commit: `git rev-list --count {base_commit}..HEAD` failed with "
+                    f"exit {rev_count.returncode}: {rev_count.stderr!r}"
+                )
+            if int(rev_count.stdout.strip() or "0") == 0:
                 base_short = base_commit[:10] if base_commit else "unknown"
                 message = (
                     f"agent exited without producing any commits on the feature branch "

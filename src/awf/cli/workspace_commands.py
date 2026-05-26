@@ -54,8 +54,8 @@ def workspace_create(
             "and 'main' for sync_release_pr."
         ),
     ),
-    task_kind: str = typer.Option(
-        "feature_branch_pr",
+    task_kind: TaskKind = typer.Option(
+        TaskKind.feature_branch_pr,
         "--task-kind",
         help="feature_branch_pr (default) or sync_release_pr.",
     ),
@@ -131,7 +131,7 @@ def workspace_create(
 ) -> None:
     """Submit a workspace creation request."""
     if branch_base is None:
-        branch_base = "main" if task_kind == TaskKind.sync_release_pr.value else "development"
+        branch_base = "main" if task_kind is TaskKind.sync_release_pr else "development"
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
@@ -141,7 +141,7 @@ def workspace_create(
             "title": task_title,
             "prompt": task_prompt,
             "agent": agent,
-            "kind": task_kind,
+            "kind": task_kind.value,
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         },
@@ -564,6 +564,14 @@ def workspace_adopt_pr(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Adopt an already-open GitHub PR into AWF PR monitoring."""
+    if pr_url is None and (repo is None or pr_number is None):
+        raise typer.BadParameter(
+            "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
+        )
+    if pr_url is not None and (repo is not None or pr_number is not None):
+        raise typer.BadParameter(
+            "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
+        )
     body: dict[str, Any] = {
         "repo_url": repo if repo and "github.com" in repo else None,
         "repo_slug": repo if repo and "github.com" not in repo else None,

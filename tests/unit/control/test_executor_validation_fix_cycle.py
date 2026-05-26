@@ -748,31 +748,51 @@ dependencies = [
             assert ws.failure_reason == "policy_failure"
             assert "pyproject.toml" in (ws.failure_message or "")
 
+    class TestSupplyChainPolicy:
+        @pytest.mark.unit
+        def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
+            evidence: list[str] = []
+            append_command_evidence(None, stdout="ignored", stderr="ignored")
+            append_command_evidence(evidence, stdout="out", stderr="err")
+            findings = [
+                SupplyChainFinding(
+                    reason_code=f"SUPPLY_CHAIN_TEST_{index}",
+                    severity="blocking",
+                    subject_path=f"lock{index}.lock" if index == 0 else None,
+                    explanation=f"finding {index}",
+                    details={"recovery_guidance": f"fix {index}"} if index != 1 else {},
+                )
+                for index in range(6)
+            ]
 
-class TestSupplyChainPolicy:
-    @pytest.mark.unit
-    def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
-        evidence: list[str] = []
-        append_command_evidence(None, stdout="ignored", stderr="ignored")
-        append_command_evidence(evidence, stdout="out", stderr="err")
-        findings = [
-            SupplyChainFinding(
-                reason_code=f"SUPPLY_CHAIN_TEST_{index}",
-                severity="blocking",
-                subject_path=f"lock{index}.lock" if index == 0 else None,
-                explanation=f"finding {index}",
-                details={"recovery_guidance": f"fix {index}"} if index != 1 else {},
+            message = _supply_chain_block_message(findings)
+
+            assert evidence == ["out", "err"]
+            assert _supply_chain_block_message([]) == (
+                "Supply-chain policy blocked workspace output."
             )
-            for index in range(6)
-        ]
+            assert "SUPPLY_CHAIN_TEST_0 (lock0.lock)" in message
+            assert "Recovery: fix 0" in message
+            assert "1 additional blocking finding" in message
 
-        message = _supply_chain_block_message(findings)
+        @pytest.mark.unit
+        def test_supply_chain_block_message_allows_none_details(self) -> None:
+            findings = [
+                SupplyChainFinding(
+                    reason_code="SUPPLY_CHAIN_TEST_NONE",
+                    severity="blocking",
+                    subject_path=None,
+                    explanation="finding with bad details",
+                    details=None,  # type: ignore[arg-type]
+                )
+            ]
 
-        assert evidence == ["out", "err"]
-        assert _supply_chain_block_message([]) == ("Supply-chain policy blocked workspace output.")
-        assert "SUPPLY_CHAIN_TEST_0 (lock0.lock)" in message
-        assert "Recovery: fix 0" in message
-        assert "1 additional blocking finding" in message
+            message = _supply_chain_block_message(findings)
+
+            assert message == (
+                "Supply-chain policy blocked workspace output:\n"
+                "- SUPPLY_CHAIN_TEST_NONE: finding with bad details"
+            )
 
     @pytest.mark.unit
     async def test_initial_agent_blocking_supply_chain_finding_fails_before_commit(

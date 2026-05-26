@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, cast
 
 from awf.control.executor.constants import (
@@ -30,7 +31,14 @@ def _get_active_recovery_payload(workspace: Any) -> dict[str, Any] | None:
     rebase requests are recorded as ``rebase`` but run through the same
     rebase-only executor path.
     """
-    operations = getattr(workspace, "operations", None) or []
+    operations = list(getattr(workspace, "operations", None) or [])
+
+    def _op_rank(operation: Any) -> tuple[float, str]:
+        stamp = getattr(operation, "started_at", None) or getattr(operation, "created_at", None)
+        stamp_value = stamp.timestamp() if isinstance(stamp, datetime) else 0.0
+        return (stamp_value, str(getattr(operation, "id", "")))
+
+    operations.sort(key=_op_rank, reverse=True)
     for operation in operations:
         if operation.status not in _RECOVERY_ACTIVE_OPERATION_STATUSES:
             continue

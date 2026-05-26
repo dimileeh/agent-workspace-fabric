@@ -342,6 +342,55 @@ class TestFailurePaths:
         assert len(fake.calls) == 5
 
     @pytest.mark.unit
+    async def test_cached_diff_git_error_is_treated_as_no_staged_paths(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # branch check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(
+            returncode=1,
+            stdout="src/awf/foo.py\n",
+            stderr="fatal: bad index",
+        )  # cached diff command failed but returned staged-looking stdout
+        fake.queue_result(returncode=0, stdout="")  # rev-list count
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert not any(call.args[:2] == ["git", "commit"] for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_rev_list_git_error_fails_infrastructure_path(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # branch check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="")  # cached diff (no paths)
+        fake.queue_result(returncode=1, stderr="fatal: bad object")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+
+    @pytest.mark.unit
     async def test_agent_killed_with_uncommitted_work_is_salvaged(
         self,
         executor: WorkspaceExecutor,

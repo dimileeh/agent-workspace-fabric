@@ -10,7 +10,7 @@ def _str_or_none(value: object) -> str | None:
 
 
 def _int_or_none(value: object) -> int | None:
-    return value if isinstance(value, int) else None
+    return value if type(value) is int else None
 
 
 def _metadata_str(metadata: Mapping[str, object], key: str) -> str | None:
@@ -20,9 +20,9 @@ def _metadata_str(metadata: Mapping[str, object], key: str) -> str | None:
 
 def _metadata_int(metadata: Mapping[str, object], key: str) -> int | None:
     value = metadata.get(key)
-    return value if isinstance(value, int) else None
+    return value if type(value) is int else None
 
 
 def _metadata_number(metadata: Mapping[str, object], key: str) -> int | float | None:
     value = metadata.get(key)
-    return value if isinstance(value, int | float) else None
+    return value if (isinstance(value, int | float) and not isinstance(value, bool)) else None

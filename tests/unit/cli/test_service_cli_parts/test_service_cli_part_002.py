@@ -434,7 +434,7 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
                     "down",
                     "--remove-orphans",
                 ],
-                {"check": False, "capture_output": True, "text": True},
+                {"check": False, "capture_output": True, "text": True, "timeout": 60},
             )
         ]
 
@@ -476,7 +476,7 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
                     "down",
                     "--remove-orphans",
                 ],
-                {"check": False, "capture_output": True, "text": True},
+                {"check": False, "capture_output": True, "text": True, "timeout": 60},
             )
         ]
 
@@ -519,7 +519,7 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
                     "down",
                     "--remove-orphans",
                 ],
-                {"check": False, "capture_output": True, "text": True},
+                {"check": False, "capture_output": True, "text": True, "timeout": 60},
             )
         ]
 

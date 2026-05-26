@@ -76,7 +76,8 @@ formatCapacityValue,
 formatGb,
 formatPercent,
 formatPrLinkLabel,
-formatScalar
+formatScalar,
+type CapacityUnit,
 } from "./console-dashboard-shared";
 
 export function ResourceCapacityPanel({
@@ -812,8 +813,6 @@ export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLan
     </div>
   );
 }
-
-export type CapacityUnit = "cores" | "gb" | "mb" | "slots";
 
 export function ResourceDimensionMeter({
   label,

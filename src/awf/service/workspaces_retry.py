@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,28 +51,27 @@ from awf.service.scheduler import (
     scheduler_retry_policy_context,
     scheduler_score_from_workspace,
 )
-from awf.service.workspaces import (
-    PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS,
-    QUEUE_DECISION_ADMITTED,
-    QUEUE_DECISION_ADMITTED_LOCAL_REASON,
-    RETRYABLE_WORKSPACE_STATUSES,
-    ResourceReservationPlan,
-    WorkspaceRetryNotAllowedError,
-    WorkspaceRetryNotFoundError,
-    WorkspaceRetryResult,
-    WorkspaceRetrySalvageUnavailableError,
-    _AgentTimeoutRetryContext,
-    _ConformanceRetryContext,
-    _log,
-    _PlanningScopeRetryContext,
-)
-from awf.service.workspaces_create import (
-    _raise_if_provider_preflight_blocks,
-    _record_owned_path_overlap_risk,
-    _record_provider_readiness_preflight,
-    _selected_provider_preflight_for_task_async,
-    overlap_risk_summary,
-)
+
+if TYPE_CHECKING:
+    from awf.service.workspaces import (
+        _AgentTimeoutRetryContext,
+        _ConformanceRetryContext,
+        _PlanningScopeRetryContext,
+    )
+
+
+def _workspace_create() -> Any:
+    """Import create helpers lazily to avoid module-load cycles."""
+    from awf.service import workspaces_create
+
+    return workspaces_create
+
+
+def _workspace_service() -> Any:
+    """Import workspace service symbols lazily to avoid module-level cycles."""
+    from awf.service import workspaces
+
+    return workspaces
 
 
 def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | None:
@@ -92,16 +91,18 @@ async def retry_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
-) -> WorkspaceRetryResult:
+) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
+    workspaces = _workspace_service()
+    workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     source = await repo.get_for_update(workspace_id)
     if source is None:
-        raise WorkspaceRetryNotFoundError(workspace_id)
+        raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
 
-    if WorkspaceStatus(source.status) not in RETRYABLE_WORKSPACE_STATUSES:
-        raise WorkspaceRetryNotAllowedError(source)
+    if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
+        raise workspaces.WorkspaceRetryNotAllowedError(source)
 
     planning_scope_context = _planning_scope_retry_context(source)
     conformance_context = (
@@ -137,7 +138,7 @@ async def retry_workspace_row(
         owned_path_overlap_coordination_warnings(overlaps),
         planning_scope_context=planning_scope_context,
     )
-    preflight = await _selected_provider_preflight_for_task_async(
+    preflight = await workspaces_create._selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=source.agent,
         task_policy=retried_task_policy,
@@ -148,7 +149,7 @@ async def retry_workspace_row(
         http_get=http_get,
     )
     preflight = {**preflight, "source_workspace_id": source.id}
-    _raise_if_provider_preflight_blocks(preflight)
+    workspaces_create._raise_if_provider_preflight_blocks(preflight)
     conformance_salvage: dict[str, Any] | None = None
     salvage_recovery_payload: dict[str, Any] | None = None
     if conformance_retry_requested:
@@ -167,7 +168,7 @@ async def retry_workspace_row(
                 run_subprocess=run_subprocess,
             )
         except ConformanceSalvageError as exc:
-            raise WorkspaceRetrySalvageUnavailableError(
+            raise workspaces.WorkspaceRetrySalvageUnavailableError(
                 source,
                 reason_code=exc.reason_code,
                 message=str(exc),
@@ -200,18 +201,18 @@ async def retry_workspace_row(
             )
         except ConformanceSalvageError as exc:
             if exc.reason_code == SALVAGE_NO_IMPLEMENTATION_DIFF:
-                _log.debug(
+                workspaces._log.debug(
                     "workspace.agent_timeout_salvage_skipped_no_diff",
                     workspace_id=source.id,
                 )
             else:
-                _log.info(
+                workspaces._log.info(
                     "workspace.agent_timeout_salvage_unavailable",
                     workspace_id=source.id,
                     reason_code=exc.reason_code,
                     detail=exc.detail,
                 )
-                raise WorkspaceRetrySalvageUnavailableError(
+                raise workspaces.WorkspaceRetrySalvageUnavailableError(
                     source,
                     source_reason_code=agent_timeout_context.reason_code,
                     reason_code=exc.reason_code,
@@ -262,7 +263,7 @@ async def retry_workspace_row(
         remote_push_branch=(
             source.remote_push_branch
             if planning_scope_context is None
-            or source.task_kind in PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
+            or source.task_kind in workspaces.PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
             else None
         ),
     )
@@ -290,7 +291,7 @@ async def retry_workspace_row(
     retry_resource_summary: dict[str, Any] = {}
     if latest_source_reservation:
         source_reservation = latest_source_reservation[0]
-        retry_reservation = ResourceReservationPlan(
+        retry_reservation = workspaces.ResourceReservationPlan(
             node_id=resolved_settings.worker_node_id or source_reservation.node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
@@ -319,14 +320,14 @@ async def retry_workspace_row(
         workspace_id=retried.id,
         task_id=task.id,
         attempt_id=attempt.id,
-        decision=QUEUE_DECISION_ADMITTED,
-        reason_code=QUEUE_DECISION_ADMITTED_LOCAL_REASON,
+        decision=workspaces.QUEUE_DECISION_ADMITTED,
+        reason_code=workspaces.QUEUE_DECISION_ADMITTED_LOCAL_REASON,
         class_priority=retry_score.class_priority,
         computed_priority=retry_score.effective_score,
         age_boost=retry_score.age_boost,
         retry_bonus=retry_score.retry_bonus,
         resource_summary=retry_resource_summary,
-        overlap_risk_summary=overlap_risk_summary(overlaps),
+        overlap_risk_summary=workspaces_create.overlap_risk_summary(overlaps),
         score_summary=retry_score.score_summary,
     )
 
@@ -364,8 +365,8 @@ async def retry_workspace_row(
         reason_code="RETRY_CREATED",
         payload=event_payload,
     )
-    await _record_provider_readiness_preflight(repo, retried, preflight)
-    await _record_owned_path_overlap_risk(repo, retried, overlaps)
+    await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
+    await workspaces_create._record_owned_path_overlap_risk(repo, retried, overlaps)
     await operation_repo.finish(
         operation,
         status=OperationStatus.succeeded,
@@ -382,7 +383,7 @@ async def retry_workspace_row(
         ),
     )
     await session.flush()
-    return WorkspaceRetryResult(
+    return workspaces.WorkspaceRetryResult(
         source_workspace_id=source.id,
         new_workspace=retried,
         operation=operation,
@@ -604,8 +605,9 @@ def _is_plan_conformance_unsatisfied(workspace: Workspace) -> bool:
     return details.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
 
 
-def _agent_timeout_retry_context(workspace: Workspace) -> _AgentTimeoutRetryContext | None:
+def _agent_timeout_retry_context(workspace: Workspace) -> Any:
     """Build a timeout retry context from the workspace's failure details if applicable."""
+    workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)
     if details is None:
         return None
@@ -622,7 +624,7 @@ def _agent_timeout_retry_context(workspace: Workspace) -> _AgentTimeoutRetryCont
     }
     if message is not None:
         evidence["message"] = message
-    return _AgentTimeoutRetryContext(
+    return workspaces._AgentTimeoutRetryContext(
         reason_code=str(reason_code),
         evidence=evidence,
         evidence_ref={
@@ -633,15 +635,16 @@ def _agent_timeout_retry_context(workspace: Workspace) -> _AgentTimeoutRetryCont
     )
 
 
-def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext | None:
+def _conformance_retry_context(workspace: Workspace) -> Any:
     """Build a conformance retry context from the workspace's failure details if applicable."""
+    workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)
     if details is None or details.get("reason_code") != PLAN_CONFORMANCE_UNSATISFIED:
         return None
     evidence = details.get("conformance")
     if not isinstance(evidence, Mapping):
         return None
-    return _ConformanceRetryContext(
+    return workspaces._ConformanceRetryContext(
         reason_code=PLAN_CONFORMANCE_UNSATISFIED,
         evidence=evidence,
         evidence_ref={
@@ -670,8 +673,9 @@ def _optional_retry_evidence_str(value: object) -> str | None:
     return stripped or None
 
 
-def _planning_scope_retry_context(workspace: Workspace) -> _PlanningScopeRetryContext | None:
+def _planning_scope_retry_context(workspace: Workspace) -> Any:
     """Build a planning-scope retry context from the workspace's failure details if applicable."""
+    workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)
     if details is None or details.get("reason_code") != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
         return None
@@ -690,11 +694,11 @@ def _planning_scope_retry_context(workspace: Workspace) -> _PlanningScopeRetryCo
         if isinstance(salvage_policy_value, str)
         else "explicit_salvage_required"
     )
-    fallback_model = _approved_planning_scope_fallback_model(workspace)
+    fallback_model = workspaces._approved_planning_scope_fallback_model(workspace)
     evidence_payload = dict(evidence)
     if fallback_model is not None:
         evidence_payload["fallback_model"] = fallback_model
-    return _PlanningScopeRetryContext(
+    return workspaces._PlanningScopeRetryContext(
         reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
         evidence=evidence_payload,
         evidence_ref={

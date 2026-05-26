@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -37,12 +38,16 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.merge_eligibility import VALIDATION_INSUFFICIENT_TIER_STALE_REASON
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
+)
+from awf.service.staleness import (
+    REASON_TARGET_ADVANCED,
 )
 
 
@@ -667,12 +672,14 @@ def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
+                (0, "", ""),
                 (1, "", "no target"),
             ],
             "could not resolve origin/main",
         ),
         (
             [
+                (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
@@ -836,6 +843,52 @@ async def test_healthcheck_failure_event_noops_when_workspace_is_not_validating(
 
 
 @pytest.mark.unit
+async def test_healthcheck_failure_event_handles_none_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(id="ws_health", status=WorkspaceStatus.validating.value)
+    captured_events: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            **kwargs: object,
+        ) -> None:
+            captured_events.append({"event_type": event_type, **kwargs})
+
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    failure = _command_result(tmp_path, returncode=1)
+    object.__setattr__(failure, "metadata", None)
+    object.__setattr__(failure, "phase", "healthcheck")
+    object.__setattr__(failure, "command", "healthcheck")
+
+    await executor._record_health_check_failed_event(
+        workspace_id=workspace.id,
+        failure=failure,
+    )
+
+    assert session.commits == 1
+    assert len(captured_events) == 1
+    assert captured_events[0]["event_type"] == "workspace.health_check_failed"
+    assert captured_events[0]["stream_ids"] == {}
+
+
+@pytest.mark.unit
 async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -885,6 +938,21 @@ async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
             **_kwargs: object,
         ) -> None:
             stale_events.append(event_type)
+
+        async def transition_if_current(
+            self,
+            workspace_id: str,
+            *,
+            from_status: WorkspaceStatus,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, Any] | None = None,
+        ) -> object | None:
+            assert workspace_id == workspace.id
+            if workspace.status != from_status.value:
+                return None
+            workspace.status = to.value
+            return workspace
 
         async def transition(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("stale terminal workspace should not transition")
@@ -1112,6 +1180,14 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
         workspace=SimpleNamespace(id="ws_rebase"),
         attempt=SimpleNamespace(id="attempt"),
     )
+    active_stale = [
+        SimpleNamespace(
+            reason_code=REASON_TARGET_ADVANCED,
+            trigger_type="target_advanced",
+            trigger_ref="abc123",
+            explanation="base moved",
+        )
+    ]
     replaced_findings: list[dict[str, object]] = []
     readiness_calls: list[object] = []
 
@@ -1129,6 +1205,10 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
 
         async def replace_active_findings(self, **kwargs: object) -> None:
             replaced_findings.append(kwargs)
+
+        async def list_active_for_candidate(self, candidate_id: str) -> list[object]:
+            assert candidate_id == candidate.id
+            return active_stale
 
     def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
         readiness_calls.append(candidate_arg)
@@ -1155,4 +1235,68 @@ async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
     assert candidate.stale is False
     assert candidate.stale_reason is None
     assert readiness_calls == [candidate]
+    assert session.commits == 1
+
+
+@pytest.mark.unit
+async def test_clear_rebase_recovery_staleness_preserves_validation_tier_stale_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    candidate = SimpleNamespace(
+        id="candidate",
+        workspace_id="ws_rebase",
+        attempt_id="attempt",
+        task_id="task",
+        stale=True,
+        stale_reason=VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        workspace=SimpleNamespace(id="ws_rebase"),
+        attempt=SimpleNamespace(id="attempt"),
+    )
+    active_stale = [
+        SimpleNamespace(
+            reason_code=REASON_TARGET_ADVANCED,
+            trigger_type="target_advanced",
+            trigger_ref="abc123",
+            explanation="base moved",
+        )
+    ]
+
+    class FakeMergeCandidateRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_open_for_workspace_with_merge_inputs(self, workspace_id: str) -> object:
+            assert workspace_id == candidate.workspace_id
+            return candidate
+
+    class FakeStaleReasonRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def replace_active_findings(self, **kwargs: object) -> None:
+            active = kwargs["findings"]
+            assert isinstance(active, list)
+            assert active == []
+
+        async def list_active_for_candidate(self, candidate_id: str) -> list[object]:
+            assert candidate_id == candidate.id
+            return active_stale
+
+    def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
+        assert candidate_arg is candidate
+
+    monkeypatch.setattr(
+        executor_git_methods, "MergeCandidateRepository", FakeMergeCandidateRepository
+    )
+    monkeypatch.setattr(executor_git_methods, "StaleReasonRepository", FakeStaleReasonRepository)
+    monkeypatch.setattr(executor_git_methods, "sync_candidate_readiness", sync_readiness)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    await executor._clear_rebase_recovery_staleness(workspace_id="ws_rebase")
+
+    assert candidate.stale is True
+    assert candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
     assert session.commits == 1

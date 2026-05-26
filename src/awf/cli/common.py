@@ -183,6 +183,13 @@ def _run_terminal_workspace_compose_teardown(
             check=False,
             capture_output=True,
             text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="docker compose down timed out after 60s",
         )
     except OSError as exc:
         return WorkspaceGCComposeTeardownResult(

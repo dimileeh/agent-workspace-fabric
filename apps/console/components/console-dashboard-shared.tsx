@@ -36,7 +36,12 @@ export const PanelContext = createContext<"default" | "ghost">("default");
 
 export type CapacityUnit = "cores" | "gb" | "mb" | "slots";
 
-export const pollMs = Number(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS || "5000");
+const MIN_POLL_MS = 1000;
+const DEFAULT_POLL_MS = 5000;
+const parsedPollMs = Number.parseInt(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS ?? `${DEFAULT_POLL_MS}`, 10);
+export const pollMs = Number.isFinite(parsedPollMs) && Number.isInteger(parsedPollMs) && parsedPollMs > 0
+  ? Math.max(MIN_POLL_MS, parsedPollMs)
+  : DEFAULT_POLL_MS;
 export const maxLogChars = 180_000;
 export const mergeQueueLimit = 20;
 
@@ -389,7 +394,15 @@ export function applyOperatorPreferenceAttributes(
 }
 
 export function openExternalHref(href: string) {
-  window.open(href, "_blank", "noopener,noreferrer");
+  try {
+    const url = new URL(href, window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return;
+    }
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  } catch {
+    // Ignore invalid URLs.
+  }
 }
 
 export function ErrorBanner({ message }: { message: string }) {
