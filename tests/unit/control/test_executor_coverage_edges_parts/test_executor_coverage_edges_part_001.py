@@ -670,6 +670,48 @@ async def test_post_validation_report_git_error_preserves_unstage_failure_metada
 
 
 @pytest.mark.unit
+async def test_post_validation_report_git_error_redacts_sensitive_output(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(
+        returncode=128,
+        stderr=(
+            "fatal: could not diff with remote "
+            "https://alice:ghp_1234567890abcdef1234@github.com/org/repo.git "
+            "Authorization: Bearer s3cr3t-token"
+        ),
+        reason_code="GIT_DIFF_FAILED",
+    )
+    runner.queue_result(
+        returncode=129,
+        stderr=(
+            "fatal: cleanup failed for "
+            "https://git:gho_1234567890abcdef1234@github.com/org/repo.git"
+        ),
+        reason_code="GIT_RESET_FAILED",
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_planning_ops._PostValidationConformanceReportGitError) as exc_info:
+        await executor._commit_post_validation_conformance_report(
+            workspace_id="ws_post",
+            worktree_path=tmp_path / "worktree",
+            report_path=report_path,
+            validation_run_id="validation-run-1",
+        )
+
+    message = str(exc_info.value)
+    assert "[redacted]" in message
+    assert "ghp_1234567890abcdef1234" not in message
+    assert "gho_1234567890abcdef1234" not in message
+    assert "s3cr3t-token" not in message
+    assert "alice" not in message
+    assert "git reset failed" in message
+
+
+@pytest.mark.unit
 async def test_post_validation_report_skips_commit_when_report_is_not_staged(
     tmp_path: Path,
 ) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import CommandResult
 from awf.runtime.planning import PlanConformanceReport
 from awf.runtime.validation import ValidationCoverageResult
@@ -26,13 +27,16 @@ class _PostValidationConformanceReportGitError(RuntimeError):
         cleanup_operation: str | None = None,
         cleanup_result: CommandResult | None = None,
     ) -> None:
-        output = (result.stderr or result.stdout or "").strip()
+        output = redact_audit_text((result.stderr or result.stdout or "").strip(), limit=1000)
         message = (
             f"post-validation conformance report git {operation} failed "
             f"(exit={result.returncode}): {output}"
         )
         if cleanup_operation is not None and cleanup_result is not None:
-            cleanup_output = (cleanup_result.stderr or cleanup_result.stdout or "").strip()
+            cleanup_output = redact_audit_text(
+                (cleanup_result.stderr or cleanup_result.stdout or "").strip(),
+                limit=1000,
+            )
             message = (
                 f"{message}; cleanup git {cleanup_operation} failed "
                 f"(exit={cleanup_result.returncode}): {cleanup_output}"
