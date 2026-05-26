@@ -637,6 +637,8 @@ export interface WorkerConcurrencySettings {
   max_concurrent_executions: number;
 }
 
+export type LocalCapacitySourceValue = "docker" | "operator_config" | "mixed";
+
 export interface LocalCapacitySource {
   cpu_cores: number | null;
   memory_gb: number | null;

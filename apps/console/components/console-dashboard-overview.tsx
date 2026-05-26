@@ -1168,7 +1168,7 @@ export function UsageSummaryBlock({
   pricing: PricingMetadata | null | undefined;
 }) {
   const safeUsage = fallbackLlmUsage(usage);
-  const pricingReason = pricingAvailabilityReason(pricing, safeUsage);
+  const pricingReason = pricingAvailabilityReason(pricing);
   const showCost = safeUsage.cost_estimate !== null;
 
   if (

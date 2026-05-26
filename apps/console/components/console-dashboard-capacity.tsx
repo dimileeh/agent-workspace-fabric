@@ -48,18 +48,19 @@ import {
 isReverseWorkspaceTransition
 } from "@/lib/recovery-format";
 import type {
-CapacityDimension,
-ConcurrencyLane,
-MergeQueueItem,
-Operation,
-ResourceSaturationSummary,
-RuntimeService,
-WorkspaceAppEndpoint,
-WorkspaceEvent,
-WorkspaceLifecycleStage,
-WorkspaceReliabilitySummary,
-WorkspaceRuntime,
-WorkspaceStatus
+  CapacityDimension,
+  ConcurrencyLane,
+  LocalCapacitySourceValue,
+  MergeQueueItem,
+  Operation,
+  ResourceSaturationSummary,
+  RuntimeService,
+  WorkspaceAppEndpoint,
+  WorkspaceEvent,
+  WorkspaceLifecycleStage,
+  WorkspaceReliabilitySummary,
+  WorkspaceRuntime,
+  WorkspaceStatus
 } from "@/lib/types";
 import {
 Badge,
@@ -106,10 +107,10 @@ export function ResourceCapacityPanel({
       : saturation.allocated_capacity.pressure_reasons.length > 0
         ? saturation.allocated_capacity.pressure_reasons
         : saturation.capacity.pressure_reasons;
-  const runtimeCapacitySource = saturation ? localCapacitySourceLabel(saturation.local_capacity.source) : "";
+  const runtimeCapacitySource = saturation ? localCapacitySourceLabel(saturation.local_capacity.source as LocalCapacitySourceValue | null) : "";
   const runtimeCapacityLimits = saturation ? localCapacityLimitLabel(saturation) : "";
   const runtimeCapacityDetail = saturation
-    ? localCapacityDetail(saturation.local_capacity.source)
+    ? localCapacityDetail(saturation.local_capacity.source as LocalCapacitySourceValue | null)
     : "";
 
   return (
@@ -258,17 +259,19 @@ export function ResourceCapacityPanel({
   );
 }
 
-function localCapacitySourceLabel(source: string | null): string {
-  if (source === "docker") {
-    return "Docker runtime";
+function localCapacitySourceLabel(source: LocalCapacitySourceValue | null): string {
+  switch (source) {
+    case "docker":
+      return "Docker runtime";
+    case "operator_config":
+      return "operator config";
+    case "mixed":
+      return "mixed config/runtime";
+    case null:
+      return "runtime capacity";
+    default:
+      return "runtime capacity";
   }
-  if (source === "operator_config") {
-    return "operator config";
-  }
-  if (source === "mixed") {
-    return "mixed config/runtime";
-  }
-  return "runtime capacity";
 }
 
 function localCapacityLimitLabel(saturation: ResourceSaturationSummary): string {
@@ -286,17 +289,19 @@ function localCapacityLimitLabel(saturation: ResourceSaturationSummary): string 
   return `${cpu} / ${memory}`;
 }
 
-function localCapacityDetail(source: string | null): string {
-  if (source === "docker") {
-    return "Limits are read from Docker Desktop via docker info, so host hardware may be larger";
+function localCapacityDetail(source: LocalCapacitySourceValue | null): string {
+  switch (source) {
+    case "docker":
+      return "Limits are read from Docker Desktop via docker info, so host hardware may be larger";
+    case "operator_config":
+      return "Limits are the AWF_LOCAL_CAPACITY_* operator overrides used by the scheduler";
+    case "mixed":
+      return "Limits combine AWF_LOCAL_CAPACITY_* overrides with Docker runtime detection";
+    case null:
+      return "Limits are the runtime capacity AWF reports for scheduling; host hardware may be larger";
+    default:
+      return "Limits are the runtime capacity AWF reports for scheduling; host hardware may be larger";
   }
-  if (source === "operator_config") {
-    return "Limits are the AWF_LOCAL_CAPACITY_* operator overrides used by the scheduler";
-  }
-  if (source === "mixed") {
-    return "Limits combine AWF_LOCAL_CAPACITY_* overrides with Docker runtime detection";
-  }
-  return "Limits are the runtime capacity AWF reports for scheduling; host hardware may be larger";
 }
 
 export function MergeQueuePanel({

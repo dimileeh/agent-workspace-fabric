@@ -147,10 +147,9 @@ export function formatCostWithPricing(
 
 export function pricingAvailabilityReason(
   pricing: PricingMetadata | null | undefined,
-  usage?: LlmUsageSummary | null,
 ): string | null {
   if (!pricing) {
-    return usage?.cost_estimate == null ? "pricing not configured" : null;
+    return "pricing not configured";
   }
   if (!pricing.is_current) {
     return "pricing stale";
