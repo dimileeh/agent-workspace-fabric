@@ -886,42 +886,42 @@ class TestMonitorPolicyMigration:
             }
 
             def _alembic(*args: str) -> None:
-                with postgres_alembic_subprocess_lock(database_url):
-                    subprocess.run(
-                        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                        cwd=repo_root,
-                        env=env,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
             monkeypatch.chdir(repo_root)
-            _alembic("upgrade", "e5f6a1b2c3d4")
+            with postgres_alembic_subprocess_lock(database_url):
+                _alembic("upgrade", "e5f6a1b2c3d4")
 
-            engine = make_engine(database_url)
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(
-                        text(
-                            """
-                            INSERT INTO workspaces (
-                                id, status, version, repo_url, branch_base,
-                                task_title, task_prompt, agent, test_commands,
-                                requires_database, created_at, updated_at
+                engine = make_engine(database_url)
+                try:
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            text(
+                                """
+                                INSERT INTO workspaces (
+                                    id, status, version, repo_url, branch_base,
+                                    task_title, task_prompt, agent, test_commands,
+                                    requires_database, created_at, updated_at
+                                )
+                                VALUES (
+                                    'ws_old_policy', 'requested', 1, 'git@example.com:repo.git',
+                                    'development', 'old row', 'do work', 'codex', '[]'::json,
+                                    false, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                                )
+                                """
                             )
-                            VALUES (
-                                'ws_old_policy', 'requested', 1, 'git@example.com:repo.git',
-                                'development', 'old row', 'do work', 'codex', '[]'::json,
-                                false, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
-                            )
-                            """
                         )
-                    )
-            finally:
-                await engine.dispose()
+                finally:
+                    await engine.dispose()
 
-            _alembic("upgrade", "head")
+                _alembic("upgrade", "head")
 
             engine = make_engine(database_url)
             try:
@@ -958,43 +958,43 @@ class TestTaskPolicyMetadataMigration:
             }
 
             def _alembic(*args: str) -> None:
-                with postgres_alembic_subprocess_lock(database_url):
-                    subprocess.run(
-                        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                        cwd=repo_root,
-                        env=env,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
             monkeypatch.chdir(repo_root)
-            _alembic("upgrade", "f6a1b2c3d4e5")
+            with postgres_alembic_subprocess_lock(database_url):
+                _alembic("upgrade", "f6a1b2c3d4e5")
 
-            engine = make_engine(database_url)
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(
-                        text(
-                            """
-                            INSERT INTO workspaces (
-                                id, status, version, repo_url, branch_base,
-                                task_title, task_prompt, agent, test_commands,
-                                requires_database, created_at, updated_at
+                engine = make_engine(database_url)
+                try:
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            text(
+                                """
+                                INSERT INTO workspaces (
+                                    id, status, version, repo_url, branch_base,
+                                    task_title, task_prompt, agent, test_commands,
+                                    requires_database, created_at, updated_at
+                                )
+                                VALUES (
+                                    'ws_old_policy_metadata', 'requested', 1,
+                                    'git@example.com:repo.git', 'development', 'old row',
+                                    'do work', 'codex', '[]'::json, false,
+                                    '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                                )
+                                """
                             )
-                            VALUES (
-                                'ws_old_policy_metadata', 'requested', 1,
-                                'git@example.com:repo.git', 'development', 'old row',
-                                'do work', 'codex', '[]'::json, false,
-                                '2026-04-25 00:00:00', '2026-04-25 00:00:00'
-                            )
-                            """
                         )
-                    )
-            finally:
-                await engine.dispose()
+                finally:
+                    await engine.dispose()
 
-            _alembic("upgrade", "head")
+                _alembic("upgrade", "head")
 
             engine = make_engine(database_url)
             try:

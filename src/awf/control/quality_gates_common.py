@@ -4,7 +4,52 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, cast
+
+
+@dataclass(frozen=True)
+class ProtectedFileDiff:
+    """Local old/new content for classifying a protected file change."""
+
+    path: str
+    old_text: str | None
+    new_text: str | None
+
+
+@dataclass(frozen=True)
+class QualityGateViolation:
+    """A protected quality-gate file changed outside task ownership."""
+
+    path: str
+    protected_pattern: str
+    section: str | None = None
+    line: int | None = None
+    reason: str = "protected quality-gate file changed outside declared owned_paths"
+
+
+def _normalize_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _violation(
+    *,
+    path: str,
+    protected_pattern: str,
+    section: str,
+    line: int | None,
+    reason: str,
+) -> QualityGateViolation:
+    return QualityGateViolation(
+        path=path,
+        protected_pattern=protected_pattern,
+        section=section,
+        line=line,
+        reason=reason,
+    )
 
 
 def _absent_protected_file_content_reason(

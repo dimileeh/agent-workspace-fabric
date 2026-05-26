@@ -8,12 +8,15 @@ import pytest
 
 from awf.control.executor.helpers import (
     _apply_baseline_coverage_ratchet,
+    _coverage_preserves_below_threshold_baseline,
     _coverage_result_from_metadata,
     _extract_string_tokens,
+    _post_validation_conformance_fix_result,
     _validation_failure_message,
     _validation_run_coverage_metadata,
     _validation_run_reason_code,
 )
+from awf.control.executor.types import _PlanningRunFailure
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -416,6 +419,59 @@ def test_baseline_debt_ratchet_preserves_gaps_in_metadata(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_baseline_debt_ratchet_handles_coverage_without_command_result(
+    tmp_path: Path,
+) -> None:
+    result = ValidationResult(
+        coverage=ValidationCoverageResult(
+            provider="python",
+            percent=90,
+            minimum_percent=99,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            command_result=None,
+        )
+    )
+    baseline = _coverage(tmp_path, percent=90, status="failed")
+
+    adjusted = _apply_baseline_coverage_ratchet(result, baseline_coverage=baseline)
+
+    assert adjusted.commands == []
+    assert adjusted.coverage is not None
+    assert adjusted.coverage.command_result is None
+    assert adjusted.coverage.status == "baseline_debt"
+
+
+@pytest.mark.unit
+def test_baseline_preservation_rejects_test_failures_and_complete_baselines(
+    tmp_path: Path,
+) -> None:
+    baseline = _coverage(tmp_path, percent=90, status="failed")
+
+    assert not _coverage_preserves_below_threshold_baseline(
+        _coverage(
+            tmp_path,
+            percent=90,
+            failing_test_node_ids=["tests/unit/test_app.py::test_fails"],
+        ),
+        baseline_coverage=baseline,
+    )
+    assert not _coverage_preserves_below_threshold_baseline(
+        _coverage(tmp_path, percent=None),
+        baseline_coverage=baseline,
+    )
+    assert not _coverage_preserves_below_threshold_baseline(
+        _coverage(tmp_path, percent=90),
+        baseline_coverage=_coverage(tmp_path, percent=None),
+    )
+    assert not _coverage_preserves_below_threshold_baseline(
+        _coverage(tmp_path, percent=99),
+        baseline_coverage=_coverage(tmp_path, percent=99, status="passed"),
+    )
+
+
+@pytest.mark.unit
 def test_failure_message_with_gaps_includes_baseline_context(tmp_path: Path) -> None:
     gaps: list[dict[str, object]] = [
         {"file": "src/mod.py", "missing_lines": ["1-100"]},
@@ -487,6 +543,43 @@ def test_failure_message_reports_provider_fail_under_without_trusting_rounded_pe
 
 
 @pytest.mark.unit
+def test_failure_message_uses_fallback_evidence_when_node_ids_are_absent(
+    tmp_path: Path,
+) -> None:
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=99.2,
+            reason_code="COVERAGE_OK",
+            status="passed",
+            command_result=None,
+            failing_test_evidence=["FAILED tests/unit/test_widget.py - AssertionError"],
+        )
+    )
+
+    message = _validation_failure_message(result)
+
+    assert "FAILED tests/unit/test_widget.py - AssertionError" in message
+    assert "coverage met the 99.0% requirement at 99.2%" in message
+
+
+@pytest.mark.unit
+def test_failure_message_names_unsupported_coverage_provider(tmp_path: Path) -> None:
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=None,
+            reason_code="COVERAGE_PROVIDER_UNSUPPORTED",
+            status="failed",
+        )
+    )
+
+    assert _validation_failure_message(result) == (
+        "validation failed: unsupported coverage provider python"
+    )
+
+
+@pytest.mark.unit
 def test_failure_message_caps_gap_list_at_five(tmp_path: Path) -> None:
     gaps: list[dict[str, object]] = [
         {"file": f"src/file_{i:02d}.py", "missing_lines": [f"{i}0-{i}9"]} for i in range(10)
@@ -507,3 +600,21 @@ def test_failure_message_caps_gap_list_at_five(tmp_path: Path) -> None:
     assert "src/file_00.py" in message
     assert "src/file_04.py" in message
     assert "src/file_05.py" not in message
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_fix_result_uses_attempt_from_failure_details(
+    tmp_path: Path,
+) -> None:
+    result = _post_validation_conformance_fix_result(
+        failure=_PlanningRunFailure(
+            message="conformance gap",
+            details={"attempt": 3},
+        ),
+        workspace_id="ws_conformance",
+        artifacts_root=tmp_path,
+    )
+
+    command = result.commands[0]
+    assert command.stdout_path.name == "post_validation_conformance.3.stdout"
+    assert command.stderr_path.name == "post_validation_conformance.3.stderr"

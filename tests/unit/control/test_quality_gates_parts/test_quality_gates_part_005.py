@@ -269,6 +269,14 @@ def test_private_coverage_policy_helper_handles_non_mapping_and_report_variants(
 
 
 @pytest.mark.unit
+def test_quality_gate_common_formats_non_string_policy_values() -> None:
+    assert quality_gate_common._format_toml_policy_value(None) == "unset"  # noqa: SLF001
+    assert quality_gate_common._format_toml_policy_value(99.0) == "99"  # noqa: SLF001
+    assert quality_gate_common._format_toml_policy_value("strict") == "'strict'"  # noqa: SLF001
+    assert quality_gate_common._format_toml_policy_value(["a", "b"]) == "['a', 'b']"  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_private_dependency_replacement_helper_falls_back_to_existing_raw_entry() -> None:
     assert (
         quality_gate_pyproject._replacement_dependency_raw(
@@ -915,3 +923,21 @@ def test_private_policy_and_expression_helpers_cover_base_branch_edges() -> None
         )
         == 5
     )
+
+
+@pytest.mark.unit
+def test_workflow_action_policy_formatting_helpers_cover_edge_shapes() -> None:
+    assert quality_gate_actions._nested_value({"outer": {"inner": 1}}, ("outer", "inner")) == 1
+    assert quality_gate_actions._nested_value({"outer": "leaf"}, ("outer", "inner")) is None
+    assert quality_gate_actions._nested_value({}, ("missing",)) is None
+
+    assert quality_gate_actions._is_number(1)
+    assert quality_gate_actions._is_number(1.5)
+    assert not quality_gate_actions._is_number(True)
+    assert not quality_gate_actions._is_number("1")
+
+    assert quality_gate_actions._format_number(3.0) == "3"
+    assert quality_gate_actions._format_number(3.25) == "3.25"
+    assert quality_gate_actions._format_toml_policy_value(None) == "unset"
+    assert quality_gate_actions._format_toml_policy_value(4) == "4"
+    assert quality_gate_actions._format_toml_policy_value("strict") == "'strict'"

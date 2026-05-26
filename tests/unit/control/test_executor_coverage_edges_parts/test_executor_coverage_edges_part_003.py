@@ -15,16 +15,10 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor import git_ops as executor_git_ops
+from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor import planning_ops as executor_planning_ops
 from awf.control.executor import quality_gates as executor_quality_gates
-from awf.control.executor.git_ops import (
-    _agent_git_writability_preflight_script,
-    _git_error_indicates_missing_head_object,
-    _read_ref_sha,
-    _recover_missing_head_from_filesystem,
-)
 from awf.control.executor.helpers import (
     _failure_salvage_payload,
     _profile_with_planning_iteration_default,
@@ -177,21 +171,25 @@ def _autofix_classification(
     )
 
 
-def _fake_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
-    mirror = tmp_path / "mirror.git"
-    linked_git_dir = mirror / "worktrees" / "ws_missing_head"
-    linked_git_dir.mkdir(parents=True)
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-    return mirror, worktree
-
-
 class _FakeSession:
     def __init__(self) -> None:
         self.commits = 0
 
     async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _FakeExecutorSession:
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def __aenter__(self) -> _FakeExecutorSession:
         return self
 
     async def __aexit__(self, *_args: object) -> None:
@@ -461,6 +459,218 @@ def test_digest_file_if_present_streams_file_bytes(
     monkeypatch.setattr(Path, "read_bytes", _read_bytes_should_not_be_used)
 
     assert executor_helpers._digest_file_if_present(path) == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.unit
+def test_exclude_agent_salvage_artifacts_uses_linked_gitdir_exclude(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    worktree.mkdir()
+    linked_git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+
+    executor_planning_ops._exclude_agent_salvage_artifacts(object(), worktree)  # noqa: SLF001
+
+    assert (linked_git_dir / "info" / "exclude").read_text(encoding="utf-8") == ("/.awf/salvage/\n")
+
+
+@pytest.mark.unit
+async def test_planning_event_helpers_skip_missing_workspace_and_missing_validation_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _MissingWorkspaceRepo:
+        def __init__(self, _session: object) -> None:
+            return None
+
+        async def get(self, _workspace_id: str) -> object | None:
+            return None
+
+    class _MissingRunRepo:
+        def __init__(self, _session: object) -> None:
+            return None
+
+        async def get(self, _run_id: str) -> object | None:
+            return None
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
+    monkeypatch.setattr(executor_planning_ops, "ValidationRunRepository", _MissingRunRepo)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: _FakeExecutorSession()  # type: ignore[method-assign]
+    handoff = executor_planning_ops._PlanningValidationHandoff(  # noqa: SLF001
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="needs validation",
+            gaps=("run tests",),
+        ),
+        plan_path=Path("plans/task.md"),
+        report_path=Path("plans/task.validation.json"),
+        iteration=0,
+        max_iterations=1,
+    )
+
+    await executor_planning_ops._record_planning_validation_handoff_event(  # noqa: SLF001
+        executor,
+        workspace_id="ws_missing",
+        handoff=handoff,
+    )
+    await executor_planning_ops._record_post_validation_conformance_event(  # noqa: SLF001
+        executor,
+        workspace_id="ws_missing",
+        handoff=handoff,
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.satisfied,
+            summary="ok",
+            gaps=(),
+        ),
+        validation_run_id="vr_missing",
+    )
+    evidence = await executor_planning_ops._validation_run_evidence_for_conformance(  # noqa: SLF001
+        executor,
+        "vr_missing",
+    )
+
+    assert '"status": "missing"' in evidence
+    assert '"reason_code": "VALIDATION_RUN_NOT_FOUND"' in evidence
+
+
+@pytest.mark.unit
+async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class _WorkspaceRepo:
+        workspace: object | None = SimpleNamespace(
+            id="ws_retry",
+            task_policy={"scheduler": {"source_workspace_id": "ws_original"}},
+        )
+
+        def __init__(self, _session: object) -> None:
+            return None
+
+        async def get(self, _workspace_id: str) -> object | None:
+            return self.workspace
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            events.append((event_type, reason_code, payload))
+
+    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _WorkspaceRepo)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: _FakeExecutorSession()  # type: ignore[method-assign]
+    failure = executor_planning_ops._PlanningRunFailure(  # noqa: SLF001
+        message="scope violation",
+        reason_code=executor_planning_ops.AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    )
+
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+    assert events[-1][1] == "PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED"
+
+    _WorkspaceRepo.workspace = SimpleNamespace(id="ws_retry", task_policy={})
+
+    async def _retry_failed(_session: object, _workspace_id: str) -> object:
+        raise executor_planning_ops.WorkspaceRetryError(
+            "cannot retry",
+            detail={"reason": "busy"},
+        )
+
+    monkeypatch.setattr(executor_planning_ops, "retry_workspace_row", _retry_failed)
+    await executor_planning_ops._auto_retry_planning_scope_failure(  # noqa: SLF001
+        executor,
+        workspace_id="ws_retry",
+        failure=failure,
+    )
+
+    assert events[-1][0] == "workspace.planning_scope_auto_retry_failed"
+    assert events[-1][2]["detail"] == {"reason": "busy"}
+
+
+@pytest.mark.unit
+async def test_execution_validation_returns_stop_when_start_transition_is_stale(
+    tmp_path: Path,
+) -> None:
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=False),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_stale_validation",
+        ws=SimpleNamespace(),
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_stale_validation",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_stale_validation",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert not result.has_known_non_plan_output
+
+
+@pytest.mark.unit
+async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
+    tmp_path: Path,
+) -> None:
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=False),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+        ),
+    )
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "validation-stale"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        test_commands=[],
+        task_class=None,
+        operations=[],
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_recheck_stale",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project="awf_ws_recheck_stale",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_recheck_stale",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=True,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert result.has_known_non_plan_output
 
 
 @pytest.mark.unit
@@ -1187,235 +1397,3 @@ async def test_changed_paths_raises_when_git_status_fails(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="git status failed"):
         await executor._changed_paths(tmp_path / "worktree")
-
-
-@pytest.mark.unit
-def test_git_error_indicates_missing_head_object() -> None:
-    assert _git_error_indicates_missing_head_object("fatal: bad object HEAD\n")
-    assert _git_error_indicates_missing_head_object("fatal: not a valid object name HEAD\n")
-    assert not _git_error_indicates_missing_head_object("fatal: not a git repository\n")
-
-
-@pytest.mark.unit
-def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes() -> None:
-    script = _agent_git_writability_preflight_script("ws_preflight")
-
-    assert "git status --porcelain" in script
-    assert "git hash-object -w --stdin" in script
-    assert 'git cat-file -e "$blob^{blob}"' in script
-    assert 'git update-ref "$ref" HEAD' in script
-    assert 'git update-ref -d "$ref"' in script
-
-
-@pytest.mark.unit
-async def test_agent_git_writability_preflight_runs_inside_agent_container(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    worktree_path = tmp_path / "worktree"
-    worktree_path.mkdir()
-    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_preflight\n")
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-
-    ok = await executor._run_agent_git_writability_preflight(
-        workspace_id="ws_preflight",
-        compose_project="awf_ws_preflight",
-        compose_file=compose_file,
-        worktree_path=worktree_path,
-    )
-
-    assert ok is True
-    assert runner.calls
-    call = runner.calls[0]
-    assert call.input_bytes == b""
-    assert call.args[:2] == ["docker", "compose"]
-    assert call.args[call.args.index("-p") + 1] == "awf_ws_preflight"
-    assert call.args[call.args.index("-f") + 1] == str(compose_file)
-    assert "agent_git_writability_preflight" not in " ".join(call.args[:10])
-    assert "git hash-object -w --stdin" in " ".join(call.args)
-
-
-@pytest.mark.unit
-async def test_agent_git_writability_preflight_skips_non_provisioned_fakes(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    worktree_path = tmp_path / "worktree"
-    worktree_path.mkdir()
-
-    assert await executor._run_agent_git_writability_preflight(
-        workspace_id="ws_no_git",
-        compose_project="awf_ws_no_git",
-        compose_file=tmp_path / "compose.yml",
-        worktree_path=worktree_path,
-    )
-
-    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_no_git\n")
-    assert await executor._run_agent_git_writability_preflight(
-        workspace_id="ws_no_compose",
-        compose_project="awf_ws_no_compose",
-        compose_file=tmp_path / "missing-compose.yml",
-        worktree_path=worktree_path,
-    )
-    assert runner.calls == []
-
-
-@pytest.mark.unit
-async def test_agent_git_writability_preflight_fails_when_repair_fails(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    executor = _executor_with_runner(runner, tmp_path)
-    worktree_path = tmp_path / "worktree"
-    worktree_path.mkdir()
-    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_repair_fail\n")
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-    executor._repair_agent_git_ownership = AsyncMock(return_value=False)  # type: ignore[method-assign]
-    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
-
-    ok = await executor._run_agent_git_writability_preflight(
-        workspace_id="ws_repair_fail",
-        compose_project="awf_ws_repair_fail",
-        compose_file=compose_file,
-        worktree_path=worktree_path,
-    )
-
-    assert ok is False
-    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
-    assert runner.calls == []
-
-
-@pytest.mark.unit
-async def test_agent_git_writability_preflight_records_container_failure(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    runner.queue_result(returncode=128, stderr="fatal: cannot write object")
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
-    worktree_path = tmp_path / "worktree"
-    worktree_path.mkdir()
-    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_git_fail\n")
-    compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services: {}\n", encoding="utf-8")
-
-    ok = await executor._run_agent_git_writability_preflight(
-        workspace_id="ws_git_fail",
-        compose_project="awf_ws_git_fail",
-        compose_file=compose_file,
-        worktree_path=worktree_path,
-    )
-
-    assert ok is False
-    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
-    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
-    assert kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
-    assert kwargs["details"]["stderr"] == "fatal: cannot write object"
-
-
-@pytest.mark.unit
-async def test_repair_agent_git_ownership_reports_repair_exceptions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
-
-    def _raise(*_args: object, **_kwargs: object) -> None:
-        raise PermissionError("cannot repair")
-
-    monkeypatch.setattr(executor_git_ops, "repair_agent_writable_worktree", _raise)
-
-    assert not await executor._repair_agent_git_ownership(
-        workspace_id="ws_repair_exception",
-        worktree_path=tmp_path / "worktree",
-        reason="test",
-    )
-
-
-@pytest.mark.unit
-def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
-    assert _read_ref_sha(tmp_path, "refs/heads/missing") is None
-
-
-@pytest.mark.unit
-def test_read_ref_sha_reads_packed_ref_when_loose_ref_is_missing(tmp_path: Path) -> None:
-    sha = "a" * 40
-    (tmp_path / "packed-refs").write_text(
-        f"# pack-refs with: peeled fully-peeled sorted\n{sha} refs/heads/awf/ws_packed\n",
-        encoding="utf-8",
-    )
-
-    assert _read_ref_sha(tmp_path, "refs/heads/awf/ws_packed") == sha
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("queued", "expected_call_count"),
-    [
-        ([(1, "", "base missing")], 1),
-        ([(0, "", ""), (1, "", "update failed")], 2),
-        ([(0, "", ""), (0, "", ""), (1, "", "reset failed")], 3),
-        ([(0, "", ""), (0, "", ""), (0, "", ""), (1, "", "add failed")], 4),
-        ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")], 5),
-        ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (2, "", "diff failed")], 5),
-        (
-            [
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (1, "", ""),
-                (1, "", "commit failed"),
-            ],
-            6,
-        ),
-        (
-            [
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (1, "", ""),
-                (0, "", ""),
-                (1, "", "head failed"),
-            ],
-            7,
-        ),
-        (
-            [
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (1, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-            ],
-            7,
-        ),
-    ],
-)
-async def test_missing_head_recovery_returns_none_for_each_unrecoverable_step(
-    tmp_path: Path,
-    queued: list[tuple[int, str, str]],
-    expected_call_count: int,
-) -> None:
-    _mirror, worktree = _fake_linked_worktree(tmp_path)
-    runner = FakeCommandRunner()
-    for returncode, stdout, stderr in queued:
-        runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
-
-    result = await _recover_missing_head_from_filesystem(
-        runner=runner,
-        workspace_id="ws_missing_head",
-        worktree_path=worktree,
-        base_commit="a" * 40,
-        branch_name="awf/ws_missing_head",
-    )
-
-    assert result is None
-    assert len(runner.calls) == expected_call_count

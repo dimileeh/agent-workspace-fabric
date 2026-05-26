@@ -106,4 +106,5 @@ const server = createServer((request, response) => {
 });
 
 const port = Number.parseInt(process.env.PORT ?? "9323", 10);
-server.listen(port, "0.0.0.0");
+const host = process.env.AWF_VALIDATOR_HOST ?? "0.0.0.0";
+server.listen(port, host);

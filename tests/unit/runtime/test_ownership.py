@@ -484,6 +484,236 @@ async def test_repair_agent_runtime_ownership_blocks_workspace_id_prefix_collisi
 
 
 @pytest.mark.unit
+def test_mirror_path_from_linked_git_dir_uses_fallback_without_commondir(tmp_path: Path) -> None:
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+
+    assert (
+        ownership._mirror_path_from_linked_git_dir(linked_git_dir)
+        == (  # noqa: SLF001
+            tmp_path / "mirrors" / "repo.git"
+        ).resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_from_linked_git_dir_resolves_relative_commondir(tmp_path: Path) -> None:
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "commondir").write_text("../..", encoding="utf-8")
+
+    assert (
+        ownership._mirror_path_from_linked_git_dir(linked_git_dir)
+        == (  # noqa: SLF001
+            tmp_path / "mirrors" / "repo.git"
+        ).resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_from_linked_git_dir_handles_empty_and_absolute_commondir(
+    tmp_path: Path,
+) -> None:
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    commondir = linked_git_dir / "commondir"
+
+    commondir.write_text("", encoding="utf-8")
+    assert (
+        ownership._mirror_path_from_linked_git_dir(linked_git_dir)
+        == (  # noqa: SLF001
+            tmp_path / "mirrors" / "repo.git"
+        ).resolve()
+    )
+
+    absolute_common = tmp_path / "absolute-mirror"
+    absolute_common.mkdir()
+    commondir.write_text(str(absolute_common), encoding="utf-8")
+    assert ownership._mirror_path_from_linked_git_dir(linked_git_dir) == (  # noqa: SLF001
+        absolute_common.resolve()
+    )
+
+
+@pytest.mark.unit
+def test_mirror_path_from_linked_git_dir_reports_unreadable_commondir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "commondir").write_text("../..", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == linked_git_dir / "commondir":
+            raise OSError("nope")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(ValueError, match="cannot resolve mirror path"):
+        ownership._mirror_path_from_linked_git_dir(linked_git_dir)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_mirror_path_from_linked_git_dir_reports_unresolvable_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    original_resolve = Path.resolve
+
+    def _resolve(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == linked_git_dir.parent.parent:
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    with pytest.raises(ValueError, match="cannot resolve mirror path"):
+        ownership._mirror_path_from_linked_git_dir(linked_git_dir)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_rejects_missing_workspace_git_file(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws1"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="non-symlink file"):
+        ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_accepts_relative_gitdir(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws1"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        str(Path("..") / ".." / ".." / ".." / "worktrees" / "ws" / ".git"),
+        encoding="utf-8",
+    )
+
+    ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_rejects_empty_gitdir(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws1"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="empty"):
+        ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_reports_unreadable_gitdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws1"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    metadata_gitdir = linked_git_dir / "gitdir"
+    metadata_gitdir.write_text("relative/.git", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == metadata_gitdir:
+            raise OSError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(ValueError, match="cannot read linked-worktree metadata"):
+        ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_reports_unresolvable_gitdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text("relative/.git", encoding="utf-8")
+
+    original_resolve = Path.resolve
+
+    def _resolve(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == linked_git_dir / "relative" / ".git":
+            raise RuntimeError("loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    with pytest.raises(ValueError, match="cannot resolve linked-worktree metadata"):
+        ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validate_linked_git_dir_backref_rejects_wrong_backref(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    other_worktree = tmp_path / "worktrees" / "other"
+    linked_git_dir = tmp_path / "mirrors" / "repo.git" / "worktrees" / "ws1"
+    worktree_path.mkdir(parents=True)
+    other_worktree.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (worktree_path / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    (other_worktree / ".git").write_text("gitdir: mirror\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(str(other_worktree / ".git"), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="points to another workspace"):
+        ownership._validate_linked_git_dir_backref(linked_git_dir, worktree_path)  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validated_layout_mirror_rejects_missing_linked_git_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    worktree_path.mkdir(parents=True)
+    monkeypatch.setattr(ownership, "linked_worktree_git_dir", lambda _path: None)
+
+    with pytest.raises(ValueError, match="cannot read linked-worktree git metadata"):
+        ownership._validated_layout_mirror_for_worktree(worktree_path, "ws")  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_validated_layout_mirror_rejects_wrong_metadata_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "ws"
+    mirror_path = tmp_path / "mirrors" / "repo.git"
+    linked_git_dir = mirror_path / "wrong-parent" / "ws"
+    worktree_path.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(ownership, "linked_worktree_git_dir", lambda _path: linked_git_dir)
+    monkeypatch.setattr(ownership, "_mirror_path_from_linked_git_dir", lambda _path: mirror_path)
+
+    with pytest.raises(ValueError, match="expected parent"):
+        ownership._validated_layout_mirror_for_worktree(worktree_path, "ws")  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_repair_agent_runtime_ownership_allows_verified_numeric_worktree_suffix(
     tmp_path: Path,
 ) -> None:

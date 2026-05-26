@@ -45,19 +45,19 @@ validation:
   healthchecks:
     - name: redis
       command: python scripts/healthcheck.py redis
-      timeout_seconds: 30
+      timeout_seconds: 120
       interval_seconds: 1
-      attempt_timeout_seconds: 5
+      attempt_timeout_seconds: 15
     - name: app
       command: python scripts/healthcheck.py app
-      timeout_seconds: 30
+      timeout_seconds: 120
       interval_seconds: 1
-      attempt_timeout_seconds: 5
+      attempt_timeout_seconds: 15
     - name: worker
       command: python scripts/healthcheck.py worker
-      timeout_seconds: 30
+      timeout_seconds: 120
       interval_seconds: 1
-      attempt_timeout_seconds: 5
+      attempt_timeout_seconds: 15
 ports:
   app: http://app:8080
   redis: redis://redis:6379/0

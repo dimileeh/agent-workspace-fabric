@@ -7,6 +7,25 @@ import pytest
 import tests.conftest as root_conftest
 
 
+def test_positive_int_env_uses_default_and_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_name = "AWF_POSTGRES_TEST_TIMEOUT_SECONDS"
+    monkeypatch.delenv(env_name, raising=False)
+    assert root_conftest._positive_int_env(env_name, 120) == 120
+
+    monkeypatch.setenv(env_name, "300")
+    assert root_conftest._positive_int_env(env_name, 120) == 300
+
+    monkeypatch.setenv(env_name, "0")
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        root_conftest._positive_int_env(env_name, 120)
+
+    monkeypatch.setenv(env_name, "nope")
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        root_conftest._positive_int_env(env_name, 120)
+
+
 class _FakeItem:
     def __init__(
         self,
@@ -27,6 +46,26 @@ class _FakeSession:
         self.items = items
 
 
+class _FakeCollectionItem(_FakeItem):
+    def __init__(
+        self,
+        path: Path,
+        fixturenames: tuple[str, ...] = (),
+        *,
+        markers: dict[str, pytest.Mark] | None = None,
+    ) -> None:
+        super().__init__(path, fixturenames)
+        self.markers = markers or {}
+        self.added_markers: list[tuple[pytest.MarkDecorator, bool]] = []
+
+    def get_closest_marker(self, name: str) -> pytest.Mark | None:
+        return self.markers.get(name)
+
+    def add_marker(self, marker: pytest.MarkDecorator, append: bool = True) -> None:
+        self.added_markers.append((marker, append))
+        self.markers[marker.name] = marker.mark
+
+
 def test_collection_finish_skips_cleanup_for_source_only_helper_mentions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -43,6 +82,45 @@ def test_collection_finish_skips_cleanup_for_source_only_helper_mentions(
     monkeypatch.setattr(postgres_mod, cleanup_name, fail_cleanup)
 
     root_conftest.pytest_collection_finish(_FakeSession([_FakeItem(test_file)]))  # type: ignore[arg-type]
+
+
+def test_collection_modifyitems_extends_docker_test_timeout(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_docker.py"
+    test_file.write_text("def test_docker():\n    pass\n", encoding="utf-8")
+    item = _FakeCollectionItem(
+        test_file,
+        markers={
+            "docker": pytest.mark.docker.mark,
+            "timeout": pytest.mark.timeout(300).mark,
+        },
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, [item])  # type: ignore[arg-type, list-item]
+
+    assert len(item.added_markers) == 1
+    added_marker, append = item.added_markers[0]
+    assert added_marker.name == "timeout"
+    assert added_marker.mark.args == (root_conftest._DOCKER_TEST_TIMEOUT_SECONDS,)
+    assert append is False
+    assert item.get_closest_marker("timeout").args == (  # type: ignore[union-attr]
+        root_conftest._DOCKER_TEST_TIMEOUT_SECONDS,
+    )
+
+
+def test_collection_modifyitems_preserves_larger_docker_timeout(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_docker_long.py"
+    test_file.write_text("def test_docker_long():\n    pass\n", encoding="utf-8")
+    item = _FakeCollectionItem(
+        test_file,
+        markers={
+            "docker": pytest.mark.docker.mark,
+            "timeout": pytest.mark.timeout(root_conftest._DOCKER_TEST_TIMEOUT_SECONDS + 1).mark,
+        },
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, [item])  # type: ignore[arg-type, list-item]
+
+    assert item.added_markers == []
 
 
 def test_collection_finish_runs_cleanup_for_managed_db_fixtures(

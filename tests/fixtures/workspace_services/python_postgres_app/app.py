@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import socket
+import struct
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-import psycopg
+from types import TracebackType
+from urllib.parse import urlparse
 
 _TABLE = "awf_profile_fixture"
 _RECORD_ID = "awf-db-profile-fixture"
@@ -18,8 +20,115 @@ def _database_url() -> str:
     return value
 
 
-def _connect() -> psycopg.Connection[tuple[object, ...]]:
-    return psycopg.connect(_database_url(), autocommit=True, connect_timeout=10)
+def _read_exact(sock: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise RuntimeError("postgres connection closed unexpectedly")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _error_message(payload: bytes) -> str:
+    fields = payload.rstrip(b"\x00").split(b"\x00")
+    messages = [
+        field[1:].decode("utf-8", errors="replace")
+        for field in fields
+        if field[:1] in {b"M", b"D", b"H"}
+    ]
+    return "; ".join(messages) or payload.decode("utf-8", errors="replace")
+
+
+class _PostgresConnection:
+    def __init__(self, url: str) -> None:
+        parsed = urlparse(url)
+        self.database = parsed.path.lstrip("/") or "awf"
+        self.user = parsed.username or "awf"
+        self.host = parsed.hostname or "postgres"
+        self.port = parsed.port or 5432
+        self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        self.sock.settimeout(10)
+        self._startup()
+
+    def __enter__(self) -> _PostgresConnection:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.sock.sendall(b"X" + struct.pack("!I", 4))
+        finally:
+            self.sock.close()
+
+    def _send_startup(self) -> None:
+        params = {
+            "user": self.user,
+            "database": self.database,
+            "client_encoding": "UTF8",
+        }
+        payload = struct.pack("!I", 196608)
+        for key, value in params.items():
+            payload += key.encode("utf-8") + b"\x00" + value.encode("utf-8") + b"\x00"
+        payload += b"\x00"
+        self.sock.sendall(struct.pack("!I", len(payload) + 4) + payload)
+
+    def _read_message(self) -> tuple[bytes, bytes]:
+        message_type = _read_exact(self.sock, 1)
+        length = struct.unpack("!I", _read_exact(self.sock, 4))[0]
+        return message_type, _read_exact(self.sock, length - 4)
+
+    def _startup(self) -> None:
+        self._send_startup()
+        while True:
+            message_type, payload = self._read_message()
+            if message_type == b"R":
+                auth_code = struct.unpack("!I", payload[:4])[0]
+                if auth_code != 0:
+                    raise RuntimeError(f"unexpected postgres auth request: {auth_code}")
+            elif message_type == b"E":
+                raise RuntimeError(_error_message(payload))
+            elif message_type == b"Z":
+                return
+
+    def execute(self, query: str) -> list[tuple[str | None, ...]]:
+        payload = query.encode("utf-8") + b"\x00"
+        self.sock.sendall(b"Q" + struct.pack("!I", len(payload) + 4) + payload)
+        rows: list[tuple[str | None, ...]] = []
+        while True:
+            message_type, payload = self._read_message()
+            if message_type == b"D":
+                rows.append(self._parse_data_row(payload))
+            elif message_type == b"E":
+                raise RuntimeError(_error_message(payload))
+            elif message_type == b"Z":
+                return rows
+
+    @staticmethod
+    def _parse_data_row(payload: bytes) -> tuple[str | None, ...]:
+        column_count = struct.unpack("!H", payload[:2])[0]
+        offset = 2
+        values: list[str | None] = []
+        for _ in range(column_count):
+            value_length = struct.unpack("!i", payload[offset : offset + 4])[0]
+            offset += 4
+            if value_length == -1:
+                values.append(None)
+                continue
+            raw_value = payload[offset : offset + value_length]
+            offset += value_length
+            values.append(raw_value.decode("utf-8"))
+        return tuple(values)
+
+
+def _connect() -> _PostgresConnection:
+    return _PostgresConnection(_database_url())
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -42,38 +151,37 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _handle_healthz(self) -> None:
-        with _connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            cur.fetchone()
+        with _connect() as conn:
+            conn.execute("SELECT 1")
         self._send_text("ok\n")
 
     def _handle_setup(self) -> None:
-        with _connect() as conn, conn.cursor() as cur:
-            cur.execute(
+        with _connect() as conn:
+            conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {_TABLE} (
                     id text PRIMARY KEY,
                     value text NOT NULL
                 )
+                ;
+                TRUNCATE TABLE {_TABLE}
                 """
             )
-            cur.execute(f"TRUNCATE TABLE {_TABLE}")
         self._send_text("setup ok\n")
 
     def _handle_validate(self) -> None:
-        with _connect() as conn, conn.cursor() as cur:
-            cur.execute(
+        with _connect() as conn:
+            rows = conn.execute(
                 f"""
                 INSERT INTO {_TABLE} (id, value)
-                VALUES (%s, %s)
+                VALUES ('{_RECORD_ID}', '{_RECORD_VALUE}')
                 ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value
-                """,
-                (_RECORD_ID, _RECORD_VALUE),
+                ;
+                SELECT value FROM {_TABLE} WHERE id = '{_RECORD_ID}'
+                """
             )
-            cur.execute(f"SELECT value FROM {_TABLE} WHERE id = %s", (_RECORD_ID,))
-            row = cur.fetchone()
-        if row != (_RECORD_VALUE,):
-            raise RuntimeError(f"unexpected validation row: {row!r}")
+        if rows != [(_RECORD_VALUE,)]:
+            raise RuntimeError(f"unexpected validation rows: {rows!r}")
         self._send_text(f"validated {_RECORD_ID}\n")
 
     def _send_text(self, body: str, *, status: HTTPStatus = HTTPStatus.OK) -> None:

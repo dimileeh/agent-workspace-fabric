@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
+import struct
 from pathlib import Path
 from types import ModuleType
 
@@ -42,27 +42,53 @@ def _load_fixture_app_module() -> ModuleType:
 def test_python_postgres_fixture_uses_startup_tolerant_db_connect_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection = object()
-    calls: list[tuple[tuple[str], dict[str, object]]] = []
+    class _Socket:
+        def __init__(self) -> None:
+            self.timeout: float | None = None
+            self.sent: list[bytes] = []
+            self.read_buffer = (
+                b"R"
+                + struct.pack("!I", 8)
+                + struct.pack("!I", 0)
+                + b"Z"
+                + struct.pack("!I", 5)
+                + b"I"
+            )
 
-    def connect(*args: str, **kwargs: object) -> object:
-        calls.append((args, kwargs))
-        return connection
+        def settimeout(self, timeout: float) -> None:
+            self.timeout = timeout
 
-    psycopg = ModuleType("psycopg")
-    psycopg.__dict__["connect"] = connect
-    monkeypatch.setitem(sys.modules, "psycopg", psycopg)
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def recv(self, size: int) -> bytes:
+            chunk = self.read_buffer[:size]
+            self.read_buffer = self.read_buffer[size:]
+            return chunk
+
+    calls: list[tuple[tuple[str, int], float]] = []
+    fake_socket = _Socket()
 
     app = _load_fixture_app_module()
-    monkeypatch.setenv("DATABASE_URL", "postgresql://awf@postgres/awf")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://awf@postgres:5432/awf")
 
-    assert app._connect() is connection
-    assert calls == [
-        (
-            ("postgresql://awf@postgres/awf",),
-            {"autocommit": True, "connect_timeout": 10},
-        )
-    ]
+    def create_connection(address: tuple[str, int], *, timeout: float) -> _Socket:
+        calls.append((address, timeout))
+        return fake_socket
+
+    monkeypatch.setattr(app.socket, "create_connection", create_connection)
+
+    connection = app._connect()
+
+    assert connection.host == "postgres"
+    assert connection.port == 5432
+    assert connection.database == "awf"
+    assert connection.user == "awf"
+    assert fake_socket.timeout == 10
+    assert calls == [(("postgres", 5432), 10)]
+    assert fake_socket.sent[0].endswith(
+        b"user\x00awf\x00database\x00awf\x00client_encoding\x00UTF8\x00\x00"
+    )
 
 
 @pytest.mark.unit

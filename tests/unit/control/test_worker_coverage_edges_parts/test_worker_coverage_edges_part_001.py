@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -31,11 +30,6 @@ from awf.control.worker.helpers import (
     _active_execution_preservation_claim_cleanup_payload,
     _exception_chain_has_sqlalchemy_error,
     _execution_claim_is_stale,
-    _has_running_agent_runtime,
-    _json_datetime,
-    _monitor_claim_is_stale,
-    _stale_active_execution_failure_message,
-    _utc_datetime,
     _worker_exception_is_transient_db_connection,
 )
 from awf.control.worker.scheduling import _record_scheduler_queue_decision
@@ -57,7 +51,8 @@ from awf.db.resilience import (
     DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
+from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
@@ -231,6 +226,20 @@ class _RefreshLoopWorker(ControlWorker):
         return self.refreshed
 
 
+def _terminal_candidate(
+    workspace_id: str = "ws_terminal",
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.completed,
+) -> worker_cleanup._TerminalRuntimeCandidate:  # noqa: SLF001
+    return worker_cleanup._TerminalRuntimeCandidate(  # noqa: SLF001
+        workspace_id=workspace_id,
+        status=status,
+        compose_project_name=f"awf_{workspace_id}",
+        compose_file_path=None,
+        repo_url="git@example.com:repo/app.git",
+    )
+
+
 @pytest.mark.unit
 def test_preserved_active_worktree_path_uses_public_provisioner_method(tmp_path: Path) -> None:
     provisioner = _PublicWorktreePathProvisioner(tmp_path)
@@ -243,6 +252,131 @@ def test_preserved_active_worktree_path_uses_public_provisioner_method(tmp_path:
     assert worker._preserved_active_worktree_path("ws_public") == tmp_path / "ws_public"  # noqa: SLF001
     assert provisioner.requests == ["ws_public"]
     assert not hasattr(provisioner, "_git")
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_resources_propagates_single_candidate_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _terminal_candidate()
+
+    async def _candidates(*, limit: int | None = None) -> list[object]:
+        assert limit == 5
+        return [candidate]
+
+    async def _release(_candidate: object) -> None:
+        raise RuntimeError("cleanup failed")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=5),
+        _list_terminal_runtime_candidates=_candidates,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+    monkeypatch.setattr(
+        worker_cleanup,
+        "_worker_exception_is_transient_db_connection",
+        lambda _exc: False,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_resources_groups_multiple_candidate_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = [_terminal_candidate("ws_one"), _terminal_candidate("ws_two")]
+
+    async def _list_candidates(*, limit: int | None = None) -> list[object]:
+        del limit
+        return candidates
+
+    async def _release(candidate: object) -> None:
+        raise RuntimeError(f"cleanup failed for {candidate.workspace_id}")  # type: ignore[attr-defined]
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=10),
+        _list_terminal_runtime_candidates=_list_candidates,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+    monkeypatch.setattr(
+        worker_cleanup,
+        "_worker_exception_is_transient_db_connection",
+        lambda _exc: False,
+    )
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    assert len(exc_info.value.exceptions) == 2
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_candidate_handles_missing_cleaner() -> None:
+    worker = SimpleNamespace(_runtime_cleaner=None)
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(  # noqa: SLF001
+        worker,
+        _terminal_candidate(),
+    )
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_candidate_records_cleanup_raise_and_swallows_record_error() -> (
+    None
+):
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: object) -> WorkspaceCleanupResult:
+            raise RuntimeError("docker failed")
+
+    async def _record(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("record failed")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _record_terminal_runtime_release_failed=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(  # noqa: SLF001
+        worker,
+        _terminal_candidate(),
+    )
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_candidate_records_partial_cleanup_and_swallows_record_error() -> (
+    None
+):
+    partial_cleanup = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose",
+                status="failed",
+                reason_code="COMPOSE_DOWN_FAILED",
+                error="still running",
+            )
+        ]
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: object) -> WorkspaceCleanupResult:
+            return partial_cleanup
+
+    async def _record(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("record failed")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _record_terminal_runtime_release_failed=_record,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(  # noqa: SLF001
+        worker,
+        _terminal_candidate(),
+    )
 
 
 @pytest.mark.unit
@@ -431,6 +565,100 @@ async def test_terminal_runtime_release_groups_multiple_candidate_failures() -> 
         await worker._release_terminal_runtime_resources()  # noqa: SLF001
 
     assert len(exc_info.value.exceptions) == 2
+
+
+@pytest.mark.unit
+async def test_maybe_release_terminal_runtime_records_scan_after_non_transient_failure() -> None:
+    worker = SimpleNamespace(
+        _next_terminal_runtime_release_scan_at=0.0,
+        _config=SimpleNamespace(terminal_runtime_release_scan_interval_seconds=5.0),
+    )
+
+    async def _release_resources() -> None:
+        raise RuntimeError("release exploded")
+
+    worker._release_terminal_runtime_resources = _release_resources
+
+    await worker_cleanup._maybe_release_terminal_runtime(worker)  # noqa: SLF001
+
+    assert worker._next_terminal_runtime_release_scan_at > 0
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_candidate_records_cleanup_raise_failures() -> None:
+    candidate = worker_cleanup._TerminalRuntimeCandidate(  # noqa: SLF001
+        workspace_id="ws_cleanup_raised",
+        status=WorkspaceStatus.failed,
+        repo_url="git@example.com:repo/app.git",
+        compose_project_name="awf_ws_cleanup_raised",
+        compose_file_path="/tmp/compose.yml",
+    )
+    recorded: list[tuple[str, object | None, str]] = []
+
+    class _FailingCleaner:
+        async def cleanup(self, **_kwargs: object) -> WorkspaceCleanupResult:
+            raise RuntimeError("compose gone")
+
+    async def _record_failed(
+        failed_candidate: object,
+        *,
+        cleanup: WorkspaceCleanupResult | None,
+        message: str,
+    ) -> None:
+        recorded.append((failed_candidate.workspace_id, cleanup, message))  # type: ignore[attr-defined]
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_FailingCleaner(),
+        _record_terminal_runtime_release_failed=_record_failed,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
+
+    assert recorded == [
+        ("ws_cleanup_raised", None, "runtime cleanup raised RuntimeError: compose gone")
+    ]
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_candidate_logs_record_failures() -> None:
+    candidate = worker_cleanup._TerminalRuntimeCandidate(  # noqa: SLF001
+        workspace_id="ws_record_failed",
+        status=WorkspaceStatus.cancelled,
+        repo_url="git@example.com:repo/app.git",
+        compose_project_name="awf_ws_record_failed",
+        compose_file_path=None,
+    )
+    cleanup = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="failed",
+                reason_code="COMPOSE_DOWN_FAILED",
+                error="boom",
+            )
+        ]
+    )
+
+    class _Cleaner:
+        async def cleanup(self, **_kwargs: object) -> WorkspaceCleanupResult:
+            return cleanup
+
+    async def _record_failed(
+        _candidate: object,
+        *,
+        cleanup: WorkspaceCleanupResult | None,
+        message: str,
+    ) -> None:
+        assert cleanup is not None
+        assert message == "failed to stop or remove terminal workspace runtime"
+        raise RuntimeError("record failed")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=_Cleaner(),
+        _record_terminal_runtime_release_failed=_record_failed,
+    )
+
+    await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -1206,250 +1434,3 @@ async def test_stale_active_execution_can_fail_ignores_salvage_for_other_status(
             compose_project_name=f"awf_{workspace_id}",
         )
     )
-
-
-@pytest.mark.unit
-async def test_stale_active_execution_can_fail_normalizes_latest_preserved_floor(
-    factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = await _seed_status(
-        factory, WorkspaceStatus.running, title="normalizes-preserved-floor"
-    )
-    now = datetime.now(UTC)
-    status_started_at = now - timedelta(minutes=10)
-    claim_expires_at = now - timedelta(minutes=5)
-    latest_preserved_at = (now - timedelta(minutes=4)).replace(tzinfo=None)
-    stale_at = now - timedelta(minutes=2)
-
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
-        assert ws is not None
-        ws.execution_claimed_by = "stale-worker"
-        ws.execution_claim_expires_at = claim_expires_at
-        state_events = await WorkspaceEventRepository(session).list(
-            workspace_id=workspace_id,
-            event_type="workspace.state_changed",
-        )
-        running_started = next(
-            event for event in state_events if event.new_state == WorkspaceStatus.running.value
-        )
-        running_started.occurred_at = status_started_at
-        stale = await repo.add_event(
-            ws,
-            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
-            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-            payload={"workspace_status": WorkspaceStatus.running.value},
-        )
-        stale.occurred_at = stale_at
-        await session.commit()
-
-    worker = ControlWorker(
-        session_factory=factory,
-        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
-        config=WorkerConfig(active_execution_preservation_grace_seconds=0.0),
-    )
-    observed_floors: list[datetime] = []
-
-    async def latest_preserved(
-        session: AsyncSession,
-        workspace_id: str,
-        status: WorkspaceStatus,
-        *,
-        event_floor: datetime | None = None,
-        match_active_execution_statuses: bool = False,
-    ) -> datetime:
-        del session, workspace_id, status, event_floor, match_active_execution_statuses
-        return latest_preserved_at
-
-    async def has_current_salvage_event(
-        session: AsyncSession,
-        workspace_id: str,
-        *,
-        event_type: str,
-        reason_code: str,
-        event_floor: datetime,
-        workspace_status: WorkspaceStatus,
-    ) -> bool:
-        del session, workspace_id, event_type, reason_code, workspace_status
-        observed_floors.append(event_floor)
-        return event_floor == _utc_datetime(latest_preserved_at)
-
-    monkeypatch.setattr(worker, "_latest_preserved_active_execution_at", latest_preserved)
-    monkeypatch.setattr(worker, "_has_current_salvage_event", has_current_salvage_event)
-
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
-        _ActiveExecutionCandidate(
-            workspace_id=workspace_id,
-            status=WorkspaceStatus.running,
-            compose_project_name=f"awf_{workspace_id}",
-        )
-    )
-    assert observed_floors == [_utc_datetime(latest_preserved_at)]
-
-
-@pytest.mark.unit
-def test_monitor_claim_staleness_and_json_datetime_handle_naive_datetimes() -> None:
-    cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
-
-    assert _monitor_claim_is_stale(
-        SimpleNamespace(
-            monitor_claimed_by="worker",
-            monitor_claim_expires_at=datetime(2026, 4, 27, 11, 59),
-        ),
-        cutoff,
-    )
-    assert _json_datetime(datetime(2026, 4, 27, 12, 1)) == "2026-04-27T12:01:00+00:00"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("loop_name", "raises", "expected_event"),
-    [
-        ("monitor", True, "worker.monitor_claim_refresh_failed"),
-        ("monitor", False, "worker.monitor_claim_lost"),
-        ("execution", True, "worker.execution_claim_refresh_failed"),
-        ("execution", False, "worker.execution_claim_lost"),
-    ],
-)
-async def test_claim_refresh_loops_stop_after_refresh_failure_or_lost_claim(
-    loop_name: str,
-    raises: bool,
-    expected_event: str,
-) -> None:
-    worker = _RefreshLoopWorker(raises=raises, refreshed=False)
-    loop = (
-        worker._refresh_monitoring_pr_claim_loop
-        if loop_name == "monitor"
-        else worker._refresh_execution_claim_loop
-    )
-
-    with structlog.testing.capture_logs() as captured:
-        await asyncio.wait_for(loop("ws_loop"), timeout=2)
-
-    assert any(event.get("event") == expected_event for event in captured)
-    if loop_name == "monitor":
-        assert worker.monitor_refresh_calls == 1
-        assert worker.execution_refresh_calls == 0
-    else:
-        assert worker.execution_refresh_calls == 1
-        assert worker.monitor_refresh_calls == 0
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("loop_name", ["monitor", "execution"])
-async def test_claim_refresh_loops_continue_after_successful_refresh(loop_name: str) -> None:
-    worker = _RefreshLoopWorker(raises=False, refreshed=True)
-    loop = (
-        worker._refresh_monitoring_pr_claim_loop
-        if loop_name == "monitor"
-        else worker._refresh_execution_claim_loop
-    )
-
-    task = asyncio.create_task(loop("ws_loop"))
-    await asyncio.wait_for(worker.refreshed_once.wait(), timeout=2)
-    await asyncio.sleep(0)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-    if loop_name == "monitor":
-        assert worker.monitor_refresh_calls == 1
-        assert worker.execution_refresh_calls == 0
-    else:
-        assert worker.execution_refresh_calls == 1
-        assert worker.monitor_refresh_calls == 0
-
-
-@pytest.mark.unit
-def test_stale_active_execution_failure_message_includes_runtime_reason() -> None:
-    message = _stale_active_execution_failure_message(
-        _ActiveExecutionCandidate(
-            workspace_id="ws_runtime",
-            status=WorkspaceStatus.running,
-            compose_project_name="awf_ws_runtime",
-        ),
-        RuntimeSnapshot(stack_state="unavailable", reason=" docker unavailable \n", services=[]),
-    )
-
-    assert "compose runtime state is unavailable: docker unavailable" in message
-    no_reason_message = _stale_active_execution_failure_message(
-        _ActiveExecutionCandidate(
-            workspace_id="ws_runtime",
-            status=WorkspaceStatus.validating,
-            compose_project_name="awf_ws_runtime",
-        ),
-        RuntimeSnapshot(stack_state="stopped", services=[]),
-    )
-    assert "compose runtime state is stopped." in no_reason_message
-
-
-@pytest.mark.unit
-def test_runtime_snapshot_requires_running_stack_before_agent_detection() -> None:
-    assert not _has_running_agent_runtime(
-        RuntimeSnapshot(
-            stack_state="stopped",
-            services=[
-                RuntimeService(
-                    name="agent",
-                    container_id="agent-1",
-                    image="awf-agent-runtime",
-                    state="running",
-                )
-            ],
-        )
-    )
-
-
-@pytest.mark.unit
-def test_worker_utc_datetime_normalizes_naive_values() -> None:
-    assert _utc_datetime(datetime(2026, 4, 27, 12, 0)) == datetime(
-        2026,
-        4,
-        27,
-        12,
-        0,
-        tzinfo=UTC,
-    )
-
-
-@pytest.mark.unit
-async def test_wait_for_execution_tasks_removes_completed_tasks(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    worker = _worker(factory)
-    worker._execution_tasks["ws_done"] = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
-
-    await worker.wait_for_execution_tasks()
-
-    assert worker._execution_tasks == {}  # noqa: SLF001
-
-
-@pytest.mark.unit
-async def test_execution_and_monitor_claim_helpers_skip_already_running_task(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    worker = _worker(factory)
-    task = asyncio.create_task(asyncio.sleep(30))
-    worker._execution_tasks["ws_busy"] = task  # noqa: SLF001
-
-    try:
-        assert worker._dispatchable_execution_ids(  # noqa: SLF001
-            ["ws_busy", "ws_next"],
-            limit=2,
-        ) == ["ws_next"]
-        assert await worker._claim_monitoring_pr_ids(["ws_busy"], limit=1) == []  # noqa: SLF001
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-@pytest.mark.unit
-async def test_dispatchable_execution_ids_stops_after_limit(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    worker = _worker(factory)
-
-    assert worker._dispatchable_execution_ids(["ws_one", "ws_two"], limit=1) == ["ws_one"]  # noqa: SLF001

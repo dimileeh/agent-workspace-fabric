@@ -17,6 +17,9 @@ down_revision: str | Sequence[str] | None = "d6e7f8a9b0c1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_INDEX_DDL_LOCK_NAMESPACE = 0x415746
+_INDEX_DDL_LOCK_KEY = 0x45564F52
+
 
 def upgrade() -> None:
     # This migration rewrites historical workspace_events rows. Keep it
@@ -126,18 +129,34 @@ def upgrade() -> None:
     # transaction. Keep the data backfill transactional above, then release the
     # transaction before building the read-path index without blocking writers.
     with op.get_context().autocommit_block():
-        op.execute(sa.text("SET lock_timeout = '5s'"))
-        op.execute(sa.text("SET statement_timeout = '10min'"))
-        op.create_index(
-            "ix_workspace_events_workspace_occurred_order",
-            "workspace_events",
-            ["workspace_id", "occurred_at", "event_order"],
-            unique=False,
-            if_not_exists=True,
-            postgresql_concurrently=True,
+        op.execute(
+            sa.text(
+                "SELECT pg_advisory_lock("
+                f"{_INDEX_DDL_LOCK_NAMESPACE}, {_INDEX_DDL_LOCK_KEY}"
+                ")"
+            )
         )
-        op.execute(sa.text("RESET lock_timeout"))
-        op.execute(sa.text("RESET statement_timeout"))
+        try:
+            op.execute(sa.text("SET lock_timeout = '30s'"))
+            op.execute(sa.text("SET statement_timeout = '10min'"))
+            op.create_index(
+                "ix_workspace_events_workspace_occurred_order",
+                "workspace_events",
+                ["workspace_id", "occurred_at", "event_order"],
+                unique=False,
+                if_not_exists=True,
+                postgresql_concurrently=True,
+            )
+        finally:
+            op.execute(sa.text("RESET lock_timeout"))
+            op.execute(sa.text("RESET statement_timeout"))
+            op.execute(
+                sa.text(
+                    "SELECT pg_advisory_unlock("
+                    f"{_INDEX_DDL_LOCK_NAMESPACE}, {_INDEX_DDL_LOCK_KEY}"
+                    ")"
+                )
+            )
 
 
 def downgrade() -> None:

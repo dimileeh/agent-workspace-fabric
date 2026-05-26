@@ -17,6 +17,23 @@ from awf.db.session import make_engine
 from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
 
 
+def _run_alembic(repo_root: Path, env: dict[str, str], *args: str) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+        cwd=repo_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            "alembic command failed: "
+            f"{' '.join(args)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            pytrace=False,
+        )
+
+
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -63,14 +80,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            _run_alembic(repo_root, env, "upgrade", "head")
 
         engine = make_engine(database_url)
         try:
@@ -302,8 +312,14 @@ def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
 
     assert ddl_timeout_index < add_column_index < backfill_timeout_index < backfill_index
     assert "SET LOCAL statement_timeout" in migration
+    assert "SET lock_timeout = '30s'" in migration
     assert "workspace_events.event_order IS NULL" in migration
     assert "autocommit_block()" in migration
+    assert "SELECT pg_advisory_lock(" in migration
+    assert "SELECT pg_advisory_unlock(" in migration
+    assert migration.index("SELECT pg_advisory_lock(") < migration.index(
+        "postgresql_concurrently=True"
+    )
     assert "if_not_exists=True" in migration
     assert "if_exists=True" in migration
     assert "postgresql_concurrently=True" in migration
@@ -321,14 +337,7 @@ async def test_workspace_event_order_migration_reruns_after_column_exists(
         }
 
         def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            _run_alembic(repo_root, env, *args)
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
@@ -436,14 +445,7 @@ async def test_workspace_event_order_migration_backfills_existing_events(
         }
 
         def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            _run_alembic(repo_root, env, *args)
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
@@ -578,61 +580,54 @@ async def test_workspace_event_order_migration_orders_old_writer_events_after_up
         }
 
         def _alembic(*args: str) -> None:
-            with postgres_alembic_subprocess_lock(database_url):
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                    cwd=repo_root,
-                    env=env,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+            _run_alembic(repo_root, env, *args)
 
         monkeypatch.chdir(repo_root)
-        _alembic("upgrade", "d6e7f8a9b0c1")
+        with postgres_alembic_subprocess_lock(database_url):
+            _alembic("upgrade", "d6e7f8a9b0c1")
 
-        engine = make_engine(database_url)
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO workspaces (
-                            id, status, version, repo_url, branch_base,
-                            task_title, task_prompt, agent, test_commands,
-                            requires_database, created_at, updated_at
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base,
+                                task_title, task_prompt, agent, test_commands,
+                                requires_database, created_at, updated_at
+                            )
+                            VALUES (
+                                'ws_event_order_old_writer', 'failed', 0,
+                                'git@example.com:repo.git', 'main',
+                                'old writer row', 'do work', 'codex', '[]'::json,
+                                false, '2026-05-01 00:00:00+00',
+                                '2026-05-01 00:00:00+00'
+                            )
+                            """
                         )
-                        VALUES (
-                            'ws_event_order_old_writer', 'failed', 0,
-                            'git@example.com:repo.git', 'main',
-                            'old writer row', 'do work', 'codex', '[]'::json,
-                            false, '2026-05-01 00:00:00+00',
-                            '2026-05-01 00:00:00+00'
-                        )
-                        """
                     )
-                )
-                await conn.execute(
-                    text(
-                        """
-                        INSERT INTO workspace_events (
-                            id, workspace_id, event_type, old_state,
-                            new_state, reason_code, payload, occurred_at
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspace_events (
+                                id, workspace_id, event_type, old_state,
+                                new_state, reason_code, payload, occurred_at
+                            )
+                            VALUES (
+                                'evt_event_order_existing',
+                                'ws_event_order_old_writer',
+                                'workspace.state_changed', 'running',
+                                'failed', 'EXISTING_FAILURE', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            )
+                            """
                         )
-                        VALUES (
-                            'evt_event_order_existing',
-                            'ws_event_order_old_writer',
-                            'workspace.state_changed', 'running',
-                            'failed', 'EXISTING_FAILURE', '{}'::json,
-                            '2026-05-01 00:00:01+00'
-                        )
-                        """
                     )
-                )
-        finally:
-            await engine.dispose()
+            finally:
+                await engine.dispose()
 
-        _alembic("upgrade", "head")
+            _alembic("upgrade", "head")
 
         engine = make_engine(database_url)
         try:

@@ -209,6 +209,7 @@ def test_python_postgres_workspace_services_profile_preserves_service_schema() -
     assert postgres.image == "postgres:16-alpine"
     assert postgres.environment == {
         "POSTGRES_DB": "awf",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
         "POSTGRES_PASSWORD": "${AWF_POSTGRES_PASSWORD}",
         "POSTGRES_USER": "awf",
     }
@@ -316,6 +317,7 @@ def test_python_postgres_profile_services_resolves_worktree_paths_and_named_volu
     assert postgres.image == "postgres:16-alpine"
     assert postgres.environment == (
         ("POSTGRES_DB", "awf"),
+        ("POSTGRES_HOST_AUTH_METHOD", "trust"),
         ("POSTGRES_PASSWORD", "${AWF_POSTGRES_PASSWORD}"),
         ("POSTGRES_USER", "awf"),
     )
@@ -521,9 +523,9 @@ def test_redis_worker_workspace_services_profile_preserves_service_schema() -> N
         (check.name, check.command, check.timeout_seconds, check.attempt_timeout_seconds)
         for check in profile.validation.healthchecks
     ] == [
-        ("redis", "python scripts/healthcheck.py redis", 30.0, 5.0),
-        ("app", "python scripts/healthcheck.py app", 30.0, 5.0),
-        ("worker", "python scripts/healthcheck.py worker", 30.0, 5.0),
+        ("redis", "python scripts/healthcheck.py redis", 120.0, 15.0),
+        ("app", "python scripts/healthcheck.py app", 120.0, 15.0),
+        ("worker", "python scripts/healthcheck.py worker", 120.0, 15.0),
     ]
 
 

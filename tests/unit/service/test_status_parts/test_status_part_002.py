@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy.exc import InterfaceError
 
@@ -878,35 +879,29 @@ async def test_docker_process_reports_os_error_without_crashing(tmp_path: Path) 
 
 
 @pytest.mark.unit
-async def test_http_get_fetches_json_from_local_health_server() -> None:
-    async def handle_client(
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        await reader.readuntil(b"\r\n\r\n")
-        writer.write(
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: application/json\r\n"
-            b"Content-Length: 15\r\n"
-            b"Connection: close\r\n"
-            b"\r\n"
-            b'{"status":"ok"}'
-        )
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+async def test_http_get_fetches_json_from_local_health_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
 
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
-    try:
-        socket = server.sockets[0]
-        host, port = socket.getsockname()[:2]
-        response = await _http_get(f"http://{host}:{port}/healthz", timeout=5.0)
-    finally:
-        server.close()
-        await server.wait_closed()
+    class _AsyncClient:
+        async def __aenter__(self) -> _AsyncClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, *, timeout: float) -> httpx.Response:
+            calls.append((url, timeout))
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(status_mod.httpx, "AsyncClient", _AsyncClient)
+
+    response = await _http_get("http://127.0.0.1:12345/healthz", timeout=5.0)
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert calls == [("http://127.0.0.1:12345/healthz", 5.0)]
 
 
 @pytest.mark.unit

@@ -23,8 +23,29 @@ from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS = 10
-POSTGRES_TEST_CONNECT_ATTEMPTS = 3
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer.") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer.")
+    return value
+
+
+POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS = _positive_int_env(
+    "AWF_POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS",
+    10,
+)
+POSTGRES_TEST_CONNECT_ATTEMPTS = _positive_int_env(
+    "AWF_POSTGRES_TEST_CONNECT_ATTEMPTS",
+    3,
+)
 RETRYABLE_POSTGRES_ERROR_NAMES = {
     "ConnectionDoesNotExistError",
     "InternalClientError",
@@ -281,6 +302,7 @@ def cleanup_stale_postgres_test_schemas() -> None:
     lock_path = Path(tempfile.gettempdir()) / (
         f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.lock"
     )
+    done_path = lock_path.with_suffix(".done")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Serialize concurrent workers while cleanup scans before this process marks
@@ -290,8 +312,24 @@ def cleanup_stale_postgres_test_schemas() -> None:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            asyncio.run(_drop_stale_postgres_test_schemas(database_url))
+            if done_path.exists() and _is_postgres_test_schema_namespace_active(
+                database_url,
+                namespace,
+            ):
+                _ensure_postgres_test_run_active(database_url)
+                _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
+                return
+            try:
+                asyncio.run(_drop_stale_postgres_test_schemas(database_url))
+            except Exception as exc:
+                if not _is_retryable_connect_error(exc):
+                    raise
+                _ensure_postgres_test_run_active(database_url)
+                done_path.touch()
+                _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
+                return
             _ensure_postgres_test_run_active(database_url)
+            done_path.touch()
             _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
         finally:
             if fcntl is not None:

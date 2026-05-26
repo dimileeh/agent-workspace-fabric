@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Final
 
+from awf.control.quality_gates_common import (
+    ProtectedFileDiff,
+    QualityGateViolation,
+    _normalize_path,
+    _violation,
+)
 from awf.db.repositories import owned_paths_overlap
 
 PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
@@ -257,26 +262,6 @@ _ALLOWED_PROJECT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class ProtectedFileDiff:
-    """Local old/new content for classifying a protected file change."""
-
-    path: str
-    old_text: str | None
-    new_text: str | None
-
-
-@dataclass(frozen=True)
-class QualityGateViolation:
-    """A protected quality-gate file changed outside task ownership."""
-
-    path: str
-    protected_pattern: str
-    section: str | None = None
-    line: int | None = None
-    reason: str = "protected quality-gate file changed outside declared owned_paths"
-
-
 def find_protected_quality_gate_changes(
     *,
     changed_paths: list[str] | tuple[str, ...],
@@ -416,23 +401,6 @@ def _is_internal_plan_artifact_path(path: str) -> bool:
     return path.startswith(INTERNAL_PLAN_ARTIFACT_PREFIX)
 
 
-def _violation(
-    *,
-    path: str,
-    protected_pattern: str,
-    section: str,
-    line: int | None,
-    reason: str,
-) -> QualityGateViolation:
-    return QualityGateViolation(
-        path=path,
-        protected_pattern=protected_pattern,
-        section=section,
-        line=line,
-        reason=reason,
-    )
-
-
 def _format_violation_detail(violation: QualityGateViolation) -> str:
     section = violation.section or violation.protected_pattern
     line = f"line {violation.line}" if violation.line is not None else "line unknown"
@@ -456,13 +424,6 @@ def _is_workflow_yaml_path(path: str) -> bool:
 
 def _is_owned(path: str, owned_paths: list[str] | tuple[str, ...]) -> bool:
     return any(owned_paths_overlap(path, owned_path) for owned_path in owned_paths)
-
-
-def _normalize_path(path: str) -> str:
-    normalized = path.strip().replace("\\", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized
 
 
 from awf.control.quality_gates_pyproject import (  # noqa: E402

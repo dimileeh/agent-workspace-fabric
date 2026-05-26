@@ -25,6 +25,24 @@ from tests.postgres import (
 )
 
 
+def _run_alembic(repo_root: Path, env: dict[str, str], *args: str) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+        cwd=repo_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            "alembic command failed: "
+            f"{' '.join(args)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            pytrace=False,
+        )
+
+
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     async with postgres_test_session() as s:
@@ -379,23 +397,7 @@ class TestTaskAttemptMigration:
             monkeypatch.chdir(repo_root)
             with postgres_alembic_subprocess_lock(database_url):
                 try:
-                    subprocess.run(
-                        [
-                            sys.executable,
-                            "-m",
-                            "alembic",
-                            "-c",
-                            "alembic.ini",
-                            "upgrade",
-                            "head",
-                        ],
-                        cwd=repo_root,
-                        env=env,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
+                    _run_alembic(repo_root, env, "upgrade", "head")
                 except subprocess.TimeoutExpired as exc:
                     pytest.fail(f"Alembic upgrade timed out after {exc.timeout} seconds")
 

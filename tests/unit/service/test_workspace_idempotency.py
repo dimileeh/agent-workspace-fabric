@@ -350,7 +350,7 @@ async def test_create_locks_idempotency_key_before_lookup_for_legacy_payload(
 ) -> None:
     calls = _record_idempotency_lock_order(monkeypatch)
     monkeypatch.setattr(
-        workspaces,
+        workspaces_create,
         "_selected_provider_preflight_for_task_async",
         _ready_provider_preflight,
     )
@@ -445,7 +445,7 @@ async def test_create_auto_profile_replays_matching_legacy_payload_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        workspaces,
+        workspaces_create,
         "_selected_provider_preflight_for_task_async",
         _ready_provider_preflight,
     )

@@ -32,7 +32,22 @@ try:
 except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
-_POSTGRES_TEST_TIMEOUT_SECONDS = 120
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer.") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer.")
+    return value
+
+
+_POSTGRES_TEST_TIMEOUT_SECONDS = _positive_int_env("AWF_POSTGRES_TEST_TIMEOUT_SECONDS", 120)
+_DOCKER_TEST_TIMEOUT_SECONDS = _positive_int_env("AWF_DOCKER_TEST_TIMEOUT_SECONDS", 1200)
 _SESSION_PATH = os.environ.get("PATH")
 _POSTGRES_FIXTURE_NAMES = frozenset(
     {
@@ -236,6 +251,16 @@ def pytest_collection_modifyitems(
     del config
     source_cache: dict[Path, bool] = {}
     for item in items:
+        if item.get_closest_marker("docker") is not None:
+            timeout_marker = item.get_closest_marker("timeout")
+            timeout_seconds = (
+                timeout_marker.args[0] if timeout_marker and timeout_marker.args else 0
+            )
+            if not isinstance(timeout_seconds, int | float) or (
+                timeout_seconds < _DOCKER_TEST_TIMEOUT_SECONDS
+            ):
+                item.add_marker(pytest.mark.timeout(_DOCKER_TEST_TIMEOUT_SECONDS), append=False)
+            continue
         if item.get_closest_marker("timeout") is not None:
             continue
         if not _uses_postgres_test_database(item, source_cache):

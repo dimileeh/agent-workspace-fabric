@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +23,7 @@ from awf.control.worker import dispatch_methods as worker_dispatch_methods
 from awf.control.worker import helpers as worker_helpers
 from awf.control.worker import recovery_cooldown as worker_recovery_cooldown
 from awf.control.worker import recovery_stale as worker_recovery_stale
+from awf.control.worker import resource_broker as worker_resource_broker
 from awf.control.worker.types import _ActiveExecutionCandidate
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
@@ -204,6 +205,291 @@ class _RefreshLoopWorker(ControlWorker):
         if self.raises:
             raise RuntimeError("execution refresh failed")
         return self.refreshed
+
+
+@pytest.mark.unit
+def test_active_salvage_recovery_operation_id_cache_moves_recent_and_evicts_oldest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = SimpleNamespace(
+        _active_salvage_monitor_recovery_operation_ids={"op-old": None, "op-keep": None}
+    )
+    monkeypatch.setattr(
+        worker_recovery_cooldown,
+        "_ACTIVE_SALVAGE_MONITOR_RECOVERY_OPERATION_ID_LIMIT",
+        2,
+    )
+
+    worker_recovery_cooldown._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        worker,
+        "op-keep",
+    )
+    worker_recovery_cooldown._remember_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        worker,
+        "op-new",
+    )
+
+    assert list(worker._active_salvage_monitor_recovery_operation_ids) == [
+        "op-keep",
+        "op-new",
+    ]
+
+    worker_recovery_cooldown._forget_active_salvage_monitor_recovery_operation_id(  # noqa: SLF001
+        worker,
+        "op-keep",
+    )
+    assert list(worker._active_salvage_monitor_recovery_operation_ids) == ["op-new"]
+
+
+@pytest.mark.unit
+async def test_active_salvage_resume_cooldown_blocks_claim_uses_persisted_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    worker = SimpleNamespace(
+        _active_salvage_monitor_resume_cooldown_active=lambda _workspace_id: False,
+    )
+
+    async def _persisted(workspace_id: str) -> bool:
+        calls.append(workspace_id)
+        return True
+
+    worker._persisted_active_salvage_monitor_resume_cooldown_active = _persisted
+
+    assert await worker_recovery_cooldown._active_salvage_monitor_resume_cooldown_blocks_claim(  # noqa: SLF001
+        worker,
+        "ws_cooldown",
+    )
+    assert calls == ["ws_cooldown"]
+
+
+@pytest.mark.unit
+async def test_active_salvage_resume_cooldown_in_memory_blocks_claim() -> None:
+    worker = SimpleNamespace(
+        _active_salvage_monitor_resume_cooldowns={"ws_hot": 1_000_000_000_000.0},
+        _evict_expired_salvage_monitor_cooldowns=lambda: None,
+    )
+    assert worker_recovery_cooldown._active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        worker,
+        "ws_hot",
+    )
+    assert not worker_recovery_cooldown._active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        worker,
+        "ws_other",
+    )
+
+
+@pytest.mark.unit
+async def test_persisted_active_salvage_resume_cooldown_handles_zero_lease_and_event_fallback() -> (
+    None
+):
+    disabled = SimpleNamespace(_config=SimpleNamespace(monitor_claim_lease_seconds=0.0))
+    assert (
+        not await worker_recovery_cooldown._persisted_active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+            disabled,
+            "ws",
+        )
+    )
+
+    class _Result:
+        def scalar_one_or_none(self) -> object:
+            return SimpleNamespace(
+                payload="not-a-mapping",
+                occurred_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _stmt: object) -> _Result:
+            return _Result()
+
+    active = SimpleNamespace(
+        _config=SimpleNamespace(monitor_claim_lease_seconds=60.0),
+        _session_factory=lambda: _Session(),
+    )
+    assert await worker_recovery_cooldown._persisted_active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        active,
+        "ws",
+    )
+
+
+@pytest.mark.unit
+async def test_persisted_active_salvage_resume_cooldown_handles_missing_and_expired_events() -> (
+    None
+):
+    class _Result:
+        def __init__(self, event: object | None) -> None:
+            self.event = event
+
+        def scalar_one_or_none(self) -> object | None:
+            return self.event
+
+    class _Session:
+        def __init__(self, event: object | None) -> None:
+            self.event = event
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _stmt: object) -> _Result:
+            return _Result(self.event)
+
+    missing = SimpleNamespace(
+        _config=SimpleNamespace(monitor_claim_lease_seconds=60.0),
+        _session_factory=lambda: _Session(None),
+    )
+    assert (
+        not await worker_recovery_cooldown._persisted_active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+            missing,
+            "ws_missing",
+        )
+    )
+
+    expired_event = SimpleNamespace(
+        payload={"cooldown_until": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()},
+        occurred_at=datetime.now(UTC),
+    )
+    expired = SimpleNamespace(
+        _config=SimpleNamespace(monitor_claim_lease_seconds=60.0),
+        _session_factory=lambda: _Session(expired_event),
+    )
+    assert (
+        not await worker_recovery_cooldown._persisted_active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+            expired,
+            "ws_expired",
+        )
+    )
+
+
+@pytest.mark.unit
+async def test_active_salvage_resume_cooldown_record_swallows_session_failures() -> None:
+    class _FailingSession:
+        async def __aenter__(self) -> object:
+            raise RuntimeError("database offline")
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    worker = SimpleNamespace(
+        _session_factory=lambda: _FailingSession(),
+        _worker_id="worker-1",
+    )
+
+    await worker_recovery_cooldown._record_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws",
+        recovery_operation_id="op",
+        cooldown_until=datetime.now(UTC),
+    )
+
+
+@pytest.mark.unit
+async def test_active_salvage_resume_cooldown_record_skips_missing_or_wrong_status_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Session:
+        committed = False
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class _Repo:
+        workspace: object | None = None
+        events: list[object] = []
+
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def get(self, _workspace_id: str) -> object | None:
+            return self.workspace
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            self.events.append((_args, _kwargs))
+
+    monkeypatch.setattr(worker_recovery_cooldown, "WorkspaceRepository", _Repo)
+    worker = SimpleNamespace(_session_factory=lambda: _Session(), _worker_id="worker-1")
+
+    await worker_recovery_cooldown._record_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws_missing",
+        recovery_operation_id="op",
+        cooldown_until=datetime.now(UTC),
+    )
+    assert _Repo.events == []
+
+    _Repo.workspace = SimpleNamespace(status=WorkspaceStatus.running.value)
+    await worker_recovery_cooldown._record_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws_running",
+        recovery_operation_id="op",
+        cooldown_until=datetime.now(UTC),
+    )
+    assert _Repo.events == []
+
+
+@pytest.mark.unit
+def test_active_salvage_resume_cooldown_expired_entry_is_evicted() -> None:
+    worker = SimpleNamespace(
+        _active_salvage_monitor_resume_cooldowns={"ws_expired": -1.0},
+        _evict_expired_salvage_monitor_cooldowns=lambda: None,
+    )
+
+    assert not worker_recovery_cooldown._active_salvage_monitor_resume_cooldown_active(  # noqa: SLF001
+        worker,
+        "ws_expired",
+    )
+    assert worker._active_salvage_monitor_resume_cooldowns == {}
+
+
+@pytest.mark.unit
+def test_active_salvage_resume_cooldown_remember_evicts_expired_and_over_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = worker_recovery_cooldown.monotonic()
+    worker = SimpleNamespace(
+        _active_salvage_monitor_resume_cooldowns={
+            "ws_expired": now - 1,
+            "ws_old": now + 100,
+            "ws_keep": now + 100,
+        },
+    )
+    worker._evict_expired_salvage_monitor_cooldowns = (  # type: ignore[attr-defined]
+        lambda: worker_recovery_cooldown._evict_expired_salvage_monitor_cooldowns(worker)  # noqa: SLF001
+    )
+    monkeypatch.setattr(
+        worker_recovery_cooldown,
+        "_ACTIVE_SALVAGE_MONITOR_RESUME_COOLDOWN_LIMIT",
+        2,
+    )
+
+    worker_recovery_cooldown._remember_active_salvage_monitor_resume_cooldown(  # noqa: SLF001
+        worker,
+        "ws_new",
+        now + 100,
+    )
+
+    assert list(worker._active_salvage_monitor_resume_cooldowns) == ["ws_keep", "ws_new"]
+
+
+@pytest.mark.unit
+def test_capacity_previous_resource_summary_strips_nested_previous() -> None:
+    assert worker_resource_broker._capacity_previous_resource_summary(  # noqa: SLF001
+        {"previous": {"stale": True}, "dind_slots": {"limit": 2}},
+    ) == {"dind_slots": {"limit": 2}}
 
 
 @pytest.mark.unit

@@ -256,19 +256,17 @@ _ALLOWED_PROJECT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-from awf.control.quality_gates import (  # noqa: E402
+from awf.control.quality_gates_common import (  # noqa: E402
     ProtectedFileDiff,
     QualityGateViolation,
-    _normalize_path,
-    _violation,
-)
-from awf.control.quality_gates_common import (  # noqa: E402
     _format_number,
     _format_toml_policy_value,
     _is_number,
     _line_containing,
     _line_matching,
     _nested_value,
+    _normalize_path,
+    _violation,
 )
 
 
