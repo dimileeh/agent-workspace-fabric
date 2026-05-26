@@ -13,6 +13,12 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from awf.api.schemas_operations import (
+    OperationListResponse,
+    OperationResponse,
+    log_stream_ids,
+    merge_log_stream_ref_value,
+)
 from awf.common.callback_events import is_valid_callback_subscription_event_type
 from awf.common.callback_targets import (
     is_public_callback_target_host,
@@ -1483,12 +1489,8 @@ class HttpExceptionErrorResponse(BaseModel):
     detail: ErrorResponse
 
 
-from awf.api.schemas_operations import (  # noqa: E402
-    OperationListResponse,
-    OperationResponse,
-    _log_stream_ids,
-    _merge_log_stream_ref_value,
-)
+_merge_log_stream_ref_value = merge_log_stream_ref_value
+_log_stream_ids = log_stream_ids
 
 __all__ = [
     *[
@@ -1498,8 +1500,8 @@ __all__ = [
         and getattr(obj, "__module__", None) == __name__
         and not name.startswith("_")
     ],
-    "_log_stream_ids",
-    "_merge_log_stream_ref_value",
+    "log_stream_ids",
+    "merge_log_stream_ref_value",
     "OperationListResponse",
     "OperationResponse",
 ]
