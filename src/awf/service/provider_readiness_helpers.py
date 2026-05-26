@@ -14,26 +14,6 @@ import httpx
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.service.config import ServiceSettings
-from awf.service.provider_readiness import (
-    _CODEX_AUTH_FILES,
-    _GITHUB_TOKEN_ENV_KEYS,
-    _HTTP_TIMEOUT_SECONDS,
-    _REDACTION,
-    _TRACEBACK_LOG_LIMIT,
-    KNOWN_SECRET_ENV_KEYS,
-    PROVIDER_NAMES,
-    TOKEN_RE,
-    URL_CREDENTIAL_RE,
-    CompletedProcessLike,
-    HttpGet,
-    HttpResponseLike,
-    ProviderName,
-    _credential_source,
-    _log,
-    _RedactionSegment,
-)
-
-
 def _codex_file_sources(host_home: Path) -> list[dict[str, str]]:
     source = host_home / ".codex"
     if not source.exists():
@@ -652,3 +632,23 @@ def _run_subprocess(
 
 def _http_get(url: str, *, timeout: float) -> HttpResponseLike:
     return httpx.get(url, timeout=timeout)
+
+
+from awf.service.provider_readiness import (  # noqa: E402
+    _CODEX_AUTH_FILES,
+    _GITHUB_TOKEN_ENV_KEYS,
+    _HTTP_TIMEOUT_SECONDS,
+    _REDACTION,
+    _TRACEBACK_LOG_LIMIT,
+    KNOWN_SECRET_ENV_KEYS,
+    PROVIDER_NAMES,
+    TOKEN_RE,
+    URL_CREDENTIAL_RE,
+    CompletedProcessLike,
+    HttpGet,
+    HttpResponseLike,
+    ProviderName,
+    _credential_source,
+    _log,
+    _RedactionSegment,
+)
