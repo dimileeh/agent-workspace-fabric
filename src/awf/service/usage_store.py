@@ -134,10 +134,10 @@ def _usage_from_record(record: dict[str, Any], *, model: str | None) -> Normaliz
     if total_tokens is None and (
         input_tokens is not None or output_tokens is not None or reasoning_output_tokens is not None
     ):
-        total_tokens = (
-            (input_tokens if input_tokens is not None else 0)
-            + (output_tokens if output_tokens is not None else 0)
-            + (reasoning_output_tokens if reasoning_output_tokens is not None else 0)
+        # reasoning_output_tokens is a subset of output_tokens; do not add it
+        # separately to avoid double-counting.
+        total_tokens = (input_tokens if input_tokens is not None else 0) + (
+            output_tokens if output_tokens is not None else 0
         )
     cost_estimate = _first(record, _COST_KEYS, _coerce_float)
     if (
