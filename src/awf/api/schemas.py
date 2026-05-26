@@ -13,16 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from awf.api.schemas_operations import (
-    OperationListResponse as OperationListResponse,
-)
-from awf.api.schemas_operations import (
-    OperationResponse as OperationResponse,
-)
-from awf.api.schemas_operations import (
-    log_stream_ids,
-    merge_log_stream_ref_value,
-)
+from awf.api import schemas_operations as _schemas_operations
 from awf.common.callback_events import is_valid_callback_subscription_event_type
 from awf.common.callback_targets import (
     is_public_callback_target_host,
@@ -76,6 +67,11 @@ WorkspaceOverlapPathMatchReasonCode = Literal[
 ]
 CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
 NetworkPosture = Literal["offline", "restricted", "open"]
+
+OperationListResponse = _schemas_operations.OperationListResponse
+OperationResponse = _schemas_operations.OperationResponse
+log_stream_ids = _schemas_operations.log_stream_ids
+merge_log_stream_ref_value = _schemas_operations.merge_log_stream_ref_value
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
