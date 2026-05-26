@@ -585,7 +585,11 @@ def _validation_run_command_records(
     coverage_evidence_reason_code: str | None = None,
 ) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
-    if "validate" in phase_names and profile.validation.alembic.enabled:
+    if (
+        "validate" in phase_names
+        and profile.validation.alembic
+        and profile.validation.alembic.enabled
+    ):
         ordered.append(
             {
                 "phase": ALEMBIC_MIGRATION_POLICY_PHASE,
