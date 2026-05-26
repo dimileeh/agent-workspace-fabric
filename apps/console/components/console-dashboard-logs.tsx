@@ -387,7 +387,10 @@ export function WorkspaceLogColumn({
         );
         setOffsets((current) => ({
           ...current,
-          [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
+          [frame.stream_id]: Math.max(
+            current[frame.stream_id] ?? 0,
+            frame.next_offset ?? frame.offset,
+          ),
         }));
         return;
       }
