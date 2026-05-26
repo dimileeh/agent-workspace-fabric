@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from awf.common.github_client import (
+        BranchOpenPullRequest,
+        PullRequestAdoptionMetadata,
+        PullRequestMetadataError,
+        RepoRef,
+    )
 
 from awf.common.github_client import (
     BranchOpenPullRequest,
@@ -19,6 +27,12 @@ def _parse_pull_request_adoption_metadata(
     pr_number: int,
 ) -> PullRequestAdoptionMetadata:
     """Parse and validate payload from ``gh pr view`` adoption query."""
+    from awf.common.github_client import (
+        PullRequestAdoptionMetadata,
+        PullRequestMetadataError,
+        RepoRef,
+    )
+
     try:
         number = int(payload["number"])
         head_ref = str(payload["headRefName"])
@@ -101,6 +115,12 @@ def _parse_branch_open_pull_request(
     branch_name: str,
 ) -> BranchOpenPullRequest:
     """Parse and validate one ``gh pr list`` branch-open payload item."""
+    from awf.common.github_client import (
+        BranchOpenPullRequest,
+        PullRequestMetadataError,
+        RepoRef,
+    )
+
     if not isinstance(payload, dict):
         raise PullRequestMetadataError(
             reason_code="OPEN_PR_LOOKUP_INVALID",
@@ -149,6 +169,8 @@ def _head_repo_slug_from_branch_open_pr_payload(
     branch_name: str,
 ) -> str:
     """Extract branch-open PR head repository slug from payload."""
+    from awf.common.github_client import PullRequestMetadataError, RepoRef
+
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
         name_with_owner = _optional_nonempty_str(head_repo.get("nameWithOwner"))
@@ -210,6 +232,8 @@ def _parse_open_pr_head_repo_slug(
     field_name: str,
 ) -> str:
     """Parse and normalize ``owner/name`` payload value."""
+    from awf.common.github_client import PullRequestMetadataError, RepoRef
+
     try:
         return RepoRef.from_url(value).slug()
     except ValueError as exc:
@@ -231,6 +255,8 @@ def _head_repo_slug_from_adoption_payload(
     pr_number: int,
 ) -> str:
     """Resolve PR head repository slug from adoption payload."""
+    from awf.common.github_client import PullRequestMetadataError, RepoRef
+
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
         name_with_owner = head_repo.get("nameWithOwner")
@@ -267,6 +293,8 @@ def _required_nonempty_str(
     message: str,
 ) -> str:
     """Return a required non-empty string or raise a metadata error."""
+    from awf.common.github_client import PullRequestMetadataError
+
     if not isinstance(value, str):
         raise PullRequestMetadataError(
             reason_code="PR_METADATA_INVALID",

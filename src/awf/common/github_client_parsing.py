@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from awf.common.github_client import _FetchedReview
 from awf.runtime.pr_monitor import (
     CheckState,
     CheckTiming,
@@ -16,6 +15,9 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThreadComment,
 )
+
+if TYPE_CHECKING:
+    from awf.common.github_client import _FetchedReview
 
 
 def _dig(obj: Any, *keys: Any) -> Any:
@@ -146,7 +148,7 @@ def _latest_activity_from_thread_comments(
 
 
 def _latest_activity_from_reviews(
-    reviews: Sequence[_FetchedReview],
+    reviews: Sequence["_FetchedReview"],
     *,
     current_at: datetime | None,
     current_source: str | None,
@@ -195,6 +197,8 @@ def _quiet_period_anchor(
 
 def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _FetchedReview:
     """Normalize one GraphQL review node for blocking-review evaluation."""
+    from awf.common.github_client import _FetchedReview
+
     raw_body = node.get("body")
     body = raw_body if isinstance(raw_body, str) else ""
     body_excerpt = body[:400] if body.strip() else ""
@@ -250,7 +254,7 @@ def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
 
 
 def _effective_blocking_reviews(
-    fetched_reviews: Sequence[_FetchedReview],
+    fetched_reviews: Sequence["_FetchedReview"],
 ) -> tuple[ReviewComment, ...]:
     """Resolve latest per-reviewer state and return blockers for merge-gating."""
     # DISMISSED must be tracked so a maintainer-dismissed review overwrites that
