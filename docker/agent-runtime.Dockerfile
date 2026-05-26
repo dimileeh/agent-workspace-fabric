@@ -121,13 +121,27 @@ ARG OPENCODE_VERSION=1.15.2
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.3
 
-RUN npm install -g --no-fund --no-audit \
-      @openai/codex@${CODEX_VERSION} \
-      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
-      @google/gemini-cli@${GEMINI_VERSION} \
-      opencode-ai@${OPENCODE_VERSION} \
-      ccusage@${CCUSAGE_VERSION} \
-    && npm cache clean --force \
+RUN set -eux; \
+    max_attempts=3; \
+    attempt=1; \
+    while [ "$attempt" -le "$max_attempts" ]; do \
+      if npm install -g --no-fund --no-audit \
+        @openai/codex@${CODEX_VERSION} \
+        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+        @google/gemini-cli@${GEMINI_VERSION} \
+        opencode-ai@${OPENCODE_VERSION} \
+        ccusage@${CCUSAGE_VERSION}; then \
+        break; \
+      fi; \
+      echo "npm install attempt $attempt/$max_attempts failed, retrying in 10s..." >&2; \
+      if [ "$attempt" -eq "$max_attempts" ]; then \
+        echo "npm install failed after $max_attempts attempts" >&2; \
+        exit 1; \
+      fi; \
+      sleep 10; \
+      attempt=$((attempt + 1)); \
+    done; \
+    npm cache clean --force \
     && codex --version || true \
     && claude --version || true \
     && gemini --version || true \
