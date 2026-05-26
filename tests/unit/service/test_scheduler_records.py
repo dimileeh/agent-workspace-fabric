@@ -490,16 +490,17 @@ async def test_terminal_destroy_releases_leaked_active_reservation_once(
 
 
 @pytest.mark.unit
-def test_legacy_numeric_memory_without_unit_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_numeric_memory_without_unit_warns() -> None:
+    from unittest.mock import patch
+
     warnings: list[tuple[str, dict[str, object]]] = []
 
     class Logger:
         def warning(self, event: str, **kwargs: object) -> None:
             warnings.append((event, kwargs))
 
-    monkeypatch.setattr(workspaces_create, "_log", Logger())
-
-    parsed = workspaces_create._parse_memory_gb("1024")
+    with patch("awf.service.workspaces_create._log", Logger()):
+        parsed = workspaces_create._parse_memory_gb("1024")
 
     assert parsed == 1024.0
     assert warnings == [
