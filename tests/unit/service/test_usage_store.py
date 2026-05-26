@@ -124,7 +124,7 @@ def test_normalize_ccusage_json_preserves_cached_and_reasoning_tokens() -> None:
 
 
 @pytest.mark.unit
-def test_normalize_ccusage_json_synthesizes_total_with_cached_tokens() -> None:
+def test_normalize_ccusage_json_synthesizes_total_ignores_cached_tokens() -> None:
     raw = json.dumps({"totals": {"inputTokens": 100, "cachedInputTokens": 900}})
 
     usage, reason = normalize_ccusage_json(raw)
@@ -133,7 +133,21 @@ def test_normalize_ccusage_json_synthesizes_total_with_cached_tokens() -> None:
     assert usage is not None
     assert usage.input_tokens == 100
     assert usage.cached_input_tokens == 900
-    assert usage.total_tokens == 1000
+    assert usage.total_tokens == 100
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_synthesizes_total_with_reasoning_fallback() -> None:
+    raw = json.dumps({"totals": {"inputTokens": 50, "reasoningOutputTokens": 30}})
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens == 50
+    assert usage.output_tokens is None
+    assert usage.reasoning_output_tokens == 30
+    assert usage.total_tokens == 80
 
 
 @pytest.mark.unit
