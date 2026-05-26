@@ -182,6 +182,8 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                 runner=self._runner,
                 defaults=adapter_defaults,
                 log_store=self._log_store,
+                agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
+                agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
             )
             profile = _profile_for_workspace(
