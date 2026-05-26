@@ -147,8 +147,8 @@ def test_normalize_ccusage_json_synthesizes_total_with_reasoning_fallback() -> N
     assert usage.input_tokens == 50
     assert usage.output_tokens is None
     assert usage.reasoning_output_tokens == 30
-    # reasoning is a subset of output; with no output present, total is just input.
-    assert usage.total_tokens == 50
+    # reasoning stands in for output when output is absent, so total = 50 + 30 = 80.
+    assert usage.total_tokens == 80
 
 
 @pytest.mark.unit
