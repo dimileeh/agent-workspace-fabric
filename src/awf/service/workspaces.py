@@ -1017,28 +1017,106 @@ from awf.service.workspaces_response import (  # noqa: E402
     workspace_response,
     workspace_retry_response,
 )
-from awf.service.workspaces_retry import (  # noqa: E402
-    _agent_timeout_retry_context,
-    _agent_timeout_salvage_recovery_payload,
-    _approved_planning_scope_fallback_model,
-    _compact_conformance_payload,
-    _compact_fallback_model,
-    _compact_planning_scope_payload,
-    _compact_salvage_payload,
-    _compact_string_list,
-    _conformance_retry_context,
-    _conformance_salvage_recovery_payload,
-    _is_plan_conformance_unsatisfied,
-    _latest_failed_state_event,
-    _optional_retry_evidence_str,
-    _payload_str,
-    _planning_scope_recovery_payload,
-    _planning_scope_retry_context,
-    _retry_evidence_gaps,
-    _retry_task_for_source,
-    _retry_task_policy,
-    retry_workspace_row,
-)
+
+
+def _workspaces_retry_module() -> object:
+    """Import retry helpers lazily to avoid module-load cycles."""
+    from awf.service import workspaces_retry
+
+    return workspaces_retry
+
+
+def _workspaces_retry_call(name: str, *args: Any, **kwargs: Any) -> Any:
+    """Call a named helper from ``awf.service.workspaces_retry`` lazily."""
+    module = _workspaces_retry_module()
+    return getattr(module, name)(*args, **kwargs)
+
+
+def retry_workspace_row(
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    return _workspaces_retry_call("retry_workspace_row", *args, **kwargs)
+
+
+def _retry_task_policy(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_retry_task_policy", *args, **kwargs)
+
+
+def _planning_scope_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_planning_scope_recovery_payload", *args, **kwargs)
+
+
+def _conformance_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_conformance_salvage_recovery_payload", *args, **kwargs)
+
+
+def _agent_timeout_salvage_recovery_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_agent_timeout_salvage_recovery_payload", *args, **kwargs)
+
+
+def _retry_task_for_source(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_retry_task_for_source", *args, **kwargs)
+
+
+def _latest_failed_state_event(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_latest_failed_state_event", *args, **kwargs)
+
+
+def _compact_conformance_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_compact_conformance_payload", *args, **kwargs)
+
+
+def _compact_planning_scope_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_compact_planning_scope_payload", *args, **kwargs)
+
+
+def _compact_string_list(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_compact_string_list", *args, **kwargs)
+
+
+def _compact_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_compact_fallback_model", *args, **kwargs)
+
+
+def _compact_salvage_payload(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_compact_salvage_payload", *args, **kwargs)
+
+
+def _payload_str(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_payload_str", *args, **kwargs)
+
+
+def _is_plan_conformance_unsatisfied(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_is_plan_conformance_unsatisfied", *args, **kwargs)
+
+
+def _agent_timeout_retry_context(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_agent_timeout_retry_context", *args, **kwargs)
+
+
+def _conformance_retry_context(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_conformance_retry_context", *args, **kwargs)
+
+
+def _retry_evidence_gaps(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_retry_evidence_gaps", *args, **kwargs)
+
+
+def _optional_retry_evidence_str(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_optional_retry_evidence_str", *args, **kwargs)
+
+
+def _planning_scope_retry_context(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call("_planning_scope_retry_context", *args, **kwargs)
+
+
+def _approved_planning_scope_fallback_model(*args: Any, **kwargs: Any) -> Any:
+    return _workspaces_retry_call(
+        "_approved_planning_scope_fallback_model",
+        *args,
+        **kwargs,
+    )
 
 __all__ = [
     "WorkspaceService",
