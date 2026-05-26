@@ -16,6 +16,7 @@ from awf.runtime.validation import ValidationCoverageResult
 class _RebaseRecoveryResult:
     base_sha: str
     head_sha: str
+    requires_pr_update: bool = False
 
 
 class _PostValidationConformanceReportGitError(RuntimeError):
