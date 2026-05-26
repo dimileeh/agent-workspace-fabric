@@ -252,11 +252,26 @@ export function WorkspaceLogColumn({
   const previousTailSignal = useRef(tailSignal);
   const streamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
-  const previousTailSelection = useRef("");
+  const previousTailRefreshKey = useRef("");
 
   const selectedStreamMetas = useMemo(
     () => streams.filter((stream) => selectedStreams.includes(stream.stream_id)),
     [selectedStreams, streams],
+  );
+  const selectedTailRefreshKey = useMemo(
+    () =>
+      selectedStreamMetas
+        .map((stream) =>
+          [
+            stream.stream_id,
+            stream.byte_count,
+            stream.line_count,
+            stream.opened_at,
+            stream.closed_at ?? "",
+          ].join(":"),
+        )
+        .join("|"),
+    [selectedStreamMetas],
   );
   const selectedEntries = useMemo(() => {
     const ordered = entries
@@ -330,17 +345,16 @@ export function WorkspaceLogColumn({
   }, [loadStreams]);
 
   useEffect(() => {
-    const selection = selectedStreams.join(",");
-    if (!selection) {
-      previousTailSelection.current = "";
+    if (!selectedTailRefreshKey) {
+      previousTailRefreshKey.current = "";
       return;
     }
-    if (previousTailSelection.current === selection) {
+    if (previousTailRefreshKey.current === selectedTailRefreshKey) {
       return;
     }
-    previousTailSelection.current = selection;
+    previousTailRefreshKey.current = selectedTailRefreshKey;
     void loadSelectedTails();
-  }, [loadSelectedTails, selectedStreams]);
+  }, [loadSelectedTails, selectedTailRefreshKey]);
 
   useEffect(() => {
     if (previousTailSignal.current === tailSignal) {
