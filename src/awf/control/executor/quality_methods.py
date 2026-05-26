@@ -29,9 +29,12 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.control.executor.constants import (
+    _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
     GIT_OBJECT_MISSING_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+    POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
     POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
     POST_AGENT_GIT_ADD_FAILED_REASON_CODE,
 )
@@ -39,9 +42,6 @@ from awf.control.executor.git_ops import (
     _git_name_lines,
 )
 from awf.control.executor.quality_gates import (
-    _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
-    POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
-    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
     _build_post_agent_precommit_repair_prompt,
     _classify_post_agent_commit_failure,
     _log,

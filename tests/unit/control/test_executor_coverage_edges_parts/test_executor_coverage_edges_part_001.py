@@ -686,8 +686,7 @@ async def test_post_validation_report_git_error_redacts_sensitive_output(tmp_pat
     runner.queue_result(
         returncode=129,
         stderr=(
-            "fatal: cleanup failed for "
-            "https://git:gho_1234567890abcdef1234@github.com/org/repo.git"
+            "fatal: cleanup failed for https://git:gho_1234567890abcdef1234@github.com/org/repo.git"
         ),
         reason_code="GIT_RESET_FAILED",
     )

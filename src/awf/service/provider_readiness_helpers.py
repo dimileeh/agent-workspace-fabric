@@ -14,6 +14,8 @@ import httpx
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.service.config import ServiceSettings
+
+
 def _codex_file_sources(host_home: Path) -> list[dict[str, str]]:
     source = host_home / ".codex"
     if not source.exists():

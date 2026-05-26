@@ -1097,14 +1097,8 @@ class TestExecutorCoverageEdgesPart002:
         await executor.resume_pr_monitor(ws_id)
 
         assert monitor_calls == [ws_id]
-        assert (
-            captured["agent_wall_timeout_seconds"]
-            == executor._config.agent_wall_timeout_seconds
-        )
-        assert (
-            captured["agent_idle_timeout_seconds"]
-            == executor._config.agent_idle_timeout_seconds
-        )
+        assert captured["agent_wall_timeout_seconds"] == executor._config.agent_wall_timeout_seconds
+        assert captured["agent_idle_timeout_seconds"] == executor._config.agent_idle_timeout_seconds
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(

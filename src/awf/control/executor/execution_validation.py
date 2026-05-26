@@ -10,16 +10,17 @@ from typing import Any
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
-from awf.common.git_identity import (
-    git_identity_config_args,
-    git_safe_directory_config_args,
-)
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.git_identity import (
+    git_identity_config_args,
+    git_safe_directory_config_args,
+)
 from awf.control.executor.constants import (
+    PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
@@ -37,7 +38,6 @@ from awf.control.executor.helpers import (
     _validation_tier_for_workspace,
 )
 from awf.control.executor.quality_gates import (
-    PLAN_CONFORMANCE_UNSATISFIED,
     _log,
     _post_validation_conformance_agent_failure_details,
     _post_validation_conformance_agent_failure_message,

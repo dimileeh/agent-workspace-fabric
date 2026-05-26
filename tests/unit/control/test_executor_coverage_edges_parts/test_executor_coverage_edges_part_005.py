@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 

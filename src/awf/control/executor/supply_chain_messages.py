@@ -14,9 +14,7 @@ def _supply_chain_block_message(findings: Sequence[SupplyChainFinding]) -> str:
     lines = ["Supply-chain policy blocked workspace output:"]
     for finding in blocking[:5]:
         guidance = (
-            finding.details.get("recovery_guidance")
-            if isinstance(finding.details, dict)
-            else None
+            finding.details.get("recovery_guidance") if isinstance(finding.details, dict) else None
         )
         subject = f" ({finding.subject_path})" if finding.subject_path else ""
         lines.append(f"- {finding.reason_code}{subject}: {finding.explanation}")

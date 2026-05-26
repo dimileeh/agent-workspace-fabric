@@ -29,8 +29,6 @@ def _parse_pull_request_adoption_metadata(
     """Parse and validate payload from ``gh pr view`` adoption query."""
     from awf.common.github_client import (
         PullRequestAdoptionMetadata,
-        PullRequestMetadataError,
-        RepoRef,
     )
 
     try:
@@ -117,8 +115,6 @@ def _parse_branch_open_pull_request(
     """Parse and validate one ``gh pr list`` branch-open payload item."""
     from awf.common.github_client import (
         BranchOpenPullRequest,
-        PullRequestMetadataError,
-        RepoRef,
     )
 
     if not isinstance(payload, dict):
@@ -169,7 +165,6 @@ def _head_repo_slug_from_branch_open_pr_payload(
     branch_name: str,
 ) -> str:
     """Extract branch-open PR head repository slug from payload."""
-    from awf.common.github_client import PullRequestMetadataError, RepoRef
 
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
@@ -232,7 +227,7 @@ def _parse_open_pr_head_repo_slug(
     field_name: str,
 ) -> str:
     """Parse and normalize ``owner/name`` payload value."""
-    from awf.common.github_client import PullRequestMetadataError, RepoRef
+    from awf.common.github_client import RepoRef
 
     try:
         return RepoRef.from_url(value).slug()
@@ -255,7 +250,7 @@ def _head_repo_slug_from_adoption_payload(
     pr_number: int,
 ) -> str:
     """Resolve PR head repository slug from adoption payload."""
-    from awf.common.github_client import PullRequestMetadataError, RepoRef
+    from awf.common.github_client import RepoRef
 
     head_repo = payload.get("headRepository")
     if isinstance(head_repo, dict):
@@ -293,7 +288,6 @@ def _required_nonempty_str(
     message: str,
 ) -> str:
     """Return a required non-empty string or raise a metadata error."""
-    from awf.common.github_client import PullRequestMetadataError
 
     if not isinstance(value, str):
         raise PullRequestMetadataError(

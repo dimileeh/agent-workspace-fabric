@@ -227,9 +227,7 @@ async def _prepare_conformance_salvage_for_execution(
 
     patch_path_value = salvage.get("patch_path")
     expected_sha = salvage.get("patch_sha256")
-    salvage_artifacts_dir = (
-        executor._config.compose_projects_root.parent / "artifacts" / "salvage"
-    )
+    salvage_artifacts_dir = executor._config.compose_projects_root.parent / "artifacts" / "salvage"
     if not isinstance(patch_path_value, str) or not patch_path_value.strip():
         return await executor._fail_conformance_salvage_execution(
             workspace_id=workspace_id,

@@ -42,6 +42,7 @@ from awf.control.executor.constants import (
     _VALIDATION_EVIDENCE_CORE_KEYS,
     _VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS,
     _VALIDATION_EVIDENCE_JSON_LIMIT,
+    PLAN_CONFORMANCE_UNSATISFIED,
     WORKTREE_MISSING_REASON_CODE,
 )
 from awf.control.executor.logging_ops import (
@@ -54,7 +55,6 @@ from awf.control.executor.metadata import (
 )
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
-    PLAN_CONFORMANCE_UNSATISFIED,
     _post_validation_conformance_failure_text,
 )
 from awf.control.executor.types import _PlanningRunFailure

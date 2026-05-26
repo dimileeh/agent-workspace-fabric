@@ -148,7 +148,7 @@ def _latest_activity_from_thread_comments(
 
 
 def _latest_activity_from_reviews(
-    reviews: Sequence["_FetchedReview"],
+    reviews: Sequence[_FetchedReview],
     *,
     current_at: datetime | None,
     current_source: str | None,
@@ -216,11 +216,7 @@ def _parse_fetched_review(node: dict[str, Any], *, fetch_index: int) -> _Fetched
         url=_clean_optional_str(node.get("url")),
         created_at=submitted_at,
         updated_at=updated_at,
-        state=(
-            raw_state.upper()
-            if isinstance(raw_state := node.get("state"), str)
-            else ""
-        ),
+        state=(raw_state.upper() if isinstance(raw_state := node.get("state"), str) else ""),
         source_kind="review",
         viewer_did_author=bool(node.get("viewerDidAuthor")),
     )
@@ -258,7 +254,7 @@ def _review_counts_for_required_review(node: dict[str, Any]) -> bool:
 
 
 def _effective_blocking_reviews(
-    fetched_reviews: Sequence["_FetchedReview"],
+    fetched_reviews: Sequence[_FetchedReview],
 ) -> tuple[ReviewComment, ...]:
     """Resolve latest per-reviewer state and return blockers for merge-gating."""
     # DISMISSED must be tracked so a maintainer-dismissed review overwrites that

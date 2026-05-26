@@ -1118,6 +1118,7 @@ def _approved_planning_scope_fallback_model(*args: Any, **kwargs: Any) -> Any:
         **kwargs,
     )
 
+
 __all__ = [
     "WorkspaceService",
     "WorkspaceRetryError",

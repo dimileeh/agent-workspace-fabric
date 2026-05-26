@@ -745,32 +745,16 @@ async def _run_monitor_rebase_recovery(
         target_ref = f"origin/{base_branch}"
         already_contains_target = await git(["merge-base", "--is-ancestor", target_ref, "HEAD"])
         if already_contains_target.ok:
-            remote_contains_target = None
-            if remote_branch is not None:
-                remote_head_ref = f"origin/{remote_branch}"
-                remote_contains_target = await git(
-                    ["merge-base", "--is-ancestor", target_ref, remote_head_ref]
+            remote_head_ref = f"origin/{remote_branch}"
+            remote_contains_target = await git(
+                ["merge-base", "--is-ancestor", target_ref, remote_head_ref]
+            )
+            if remote_contains_target.returncode not in {0, 1}:
+                raise _MonitorRebaseRecoveryError(
+                    "rebase recovery: git merge-base --is-ancestor "
+                    f"{target_ref} {remote_head_ref} failed: {remote_contains_target.stderr}"
                 )
-                if remote_contains_target.returncode not in {0, 1}:
-                    raise _MonitorRebaseRecoveryError(
-                        "rebase recovery: git merge-base --is-ancestor "
-                        f"{target_ref} {remote_head_ref} failed: {remote_contains_target.stderr}"
-                    )
-            else:
-                return cast(
-                    _RebaseRecoveryResult,
-                    await self._record_current_rebase_recovery_head(
-                        git=git,
-                        workspace_id=workspace_id,
-                        target_ref=target_ref,
-                        operation=operation,
-                        source_base_sha=source_base_sha,
-                        source_head_sha=source_head_sha,
-                        rebased=False,
-                        pushed=False,
-                    ),
-                )
-            if remote_contains_target is None or remote_contains_target.ok:
+            if remote_contains_target.ok:
                 return cast(
                     _RebaseRecoveryResult,
                     await self._record_current_rebase_recovery_head(

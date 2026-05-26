@@ -25,8 +25,4 @@ def _metadata_int(metadata: Mapping[str, object], key: str) -> int | None:
 
 def _metadata_number(metadata: Mapping[str, object], key: str) -> int | float | None:
     value = metadata.get(key)
-    return (
-        value
-        if (isinstance(value, int | float) and not isinstance(value, bool))
-        else None
-    )
+    return value if (isinstance(value, int | float) and not isinstance(value, bool)) else None

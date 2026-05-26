@@ -1,6 +1,7 @@
 """Quality gates, coverage validation, pre-commit checking, and conformance logic."""
 
 from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +27,6 @@ from awf.control.executor.constants import (
     POST_AGENT_COMMIT_FAILED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
-    PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
@@ -36,6 +36,7 @@ from awf.db.enums import FailureReason
 from awf.runtime.validation import ValidationCoverageResult
 
 _log = get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class _PostAgentCommitClassification:

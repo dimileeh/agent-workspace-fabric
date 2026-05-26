@@ -366,9 +366,7 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
-            assert not any(
-                call.args[:2] == ["git", "commit"] for call in fake.calls
-            )
+            assert not any(call.args[:2] == ["git", "commit"] for call in fake.calls)
 
     @pytest.mark.unit
     async def test_rev_list_git_error_fails_infrastructure_path(

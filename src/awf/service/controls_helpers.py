@@ -43,6 +43,7 @@ class _WorkspaceStackStopErrorLike(Protocol):
     message: str
     error_code: str
 
+
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,

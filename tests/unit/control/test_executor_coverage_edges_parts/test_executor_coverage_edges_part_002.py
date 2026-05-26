@@ -867,7 +867,9 @@ def test_validation_run_command_records_include_alembic_policy_before_healthchec
     }
 
 
-def test_validation_run_command_records_skips_alembic_policy_if_validation_alembic_is_none() -> None:
+def test_validation_run_command_records_skips_alembic_policy_if_validation_alembic_is_none() -> (
+    None
+):
     profile = WorkspaceProfile.model_validate(
         {
             "name": "records-alembic-none",

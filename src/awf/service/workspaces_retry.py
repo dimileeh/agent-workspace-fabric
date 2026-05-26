@@ -54,21 +54,20 @@ from awf.service.scheduler import (
 
 if TYPE_CHECKING:
     from awf.service.workspaces import (
-        WorkspaceRetryResult,
         _AgentTimeoutRetryContext,
         _ConformanceRetryContext,
         _PlanningScopeRetryContext,
     )
 
 
-def _workspace_create() -> object:
+def _workspace_create() -> Any:
     """Import create helpers lazily to avoid module-load cycles."""
     from awf.service import workspaces_create
 
     return workspaces_create
 
 
-def _workspace_service() -> object:
+def _workspace_service() -> Any:
     """Import workspace service symbols lazily to avoid module-level cycles."""
     from awf.service import workspaces
 
@@ -92,7 +91,7 @@ async def retry_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
-) -> WorkspaceRetryResult:
+) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
     workspaces = _workspace_service()
     workspaces_create = _workspace_create()
@@ -606,7 +605,7 @@ def _is_plan_conformance_unsatisfied(workspace: Workspace) -> bool:
     return details.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
 
 
-def _agent_timeout_retry_context(workspace: Workspace) -> _AgentTimeoutRetryContext | None:
+def _agent_timeout_retry_context(workspace: Workspace) -> Any:
     """Build a timeout retry context from the workspace's failure details if applicable."""
     workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)
@@ -636,7 +635,7 @@ def _agent_timeout_retry_context(workspace: Workspace) -> _AgentTimeoutRetryCont
     )
 
 
-def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext | None:
+def _conformance_retry_context(workspace: Workspace) -> Any:
     """Build a conformance retry context from the workspace's failure details if applicable."""
     workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)
@@ -674,7 +673,7 @@ def _optional_retry_evidence_str(value: object) -> str | None:
     return stripped or None
 
 
-def _planning_scope_retry_context(workspace: Workspace) -> _PlanningScopeRetryContext | None:
+def _planning_scope_retry_context(workspace: Workspace) -> Any:
     """Build a planning-scope retry context from the workspace's failure details if applicable."""
     workspaces = _workspace_service()
     details = workspace_failure_details_payload(workspace)

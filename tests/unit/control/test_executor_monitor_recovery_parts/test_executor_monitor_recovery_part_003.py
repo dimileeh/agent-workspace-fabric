@@ -522,7 +522,9 @@ def _queue_already_synced_rebase_recovery(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0)  # git fetch origin <base>
     fake.queue_result(returncode=0)  # git switch <branch>
     fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> HEAD
-    fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
+    fake.queue_result(
+        returncode=0
+    )  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
     fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
     fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
 
@@ -531,7 +533,9 @@ def _queue_synced_base_local_missing_remote_check(fake: FakeCommandRunner) -> No
     fake.queue_result(returncode=0)  # git fetch origin <base>
     fake.queue_result(returncode=0)  # git switch <branch>
     fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> HEAD
-    fake.queue_result(returncode=1)  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
+    fake.queue_result(
+        returncode=1
+    )  # git merge-base --is-ancestor origin/<base> origin/<remote_branch>
     fake.queue_result(returncode=0)  # git rebase origin/<base>
     fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
     fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD

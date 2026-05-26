@@ -27,7 +27,7 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
-from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE
+from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
 from awf.control.executor.git_ops import (
     _git_name_lines,
 )
@@ -39,7 +39,6 @@ from awf.control.executor.helpers import (
 )
 from awf.control.executor.planning_scope import _build_planning_scope_failure
 from awf.control.executor.quality_gates import (
-    PLAN_CONFORMANCE_UNSATISFIED,
     _log,
 )
 from awf.control.executor.time_utils import _monotonic

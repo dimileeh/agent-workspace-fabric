@@ -35,10 +35,7 @@ def _get_active_recovery_payload(workspace: Any) -> dict[str, Any] | None:
 
     def _op_rank(operation: Any) -> tuple[float, str]:
         stamp = getattr(operation, "started_at", None) or getattr(operation, "created_at", None)
-        if isinstance(stamp, datetime):
-            stamp_value = stamp.timestamp()
-        else:
-            stamp_value = 0.0
+        stamp_value = stamp.timestamp() if isinstance(stamp, datetime) else 0.0
         return (stamp_value, str(getattr(operation, "id", "")))
 
     operations.sort(key=_op_rank, reverse=True)
