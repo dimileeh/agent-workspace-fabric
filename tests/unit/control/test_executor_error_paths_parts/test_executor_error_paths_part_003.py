@@ -36,6 +36,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import execution_flow as executor_execution_flow
+from awf.control.executor import git_ops as executor_git_ops
 from awf.control.executor.helpers import (
     _validation_run_command_records,
 )
@@ -523,6 +524,12 @@ async def _seed_ready(
         return ws.id
 
 
+def _salvage_artifact_path(tmp_path: Path, filename: str) -> Path:
+    artifact_dir = tmp_path / "work" / "artifacts" / "salvage"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / filename
+
+
 def _provider_recovery_policy(*, max_same_provider_retries: int) -> dict[str, Any]:
     return {
         "agent_model": "gemini-2.5-pro",
@@ -734,7 +741,7 @@ class TestPullRequestUnexpectedErrorPart001:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        patch_path = tmp_path / "conflict-execute.patch"
+        patch_path = _salvage_artifact_path(tmp_path, "conflict-execute.patch")
         patch_path.write_text(
             "diff --git a/src/app.py b/src/app.py\n"
             "index 51f15c8..5f2b6d7 100644\n"
@@ -821,7 +828,7 @@ class TestPullRequestUnexpectedErrorPart001:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        patch_path = tmp_path / "source.patch"
+        patch_path = _salvage_artifact_path(tmp_path, "source.patch")
         patch_path.write_text(
             "diff --git a/src/restored.py b/src/restored.py\n"
             "new file mode 100644\n"
@@ -890,7 +897,7 @@ class TestPullRequestUnexpectedErrorPart001:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        patch_path = tmp_path / "conflict.patch"
+        patch_path = _salvage_artifact_path(tmp_path, "conflict.patch")
         patch_path.write_text(
             "diff --git a/src/app.py b/src/app.py\n"
             "index 51f15c8..5f2b6d7 100644\n"
@@ -965,7 +972,7 @@ class TestPullRequestUnexpectedErrorPart001:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        patch_path = tmp_path / "source.patch"
+        patch_path = _salvage_artifact_path(tmp_path, "source.patch")
         patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
         ws_id = await _seed_ready(
             factory,
@@ -1070,13 +1077,184 @@ class TestPullRequestUnexpectedErrorPart001:
         assert expected_reason in workspace.failure_message
 
     @pytest.mark.unit
+    async def test_conformance_salvage_patch_path_outside_artifacts_is_unavailable(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        outside_patch = tmp_path / "outside.patch"
+        outside_patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        digest = hashlib.sha256(outside_patch.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(outside_patch),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["x"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_UNAVAILABLE" in workspace.failure_message
+
+    @pytest.mark.unit
+    async def test_conformance_salvage_patch_read_oserror_marks_unavailable(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        patch_path = _salvage_artifact_path(tmp_path, "source.patch")
+        patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["x"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+
+        def _raise_read_bytes(_self: Any) -> bytes:
+            raise OSError("simulated read failure")
+
+        monkeypatch.setattr(executor_git_ops.Path, "read_bytes", _raise_read_bytes)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_UNAVAILABLE" in workspace.failure_message
+
+    @pytest.mark.unit
+    async def test_conformance_salvage_apply_oserror_marks_unavailable(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        patch_path = _salvage_artifact_path(tmp_path, "source.patch")
+        patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["x"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+
+        class _OSErrorRunner:
+            async def run(self, *_args: Any, **_kwargs: Any) -> Any:
+                raise OSError("simulated git runner failure")
+
+        executor = _make_executor(
+            _OSErrorRunner(),  # type: ignore[arg-type]
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_UNAVAILABLE" in workspace.failure_message
+
+    @pytest.mark.unit
     async def test_conformance_salvage_apply_failure_marks_failed(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        patch_path = tmp_path / "source.patch"
+        patch_path = _salvage_artifact_path(tmp_path, "source.patch")
         patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
         digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
         ws_id = await _seed_ready(
