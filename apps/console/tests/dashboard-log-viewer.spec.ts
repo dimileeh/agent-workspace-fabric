@@ -3,6 +3,13 @@ import { expect, type Page, test } from "@playwright/test";
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
 const activeOpenedAt = "2026-05-21T10:00:10.000Z";
+const quietStreamId = "quiet.stdout";
+
+type MockAwfApiOptions = {
+  quietTailBytes?: number;
+  streamNoiseBytes?: number;
+  streamResponseDelayMs?: number;
+};
 
 test("fullscreen logs default to ascending, preserve manual scroll, and order tails by stream activity", async ({
   page,
@@ -40,12 +47,36 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   await expect.poll(async () => output.evaluate((node) => node.scrollTop)).toBeLessThan(24);
 });
 
+test("fullscreen logs keep selected stream history when unselected stream tails are oversized", async ({ page }) => {
+  const modalSelector = ".fixed.inset-0.z-50";
+  const streamName = "quiet.stdout";
+  const activeExpectedText = "active.stdout";
+
+  await mockAwfApi(page, {
+    streamNoiseBytes: 220_000,
+    streamResponseDelayMs: 150,
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(modalSelector);
+  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+  const output = modal.getByTestId("log-output");
+
+  await modal.getByRole("checkbox", { name: streamName }).uncheck();
+
+  await expect.poll(async () => output.textContent() ?? "").toContain(activeExpectedText);
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
 }
 
-async function mockAwfApi(page: Page) {
+async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
+  const { quietTailBytes, streamNoiseBytes, streamResponseDelayMs } = options;
   const state = { streamPolls: 0 };
   await page.route("**/api/awf/**", async (route) => {
     const url = new URL(route.request().url());
@@ -97,7 +128,7 @@ async function mockAwfApi(page: Page) {
       return;
     }
     if (path.endsWith("/logs/quiet.stdout")) {
-      await fulfillJson(route, logRead("quiet.stdout", quietLogData()));
+      await fulfillJson(route, logRead("quiet.stdout", quietLogData(state.streamPolls, quietTailBytes)));
       return;
     }
     if (path === "/api/awf/workspaces/ws_logs") {
@@ -105,13 +136,33 @@ async function mockAwfApi(page: Page) {
       return;
     }
     if (path === "/api/awf/workspaces/ws_logs/stream") {
+      const frames = [
+        { type: "connected", workspace_id: "ws_logs" },
+      ];
+      if (typeof streamNoiseBytes === "number") {
+        frames.push({
+          type: "log",
+          seq: 0,
+          workspace_id: "ws_logs",
+          stream_id: quietStreamId,
+          source: "monitor",
+          fd: "stdout",
+          offset: 0,
+          next_offset: streamNoiseBytes,
+          data: quietLogData(0, streamNoiseBytes),
+        });
+      }
+      const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("");
+      if (typeof streamResponseDelayMs === "number" && streamResponseDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, streamResponseDelayMs));
+      }
       await route.fulfill({
         status: 200,
         headers: {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-cache",
         },
-        body: `data: ${JSON.stringify({ type: "connected", workspace_id: "ws_logs" })}\n\n`,
+        body,
       });
       return;
     }
@@ -196,7 +247,14 @@ function logRead(streamId: string, data: string) {
   };
 }
 
-function quietLogData() {
+function quietLogData(_poll: number, forcedBytes?: number) {
+  if (typeof forcedBytes === "number") {
+    const prefix = "quiet line 000";
+    if (forcedBytes <= prefix.length) {
+      return prefix;
+    }
+    return `${prefix}${"x".repeat(forcedBytes - prefix.length)}`;
+  }
   return Array.from({ length: 120 }, (_, index) => `quiet line ${index.toString().padStart(3, "0")}`).join("\n");
 }
 
