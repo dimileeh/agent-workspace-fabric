@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import ValidationError
@@ -57,11 +57,6 @@ from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
 )
-from awf.service.workspaces import (
-    _PROFILE_APP_ENDPOINTS_ADAPTER,
-    WorkspaceRetryResult,
-    _WorkspaceResponseSource,
-)
 from awf.service.workspaces_create import workspace_provider_readiness_preflight
 from awf.service.workspaces_retry import (
     _compact_conformance_payload,
@@ -70,6 +65,26 @@ from awf.service.workspaces_retry import (
     _latest_failed_state_event,
     _payload_str,
 )
+
+if TYPE_CHECKING:
+    from awf.service.workspaces import WorkspaceRetryResult
+
+
+def _workspace_response_source(
+    workspace: Workspace,
+    computed_fields: Mapping[str, Any],
+) -> Any:
+    """Build a workspace response source wrapper from the workspace service module."""
+    from awf.service.workspaces import _WorkspaceResponseSource
+
+    return _WorkspaceResponseSource(workspace, computed_fields)
+
+
+def _profile_app_endpoint_adapter() -> Any:
+    """Load the profile app endpoint adapter lazily to avoid module-load cycles."""
+    from awf.service.workspaces import _PROFILE_APP_ENDPOINTS_ADAPTER
+
+    return _PROFILE_APP_ENDPOINTS_ADAPTER
 
 
 def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResponse:
@@ -160,7 +175,7 @@ def workspace_response(
     computed_fields["pricing"] = _pricing_metadata_response(workspace)
     if egress_audit is not None:
         computed_fields["egress_audit"] = egress_audit
-    return WorkspaceResponse.model_validate(_WorkspaceResponseSource(workspace, computed_fields))
+    return WorkspaceResponse.model_validate(_workspace_response_source(workspace, computed_fields))
 
 
 def _workspace_app_endpoint_responses(
@@ -171,7 +186,7 @@ def _workspace_app_endpoint_responses(
     if not isinstance(raw_profile, Mapping):
         return []
     try:
-        app_endpoints = _PROFILE_APP_ENDPOINTS_ADAPTER.validate_python(
+        app_endpoints = _profile_app_endpoint_adapter().validate_python(
             raw_profile.get("app_endpoints", [])
         )
     except ValidationError:
