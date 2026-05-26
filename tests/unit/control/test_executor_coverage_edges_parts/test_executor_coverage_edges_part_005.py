@@ -667,12 +667,14 @@ def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
+                (0, "", ""),
                 (1, "", "no target"),
             ],
             "could not resolve origin/main",
         ),
         (
             [
+                (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
