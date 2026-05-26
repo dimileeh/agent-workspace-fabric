@@ -21,21 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
+from tests.util import _positive_int_env
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-
-
-def _positive_int_env(name: str, default: int) -> int:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        value = int(raw_value)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be a positive integer.") from exc
-    if value <= 0:
-        raise RuntimeError(f"{name} must be a positive integer.")
-    return value
 
 
 POSTGRES_TEST_CONNECT_TIMEOUT_SECONDS = _positive_int_env(

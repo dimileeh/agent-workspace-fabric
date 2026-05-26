@@ -26,24 +26,12 @@ from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 from tests.postgres import postgres_test_engine
+from tests.util import _positive_int_env
 
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
-
-
-def _positive_int_env(name: str, default: int) -> int:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        value = int(raw_value)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be a positive integer.") from exc
-    if value <= 0:
-        raise RuntimeError(f"{name} must be a positive integer.")
-    return value
 
 
 _POSTGRES_TEST_TIMEOUT_SECONDS = _positive_int_env("AWF_POSTGRES_TEST_TIMEOUT_SECONDS", 120)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from collections import Counter
 
 import pytest
@@ -144,6 +146,28 @@ steps:
         )
         == 8
     )
+
+
+def test_quality_gates_workflow_actions_import_has_no_circular_dependency() -> None:
+    module_names = (
+        "awf.control.quality_gates_workflow",
+        "awf.control.quality_gates_workflow_actions",
+        "awf.control.quality_gates_workflow_commands",
+    )
+    originals = {name: sys.modules.get(name) for name in module_names}
+    try:
+        for name in module_names:
+            sys.modules.pop(name, None)
+        imported = importlib.import_module("awf.control.quality_gates_workflow_actions")
+        assert imported is not None
+        assert imported._is_default_false_continue_on_error is not None
+        assert imported._line_for_yaml_key("jobs:\\n  test: {}\\n", "jobs") == 1
+    finally:
+        for name, module in originals.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 @pytest.mark.unit

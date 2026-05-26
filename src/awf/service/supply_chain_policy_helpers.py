@@ -37,9 +37,7 @@ _LOCKFILE_NAMES: Final[frozenset[str]] = frozenset(
         "packages.lock.json",
     }
 )
-_URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(https?://)[^/@\\s]+(?::[^/@\\s]+)?@"
-)
+_URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 
 
 def _command_token_segments(

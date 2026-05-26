@@ -130,7 +130,7 @@ class OperationResponse(BaseModel):
             _operation_log_stream_refs(payload, result),
         )
         self.log_stream_refs = refs
-        self.log_stream_ids = _log_stream_ids(self.log_stream_refs)
+        self.log_stream_ids = log_stream_ids(self.log_stream_refs)
         return self
 
 
@@ -161,34 +161,7 @@ def _operation_log_stream_refs(
     return refs
 
 
-def _merge_log_stream_refs(
-    existing: dict[str, Any],
-    incoming: dict[str, Any],
-) -> dict[str, Any]:
-    refs = dict(existing)
-    for key, value in incoming.items():
-        if key in refs:
-            refs[key] = _merge_log_stream_ref_value(refs[key], value)
-        else:
-            refs[key] = value
-    return refs
-
-
-def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
-    if existing == incoming:
-        return existing
-    if isinstance(existing, dict) and isinstance(incoming, dict):
-        return _merge_log_stream_refs(existing, incoming)
-
-    values = list(existing) if isinstance(existing, list) else [existing]
-    incoming_values = incoming if isinstance(incoming, list) else [incoming]
-    for value in incoming_values:
-        if value not in values:
-            values.append(value)
-    return values
-
-
-def _log_stream_ids(value: Any) -> list[str]:
+def log_stream_ids(value: Any) -> list[str]:
     ids: set[str] = set()
 
     def collect(item: Any, depth: int = 0) -> None:
@@ -207,6 +180,41 @@ def _log_stream_ids(value: Any) -> list[str]:
 
     collect(value)
     return sorted(ids)
+
+
+def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
+    if existing == incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        return _merge_log_stream_refs(existing, incoming)
+
+    values = list(existing) if isinstance(existing, list) else [existing]
+    incoming_values = incoming if isinstance(incoming, list) else [incoming]
+    for value in incoming_values:
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _log_stream_ids(value: Any) -> list[str]:
+    return log_stream_ids(value)
+
+
+def merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
+    return _merge_log_stream_ref_value(existing, incoming)
+
+
+def _merge_log_stream_refs(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    refs = dict(existing)
+    for key, value in incoming.items():
+        if key in refs:
+            refs[key] = merge_log_stream_ref_value(refs[key], value)
+        else:
+            refs[key] = value
+    return refs
 
 
 class OperationListResponse(BaseModel):
