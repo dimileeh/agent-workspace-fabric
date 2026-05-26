@@ -129,16 +129,16 @@ def upgrade() -> None:
     # transaction. Keep the data backfill transactional above, then release the
     # transaction before building the read-path index without blocking writers.
     with op.get_context().autocommit_block():
-        op.execute(sa.text("SET lock_timeout = '30s'"))
-        op.execute(sa.text("SET statement_timeout = '10min'"))
-        op.execute(
-            sa.text(
-                "SELECT pg_advisory_lock("
-                f"{_INDEX_DDL_LOCK_NAMESPACE}, {_INDEX_DDL_LOCK_KEY}"
-                ")"
-            )
-        )
         try:
+            op.execute(sa.text("SET lock_timeout = '30s'"))
+            op.execute(sa.text("SET statement_timeout = '10min'"))
+            op.execute(
+                sa.text(
+                    "SELECT pg_advisory_lock("
+                    f"{_INDEX_DDL_LOCK_NAMESPACE}, {_INDEX_DDL_LOCK_KEY}"
+                    ")"
+                )
+            )
             bind = op.get_bind()
             invalid_index = bind.execute(
                 sa.text(
