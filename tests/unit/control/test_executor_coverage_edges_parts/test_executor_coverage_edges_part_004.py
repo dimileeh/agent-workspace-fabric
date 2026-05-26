@@ -266,6 +266,48 @@ async def test_missing_head_recovery_recommits_filesystem_state(
 
 
 @pytest.mark.unit
+async def test_missing_head_recovery_returns_success_when_index_matches_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirror, worktree = _fake_linked_worktree(tmp_path)
+    branch_dir = mirror / "refs" / "heads" / "awf"
+    branch_dir.mkdir(parents=True)
+    broken_head = "b" * 40
+    (branch_dir / "ws_missing_head").write_text(f"{broken_head}\n", encoding="utf-8")
+    recovered_head = "a" * 40
+    runner = FakeCommandRunner()
+    for returncode, stdout, stderr in [
+        (0, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (0, f"{recovered_head}\n", ""),
+    ]:
+        runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
+    monkeypatch.setattr(
+        executor_git_ops,
+        "repair_agent_writable_worktree",
+        lambda *_args: None,
+    )
+
+    result = await _recover_missing_head_from_filesystem(
+        runner=runner,
+        workspace_id="ws_missing_head",
+        worktree_path=worktree,
+        base_commit=recovered_head,
+        branch_name="awf/ws_missing_head",
+    )
+
+    assert result == _GitObjectRecoveryResult(
+        broken_head_sha=broken_head,
+        recovered_head_sha=recovered_head,
+    )
+    assert len(runner.calls) == 6
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("queued", "expected_call_count"),
     [
@@ -273,7 +315,6 @@ async def test_missing_head_recovery_recommits_filesystem_state(
         ([(0, "", ""), (1, "", "update failed")], 2),
         ([(0, "", ""), (0, "", ""), (1, "", "reset failed")], 3),
         ([(0, "", ""), (0, "", ""), (0, "", ""), (1, "", "add failed")], 4),
-        ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")], 5),
         ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (2, "", "diff failed")], 5),
         (
             [
