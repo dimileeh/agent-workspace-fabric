@@ -306,8 +306,6 @@ export function WorkspaceLogColumn({
     );
     if (!result.ok) {
       setError(result.message);
-      setStreams([]);
-      setSelectedStreams([]);
       return;
     }
     setError(null);
