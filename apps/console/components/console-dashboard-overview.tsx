@@ -1227,7 +1227,7 @@ export function UsageSummaryBlock({
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
         {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
-        {pricingReason ? (
+        {pricingReason && !showCost ? (
           <>
             <span className="text-slate-300">|</span>
             <span className="text-amber-600">{pricingReason}</span>
