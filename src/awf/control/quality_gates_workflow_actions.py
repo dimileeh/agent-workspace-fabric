@@ -254,11 +254,6 @@ _ALLOWED_PROJECT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-from awf.control.quality_gates_workflow import (  # noqa: E402
-    _line_matching,
-)
-
-
 def _has_unsafe_github_actions_expression(tokens: Sequence[str]) -> bool:
     from awf.control.quality_gates_workflow_commands import (
         _has_unsafe_github_actions_expression as impl,
@@ -623,4 +618,6 @@ def _format_toml_policy_value(value: object) -> str:
 
 
 def _line_for_yaml_key(text: str, key: str) -> int | None:
+    from awf.control.quality_gates_workflow import _line_matching
+
     return _line_matching(text, rf"^\s*{re.escape(key)}\s*:")
