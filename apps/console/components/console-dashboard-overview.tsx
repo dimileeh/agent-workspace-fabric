@@ -1220,7 +1220,7 @@ export function UsageSummaryBlock({
           label="Cost"
           value={
             showCost
-              ? formatCostWithPricing(safeUsage.cost_estimate, safeUsage.currency, pricing)
+              ? formatCostWithPricing(safeUsage.cost_estimate, safeUsage.currency, pricing, safeUsage.source)
               : "—"
           }
         />

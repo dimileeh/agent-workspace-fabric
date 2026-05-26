@@ -125,6 +125,48 @@ test("formatCostWithPricing renders computed usage cost without pricing metadata
   assert.equal(formatCostWithPricing(0.05, "USD", null), "$0.0500");
 });
 
+test("formatCostWithPricing appends stale-pricing suffix when pricing is stale and source is not ccusage", () => {
+  const stalePricing = {
+    provider: "openai",
+    model: "gpt-4o",
+    currency: "USD",
+    unit: "per_1m_tokens",
+    price_per_unit: 5.0,
+    timestamp: "2025-01-01T00:00:00Z",
+    version: 1,
+    is_current: false,
+  };
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing),
+    "$0.1200 (stale pricing)",
+  );
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, "operations"),
+    "$0.1200 (stale pricing)",
+  );
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, null),
+    "$0.1200 (stale pricing)",
+  );
+});
+
+test("formatCostWithPricing suppresses stale-pricing suffix when source is ccusage", () => {
+  const stalePricing = {
+    provider: "openai",
+    model: "gpt-4o",
+    currency: "USD",
+    unit: "per_1m_tokens",
+    price_per_unit: 5.0,
+    timestamp: "2025-01-01T00:00:00Z",
+    version: 1,
+    is_current: false,
+  };
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, "ccusage"),
+    "$0.1200",
+  );
+});
+
 test("toneFillClass maps warning and bad pressure to distinct fills", () => {
   assert.equal(toneFillClass("good"), "bg-emerald-500");
   assert.equal(toneFillClass("warn"), "bg-amber-500");

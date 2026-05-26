@@ -120,6 +120,7 @@ export function formatCostWithPricing(
   cost: number | null,
   currency: string | null | undefined,
   pricing: PricingMetadata | null | undefined,
+  source?: string | null,
 ): string {
   if (cost === null || cost === undefined) {
     return "—";
@@ -139,7 +140,7 @@ export function formatCostWithPricing(
       maximumFractionDigits: 4,
     }).format(cost);
   }
-  if (pricing && !pricing.is_current) {
+  if (pricing && !pricing.is_current && source !== "ccusage") {
     return `${formatted} (stale pricing)`;
   }
   return formatted;
