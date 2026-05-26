@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-import click
 import httpx
 import typer
 import typer.rich_utils as typer_rich_utils
@@ -41,7 +40,7 @@ class OutputFormat(StrEnum):
 class MinRichHelpWidthCommand(typer.core.TyperCommand):
     """Typer command class with a wider rich help minimum."""
 
-    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+    def format_help(self, ctx: Any, formatter: Any) -> None:
         """Render rich help with a stable minimum width."""
         configured_width = typer_rich_utils.MAX_WIDTH
         terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
