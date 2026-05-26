@@ -38,7 +38,6 @@ from awf.db.repositories.base import (
     _secret_lease_insert_if_absent_stmt,
     resolve_session_dialect_name,
 )
-from awf.db.repositories.workspace_repo import WorkspaceRepository, set_committed_value
 
 
 class SecretLeaseRepository:
@@ -124,6 +123,8 @@ class SecretLeaseRepository:
             lease = await self._session.get(WorkspaceSecretLease, inserted_id)
             if lease is None:
                 raise RuntimeError(f"inserted secret lease {inserted_id} was not visible")
+            from awf.db.repositories.workspace_repo import set_committed_value
+
             set_committed_value(lease, "issued_at", now)
             set_committed_value(lease, "expires_at", issue.expires_at)
             return _IssuedSecretLease(lease=lease, issue_event_required=True)
@@ -309,6 +310,8 @@ class SecretLeaseRepository:
         action: str,
         now: datetime,
     ) -> None:
+        from awf.db.repositories.workspace_repo import WorkspaceRepository
+
         events = [
             WorkspaceEventCreate(
                 event_type=SECRET_LEASE_AUDIT_EVENT_TYPE,
