@@ -223,7 +223,7 @@ async def _record_health_check_failed_event(
     workspace_id: str,
     failure: ValidationCommandResult,
 ) -> None:
-    metadata = failure.metadata
+    metadata = failure.metadata if isinstance(failure.metadata, dict) else {}
     stream_ids = metadata.get("stream_ids")
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)

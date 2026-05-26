@@ -836,6 +836,52 @@ async def test_healthcheck_failure_event_noops_when_workspace_is_not_validating(
 
 
 @pytest.mark.unit
+async def test_healthcheck_failure_event_handles_none_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(id="ws_health", status=WorkspaceStatus.validating.value)
+    captured_events: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            **kwargs: object,
+        ) -> None:
+            captured_events.append({"event_type": event_type, **kwargs})
+
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    failure = _command_result(tmp_path, returncode=1)
+    object.__setattr__(failure, "metadata", None)
+    object.__setattr__(failure, "phase", "healthcheck")
+    object.__setattr__(failure, "command", "healthcheck")
+
+    await executor._record_health_check_failed_event(
+        workspace_id=workspace.id,
+        failure=failure,
+    )
+
+    assert session.commits == 1
+    assert len(captured_events) == 1
+    assert captured_events[0]["event_type"] == "workspace.health_check_failed"
+    assert captured_events[0]["stream_ids"] == {}
+
+
+@pytest.mark.unit
 async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
