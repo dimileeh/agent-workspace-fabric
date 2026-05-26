@@ -254,6 +254,16 @@ def test_recovery_conformance_gaps_accepts_string_and_empty_values() -> None:
             True,
         ),
         (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "rebased",
+            _RebaseRecoveryResult(
+                base_sha="base",
+                head_sha="rebased",
+                requires_pr_update=True,
+            ),
+            True,
+        ),
+        (
             {"recovery_mode": "validate_only", "source_head_sha": "old"},
             "new",
             _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),

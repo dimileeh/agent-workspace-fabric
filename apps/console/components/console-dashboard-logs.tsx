@@ -251,6 +251,7 @@ export function WorkspaceLogColumn({
   const [error, setError] = useState<string | null>(null);
   const previousTailSignal = useRef(tailSignal);
   const streamActivityRef = useRef<LogStreamActivityMap>({});
+  const selectedStreamsRef = useRef<string[]>([]);
   const previousTailSelection = useRef("");
 
   const selectedStreamMetas = useMemo(
@@ -289,7 +290,7 @@ export function WorkspaceLogColumn({
           return entry.kind === "live" && entry.offset >= result.nextOffset;
         }),
         ...results.map((result) => result.entry),
-      ]),
+      ], selectedStreams),
     );
     setOffsets((current) => {
       const next = { ...current };
@@ -299,6 +300,10 @@ export function WorkspaceLogColumn({
       return next;
     });
   }, [selectedStreams, streams, workspace.workspace_id]);
+
+  useEffect(() => {
+    selectedStreamsRef.current = selectedStreams;
+  }, [selectedStreams]);
 
   const loadStreams = useCallback(async () => {
     const result = await apiGet<ListEnvelope<WorkspaceLogStream>>(
@@ -327,6 +332,7 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     const selection = selectedStreams.join(",");
     if (!selection) {
+      previousTailSelection.current = "";
       return;
     }
     if (previousTailSelection.current === selection) {
@@ -376,7 +382,8 @@ export function WorkspaceLogColumn({
           kind: frame.seq === 0 ? "tail" : "live",
         };
         setEntries((current) =>
-          trimLogEntries([
+          trimLogEntries(
+            [
             ...current.filter(
               (item) =>
                 item.streamId !== frame.stream_id ||
@@ -384,7 +391,9 @@ export function WorkspaceLogColumn({
                 entry.kind !== "tail",
             ),
             entry,
-          ]),
+            ],
+            selectedStreamsRef.current,
+          ),
         );
         setOffsets((current) => ({
           ...current,

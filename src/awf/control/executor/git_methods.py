@@ -768,7 +768,21 @@ async def _run_monitor_rebase_recovery(
                         pushed=False,
                     ),
                 )
-        elif already_contains_target.returncode not in {1}:
+            return cast(
+                _RebaseRecoveryResult,
+                await self._record_current_rebase_recovery_head(
+                    git=git,
+                    workspace_id=workspace_id,
+                    target_ref=target_ref,
+                    operation=operation,
+                    source_base_sha=source_base_sha,
+                    source_head_sha=source_head_sha,
+                    rebased=False,
+                    pushed=False,
+                    requires_pr_update=True,
+                ),
+            )
+        if already_contains_target.returncode not in {1}:
             raise _MonitorRebaseRecoveryError(
                 "rebase recovery: git merge-base --is-ancestor "
                 f"{target_ref} HEAD failed: {already_contains_target.stderr}"
@@ -823,6 +837,7 @@ async def _record_current_rebase_recovery_head(
     source_head_sha: str | None,
     rebased: bool,
     pushed: bool,
+    requires_pr_update: bool = False,
 ) -> _RebaseRecoveryResult:
     """Record the current branch head after rebase-style recovery.
 
@@ -886,7 +901,11 @@ async def _record_current_rebase_recovery_head(
         pushed=pushed,
         rebased=rebased,
     )
-    return _RebaseRecoveryResult(base_sha=base_sha, head_sha=head_sha)
+    return _RebaseRecoveryResult(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        requires_pr_update=requires_pr_update,
+    )
 
 
 async def _record_rebase_recovery_success(

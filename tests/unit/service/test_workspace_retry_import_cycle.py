@@ -33,3 +33,13 @@ def test_workspace_create_imports_without_module_cycle() -> None:
     _clear_cached_workspace_modules()
     create_module = importlib.import_module("awf.service.workspaces_create")
     assert hasattr(create_module, "create_workspace_row")
+
+
+@pytest.mark.unit
+def test_workspace_response_imports_without_module_cycle() -> None:
+    """Importing `workspaces_response` before `workspaces` should not fail."""
+    _clear_cached_workspace_modules()
+    response_module = importlib.import_module("awf.service.workspaces_response")
+    assert hasattr(response_module, "workspace_response")
+    workspace_module = importlib.import_module("awf.service.workspaces")
+    assert hasattr(workspace_module, "workspace_response")
