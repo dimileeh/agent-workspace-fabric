@@ -10,6 +10,23 @@ from awf.db.enums import TaskKind
 
 
 @pytest.mark.unit
+def test_api_schemas_star_import_preserves_legacy_public_surface() -> None:
+    namespace: dict[str, object] = {}
+
+    exec("from awf.api.schemas import *", namespace)
+
+    assert {
+        "OwnedPath",
+        "ValidationCommand",
+        "PUBLIC_DIRECT_CREATE_TASK_KINDS",
+        "OperationListResponse",
+        "OperationResponse",
+        "log_stream_ids",
+        "merge_log_stream_ref_value",
+    } <= namespace.keys()
+
+
+@pytest.mark.unit
 def test_task_kind_enum_drops_deprecated_monitor_release_pr() -> None:
     values = {member.value for member in TaskKind}
     assert "monitor_release_pr" not in values
