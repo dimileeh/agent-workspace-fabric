@@ -151,6 +151,22 @@ def test_normalize_ccusage_json_synthesizes_total_with_reasoning_fallback() -> N
 
 
 @pytest.mark.unit
+def test_normalize_ccusage_json_synthesizes_total_with_output_and_reasoning() -> None:
+    raw = json.dumps(
+        {"totals": {"inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 25}}
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 40
+    assert usage.reasoning_output_tokens == 25
+    assert usage.total_tokens == 165
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_sums_daily_when_no_totals() -> None:
     raw = json.dumps(
         {
