@@ -154,31 +154,39 @@ async def _transition_if_current(
 ) -> bool:
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
-        if ws is None:  # pragma: no cover - destroyed mid-flight
-            return False
-        if ws.status != from_status.value:
-            await self._record_stale_action_skip(
-                repo,
-                ws,
-                action=action,
-                expected=from_status,
-                reason_code="EXECUTOR_STALE_STATUS",
-            )
-            if _is_callback_terminal_status(ws.status):
-                await self._finish_ignored_stale_callback_operations_in_session(
-                    session,
-                    workspace_id=workspace_id,
-                    callback_source="executor",
-                    callback_action=action,
-                    expected_status=from_status,
-                    actual_status=ws.status,
-                )
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=from_status,
+            to=to,
+            reason_code=reason,
+        )
+        if ws is not None:
             await session.commit()
+            return True
+
+        current = await repo.get(workspace_id)
+        if current is None:
+            # pragma: no cover - destroyed mid-flight
             return False
-        await repo.transition(ws, to=to, reason_code=reason)
+
+        await self._record_stale_action_skip(
+            repo,
+            current,
+            action=action,
+            expected=from_status,
+            reason_code="EXECUTOR_STALE_STATUS",
+        )
+        if _is_callback_terminal_status(current.status):
+            await self._finish_ignored_stale_callback_operations_in_session(
+                session,
+                workspace_id=workspace_id,
+                callback_source="executor",
+                callback_action=action,
+                expected_status=from_status,
+                actual_status=current.status,
+            )
         await session.commit()
-        return True
+        return False
 
 
 async def _record_stale_action_skip(
@@ -259,10 +267,31 @@ async def _mark_failed(
 ) -> None:
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
-        if ws is None:  # pragma: no cover
-            return
-        if ws.status != from_status.value:
+        final_reason_code = reason_code or failure_reason.value.upper()
+        safe_message = redact_audit_text(message, limit=2000)
+        payload: dict[str, Any] | None = None
+        if details is not None or salvage is not None:
+            payload = {
+                "failure_reason": failure_reason.value,
+                "reason_code": final_reason_code,
+                "message": safe_message,
+            }
+            if details is not None:
+                payload["details"] = dict(details)
+            if salvage is not None:
+                payload["salvage"] = dict(salvage)
+
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=from_status,
+            to=WorkspaceStatus.failed,
+            reason_code=final_reason_code,
+            payload=payload,
+        )
+        if ws is None:
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover
+                return
             # Already moved (e.g. cancelled) — respect it.
             await self._record_stale_action_skip(
                 repo,
@@ -282,31 +311,14 @@ async def _mark_failed(
                 )
             await session.commit()
             return
-        safe_message = redact_audit_text(message, limit=2000)
+
         ws.failure_reason = failure_reason.value
         ws.failure_message = safe_message
-        if reason_code == EXEC_PROCESS_CLEANUP_FAILED:
+        if final_reason_code == EXEC_PROCESS_CLEANUP_FAILED:
             await repo.add_event(
                 ws,
                 event_type="workspace.exec_process_cleanup_failed",
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 payload={"message": safe_message[:1000]},
             )
-        payload: dict[str, Any] | None = None
-        if details is not None or salvage is not None:
-            payload = {
-                "failure_reason": failure_reason.value,
-                "reason_code": reason_code or failure_reason.value.upper(),
-                "message": safe_message,
-            }
-            if details is not None:
-                payload["details"] = dict(details)
-            if salvage is not None:
-                payload["salvage"] = dict(salvage)
-        await repo.transition(
-            ws,
-            to=WorkspaceStatus.failed,
-            reason_code=reason_code or failure_reason.value.upper(),
-            payload=payload,
-        )
         await session.commit()

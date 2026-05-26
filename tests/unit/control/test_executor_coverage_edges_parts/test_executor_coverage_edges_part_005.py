@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from typing import Any
 
 import pytest
 
@@ -937,6 +938,21 @@ async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
             **_kwargs: object,
         ) -> None:
             stale_events.append(event_type)
+
+        async def transition_if_current(
+            self,
+            workspace_id: str,
+            *,
+            from_status: WorkspaceStatus,
+            to: WorkspaceStatus,
+            reason_code: str,
+            payload: dict[str, Any] | None = None,
+        ) -> object | None:
+            assert workspace_id == workspace.id
+            if workspace.status != from_status.value:
+                return None
+            workspace.status = to.value
+            return workspace
 
         async def transition(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("stale terminal workspace should not transition")
