@@ -1,5 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import type { AwfStreamFrame } from "@/lib/types";
+
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
 const activeOpenedAt = "2026-05-21T10:00:10.000Z";
@@ -159,7 +161,7 @@ async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
       return;
     }
     if (path === "/api/awf/workspaces/ws_logs/stream") {
-      const frames = [
+      const frames: AwfStreamFrame[] = [
         { type: "connected", workspace_id: "ws_logs" },
       ];
       if (typeof streamNoiseBytes === "number") {

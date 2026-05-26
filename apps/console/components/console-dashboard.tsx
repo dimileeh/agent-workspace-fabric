@@ -716,7 +716,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     setLogTailSignal((current) => current + 1);
     for (const stream of detail.streams) {
       if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream);
+        void loadLogTail(selectedId, stream, selectedStreams);
       }
     }
   }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
