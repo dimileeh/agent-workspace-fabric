@@ -18,6 +18,7 @@ from awf.api.schemas import (
     WorkspaceWarningResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
 from awf.db.enums import AgentRuntime, TaskKind
 from awf.db.models import (
@@ -61,6 +62,8 @@ from awf.service.scheduler import (
 
 if TYPE_CHECKING:
     from awf.service.workspaces import ResourceReservationPlan
+
+_log = get_logger(__name__)
 
 
 async def create_workspace_row(
@@ -980,7 +983,6 @@ def _parse_memory_gb(value: str | None) -> float | None:
         memory_gb = float(normalized)
     except ValueError:
         return None
-    from awf.service.workspaces import _log  # noqa: E402
 
     _log.warning(
         "workspace.resources.memory_unit_missing",

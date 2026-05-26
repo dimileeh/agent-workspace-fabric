@@ -41,6 +41,12 @@ locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility
 operations_app = typer.Typer(help="Global operation history inspection.")
 
 
+def _option_value(value: Any) -> str:
+    """Return the wire value for Typer enum options and direct string test calls."""
+    enum_value = getattr(value, "value", None)
+    return str(enum_value if enum_value is not None else value)
+
+
 @workspace_app.command("create")
 def workspace_create(
     repo_url: str = typer.Option(..., "--repo", help="Git URL."),
@@ -130,8 +136,9 @@ def workspace_create(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Submit a workspace creation request."""
+    task_kind_value = _option_value(task_kind)
     if branch_base is None:
-        branch_base = "main" if task_kind == TaskKind.sync_release_pr else "development"
+        branch_base = "main" if task_kind_value == TaskKind.sync_release_pr.value else "development"
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
@@ -141,7 +148,7 @@ def workspace_create(
             "title": task_title,
             "prompt": task_prompt,
             "agent": agent,
-            "kind": task_kind if isinstance(task_kind, str) else task_kind.value,
+            "kind": task_kind_value,
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
         },
@@ -159,7 +166,7 @@ def workspace_create(
     if effort is not None:
         body["task"]["effort"] = effort
     if task_class is not None:
-        body["task"]["task_class"] = task_class.value
+        body["task"]["task_class"] = _option_value(task_class)
     if external_id is not None:
         body["task"]["external_id"] = external_id
     if priority is not None:

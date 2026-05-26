@@ -1,8 +1,4 @@
-"""Executor recovery branch — additional recovery scenario tests.
-
-Split from test_executor_monitor_recovery_part_001.py — normal-path
-regression guard and existing-PR recovery scenarios.
-"""
+"""Executor monitor-recovery coverage split for normal and existing-PR paths."""
 
 from __future__ import annotations
 
@@ -13,30 +9,25 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters import registry as _registry  # noqa: F401 — populates registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import (
-    ExecutorConfig,
-    WorkspaceExecutor,
-)
-from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import (
-    OperationRepository,
-    WorkspaceEventRepository,
-    WorkspaceRepository,
-)
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeManager
-from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import ValidationResult
 from tests.postgres import postgres_test_engine
-from tests.unit.control.executor_paths import _test_worktrees_root
-
-_TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-
-
-def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
-    fake.queue_result(returncode=0, stdout=f"{head}\n")
+from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_part_001 import (
+    _FEATURE_TASK_PROMPT,
+    _all_adapter_args,
+    _all_adapter_prompts,
+    _all_push_and_pr_create_calls,
+    _make_executor,
+    _queue_push_and_pr,
+    _queue_validation_head,
+    _seed_ready_workspace_no_recovery,
+    _seed_ready_workspace_with_recovery,
+    _setup_dependency_retry_success_result,
+    _SetupFailureValidation,
+)
 
 
 @pytest.fixture
@@ -52,166 +43,52 @@ def fake() -> FakeCommandRunner:
     return FakeCommandRunner()
 
 
-_FEATURE_TASK_PROMPT = "Implement the customer feature flag wiring for the staging dashboard."
-
-
-def _make_executor(
-    *,
+@pytest.mark.unit
+async def test_setup_dependency_event_recording_failure_does_not_block_agent_run(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    max_fix_passes: int = 5,
-    pr_monitor_factory: Any = None,
-    validation: Any = None,
-) -> WorkspaceExecutor:
-    compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
-    validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
-    pr = PullRequestCreator(fake)
-    return WorkspaceExecutor(
-        session_factory=factory,
-        runner=fake,
-        compose=compose,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation = _SetupFailureValidation(
+        ValidationResult(commands=[_setup_dependency_retry_success_result(tmp_path)])
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
         validation=validation,
-        pr_creator=pr,
-        config=ExecutorConfig(
-            worktrees_root=tmp_path / "work" / "worktrees",
-            compose_projects_root=tmp_path / "work" / "compose",
-            default_models={
-                AgentRuntime.codex: "gpt-5",
-                AgentRuntime.claude_code: "sonnet",
-                AgentRuntime.gemini: "gemini-2.5-pro",
-            },
-            max_validation_fix_passes=max_fix_passes,
-        ),
-        pr_monitor_factory=pr_monitor_factory,
+    )
+    ws_id = await _seed_ready_workspace_no_recovery(factory)
+
+    async def _raise_event_recording_failure(**_kwargs: Any) -> None:
+        raise RuntimeError("setup dependency event commit failed")
+
+    monkeypatch.setattr(
+        executor,
+        "_record_setup_dependency_network_events",
+        _raise_event_recording_failure,
     )
 
+    fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+    _queue_validation_head(fake)
+    _queue_push_and_pr(fake)
 
-async def _seed_ready_workspace_with_recovery(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    pr_url: str = "https://github.com/x/y/pull/1",
-    pr_number: int = 1,
-    create_worktree: bool = True,
-    resolved_profile: dict[str, Any] | None = None,
-) -> str:
-    from awf.db.enums import OperationType
+    await executor.execute(ws_id)
 
+    assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+    assert len(_all_adapter_args(fake)) == 1
     async with factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-agent.git",
-            branch_base="development",
-            task_title="recovery test",
-            task_prompt=_FEATURE_TASK_PROMPT,
-            agent="codex",
-            test_commands=["pytest -q"],
-            requires_database=False,
-            resolved_profile=resolved_profile,
-        )
-        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
-        ws.base_commit = "a" * 40
-        ws.monitor_last_commit_sha = "d" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        ws.pr_url = pr_url
-        ws.pr_number = pr_number
-        ws.remote_push_branch = ws.branch_name
-        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="RECOVERY_DISPATCH")
-        payload = {
-            "owner": "pr_monitor",
-            "source": "pr_monitor",
-            "action": "validate_only",
-            "requested_action": "validate",
-            "reason": "validation_insufficient_tier",
-            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
-            "recovery_mode": "validate_only",
-            "pr_number": pr_number,
-            "pr_url": pr_url,
-            "source_head_sha": ws.monitor_last_commit_sha,
-            "source_base_sha": ws.base_commit,
-            "target_branch": ws.branch_base,
-            "remote_branch": ws.remote_push_branch,
-        }
-        await OperationRepository(s).create(
-            workspace_id=ws.id,
-            operation_type=OperationType.validate,
-            payload=payload,
-            idempotency_key=f"pr_monitor:validate_only:{ws.id}",
-        )
-        await s.commit()
-        if create_worktree:
-            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
-        return ws.id
-
-
-async def _seed_ready_workspace_no_recovery(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    create_worktree: bool = True,
-) -> str:
-    async with factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-agent.git",
-            branch_base="development",
-            task_title="normal feature",
-            task_prompt=_FEATURE_TASK_PROMPT,
-            agent="codex",
-            test_commands=["pytest -q"],
-            requires_database=False,
-        )
-        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
-        await s.commit()
-        if create_worktree:
-            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
-        return ws.id
-
-
-def _queue_push_and_pr(
-    fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
-) -> None:
-    fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")
-    fake.queue_result(returncode=0, stdout="deadbeef01\n")
-    fake.queue_result(returncode=0, stdout="awf/ws_test\n")
-    fake.queue_result(returncode=0, stdout="abc1234 work\n")
-    fake.queue_result(returncode=0)
-    fake.queue_result(returncode=0, stdout=pr_url)
-
-
-def _all_adapter_args(fake: FakeCommandRunner) -> list[list[str]]:
-    return [c.args for c in fake.calls if "exec" in c.args and "codex" in c.args]
-
-
-def _all_adapter_prompt_values(fake: FakeCommandRunner) -> list[str]:
-    prompts: list[str] = []
-    for call in fake.calls:
-        if "exec" not in call.args or "codex" not in call.args:
-            continue
-        if call.input_bytes is not None:
-            prompts.append(call.input_bytes.decode())
-    return prompts
-
-
-def _all_adapter_prompts(fake: FakeCommandRunner) -> str:
-    return "\n".join(_all_adapter_prompt_values(fake))
-
-
-def _all_push_and_pr_create_calls(fake: FakeCommandRunner) -> list[list[str]]:
-    return [
-        c.args
-        for c in fake.calls
-        if ("push" in c.args and "git" in c.args) or (c.args[:3] == ["gh", "pr", "create"])
-    ]
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert ws.failure_message is None
 
 
 @pytest.mark.unit
@@ -226,15 +103,16 @@ async def test_executor_normal_path_unchanged_when_no_recovery_op(
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_no_recovery(factory)
 
-    fake.queue_result(returncode=0, stdout="codex finished")
-    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
-    fake.queue_result(returncode=0)
-    fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")
-    fake.queue_result(returncode=0)
-    fake.queue_result(returncode=0, stdout="1\n")
-    fake.queue_result(returncode=0)
+    # Standard initial-execution sequence (mirrors test_executor.py).
+    fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
     _queue_validation_head(fake)
-    fake.queue_result(returncode=0, stdout="tests ok")
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
     _queue_push_and_pr(fake)
 
     await executor.execute(ws_id)
@@ -256,10 +134,9 @@ async def test_recovery_skips_push_when_pr_already_exists(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A workspace in recovery with an existing PR must NOT re-push or
-    re-create the PR. The executor should skip the entire push/PR-creation
-    path and transition directly back to monitoring_pr (or completed if
-    no monitor is wired)."""
+    """A workspace in recovery with an existing PR must not re-push or
+    re-create the PR.
+    """
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(
         factory, pr_url="https://github.com/x/y/pull/1"
