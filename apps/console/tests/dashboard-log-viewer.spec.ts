@@ -70,6 +70,26 @@ test("fullscreen logs keep selected stream history when unselected stream tails 
   await expect.poll(async () => output.textContent() ?? "").toContain(activeExpectedText);
 });
 
+test("fullscreen logs reload tails after clearing and reselecting the same streams", async ({ page }) => {
+  const api = await mockAwfApi(page);
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText("active.stdout");
+
+  await modal.getByRole("button", { name: "Clear" }).click();
+  await expect(output).toContainText("No log data loaded.");
+
+  api.activeTailPoll = 99;
+  await modal.getByRole("button", { name: "All", exact: true }).click();
+
+  await expect(output).toContainText("active line 000 poll 99");
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
@@ -77,7 +97,7 @@ async function waitForConsoleReady(page: Page) {
 
 async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
   const { quietTailBytes, streamNoiseBytes, streamResponseDelayMs } = options;
-  const state = { streamPolls: 0 };
+  const state: { streamPolls: number; activeTailPoll: number | null } = { streamPolls: 0, activeTailPoll: null };
   await page.route("**/api/awf/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -124,7 +144,7 @@ async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
       return;
     }
     if (path.endsWith("/logs/active.stdout")) {
-      await fulfillJson(route, logRead("active.stdout", activeLogData(state.streamPolls)));
+      await fulfillJson(route, logRead("active.stdout", activeLogData(state.activeTailPoll ?? state.streamPolls)));
       return;
     }
     if (path.endsWith("/logs/quiet.stdout")) {

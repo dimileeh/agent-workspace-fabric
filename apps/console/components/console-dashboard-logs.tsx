@@ -332,6 +332,7 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     const selection = selectedStreams.join(",");
     if (!selection) {
+      previousTailSelection.current = "";
       return;
     }
     if (previousTailSelection.current === selection) {
