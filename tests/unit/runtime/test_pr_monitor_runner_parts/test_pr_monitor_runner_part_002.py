@@ -24,6 +24,7 @@ from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
+    OperationType,
     TaskClass,
     WorkspaceStatus,
 )
@@ -40,6 +41,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.merge_eligibility import VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -628,6 +630,88 @@ async def test_auto_merge_waits_for_non_check_reviewer_settle_before_merge(
     assert _gh_pr_merge_calls(cmd) == []
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_auto_merge_dispatches_current_head_validation_recovery_when_tier_is_satisfied(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 162
+    validated_head_sha = "8" * 40
+    current_head_sha = "c" * 40
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=validated_head_sha,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        assert workspace is not None
+        assert attempt is not None
+        validation_repo = ValidationRunRepository(session)
+        validation_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=workspace.base_commit,
+            base_sha=workspace.base_commit,
+            target_branch=workspace.remote_push_branch,
+            target_head_sha=validated_head_sha,
+            workspace_head_sha=validated_head_sha,
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=current_head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    assert _gh_pr_merge_calls(cmd) == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert len(operations) == 1
+    operation = operations[0]
+    assert operation.type == OperationType.validate.value
+    assert operation.status == OperationStatus.pending.value
+    assert operation.payload["action"] == "validate_only"
+    assert operation.payload["reason"] == "AWF validation has not passed for the current PR head."
+    assert operation.payload["stale_reason"] == VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON
+    assert operation.payload["reason_code"] == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
+    assert operation.payload["source_head_sha"] == current_head_sha
 
 
 @pytest.mark.unit

@@ -1359,6 +1359,60 @@ def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_validation_summary_reports_fresh_current_pr_head() -> None:
+    now = datetime(2026, 4, 27, 15, 30, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_current_head",
+        task_class="test_task",
+        resolved_profile=None,
+        operations=[],
+        monitor_last_commit_sha="current-head",
+    )
+    candidate = SimpleNamespace(
+        id="mc_current_head",
+        attempt_id="att_current_head",
+        head_sha="current-head",
+    )
+    run = SimpleNamespace(
+        id="vr_current_head",
+        workspace_id="ws_current_head",
+        attempt_id="att_current_head",
+        tier=1,
+        command_set_hash="c" * 64,
+        base_commit="base",
+        base_sha="base",
+        workspace_head_sha="current-head",
+        target_branch="main",
+        target_head_sha="current-head",
+        profile_name=None,
+        profile_version=None,
+        profile_source=None,
+        resolved_profile_digest=None,
+        environment_identity_digest=None,
+        environment_identity_inputs=None,
+        status="succeeded",
+        reason_code="VALIDATION_OK",
+        started_at=now,
+        finished_at=now + timedelta(minutes=1),
+        log_stream_refs={},
+        retry_count=0,
+    )
+
+    summary = validation_freshness_summary(
+        workspace,  # type: ignore[arg-type]
+        [run],  # type: ignore[list-item]
+        candidate=candidate,  # type: ignore[arg-type]
+    )
+
+    assert summary.required_tier == 1
+    assert summary.latest_satisfied_tier == 1
+    assert summary.freshness_status == "fresh"
+    assert summary.reason_code == "validation_fresh"
+    assert summary.latest_validation is not None
+    assert summary.latest_validation.target_head_sha == "current-head"
+
+
+@pytest.mark.unit
 def test_workspace_validation_summary_uses_latest_successful_rebase() -> None:
     now = datetime(2026, 4, 27, 15, 0, tzinfo=UTC)
     workspace = SimpleNamespace(

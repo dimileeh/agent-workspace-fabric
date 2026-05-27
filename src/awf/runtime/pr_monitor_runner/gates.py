@@ -113,6 +113,7 @@ async def _merge_gate_for_workspace(
     from awf.runtime.merge_eligibility import (
         DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
         VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
         compute_stale_reason_for_attempt,
         stale_reason_blocks_merge,
         stale_reason_required_action,
@@ -155,15 +156,15 @@ async def _merge_gate_for_workspace(
                 current_head_sha=current_head_sha,
             )
         ):
-            validation_reason = VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+            validation_reason = VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON
             validation_action = "validate"
 
         persisted_stale_reason = candidate.stale_reason or "stale" if candidate.stale else None
         if not stale_reason_blocks_merge(persisted_stale_reason):
             persisted_stale_reason = None
-        if (
-            validation_reason is None
-            and persisted_stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+        if validation_reason is None and persisted_stale_reason in (
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
         ):
             persisted_stale_reason = None
         docs_scope_validated_current_head = (

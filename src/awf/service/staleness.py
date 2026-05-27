@@ -533,7 +533,11 @@ class StalenessRefreshService:
         validation_reason, _ = compute_stale_reason(candidate.workspace)
         existing_validation_reason = (
             candidate.stale_reason
-            if candidate.stale_reason == "validation_insufficient_tier"
+            if candidate.stale_reason
+            in {
+                "validation_insufficient_tier",
+                "validation_missing_for_current_head",
+            }
             else None
         )
         next_stale = stale or validation_reason is not None

@@ -55,6 +55,7 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
+from awf.control.executor.metadata import _str_or_none
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -97,6 +98,24 @@ from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
 )
+
+
+def _validate_only_recovery_target_head_sha(
+    recovery: Mapping[str, Any] | None,
+    *,
+    validated_workspace_head_sha: str | None,
+) -> str | None:
+    if not recovery or recovery.get("recovery_mode") != "validate_only":
+        return None
+    source_head_sha = _str_or_none(recovery.get("source_head_sha"))
+    if source_head_sha is None:
+        return None
+    normalized_source_head_sha = source_head_sha.strip()
+    if not normalized_source_head_sha:
+        return None
+    if validated_workspace_head_sha != normalized_source_head_sha:
+        return None
+    return normalized_source_head_sha
 
 
 async def execute(
@@ -1082,6 +1101,28 @@ async def execute(
                     "executor.rebase_recovery_staleness_clear_failed",
                     workspace_id=workspace_id,
                     validation_run_id=successful_validation_run_id,
+                )
+        validate_only_target_head_sha = _validate_only_recovery_target_head_sha(
+            recovery,
+            validated_workspace_head_sha=successful_validation_workspace_head_sha,
+        )
+        if (
+            rebase_recovery_result is None
+            and successful_validation_run_id is not None
+            and validate_only_target_head_sha is not None
+        ):
+            try:
+                await self._set_validation_run_target_head_sha(
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=validate_only_target_head_sha,
+                    workspace_head_sha=successful_validation_workspace_head_sha,
+                )
+            except Exception:
+                _log.exception(
+                    "executor.validate_only_recovery_target_head_sha_update_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=validate_only_target_head_sha,
                 )
         if not recovery_requires_pr_update:
             if not await self._recheck_status(

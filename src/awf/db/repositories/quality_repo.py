@@ -47,7 +47,10 @@ from awf.db.repositories.base import (
 )
 from awf.db.repositories.task_repo import TaskAttemptRepository
 from awf.db.validation_runs import validation_run_coverage_payload
-from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+from awf.runtime.merge_eligibility import (
+    DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
+)
 
 
 class ResourceReservationRepository:
@@ -1217,6 +1220,7 @@ def sync_candidate_readiness(
             candidate.stale_reason = stale_reason
         elif candidate.stale_reason in (
             VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
             DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
         ):
             candidate.stale = False

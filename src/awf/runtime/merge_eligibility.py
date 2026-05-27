@@ -12,10 +12,12 @@ from awf.db.models import (
 
 DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
 VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
+VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON = "validation_missing_for_current_head"
 
 __all__ = [
     "DOCS_TASK_SCOPE_VIOLATION_STALE_REASON",
     "VALIDATION_INSUFFICIENT_TIER_STALE_REASON",
+    "VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON",
     "compute_stale_reason",
     "compute_stale_reason_for_attempt",
     "stale_reason_blocks_merge",
@@ -27,7 +29,10 @@ __all__ = [
 def stale_reason_required_action(reason_code: str | None) -> str | None:
     if not stale_reason_blocks_merge(reason_code):
         return None
-    if reason_code == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+    if reason_code in (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
+    ):
         return "validate"
     if reason_code == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
         return "resolve_task_scope"
