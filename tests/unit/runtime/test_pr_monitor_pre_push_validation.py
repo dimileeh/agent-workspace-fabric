@@ -373,6 +373,7 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
     )
     state = MonitorState()
     calls: list[str] = []
+    state = MonitorState()
 
     async def _no_dirty(**_kwargs: object) -> None:
         """Indicate there is no pre-existing dirty worktree state."""
@@ -543,6 +544,7 @@ async def test_sync_base_uses_validated_push(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+    state = MonitorState()
     calls: list[str] = []
 
     async def _fetch_base(**_kwargs: object) -> None:
@@ -553,6 +555,8 @@ async def test_sync_base_uses_validated_push(
 
     async def _validated(**_kwargs: object) -> _GitPushResult:
         """Simulate validated push success and record that it was used."""
+        assert "state" in _kwargs
+        assert _kwargs["state"] is state
         calls.append("validated")
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
@@ -567,6 +571,7 @@ async def test_sync_base_uses_validated_push(
 
     result = await runner._run_sync_base(
         workspace_id=workspace_id,
+        state=state,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         base_branch="development",

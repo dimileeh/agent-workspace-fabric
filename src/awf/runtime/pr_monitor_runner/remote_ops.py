@@ -496,6 +496,7 @@ async def _run_sync_base(
     runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
+    state: object | None = None,
     repo: RepoRef,
     pr_number: int,
     base_branch: str,
@@ -609,6 +610,7 @@ async def _run_sync_base(
         compose_project=compose_project,
         compose_file=compose_file,
         remote_url=remote_push_url,
+        state=state,
     )
 
 

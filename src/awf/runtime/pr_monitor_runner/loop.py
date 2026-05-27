@@ -241,6 +241,7 @@ async def _execute(
         try:
             push_result = await self._run_sync_base(
                 workspace_id=workspace_id,
+                state=state,
                 repo=repo,
                 pr_number=pr_number,
                 base_branch=base_branch,
