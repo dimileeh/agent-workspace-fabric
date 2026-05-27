@@ -7,6 +7,7 @@ import pytest
 from awf.common.companions import (
     companion_branch_name,
     companion_name_is_git_branch_component,
+    companion_volume_source_is_repo_relative,
     companion_worktree_id,
     companions_from_task_policy,
     parent_workspace_id_from_companion_worktree_id,
@@ -50,6 +51,26 @@ def test_companion_name_is_git_branch_component(
     expected: bool,
 ) -> None:
     assert companion_name_is_git_branch_component(companion_name) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("cache-volume", False),
+        ("cache.volume", False),
+        ("./fixtures", True),
+        ("fixtures/data", True),
+        (r"fixtures\data", True),
+        ("/tmp/cache", True),
+        (r"C:\cache", True),
+    ],
+)
+def test_companion_volume_source_is_repo_relative(
+    source: str,
+    expected: bool,
+) -> None:
+    assert companion_volume_source_is_repo_relative(source) is expected
 
 
 @pytest.mark.unit

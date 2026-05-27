@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from awf.common.companions import companions_from_task_policy
+from awf.common.companions import (
+    companion_volume_source_is_repo_relative,
+    companions_from_task_policy,
+)
 from awf.node.compose_manager import CompanionService, ComposeService
 from awf.node.git_manager import WorktreeLayout
 from awf.profiles.models import DockerMode
@@ -262,6 +265,6 @@ def _resolve_repo_path(value: str, *, root: Path) -> str:
 
 
 def _resolve_volume_source(source: str, *, root: Path) -> str:
-    if source.startswith(".") or "/" in source or "\\" in source:
+    if companion_volume_source_is_repo_relative(source):
         return _resolve_repo_path(source, root=root)
     return source

@@ -27,6 +27,11 @@ def companion_name_is_git_branch_component(companion_name: str) -> bool:
     )
 
 
+def companion_volume_source_is_repo_relative(source: str) -> bool:
+    """Return whether a companion volume source should resolve inside its repo."""
+    return source.startswith(".") or "/" in source or "\\" in source
+
+
 def companion_worktree_id(workspace_id: str, companion_name: str) -> str:
     """Return the managed worktree id for one workspace companion."""
     return f"{workspace_id}{COMPANION_WORKTREE_MARKER}{companion_name}"

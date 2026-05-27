@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from awf.common.companions import (
     RESERVED_COMPANION_SERVICE_NAMES,
     companion_name_is_git_branch_component,
+    companion_volume_source_is_repo_relative,
 )
 
 ServiceName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
@@ -32,10 +33,6 @@ def _is_absolute_or_escaping_path(value: str) -> bool:
         or ".." in posix_path.parts
         or ".." in windows_path.parts
     )
-
-
-def _looks_like_relative_path(value: str) -> bool:
-    return value.startswith(".") or "/" in value or "\\" in value
 
 
 class WorkspaceCompanionRequest(BaseModel):
@@ -95,7 +92,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @classmethod
     def _validate_volume_sources(cls, value: list[tuple[str, str]]) -> list[tuple[str, str]]:
         for source, _target in value:
-            if _looks_like_relative_path(source):
+            if companion_volume_source_is_repo_relative(source):
                 _validate_companion_repo_relative_path("volume source", source)
             elif _is_absolute_or_escaping_path(source):
                 raise ValueError("volume source must be a named volume or repo-relative path")
