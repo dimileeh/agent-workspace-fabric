@@ -227,7 +227,9 @@ async def _merge_gate_for_workspace(
         elif active_stale_reason is not None:
             candidate.stale = True
             candidate.stale_reason = active_stale_reason
-        elif candidate.stale_reason != stale_reason:
+        elif (
+            candidate.stale != (stale_reason is not None) or candidate.stale_reason != stale_reason
+        ):
             should_be_stale = stale_reason is not None
             candidate.stale = should_be_stale
             candidate.stale_reason = stale_reason
