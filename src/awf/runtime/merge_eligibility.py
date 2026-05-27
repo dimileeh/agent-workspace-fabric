@@ -40,6 +40,7 @@ def stale_reason_required_action(reason_code: str | None) -> str | None:
 
 
 def _task_class_tier(task_class: str | None) -> int:
+    """Return the minimum validation tier required by task class."""
     if task_class == TaskClass.migration_task.value:
         return 3
     if task_class in (
@@ -155,6 +156,7 @@ def compute_stale_reason_for_attempt(
 
 
 def _successful_validation_run_tier(run: ValidationRun) -> int | None:
+    """Return the validation tier only for successful runs."""
     if run.status != "succeeded":
         return None
     return run.tier

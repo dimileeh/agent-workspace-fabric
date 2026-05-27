@@ -105,6 +105,7 @@ def _validate_only_recovery_target_head_sha(
     *,
     validated_workspace_head_sha: str | None,
 ) -> str | None:
+    """Return the recovery source head SHA when this is validate-only recovery."""
     if not recovery or recovery.get("recovery_mode") != "validate_only":
         return None
     source_head_sha = _str_or_none(recovery.get("source_head_sha"))

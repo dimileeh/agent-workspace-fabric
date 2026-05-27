@@ -82,6 +82,7 @@ def _has_successful_validation_for_pr_head(
     attempt_id: str,
     current_head_sha: str | None,
 ) -> bool:
+    """Return ``True`` when the attempt has a succeeded run for ``current_head_sha``."""
     if current_head_sha is None:
         return False
     state = inspect(workspace)
