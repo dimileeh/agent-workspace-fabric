@@ -371,7 +371,6 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
         body_excerpt="please fix",
         author="reviewer",
     )
-    state = MonitorState()
     calls: list[str] = []
     state = MonitorState()
 
