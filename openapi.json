@@ -1219,6 +1219,7 @@
         "type": "object"
       },
       "LocalCapacitySourceResponse": {
+        "description": "Local runtime capacity origin metadata exposed in saturation responses.",
         "properties": {
           "cpu_cores": {
             "anyOf": [
