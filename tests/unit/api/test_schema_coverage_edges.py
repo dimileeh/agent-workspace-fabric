@@ -249,6 +249,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
             "environment values must not contain Docker Compose interpolation",
         ),
         (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "healthcheck_cmd": 'curl -H "Authorization: ${GITHUB_TOKEN}" http://api/health',
+                }
+            ],
+            "healthcheck command must not contain Docker Compose interpolation",
+        ),
+        (
             [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],
             "volume source",
         ),
