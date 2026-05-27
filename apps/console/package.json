@@ -6,6 +6,7 @@
     "dev": "next dev",
     "start": "next start",
     "build": "next build",
+    "postinstall": "node scripts/prepare-playwright-ci-bin.mjs",
     "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/*.test.mjs",
     "test:browser": "playwright test",
     "lint": "eslint .",
