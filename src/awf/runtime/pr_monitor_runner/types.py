@@ -14,6 +14,7 @@ from awf.common.github_client import GitHubClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
+from awf.runtime.validation import ValidationRunner
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class _RunnerDeps:
     adapter: AgentAdapter
     gh: GitHubClient
     sleep: Callable[[float], Awaitable[None]]
+    validation: ValidationRunner | None = None
     provider_recovery_default_model: str | None = None
     log_store: LogStore | None = None
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None

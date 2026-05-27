@@ -11,6 +11,7 @@ from awf.runtime.pr_monitor_runner import gates as _gates
 from awf.runtime.pr_monitor_runner import lifecycle as _lifecycle
 from awf.runtime.pr_monitor_runner import loop as _loop
 from awf.runtime.pr_monitor_runner import operations as _operations
+from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
 from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
@@ -67,6 +68,12 @@ class RunnerDelegatesMixin:
     _begin_monitor_state_operation = _operations._begin_monitor_state_operation
     _record_monitor_state_operation = _operations._record_monitor_state_operation
     _sleep_with_monitor_state_operation = _operations._sleep_with_monitor_state_operation
+
+    _validated_git_push_result = _pre_push_validation._validated_git_push_result
+    _run_pre_push_validation = _pre_push_validation._run_pre_push_validation
+    _run_pre_push_validation_with_fix_passes = (
+        _pre_push_validation._run_pre_push_validation_with_fix_passes
+    )
 
     _open_monitor_log = _provider_ops._open_monitor_log
     _write_monitor_log = _provider_ops._write_monitor_log

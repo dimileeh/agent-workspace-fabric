@@ -26,6 +26,10 @@ class MonitorRunnerConfig:
     max_outer_iterations: int = 10_000
     # Max fix_cycle re-polls inside a single AddressComments action.
     max_fix_cycle_passes: int = 5
+    # Max local validation-fix passes before a PR-monitor repair push. This is
+    # intentionally small: the monitor should validate and salvage its own
+    # repair commit, but not open a second unbounded execution loop.
+    pre_push_validation_fix_passes: int = 1
     # Transient GitHub outages can surface through `git fetch`, not only `gh`.
     # Keep base refresh authoritative, but retry remote 5xx/network failures
     # before declaring the monitor infrastructure-failed.

@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner import (
     PostMergeTargetReconciler,
     PullRequestMonitorRunner,
 )
+from awf.runtime.validation import ValidationRunner
 
 
 def build_release_pr_monitor(
@@ -44,6 +45,7 @@ def build_release_pr_monitor(
     runner: AsyncCommandRunner,
     adapter: AgentAdapter,
     gh: GitHubClient,
+    validation: ValidationRunner,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
@@ -81,6 +83,7 @@ def build_release_pr_monitor(
             max_outer_iterations=max_outer_iterations,
             max_fix_cycle_passes=max_fix_cycle_passes,
         ),
+        validation=validation,
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
         log_store=log_store,
@@ -97,6 +100,7 @@ def build_feature_pr_monitor(
     runner: AsyncCommandRunner,
     adapter: AgentAdapter,
     gh: GitHubClient,
+    validation: ValidationRunner,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
@@ -134,6 +138,7 @@ def build_feature_pr_monitor(
             max_outer_iterations=max_outer_iterations,
             max_fix_cycle_passes=max_fix_cycle_passes,
         ),
+        validation=validation,
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
         log_store=log_store,

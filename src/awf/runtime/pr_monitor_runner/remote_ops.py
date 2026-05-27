@@ -115,6 +115,11 @@ class _ProtectedScopePushBlock:
 
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
+    if push_result.reason_code in {
+        "PRE_PUSH_VALIDATION_FAILED",
+        "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
+    }:
+        return "pre_push_validation_failed"
     if push_result.protected_scope_diff_unavailable:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:
@@ -591,9 +596,12 @@ async def _run_sync_base(
             stderr=protected_scope_block.message,
             reason_code=protected_scope_block.reason_code,
         )
-    return await runner._git_push_result(
+    return await runner._validated_git_push_result(
+        workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
+        compose_project=compose_project,
+        compose_file=compose_file,
         remote_url=remote_push_url,
     )
 

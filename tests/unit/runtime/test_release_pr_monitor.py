@@ -14,6 +14,7 @@ from awf.runtime.release_pr_monitor import (
     build_feature_pr_monitor,
     build_release_pr_monitor,
 )
+from awf.runtime.validation import ValidationRunner
 
 
 class _StubAdapter(AgentAdapter):
@@ -44,6 +45,10 @@ class _StubAdapter(AgentAdapter):
         return AgentRunResult(returncode=0, stdout="", stderr="")
 
 
+def _validation(cmd: FakeCommandRunner, tmp_path: Path) -> ValidationRunner:
+    return ValidationRunner(runner=cmd, artifacts_dir=tmp_path / "artifacts")
+
+
 @pytest.mark.unit
 def test_release_monitor_has_auto_merge_disabled(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
@@ -52,6 +57,7 @@ def test_release_monitor_has_auto_merge_disabled(tmp_path: Path) -> None:
         runner=cmd,
         adapter=_StubAdapter(),
         gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
         worktrees_root=tmp_path,
     )
     assert runner._config.auto_merge is False
@@ -65,6 +71,7 @@ def test_feature_monitor_has_auto_merge_enabled(tmp_path: Path) -> None:
         runner=cmd,
         adapter=_StubAdapter(),
         gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
         worktrees_root=tmp_path,
     )
     assert runner._config.auto_merge is True
@@ -81,6 +88,7 @@ def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) ->
         runner=cmd,
         adapter=_StubAdapter(),
         gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
         worktrees_root=tmp_path,
         post_merge_target_reconciler=_reconcile,
     )
@@ -96,6 +104,7 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         runner=cmd,
         adapter=_StubAdapter(),
         gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
         worktrees_root=tmp_path,
         poll_interval_seconds=15,
         settle_interval_seconds=7,

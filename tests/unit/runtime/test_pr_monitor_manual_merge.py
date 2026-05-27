@@ -33,6 +33,7 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.runtime.release_pr_monitor import build_release_pr_monitor
+from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -835,6 +836,7 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
         runner=cmd,
         adapter=adapter,
         gh=GitHubClient(cmd),
+        validation=ValidationRunner(runner=cmd, artifacts_dir=tmp_path / "artifacts"),
         worktrees_root=tmp_path / "worktrees",
         poll_interval_seconds=60,
         settle_interval_seconds=30,
