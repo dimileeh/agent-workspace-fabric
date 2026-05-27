@@ -1123,6 +1123,92 @@ async def test_gc_candidate_and_default_remover_include_companion_worktrees(
     }
 
 
+async def test_default_worktree_remover_continues_after_companion_failure(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    del engine
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="s" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                },
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "base_branch": "development",
+                },
+            ]
+        },
+    )
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=work_dir / "git" / "worktrees" / workspace_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
+    )
+
+    async def _remove_worktree(*, workspace_id: str, repo_url: str) -> None:
+        del repo_url
+        if workspace_id.endswith("__companion__backend"):
+            raise RuntimeError("backend mirror missing")
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock(side_effect=_remove_worktree)
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "failed"
+    assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
+    assert result.error is not None
+    assert "backend mirror missing" in result.error
+    assert [call.kwargs for call in mock_gm.remove_worktree.await_args_list] == [
+        {
+            "workspace_id": workspace_id,
+            "repo_url": "git@github.com:example/repo.git",
+        },
+        {
+            "workspace_id": f"{workspace_id}__companion__backend",
+            "repo_url": "git@github.com:example/backend.git",
+        },
+        {
+            "workspace_id": f"{workspace_id}__companion__web",
+            "repo_url": "git@github.com:example/web.git",
+        },
+    ]
+
+
 async def test_default_worktree_remover_skips_when_no_repo_url(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

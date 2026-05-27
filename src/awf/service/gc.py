@@ -1033,19 +1033,22 @@ async def _default_worktree_remover(
         (candidate.workspace_id, workspace.repo_url),
         *companion_worktree_remove_targets(workspace),
     ]
-    try:
-        for worktree_id, repo_url in worktree_targets:
+    errors: list[str] = []
+    for worktree_id, repo_url in worktree_targets:
+        try:
             await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
-        return WorkspaceGCWorktreeRemoveResult(
-            status="succeeded",
-            reason_code="WORKTREE_REMOVE_SUCCEEDED",
-        )
-    except Exception as exc:
+        except Exception as exc:
+            errors.append(f"{worktree_id}: {exc}")
+    if errors:
         return WorkspaceGCWorktreeRemoveResult(
             status="failed",
             reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error=str(exc)[:1000],
+            error="; ".join(errors)[:1000],
         )
+    return WorkspaceGCWorktreeRemoveResult(
+        status="succeeded",
+        reason_code="WORKTREE_REMOVE_SUCCEEDED",
+    )
 
 
 async def _run_worktree_remove(
