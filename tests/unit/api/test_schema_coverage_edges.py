@@ -273,6 +273,46 @@ def test_workspace_companions_reject_invalid_public_contract(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "companions",
+    [
+        [
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "ports": [(8000, 18000), (8001, 18000)],
+            }
+        ],
+        [
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "ports": [(8000, 18000)],
+            },
+            {
+                "name": "worker",
+                "repo_url": "git@example.com:worker.git",
+                "ports": [(9000, 18000)],
+            },
+        ],
+    ],
+)
+def test_workspace_companions_reject_duplicate_host_ports(
+    companions: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:example/app.git", "base_branch": "main"},
+                "task": _task(),
+                "companions": companions,
+            }
+        )
+
+    assert "duplicate companion host port 18000" in str(exc.value)
+
+
+@pytest.mark.unit
 def test_workspace_create_payload_without_legacy_repo_url_uses_normal_validation() -> None:
     with pytest.raises(ValidationError):
         api_schemas.WorkspaceCreateRequest.model_validate({"task_title": "Missing repo"})

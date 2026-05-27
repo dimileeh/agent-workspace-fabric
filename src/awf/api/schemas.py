@@ -267,11 +267,20 @@ class WorkspaceCreateRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_companions(self) -> WorkspaceCreateRequest:
         names: set[str] = set()
+        companion_host_ports: dict[int, str] = {}
         normalized: list[WorkspaceCompanionRequest] = []
         for companion in self.companions:
             if companion.name in names:
                 raise ValueError(f"duplicate companion name {companion.name!r}")
             names.add(companion.name)
+            for _, host_port in companion.ports:
+                previous_companion = companion_host_ports.get(host_port)
+                if previous_companion is not None:
+                    raise ValueError(
+                        f"duplicate companion host port {host_port} requested by "
+                        f"{previous_companion!r} and {companion.name!r}"
+                    )
+                companion_host_ports[host_port] = companion.name
             if companion.base_branch is None:
                 companion = companion.model_copy(update={"base_branch": self.repo.base_branch})
             normalized.append(companion)

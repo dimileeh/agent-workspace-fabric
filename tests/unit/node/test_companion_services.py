@@ -223,6 +223,72 @@ def test_validate_companion_service_graph_rejects_duplicate_companion_names(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("profile_services", "companions"),
+    [
+        (
+            (),
+            (
+                WorkspaceCompanionSpec(
+                    name="api",
+                    repo_url="git@example.com:api.git",
+                    base_branch="main",
+                    ports=((8000, 18000), (8001, 18000)),
+                ),
+            ),
+        ),
+        (
+            (),
+            (
+                WorkspaceCompanionSpec(
+                    name="api",
+                    repo_url="git@example.com:api.git",
+                    base_branch="main",
+                    ports=((8000, 18000),),
+                ),
+                WorkspaceCompanionSpec(
+                    name="worker",
+                    repo_url="git@example.com:worker.git",
+                    base_branch="main",
+                    ports=((9000, 18000),),
+                ),
+            ),
+        ),
+        (
+            (
+                ComposeService(
+                    name="redis",
+                    image="redis:7",
+                    ports=((6379, 18000),),
+                ),
+            ),
+            (
+                WorkspaceCompanionSpec(
+                    name="api",
+                    repo_url="git@example.com:api.git",
+                    base_branch="main",
+                    ports=((8000, 18000),),
+                ),
+            ),
+        ),
+    ],
+)
+def test_validate_companion_service_graph_rejects_duplicate_host_ports(
+    profile_services: tuple[ComposeService, ...],
+    companions: tuple[WorkspaceCompanionSpec, ...],
+) -> None:
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=profile_services,
+            companions=companions,
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_HOST_PORT_COLLISION"
+    assert "duplicate companion/profile host port 18000" in str(exc.value)
+
+
+@pytest.mark.unit
 def test_validate_companion_service_graph_rejects_unknown_dependencies(tmp_path: Path) -> None:
     companion_root = tmp_path / "backend"
     companion_root.mkdir()

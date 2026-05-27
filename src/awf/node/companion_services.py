@@ -103,6 +103,16 @@ def validate_companion_service_graph(
             reason_code="COMPANION_SERVICE_NAME_COLLISION",
         )
 
+    duplicate_host_ports = _duplicate_companion_profile_host_ports(
+        profile_services=profile_services,
+        companions=companions,
+    )
+    if duplicate_host_ports:
+        raise ProfileResolutionError(
+            f"duplicate companion/profile host port {'; '.join(duplicate_host_ports)}",
+            reason_code="COMPANION_SERVICE_HOST_PORT_COLLISION",
+        )
+
     known_names = set(profile_names) | set(companion_names)
     known_names.add("agent")
     if docker_mode == DockerMode.dind:
@@ -224,6 +234,26 @@ def _duplicate_companion_service_names(
         ).items()
         if count > 1
     )
+
+
+def _duplicate_companion_profile_host_ports(
+    *,
+    profile_services: tuple[ComposeService, ...],
+    companions: tuple[CompanionGraphInput, ...],
+) -> list[str]:
+    host_port_owners: dict[int, list[str]] = {}
+    for service in profile_services:
+        for _, host_port in service.ports:
+            host_port_owners.setdefault(host_port, []).append(service.name)
+    for companion in companions:
+        spec = _companion_graph_spec(companion)
+        for _, host_port in spec.ports:
+            host_port_owners.setdefault(host_port, []).append(spec.name)
+    return [
+        f"{host_port} used by {', '.join(owners)}"
+        for host_port, owners in sorted(host_port_owners.items())
+        if len(owners) > 1
+    ]
 
 
 def _companion_graph_spec(companion: CompanionGraphInput) -> WorkspaceCompanionSpec:

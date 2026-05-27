@@ -129,9 +129,13 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("ports")
     @classmethod
     def _validate_ports(cls, value: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        host_ports: set[int] = set()
         for container_port, host_port in value:
             if not (1 <= container_port <= 65535 and 1 <= host_port <= 65535):
                 raise ValueError("companion ports must be valid TCP port numbers")
+            if host_port in host_ports:
+                raise ValueError(f"duplicate companion host port {host_port}")
+            host_ports.add(host_port)
         return value
 
     @field_validator("volumes")
