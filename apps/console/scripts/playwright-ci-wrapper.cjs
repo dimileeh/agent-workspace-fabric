@@ -24,9 +24,7 @@ function normalizePlaywrightArgs(args, env = process.env) {
 
   const normalized = ["install"];
   for (const flag of flagArgs) {
-    if (["--dry-run", "--force", "--with-deps"].includes(flag)) {
-      normalized.push(flag);
-    }
+    normalized.push(flag);
   }
   normalized.push("--only-shell", "chromium");
   return normalized;

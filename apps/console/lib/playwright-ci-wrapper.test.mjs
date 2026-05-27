@@ -30,6 +30,13 @@ test("CI Chromium install keeps installer flags that remain relevant", () => {
   );
 });
 
+test("CI Chromium install preserves unknown installer flags", () => {
+  assert.deepEqual(
+    normalizePlaywrightArgs(["install", "--trace", "--debug", "chromium"], { CI: "true" }),
+    ["install", "--trace", "--debug", "--only-shell", "chromium"],
+  );
+});
+
 test("CI install leaves non-Chromium browser requests unchanged", () => {
   assert.deepEqual(
     normalizePlaywrightArgs(["install", "firefox"], { CI: "true" }),

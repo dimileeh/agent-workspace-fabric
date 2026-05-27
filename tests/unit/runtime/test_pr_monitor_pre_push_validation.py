@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.models import WorkspaceProfile
@@ -106,6 +107,42 @@ async def _set_resolved_profile(
         await session.commit()
 
 
+async def _seed_monitoring_workspace_without_attempt(
+    factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """Create a monitoring workspace row without a task-attempt record."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="monitor test without attempt",
+            task_prompt="x",
+            agent="claude_code",
+            test_commands=["pytest -q"],
+            requires_database=False,
+            auto_merge=True,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="X")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        ws.pr_url = "https://github.com/dimileeh/aira-web/pull/42"
+        ws.pr_number = 42
+        await session.commit()
+        return ws.id
+
+
 async def _validation_runs(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -191,6 +228,48 @@ async def test_pre_push_validation_failure_does_not_push(
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
     assert result.details is not None
     assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_without_task_attempt_fails_without_persisting_run(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A missing task attempt should fail explicitly without creating an invisible run."""
+    workspace_id = await _seed_monitoring_workspace_without_attempt(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    local_head = "b" * 40
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
+    assert result.details is not None
+    assert result.details["workspace_head_sha"] == local_head
+    assert "task attempt" in result.stderr
+    assert validation.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+    assert await _validation_runs(factory, workspace_id) == []
 
 
 @pytest.mark.unit

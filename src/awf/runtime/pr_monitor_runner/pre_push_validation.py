@@ -175,6 +175,8 @@ async def _run_pre_push_validation_with_fix_passes(
         if validation_result.passed:
             return validation_result
         last_result = validation_result
+        if validation_result.reason_code == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON:
+            return validation_result
         if pass_index >= max_fix_passes:
             break
         committed = await _run_pre_push_validation_fix_pass(
@@ -371,6 +373,14 @@ async def _run_pre_push_validation(
         target_branch=remote_branch,
         tier=validation_tier,
     )
+    if validation_run_id is None:
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=None,
+            workspace_head_sha=workspace_head_sha,
+            reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+            message="workspace has no task attempt before PR monitor pre-push validation",
+        )
     coverage_result: ValidationCoverageResult | None = None
     try:
         assert self._deps.validation is not None
@@ -460,7 +470,7 @@ async def _start_pre_push_validation_run(
     workspace_head_sha: str,
     target_branch: str,
     tier: int,
-) -> str:
+) -> str | None:
     """Create and start a pre-push validation run record."""
     command_records = _validation_run_command_records(
         profile=profile,
@@ -469,9 +479,11 @@ async def _start_pre_push_validation_run(
     )
     async with self._deps.session_factory() as session:
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        if attempt is None:
+            return None
         run = await ValidationRunRepository(session).start(
             workspace_id=workspace_id,
-            attempt_id=attempt.id if attempt is not None else None,
+            attempt_id=attempt.id,
             tier=tier,
             commands=command_records,
             base_commit=base_commit,
