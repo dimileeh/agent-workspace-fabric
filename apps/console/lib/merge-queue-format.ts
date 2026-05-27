@@ -397,6 +397,17 @@ const blockerReasonLabels: Record<MergeBlockerReason, string> = {
   stale: "stale",
 };
 
+const staleReasonLabels: Record<string, string> = {
+  STALE_TARGET_ADVANCED: "STALE_TARGET_ADVANCED",
+  STALE_OVERLAP: "STALE_OVERLAP",
+  STALE_DEPENDENCY: "STALE_DEPENDENCY",
+  STALE_BUILD_CONFIG: "STALE_BUILD_CONFIG",
+  STALE_SCHEMA: "STALE_SCHEMA",
+  ADVISORY_PLAN_ARTIFACT_OVERLAP: "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+  validation_insufficient_tier: "validation tier not yet satisfied",
+  validation_missing_for_current_head: "AWF validation missing for current PR head",
+};
+
 const validationReasonLabels: Record<string, string> = {
   VALIDATION_INSUFFICIENT_TIER: "validation tier not yet satisfied",
   VALIDATION_MISSING_FOR_CURRENT_HEAD: "AWF validation missing for current PR head",
@@ -410,13 +421,15 @@ const validationReasonLabels: Record<string, string> = {
 };
 
 function staleReasonLabel(reason: StaleReason): string {
-  return reason.trigger_ref ? `${reason.reason_code} @ ${reason.trigger_ref}` : reason.reason_code;
+  const reasonLabel = staleReasonLabels[reason.reason_code] ?? reason.reason_code;
+  return reason.trigger_ref ? `${reasonLabel} @ ${reason.trigger_ref}` : reasonLabel;
 }
 
 function staleReasonDetail(reason: StaleReason): string {
+  const reasonLabel = staleReasonLabels[reason.reason_code] ?? reason.reason_code;
   const trigger = reason.trigger_ref ? `${reason.trigger_type} @ ${reason.trigger_ref}` : reason.trigger_type;
   const prefix = staleReasonBlocksMerge(reason) ? "" : "advisory ";
-  return `${prefix}${reason.reason_code} / ${trigger}`;
+  return `${prefix}${reasonLabel} / ${trigger}`;
 }
 
 function staleReasonBlocksMerge(reason: StaleReason): boolean {

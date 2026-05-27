@@ -56,6 +56,10 @@ from awf.db.models import (
     TaskAttempt,
     Workspace,
 )
+from awf.runtime.merge_eligibility import (
+    VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+    VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
+)
 from awf.db.repositories import (
     StaleReasonCreate,
     StaleReasonRepository,
@@ -149,6 +153,12 @@ _BLOCKING_REASON_PRIORITY: Final[dict[str, int]] = {
     REASON_TARGET_ADVANCED: 4,
 }
 _DEFAULT_BLOCKING_REASON_PRIORITY: Final[int] = len(_BLOCKING_REASON_PRIORITY)
+_VALIDATION_STALE_REASONS_TO_PRESERVE: Final[frozenset[str]] = frozenset(
+    {
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
+    }
+)
 
 TRIGGER_TARGET_ADVANCED: Final[str] = "target_advanced"
 TRIGGER_PATH_OVERLAP: Final[str] = "path_overlap"
@@ -533,11 +543,7 @@ class StalenessRefreshService:
         validation_reason, _ = compute_stale_reason(candidate.workspace)
         existing_validation_reason = (
             candidate.stale_reason
-            if candidate.stale_reason
-            in {
-                "validation_insufficient_tier",
-                "validation_missing_for_current_head",
-            }
+            if candidate.stale_reason in _VALIDATION_STALE_REASONS_TO_PRESERVE
             else None
         )
         next_stale = stale or validation_reason is not None
