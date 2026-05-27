@@ -78,6 +78,30 @@ def test_feature_monitor_has_auto_merge_enabled(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_factories_allow_omitted_validation(tmp_path: Path) -> None:
+    release_cmd = FakeCommandRunner()
+    release_runner = build_release_pr_monitor(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=release_cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(release_cmd),
+        worktrees_root=tmp_path,
+    )
+
+    feature_cmd = FakeCommandRunner()
+    feature_runner = build_feature_pr_monitor(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=feature_cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(feature_cmd),
+        worktrees_root=tmp_path,
+    )
+
+    assert release_runner._deps.validation is None
+    assert feature_runner._deps.validation is None
+
+
+@pytest.mark.unit
 def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) -> None:
     async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> object:
         return {"repo_url": repo_url, "branch": branch, "workspace_id": workspace_id}
