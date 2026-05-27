@@ -1256,7 +1256,7 @@ async def test_merge_gate_resyncs_stale_flag_when_reason_unchanged(
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=0,
     )
-    await runner._merge_gate_for_workspace(workspace_id)
+    gate = await runner._merge_gate_for_workspace(workspace_id)
 
     async with factory() as session:
         candidate = await MergeCandidateRepository(
@@ -1264,6 +1264,8 @@ async def test_merge_gate_resyncs_stale_flag_when_reason_unchanged(
         ).get_open_for_workspace_with_merge_inputs(workspace_id)
         assert candidate is not None
 
+    assert gate.stale_reason == "stale"
+    assert gate.stale_reason == candidate.stale_reason
     assert candidate.stale is True
     assert candidate.stale_reason == "stale"
 

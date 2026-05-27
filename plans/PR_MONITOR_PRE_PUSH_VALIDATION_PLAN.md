@@ -34,9 +34,9 @@ post-green `monitoring_pr -> ready -> validating` bounce.
 ## Tests
 
 - Add regression coverage proving monitor repair paths validate before pushing.
-- Cover validation failure blocking push and preserving unresolved review
+- Verify validation failures block push while preserving unresolved review
   thread state.
-- Cover a successful bounded validation-fix pass before push.
-- Cover that validation run provenance records `target_head_sha` for the local
+- Demonstrate a successful bounded validation-fix pass before push.
+- Confirm that validation run provenance records `target_head_sha` for the local
   head that is pushed.
 - Re-run focused PR monitor and executor suites, plus ruff/mypy before pushing.
