@@ -56,15 +56,15 @@ from awf.db.models import (
     TaskAttempt,
     Workspace,
 )
-from awf.runtime.merge_eligibility import (
-    VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
-    VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
-)
 from awf.db.repositories import (
     StaleReasonCreate,
     StaleReasonRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
+)
+from awf.runtime.merge_eligibility import (
+    VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+    VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
 )
 
 _log = get_logger(__name__)
