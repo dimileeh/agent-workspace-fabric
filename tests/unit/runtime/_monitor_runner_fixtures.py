@@ -41,25 +41,31 @@ from awf.runtime.pr_monitor_runner import (
 
 @dataclass
 class FakeAdapter(AgentAdapter):
+    """Test-only AgentAdapter stub used by PR-monitor unit tests."""
+
     runtime = AgentRuntime.claude_code
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
 
     def __init__(self, *, default_model: str | None = None) -> None:  # type: ignore[override]
+        """Store queue-backed run results for this test adapter."""
         super().__init__(runner=None, default_model=default_model)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
         self.workspace_ids = []
 
     def get_provider(self, model: str | None) -> str:
+        """Return the fixed fake provider identifier."""
         return "fake"
 
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
+        """Expose the fake adapter runtime name."""
         return AgentRuntime.claude_code
 
     def _cli_args(self, *, model: str | None) -> list[str]:
+        """Return an empty CLI argument list for the fake adapter."""
         return []
 
     def queue(
@@ -70,6 +76,7 @@ class FakeAdapter(AgentAdapter):
         returncode: int = 0,
         exc: Exception | None = None,
     ) -> None:
+        """Append a scripted command result or exception to the fake queue."""
         self._queued.append(
             exc
             if exc is not None
@@ -86,6 +93,7 @@ class FakeAdapter(AgentAdapter):
         workspace_id: str | None = None,
         log_source: str = "agent",
     ) -> AgentRunResult:
+        """Consume one queued result and log the dispatched prompt."""
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
         if self._log_store and workspace_id:
@@ -114,10 +122,14 @@ class FakeAdapter(AgentAdapter):
 
 
 class RecordedSleep:
+    """Async sleep shim that captures sleep invocations in unit tests."""
+
     def __init__(self) -> None:
+        """Initialize the in-memory sleep call tracker."""
         self.calls: list[float] = []
 
     async def __call__(self, seconds: float) -> None:
+        """Record the requested sleep duration without delaying."""
         self.calls.append(seconds)
 
 
@@ -137,6 +149,7 @@ def pr_payload(
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
 ) -> str:
+    """Build a GraphQL-like PR payload for monitor status helpers."""
     return json.dumps(
         {
             "data": {
@@ -183,6 +196,7 @@ def thread_node(
     line: int = 42,
     body: str = "tiny nit",
 ) -> dict:
+    """Create a lightweight review-thread node fixture."""
     return {
         "id": tid,
         "isResolved": False,
@@ -194,6 +208,7 @@ def thread_node(
 
 
 def review_node(*, cid: int, author: str, body: str = "see below") -> dict:
+    """Create a mocked review node for outside-diff comments."""
     return {
         "databaseId": cid,
         "body": body,
@@ -209,6 +224,7 @@ def issue_comment_node(
     body: str,
     minimized: bool = False,
 ) -> dict:
+    """Create a mocked issue-comment payload for outside-diff comment scenarios."""
     return {
         "databaseId": cid,
         "body": body,
@@ -226,6 +242,7 @@ async def seed_monitoring_workspace(
     pr_merge_sha: str | None = None,
     test_commands: list[str] | None = None,
 ) -> str:
+    """Create and seed a workspace in monitoring_pr state for unit tests."""
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
@@ -320,6 +337,7 @@ def make_runner(
     post_merge_target_reconciler: Any | None = None,
     provider_recovery_default_model: str | None = None,
 ) -> PullRequestMonitorRunner:
+    """Construct a PullRequestMonitorRunner wired for integration-style unit tests."""
     kwargs: dict = {
         "session_factory": factory,
         "runner": cmd,

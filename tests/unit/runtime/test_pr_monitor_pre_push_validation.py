@@ -36,28 +36,35 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a scoped async SQLAlchemy session factory for tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
 
 class _FakeValidation:
+    """Minimal validation runner used to script pass/fail outcomes."""
+
     def __init__(self, *results: ValidationResult) -> None:
+        """Store queued validation results for later retrieval."""
         self.results = list(results)
         self.calls: list[dict[str, object]] = []
 
     async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
+        """Return the next queued validation outcome."""
         self.calls.append(dict(kwargs))
         if not self.results:
             raise AssertionError("validation called more times than expected")
         return self.results.pop(0)
 
     async def run_profile_coverage(self, **_kwargs: object) -> None:
-        return None
+        """Stub profile coverage step; included for interface compatibility."""
+        pass
 
 
 def _command_result(
     tmp_path: Path, *, ok: bool, reason_code: str | None = None
 ) -> ValidationCommandResult:
+    """Build a deterministic validation command result with local artifact paths."""
     if reason_code is None:
         reason_code = "VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE"
     stdout_path = tmp_path / ("ok.stdout" if ok else "failed.stdout")
@@ -77,6 +84,7 @@ def _command_result(
 def _validation_result(
     tmp_path: Path, *, ok: bool, reason_code: str | None = None
 ) -> ValidationResult:
+    """Wrap one command result into a single-command validation result."""
     return ValidationResult(commands=[_command_result(tmp_path, ok=ok, reason_code=reason_code)])
 
 
@@ -84,6 +92,7 @@ async def _set_resolved_profile(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
 ) -> None:
+    """Attach a simple resolved validation profile to the workspace."""
     profile = WorkspaceProfile.model_validate(
         {
             "name": "test-profile",
@@ -101,6 +110,7 @@ async def _validation_runs(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
 ) -> list[Any]:
+    """Return all persisted validation runs for a workspace."""
     async with factory() as session:
         return await ValidationRunRepository(session).list_for_workspace(workspace_id)
 
@@ -110,6 +120,7 @@ async def test_pre_push_validation_records_target_head_before_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Persisted validation run should track workspace and target head before push."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -150,6 +161,7 @@ async def test_pre_push_validation_failure_does_not_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A validation failure should block raw push and expose a validation reason."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -187,6 +199,7 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Repair passes should re-run validation before allowing push."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -239,6 +252,7 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Fix prompts should include the first failing validation reason code."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -294,6 +308,7 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Failed fix commit attempts should surface ``PRE_PUSH_VALIDATION_FIX_FAILED``."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -337,6 +352,7 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Review-thread repair must route through validated push when a fix fails."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -429,6 +445,7 @@ async def test_ci_repair_uses_validated_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """CI-repair flow should use validated push and avoid raw push."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed\n")
@@ -500,6 +517,7 @@ async def test_sync_base_uses_validated_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Sync-base recovery should also rely on validated push."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # merge --abort
