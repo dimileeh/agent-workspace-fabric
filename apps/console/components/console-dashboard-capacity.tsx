@@ -161,7 +161,7 @@ export function ResourceCapacityPanel({
               )} peak`}
             />
             <Fact
-              label="Reserved memory"
+              label="Reserved runtime memory"
               value={`${formatGb(saturation.reserved_resources.steady_memory_gb)} steady / ${formatGb(
                 saturation.reserved_resources.peak_memory_gb,
               )} peak`}
