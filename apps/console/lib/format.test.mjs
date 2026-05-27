@@ -86,7 +86,9 @@ test("formatUsageProvenance passes through unknown source and reason", () => {
 test("fallbackLlmUsage protects legacy workspace payloads", () => {
   assert.deepEqual(fallbackLlmUsage(undefined), {
     input_tokens: null,
+    cached_input_tokens: null,
     output_tokens: null,
+    reasoning_output_tokens: null,
     total_tokens: null,
     cost_estimate: null,
     currency: null,
@@ -100,7 +102,9 @@ test("fallbackLlmUsage preserves available provider usage", () => {
   assert.deepEqual(
     fallbackLlmUsage({
       input_tokens: 10,
+      cached_input_tokens: 3,
       output_tokens: 5,
+      reasoning_output_tokens: 2,
       total_tokens: 15,
       cost_estimate: 0.12,
       currency: "USD",
@@ -110,7 +114,9 @@ test("fallbackLlmUsage preserves available provider usage", () => {
     }),
     {
       input_tokens: 10,
+      cached_input_tokens: 3,
       output_tokens: 5,
+      reasoning_output_tokens: 2,
       total_tokens: 15,
       cost_estimate: 0.12,
       currency: "USD",
