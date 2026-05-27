@@ -41,6 +41,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -1291,3 +1292,118 @@ class TestPullRequestUnexpectedErrorPart001:
         assert workspace is not None
         assert workspace.failure_message is not None
         assert "SALVAGE_PATCH_APPLY_FAILED" in workspace.failure_message
+
+    @pytest.mark.unit
+    async def test_plan_only_output_fails_before_validation_and_pr_creation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("plan-only output must not be pushed")
+
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=0,
+            stdout=("docs/awf-plans/ws_plan.md\ndocs/awf-plans/ws_plan.conformance.json\n"),
+        )
+        validation = _RecordingValidation()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "only AWF plan/conformance artifact" in (ws.failure_message or "")
+            assert ws.pr_url is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert any(
+                event.event_type == "workspace.state_changed"
+                and event.reason_code == "PLAN_ONLY_OUTPUT"
+                for event in events
+            )
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert runs == []
+
+        assert validation.calls == [("setup", "pre_agent")]
+
+    @pytest.mark.unit
+    async def test_plan_only_staged_conformance_after_real_commit_is_accepted(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingPrCreator:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def push_and_open(self, *, branch_name: str, **_kwargs: Any) -> PullRequestResult:
+                self.called = True
+                return PullRequestResult(
+                    url="https://github.com/x/y/pull/123",
+                    branch=branch_name,
+                    head_sha="b" * 40,
+                )
+
+        ws_id = await _seed_ready(factory)
+        validation = _RecordingValidation()
+        pr_creator = _RecordingPrCreator()
+
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(  # only the final conformance artifact remains staged
+            returncode=0,
+            stdout=f"docs/awf-plans/{ws_id}.conformance.json\n",
+        )
+        fake.queue_result(  # committed implementation output already exists on the branch
+            returncode=0,
+            stdout="src/awf/mcp/server.py\ntests/unit/mcp/test_mcp_operator_surfaces.py\n",
+        )
+        fake.queue_result(returncode=0)  # commit staged conformance artifact
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=pr_creator,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            assert ws.pr_url == "https://github.com/x/y/pull/123"
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert not any(event.reason_code == "PLAN_ONLY_OUTPUT" for event in events)
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert len(runs) == 1
+            assert runs[0].status == "succeeded"
+            assert runs[0].workspace_head_sha == "validated-head"
+
+        assert pr_creator.called is True
+        assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
