@@ -39,6 +39,8 @@ from awf.service.workspace_observability import (
 )
 from awf.service.workspaces import (
     WorkspaceRetryError,
+    WorkspaceRetryNotAllowedError,
+    WorkspaceRetryNotFoundError,
     WorkspaceService,
     _assert_supported_direct_create_task_kind,
     _effective_auto_merge,
@@ -756,11 +758,9 @@ async def test_retry_workspace_errors_and_missing_source_attempt_fallback(
         failed_id = failed.id
 
     async with factory() as session:
-        from awf.service import workspaces as workspaces_module
-
-        with pytest.raises(workspaces_module.WorkspaceRetryNotFoundError):
+        with pytest.raises(WorkspaceRetryNotFoundError):
             await retry_workspace_row(session, "ws_missing")
-        with pytest.raises(workspaces_module.WorkspaceRetryNotAllowedError):
+        with pytest.raises(WorkspaceRetryNotAllowedError):
             await retry_workspace_row(session, active_id)
         result = await retry_workspace_row(
             session,
