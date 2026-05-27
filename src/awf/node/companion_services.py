@@ -90,6 +90,7 @@ def validate_companion_service_graph(
         )
 
     known_names = set(profile_names) | set(companion_names)
+    known_names.add("agent")
     if docker_mode == DockerMode.dind:
         known_names.add("docker")
 

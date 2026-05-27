@@ -172,6 +172,27 @@ def test_validate_companion_service_graph_rejects_unknown_dependencies(tmp_path:
 
 
 @pytest.mark.unit
+def test_validate_companion_service_graph_accepts_agent_dependency(tmp_path: Path) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            base_branch="main",
+            depends_on=("agent",),
+        ),
+        layout=_layout(companion_root),
+    )
+
+    validate_companion_service_graph(
+        profile_services=(ComposeService(name="web", depends_on=("agent",)),),
+        companions=(companion,),
+        docker_mode=DockerMode.none,
+    )
+
+
+@pytest.mark.unit
 def test_validate_companion_service_graph_rejects_self_dependency(tmp_path: Path) -> None:
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
