@@ -17,7 +17,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from awf.common.config import get_settings
@@ -51,6 +51,8 @@ _INPUT_TOKEN_KEYS = ("inputTokens", "input_tokens")
 _CACHED_INPUT_TOKEN_KEYS = (
     "cachedInputTokens",
     "cached_input_tokens",
+)
+_CACHED_INPUT_TOKEN_SPLIT_KEYS = (
     "cacheCreationTokens",
     "cacheReadTokens",
     "cache_creation_tokens",
@@ -147,9 +149,18 @@ def _sum(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> int | N
     return total if seen else None
 
 
+def _cached_input_tokens_from_record(record: dict[str, Any]) -> int | None:
+    """Prefer the pre-aggregated cached token key when present."""
+
+    cached_input_tokens = cast(int | None, _first(record, _CACHED_INPUT_TOKEN_KEYS, _coerce_int))
+    if cached_input_tokens is not None:
+        return cached_input_tokens
+    return _sum(record, _CACHED_INPUT_TOKEN_SPLIT_KEYS, _coerce_int)
+
+
 def _usage_from_record(record: dict[str, Any], *, model: str | None) -> NormalizedUsage | None:
     input_tokens = _first(record, _INPUT_TOKEN_KEYS, _coerce_int)
-    cached_input_tokens = _sum(record, _CACHED_INPUT_TOKEN_KEYS, _coerce_int)
+    cached_input_tokens = _cached_input_tokens_from_record(record)
     output_tokens = _first(record, _OUTPUT_TOKEN_KEYS, _coerce_int)
     reasoning_output_tokens = _first(record, _REASONING_OUTPUT_TOKEN_KEYS, _coerce_int)
     total_tokens = _first(record, _TOTAL_TOKEN_KEYS, _coerce_int)
