@@ -387,6 +387,74 @@ async def test_gc_partial_worktree_remove_failure_still_deletes_other_paths(
     assert workspace_id in result.reservation_releases
 
 
+async def test_gc_partial_worktree_remove_failure_marks_companion_worktrees_skipped(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="f" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                }
+            ]
+        },
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    companion = work_dir / "git" / "worktrees" / f"{workspace_id}__companion__backend"
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(companion / "repo.txt", "companion")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    async def _failing_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error="mirror not accessible",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_failing_worktree_remover,
+    )
+
+    payload = result.to_dict()
+    candidate_payload = next(
+        item for item in payload["candidates"] if item["workspace_id"] == workspace_id
+    )
+    paths = candidate_payload["paths"]
+    companion_payload = paths[f"companion_worktree:{companion.name}"]
+
+    assert result.status == "partial"
+    assert paths["worktree"]["status"] == "skipped"
+    assert companion_payload["status"] == "skipped"
+    assert companion_payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
+    assert companion_payload["error"] == "mirror not accessible"
+    assert worktree.exists()
+    assert companion.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+
+
 async def test_gc_reservation_release_failure_does_not_block_other_cleanup(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

@@ -941,17 +941,18 @@ async def _delete_gc_plan_paths(
                         reason_code=wt_remove.reason_code,
                     )
                 )
-                path_outcomes.append(
-                    WorkspaceGCPathOutcome(
-                        workspace_id=candidate.workspace_id,
-                        kind=candidate.worktree.kind,
-                        path=candidate.worktree.path,
-                        status="skipped",
-                        reason_code=wt_remove.reason_code,
-                        error=wt_remove.error,
-                        estimated_bytes=candidate.worktree.estimated_bytes,
+                for skipped_target in (candidate.worktree, *candidate.companion_worktrees):
+                    path_outcomes.append(
+                        WorkspaceGCPathOutcome(
+                            workspace_id=candidate.workspace_id,
+                            kind=skipped_target.kind,
+                            path=skipped_target.path,
+                            status="skipped",
+                            reason_code=wt_remove.reason_code,
+                            error=wt_remove.error,
+                            estimated_bytes=skipped_target.estimated_bytes,
+                        )
                     )
-                )
                 for target in (candidate.compose, candidate.auth):
                     outcome = await asyncio.to_thread(
                         _delete_gc_path_outcome,
