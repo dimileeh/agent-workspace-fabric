@@ -174,22 +174,12 @@ def _companion_service_dependency_cycle(
     profile_services: tuple[ComposeService, ...],
     companions: tuple[CompanionGraphInput, ...],
 ) -> tuple[str, ...] | None:
+    """Return a dependency cycle after public graph validation verifies names."""
     graph: dict[str, tuple[str, ...]] = {
         service.name: tuple(service.depends_on) for service in profile_services
     }
-    duplicate_companion_names = _duplicate_companion_service_names(companions)
-    if duplicate_companion_names:
-        raise ProfileResolutionError(
-            f"duplicate companion service name: {', '.join(duplicate_companion_names)}",
-            reason_code="COMPANION_SERVICE_NAME_COLLISION",
-        )
     for companion in companions:
         spec = _companion_graph_spec(companion)
-        if spec.name in graph:
-            raise ProfileResolutionError(
-                f"companion service name collides with profile service: {spec.name}",
-                reason_code="COMPANION_SERVICE_NAME_COLLISION",
-            )
         graph[spec.name] = tuple(spec.depends_on)
     visiting: set[str] = set()
     visited: set[str] = set()

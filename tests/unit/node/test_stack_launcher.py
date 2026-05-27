@@ -360,6 +360,40 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_preflights_profile_dependencies_without_companions() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        services=[
+            ProfileService(name="postgres", image="postgres:16-alpine"),
+            ProfileService(
+                name="app",
+                image="example/app:latest",
+                depends_on=["postgres"],
+                healthcheck_cmd="curl -fsS http://localhost:8080/health",
+            ),
+        ],
+    )
+
+    with pytest.raises(ProfileResolutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+            )
+        )
+
+    assert raised.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNHEALTHY"
+    assert "app->postgres" in str(raised.value)
+    assert compose.specs == []
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_default_restricted_egress_uses_internal_flags() -> None:
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
