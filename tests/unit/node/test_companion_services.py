@@ -145,6 +145,50 @@ def test_companion_specs_from_task_policy_treats_scalar_dependency_as_single_ser
 
 
 @pytest.mark.unit
+def test_companion_service_from_materialized_keeps_default_dockerfile_context_relative(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    (companion_root / "services" / "api").mkdir(parents=True)
+    spec = WorkspaceCompanionSpec(
+        name="backend",
+        repo_url="git@example.com:api.git",
+        base_branch="main",
+        build_context="services/api",
+    )
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root))
+    )
+
+    assert service.build_context == str(companion_root / "services" / "api")
+    assert service.dockerfile == "Dockerfile"
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_rewrites_explicit_repo_relative_dockerfile(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    (companion_root / "services" / "api").mkdir(parents=True)
+    (companion_root / "docker").mkdir()
+    spec = WorkspaceCompanionSpec(
+        name="backend",
+        repo_url="git@example.com:api.git",
+        base_branch="main",
+        build_context="services/api",
+        dockerfile="docker/Dockerfile",
+    )
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root))
+    )
+
+    assert service.build_context == str(companion_root / "services" / "api")
+    assert service.dockerfile == "../../docker/Dockerfile"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "companion",
     [

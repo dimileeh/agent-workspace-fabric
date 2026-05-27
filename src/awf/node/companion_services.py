@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -62,10 +63,15 @@ def companion_service_from_materialized(
     """Convert a materialized companion checkout into a Compose service."""
     spec = companion.spec
     root = companion.layout.worktree_path
+    build_context = _resolve_repo_path(spec.build_context, root=root)
     return CompanionService(
         name=spec.name,
-        build_context=_resolve_repo_path(spec.build_context, root=root),
-        dockerfile=_resolve_repo_path(spec.dockerfile, root=root),
+        build_context=build_context,
+        dockerfile=_resolve_companion_dockerfile(
+            spec.dockerfile,
+            build_context=Path(build_context),
+            root=root,
+        ),
         env_file=(
             _resolve_repo_path(spec.env_file, root=root) if spec.env_file is not None else None
         ),
@@ -328,6 +334,14 @@ def _resolve_repo_path(value: str, *, root: Path) -> str:
     if not resolved.is_relative_to(resolved_root):
         raise ValueError(f"companion path escapes managed worktree: {value!r}")
     return str(resolved)
+
+
+def _resolve_companion_dockerfile(value: str, *, build_context: Path, root: Path) -> str:
+    if value == "Dockerfile":
+        return value
+
+    resolved = Path(_resolve_repo_path(value, root=root))
+    return os.path.relpath(resolved, start=build_context)
 
 
 def _resolve_volume_source(source: str, *, root: Path) -> str:

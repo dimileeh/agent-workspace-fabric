@@ -599,7 +599,7 @@ async def test_compose_stack_launcher_passes_materialized_companions_to_compose(
     rendered = compose.specs[0].companions[0]
     assert rendered.name == "backend"
     assert rendered.build_context == str(companion_root / "services" / "api")
-    assert rendered.dockerfile == str(companion_root / "docker" / "Dockerfile")
+    assert rendered.dockerfile == "../../docker/Dockerfile"
     assert rendered.env_file == str(companion_root / "config" / "dev.env")
     assert rendered.depends_on == ("docker",)
     assert rendered.healthcheck_cmd == "curl -fsS http://localhost:8000/health"
