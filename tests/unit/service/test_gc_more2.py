@@ -26,6 +26,7 @@ from awf.service.gc import (
     WorkspaceGCPath,
     WorkspaceGCPreserved,
     WorkspaceGCWorktreeRemoveResult,
+    WorkspaceGCWorktreeRemoveTargetResult,
     _classify_workspace_for_gc,
     _default_worktree_remover,
     _pr_has_merged,
@@ -455,6 +456,106 @@ async def test_gc_partial_worktree_remove_failure_marks_companion_worktrees_skip
     assert not auth.exists()
 
 
+async def test_gc_partial_worktree_remove_deletes_successful_worktree_paths(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    del engine
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="f" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                },
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "base_branch": "development",
+                },
+            ]
+        },
+    )
+    backend_id = f"{workspace_id}__companion__backend"
+    web_id = f"{workspace_id}__companion__web"
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    backend = work_dir / "git" / "worktrees" / backend_id
+    web = work_dir / "git" / "worktrees" / web_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(backend / "repo.txt", "backend")
+    _write(web / "repo.txt", "web")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    async def _partial_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        del candidate
+        return WorkspaceGCWorktreeRemoveResult(
+            status="partial",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error="backend mirror not accessible",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=backend_id,
+                    status="failed",
+                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                    error="backend mirror not accessible",
+                ),
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=web_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+            ),
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_partial_worktree_remover,
+    )
+
+    payload = result.to_dict()
+    candidate_payload = next(
+        item for item in payload["candidates"] if item["workspace_id"] == workspace_id
+    )
+    paths = candidate_payload["paths"]
+
+    assert result.status == "partial"
+    assert result.worktree_removes[workspace_id].status == "partial"
+    assert paths["worktree"]["status"] == "deleted"
+    assert paths[f"companion_worktree:{backend_id}"]["status"] == "skipped"
+    assert paths[f"companion_worktree:{backend_id}"]["reason_code"] == (
+        "GIT_WORKTREE_REMOVE_FAILED"
+    )
+    assert paths[f"companion_worktree:{web_id}"]["status"] == "deleted"
+    assert not worktree.exists()
+    assert backend.exists()
+    assert not web.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+
+
 async def test_gc_reservation_release_failure_does_not_block_other_cleanup(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
@@ -720,14 +821,40 @@ async def test_single_workspace_gc_calls_worktree_remover(
 
 def test_worktree_remove_result_to_dict_with_error():
     result = WorkspaceGCWorktreeRemoveResult(
-        status="failed",
+        status="partial",
         reason_code="GIT_WORKTREE_REMOVE_FAILED",
         error="mirror not accessible",
+        target_results=(
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id="ws_primary",
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            ),
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id="ws_companion",
+                status="failed",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                error="mirror not accessible",
+            ),
+        ),
     )
     payload = result.to_dict()
-    assert payload["status"] == "failed"
+    assert payload["status"] == "partial"
     assert payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
     assert payload["error"] == "mirror not accessible"
+    assert payload["target_results"] == [
+        {
+            "worktree_id": "ws_primary",
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        },
+        {
+            "worktree_id": "ws_companion",
+            "status": "failed",
+            "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
+            "error": "mirror not accessible",
+        },
+    ]
 
 
 async def test_run_worktree_remove_skips_when_callback_absent() -> None:
@@ -1257,10 +1384,28 @@ async def test_default_worktree_remover_continues_after_companion_failure(
             work_dir=work_dir,
         )
 
-    assert result.status == "failed"
+    assert result.status == "partial"
     assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
     assert result.error is not None
     assert "backend mirror missing" in result.error
+    assert [target.to_dict() for target in result.target_results] == [
+        {
+            "worktree_id": workspace_id,
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        },
+        {
+            "worktree_id": f"{workspace_id}__companion__backend",
+            "status": "failed",
+            "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
+            "error": "backend mirror missing",
+        },
+        {
+            "worktree_id": f"{workspace_id}__companion__web",
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        },
+    ]
     assert [call.kwargs for call in mock_gm.remove_worktree.await_args_list] == [
         {
             "workspace_id": workspace_id,

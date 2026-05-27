@@ -90,20 +90,23 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 
 # ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
 ARG GH_VERSION=2.92.0
+ARG GH_AMD64_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
+ARG GH_ARM64_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
 RUN set -eux; \
     gh_arch="$(dpkg --print-architecture)"; \
+    gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
     case "$gh_arch" in \
-      amd64|arm64) ;; \
+      amd64) expected_hash="${GH_AMD64_SHA256}" ;; \
+      arm64) expected_hash="${GH_ARM64_SHA256}" ;; \
       *) echo "Unsupported GitHub CLI architecture: $gh_arch" >&2; exit 1 ;; \
     esac; \
-    gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
+    if [ -z "$expected_hash" ]; then \
+      echo "GitHub CLI checksum is not pinned for ${gh_asset}" >&2; \
+      exit 1; \
+    fi; \
     gh_deb="/tmp/${gh_asset}"; \
-    gh_checksums="/tmp/gh_${GH_VERSION}_checksums.txt"; \
-    trap 'rm -f "$gh_deb" "$gh_checksums"' EXIT; \
+    trap 'rm -f "$gh_deb"' EXIT; \
     curl -fsSL -o "$gh_deb" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
-    curl -fsSL -o "$gh_checksums" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
-    expected_hash="$(awk -v asset="$gh_asset" '$2 == asset { print $1; found=1 } END { exit found ? 0 : 1 }' "$gh_checksums")" \
-      || { echo "Missing GitHub CLI checksum for ${gh_asset}" >&2; exit 1; }; \
     actual_hash="$(sha256sum "$gh_deb")"; \
     actual_hash="${actual_hash%% *}"; \
     if [ "$actual_hash" != "$expected_hash" ]; then \
