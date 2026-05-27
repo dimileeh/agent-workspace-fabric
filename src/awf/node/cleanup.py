@@ -217,15 +217,17 @@ class WorkspaceCleaner:
                 )
             )
 
+        worktree_targets = (
+            (workspace_id, repo_url, "worktree_remove"),
+            *(
+                (companion_id, companion_repo_url, f"companion_worktree_remove:{companion_id}")
+                for companion_id, companion_repo_url in companion_worktrees
+            ),
+        )
+
         # Step 2: git worktree remove (idempotent already per GitManager).
         if remove_worktree:
-            for worktree_id, worktree_repo_url, step_name in (
-                (workspace_id, repo_url, "worktree_remove"),
-                *(
-                    (companion_id, companion_repo_url, f"companion_worktree_remove:{companion_id}")
-                    for companion_id, companion_repo_url in companion_worktrees
-                ),
-            ):
+            for worktree_id, worktree_repo_url, step_name in worktree_targets:
                 try:
                     await self._git.remove_worktree(
                         workspace_id=worktree_id,
@@ -255,13 +257,14 @@ class WorkspaceCleaner:
                         )
                     )
         else:
-            steps.append(
-                WorkspaceCleanupStepResult(
-                    name="worktree_remove",
-                    status="skipped",
-                    reason_code=WORKTREE_REMOVE_SKIPPED,
+            for _, _, step_name in worktree_targets:
+                steps.append(
+                    WorkspaceCleanupStepResult(
+                        name=step_name,
+                        status="skipped",
+                        reason_code=WORKTREE_REMOVE_SKIPPED,
+                    )
                 )
-            )
 
         return WorkspaceCleanupResult.from_steps(steps)
 
