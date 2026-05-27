@@ -259,6 +259,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
             "healthcheck command must not contain Docker Compose interpolation",
         ),
         (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "command": "sh -c 'echo ${GITHUB_TOKEN}'",
+                }
+            ],
+            "companion command must not contain Docker Compose interpolation",
+        ),
+        (
             [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],
             "volume source",
         ),

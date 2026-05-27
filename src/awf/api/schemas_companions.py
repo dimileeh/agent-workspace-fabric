@@ -183,6 +183,15 @@ class WorkspaceCompanionRequest(BaseModel):
             )
         return value
 
+    @field_validator("command")
+    @classmethod
+    def _validate_command(cls, value: str | None) -> str | None:
+        if value is not None and _value_has_compose_interpolation(value):
+            raise ValueError(
+                "companion command must not contain Docker Compose interpolation syntax"
+            )
+        return value
+
     @field_validator("ports")
     @classmethod
     def _validate_ports(cls, value: list[tuple[int, int]]) -> list[tuple[int, int]]:
