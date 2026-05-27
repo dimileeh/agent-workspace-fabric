@@ -111,12 +111,18 @@ def _local_capacity_source_summary(
         source = "mixed"
     else:
         source = detected.source
+    reason_code = detected.reason_code
+    detail = detected.detail
+    if source in {"operator_config", "mixed"}:
+        reason_code = None
+        detail = None
+
     return LocalCapacitySourceSummary(
         cpu_cores=(settings.local_capacity_cpu_cores if cpu_configured else detected.cpu_cores),
         memory_gb=(settings.local_capacity_memory_gb if memory_configured else detected.memory_gb),
         source=source,
-        reason_code=detected.reason_code,
-        detail=detected.detail,
+        reason_code=reason_code,
+        detail=detail,
     )
 
 
