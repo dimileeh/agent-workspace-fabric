@@ -962,6 +962,23 @@ def test_workspace_retry_error_uses_default_message() -> None:
 
 
 @pytest.mark.unit
+def test_task_policy_snapshot_persists_empty_companion_list() -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
+        task={"title": "Policy snapshot", "prompt": "p", "agent": "codex"},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "observability test fixture",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert "companions" in policy
+    assert policy["companions"] == []
+
+
+@pytest.mark.unit
 def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> None:
     request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
@@ -988,6 +1005,7 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
 
     assert policy == {
         "agent_model": "gpt-5.3-codex",
+        "companions": [],
         "out_of_scope_changes": {
             "mode": "block",
             "allowlist_patterns": ["generated/**"],

@@ -1165,9 +1165,7 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
             exclude_none=True,
             exclude_unset=True,
         )
-    companions = _requested_companions(payload)
-    if companions:
-        policy[COMPANION_POLICY_KEY] = companions
+    policy[COMPANION_POLICY_KEY] = _requested_companions(payload)
     return policy
 
 
