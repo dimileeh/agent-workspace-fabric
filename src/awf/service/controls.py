@@ -986,7 +986,7 @@ class WorkspaceControlService:
 
         await self._session.flush()
         cleaner = self._cleaner_factory()
-        companion_worktrees = _companion_cleanup_worktrees(workspace)
+        companion_worktrees = companion_worktree_remove_targets(workspace)
         cleanup_result = _normalize_cleanup_result(
             await cleaner.cleanup(
                 workspace_id=workspace_id,
@@ -1366,11 +1366,6 @@ from awf.service.controls_helpers import (  # noqa: E402
     default_cleaner,
     stop_project_containers,
 )
-
-
-def _companion_cleanup_worktrees(workspace: Workspace) -> tuple[tuple[str, str], ...]:
-    return companion_worktree_remove_targets(workspace)
-
 
 __all__ = [
     "WorkspaceControlService",
