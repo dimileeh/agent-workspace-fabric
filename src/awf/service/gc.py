@@ -24,6 +24,12 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
+from awf.service.gc_companions import (
+    companion_worktree_paths_for_gc,
+    companion_worktree_remove_targets,
+)
+from awf.service.gc_time import normalize_statuses as _normalize_statuses
+from awf.service.gc_time import to_utc as _to_utc
 from awf.service.secret_leases import (
     TERMINAL_GC_REVOKE_REASON,
     SecretLeaseService,
@@ -219,17 +225,22 @@ class WorkspaceGCCandidate:
     worktree: WorkspaceGCPath
     compose: WorkspaceGCPath
     auth: WorkspaceGCPath
+    companion_worktrees: tuple[WorkspaceGCPath, ...] = ()
     compose_project_name: str | None = None
     compose_file_path: str | None = None
 
     @property
     def total_estimated_bytes(self) -> int:
         return (
-            self.worktree.estimated_bytes + self.compose.estimated_bytes + self.auth.estimated_bytes
+            self.worktree.estimated_bytes
+            + self.compose.estimated_bytes
+            + self.auth.estimated_bytes
+            + sum(item.estimated_bytes for item in self.companion_worktrees)
         )
 
     def paths(self) -> Iterator[WorkspaceGCPath]:
         yield self.worktree
+        yield from self.companion_worktrees
         yield self.compose
         yield self.auth
 
@@ -262,6 +273,9 @@ class WorkspaceGCCandidate:
             "age_hours": self.age_hours,
             "estimated_bytes": {
                 "worktree": self.worktree.estimated_bytes,
+                "companion_worktrees": sum(
+                    item.estimated_bytes for item in self.companion_worktrees
+                ),
                 "compose": self.compose.estimated_bytes,
                 "auth": self.auth.estimated_bytes,
                 "total": self.total_estimated_bytes,
@@ -1015,11 +1029,13 @@ async def _default_worktree_remover(
             reason_code="WORKTREE_NOT_GIT_MANAGED",
         )
     git_manager = GitManager(work_dir / "git")
+    worktree_targets = [
+        (candidate.workspace_id, workspace.repo_url),
+        *companion_worktree_remove_targets(workspace),
+    ]
     try:
-        await git_manager.remove_worktree(
-            workspace_id=candidate.workspace_id,
-            repo_url=workspace.repo_url,
-        )
+        for worktree_id, repo_url in worktree_targets:
+            await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
         return WorkspaceGCWorktreeRemoveResult(
             status="succeeded",
             reason_code="WORKTREE_REMOVE_SUCCEEDED",
@@ -1169,6 +1185,10 @@ def _candidate_for_workspace(
     updated_at = _to_utc(workspace.updated_at)
     age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
     worktree_path = work_dir / "git" / "worktrees" / workspace.id
+    companion_worktrees = tuple(
+        _gc_path(f"companion_worktree:{path.name}", path)
+        for path in companion_worktree_paths_for_gc(workspace, work_dir=work_dir)
+    )
     compose_path = (
         Path(workspace.compose_file_path).expanduser().parent
         if workspace.compose_file_path
@@ -1182,6 +1202,7 @@ def _candidate_for_workspace(
         age_hours=age_hours,
         reason_code=reason_code,
         worktree=_gc_path("worktree", worktree_path),
+        companion_worktrees=companion_worktrees,
         compose=_gc_path("compose", compose_path),
         auth=_gc_path("auth", auth_path),
         compose_project_name=workspace.compose_project_name,
@@ -1458,10 +1479,11 @@ def _delete_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> tuple[bool, s
 def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
     roots = {
         "worktree": work_dir / "git" / "worktrees",
+        "companion_worktree": work_dir / "git" / "worktrees",
         "compose": work_dir / "compose",
         "auth": work_dir / "auth",
     }
-    root = roots.get(target.kind)
+    root = roots.get(target.kind.split(":", maxsplit=1)[0])
     if root is None:
         return False
     try:
@@ -1469,19 +1491,3 @@ def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _normalize_statuses(
-    statuses: Iterable[WorkspaceStatus | str] | None,
-) -> set[str] | None:
-    if statuses is None:
-        return None
-    return {
-        status.value if isinstance(status, WorkspaceStatus) else str(status) for status in statuses
-    }
-
-
-def _to_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)

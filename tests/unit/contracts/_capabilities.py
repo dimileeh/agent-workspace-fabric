@@ -404,7 +404,15 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_response_model="WorkspaceAcceptedResponse",
         rest_header_fields=frozenset({"Idempotency-Key"}),
         rest_body_fields=frozenset(
-            {"repo", "task", "workspace", "validation", "preflight", "resources"}
+            {
+                "repo",
+                "task",
+                "workspace",
+                "validation",
+                "preflight",
+                "resources",
+                "companions",
+            }
         ),
         mcp_request_fields=frozenset(
             {
@@ -438,6 +446,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "initial_review_grace_period_seconds",
                 "provider_readiness_override",
                 "provider_readiness_override_reason",
+                "companions",
                 "idempotency_key",
             }
         ),
@@ -472,6 +481,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--provider-recovery-json",
                 "--provider-readiness-override",
                 "--provider-readiness-override-reason",
+                "--companion-json",
                 "--idempotency-key",
                 "--api-token",
             }

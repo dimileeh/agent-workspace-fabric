@@ -415,3 +415,10 @@ Use `awf workspace show <workspace_id> --format pretty`,
 `awf workspace logs <workspace_id>`, or the console to follow progress. Use
 `awf service gc` for service-owned cleanup rather than deleting workspaces by
 hand.
+
+For cross-repo E2E tasks, pass managed companions through REST, MCP, or CLI
+workspace creation. For example, a web repo can request a backend companion
+with `--companion-json '{"name":"backend","repo_url":"git@github.com:example/api.git","base_branch":"development"}'`.
+AWF clones the companion into a service-owned worktree and tears it down with
+the parent workspace; companion paths are repo-relative and never raw host
+path passthroughs.

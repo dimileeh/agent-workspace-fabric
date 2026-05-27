@@ -318,6 +318,14 @@ def register_workspace_tools(
             max_length=512,
             description="Audit reason for provider_readiness_override.",
         ),
+        companions: list[dict[str, Any]] | None = Field(
+            default=None,
+            max_length=16,
+            description=(
+                "Optional managed companion services. Each item is a companion "
+                "object with repo_url, name, and repo-relative service paths."
+            ),
+        ),
         idempotency_key: str | None = Field(
             default=None,
             description="Optional replay key matching the REST Idempotency-Key header.",
@@ -414,6 +422,7 @@ def register_workspace_tools(
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             },
+            companions=companions or [],
         )
 
         async def resolve_disk_check() -> DiskCheck:

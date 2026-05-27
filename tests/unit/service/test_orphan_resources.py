@@ -471,6 +471,32 @@ def test_missing_workspace_resources_are_orphans(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_companion_worktree_scan_uses_parent_workspace_id(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "git" / "worktrees"
+    (worktree_root / "ws_live").mkdir(parents=True)
+    (worktree_root / "ws_live__companion__backend").mkdir()
+
+    scan = scan_managed_worktrees(tmp_path)
+    ids = {
+        resource.path.rsplit("/", maxsplit=1)[-1]: resource.workspace_id
+        for resource in scan.resources
+    }
+
+    assert ids == {
+        "ws_live": "ws_live",
+        "ws_live__companion__backend": "ws_live",
+    }
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan,
+        workspace_view=_ok_view(active={"ws_live"}),
+    ).to_dict()
+    assert summary["reason"] == "NO_ORPHANS"
+    assert summary["expected_count"] == 2
+    assert summary["expected_counts_by_kind"]["worktree"] == 2
+
+
+@pytest.mark.unit
 def test_db_unavailable_makes_classification_unknown(tmp_path: Path) -> None:
     docker = scan_docker_resources(
         docker_host="unix:///var/run/docker.sock",

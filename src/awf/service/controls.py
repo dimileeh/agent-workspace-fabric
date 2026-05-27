@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
+from awf.common.companions import companion_worktree_id, companions_from_task_policy
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -101,6 +102,7 @@ class WorkspaceCleanerProtocol(Protocol):
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -984,19 +986,21 @@ class WorkspaceControlService:
 
         await self._session.flush()
         cleaner = self._cleaner_factory()
-        cleanup_result = _normalize_cleanup_result(
-            await cleaner.cleanup(
-                workspace_id=workspace_id,
-                repo_url=workspace.repo_url,
-                compose_project_name=workspace.compose_project_name,
-                compose_file_path=(
-                    Path(workspace.compose_file_path) if workspace.compose_file_path else None
-                ),
-                worktree_host_path=None,
-                remove_volumes=remove_volumes,
-                remove_worktree=remove_worktree,
-            )
-        )
+        cleanup_kwargs: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "repo_url": workspace.repo_url,
+            "compose_project_name": workspace.compose_project_name,
+            "compose_file_path": (
+                Path(workspace.compose_file_path) if workspace.compose_file_path else None
+            ),
+            "worktree_host_path": None,
+            "remove_volumes": remove_volumes,
+            "remove_worktree": remove_worktree,
+        }
+        companion_worktrees = _companion_cleanup_worktrees(workspace)
+        if companion_worktrees:
+            cleanup_kwargs["companion_worktrees"] = companion_worktrees
+        cleanup_result = _normalize_cleanup_result(await cleaner.cleanup(**cleanup_kwargs))
         cleanup_payload = cleanup_result.to_dict()
         # The cleanup callback may append an already-failed secondary event.
         # Refresh with a row lock so the terminal/status decision stays
@@ -1362,6 +1366,15 @@ from awf.service.controls_helpers import (  # noqa: E402
     default_cleaner,
     stop_project_containers,
 )
+
+
+def _companion_cleanup_worktrees(workspace: Workspace) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (companion_worktree_id(workspace.id, str(companion["name"])), str(companion["repo_url"]))
+        for companion in companions_from_task_policy(workspace.task_policy)
+        if "name" in companion and "repo_url" in companion
+    )
+
 
 __all__ = [
     "WorkspaceControlService",

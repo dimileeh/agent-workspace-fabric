@@ -81,6 +81,7 @@ async def _workspace(
     compose_file_path: str | None = None,
     pr: bool = False,
     pr_merge_sha: str | None = None,
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -90,6 +91,7 @@ async def _workspace(
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         workspace.status = status.value
         workspace.updated_at = updated_at
@@ -1063,6 +1065,62 @@ async def test_default_worktree_remover_succeeds(
             workspace_id=workspace_id,
             repo_url="git@github.com:example/repo.git",
         )
+
+
+async def test_gc_candidate_and_default_remover_include_companion_worktrees(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    del engine
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="q" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                }
+            ]
+        },
+    )
+    companion_path = work_dir / "git" / "worktrees" / f"{workspace_id}__companion__backend"
+    _write(companion_path / ".git", "gitdir")
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+
+    candidate = next(item for item in plan.candidates if item.workspace_id == workspace_id)
+    assert [path.kind for path in candidate.companion_worktrees] == [
+        f"companion_worktree:{workspace_id}__companion__backend"
+    ]
+    assert candidate.to_dict()["estimated_bytes"]["companion_worktrees"] > 0
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    assert mock_gm.remove_worktree.await_args_list[1].kwargs == {
+        "workspace_id": f"{workspace_id}__companion__backend",
+        "repo_url": "git@github.com:example/backend.git",
+    }
 
 
 async def test_default_worktree_remover_skips_when_no_repo_url(

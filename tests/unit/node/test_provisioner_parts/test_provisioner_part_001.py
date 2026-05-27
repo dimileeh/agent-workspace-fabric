@@ -260,6 +260,110 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
+    async def test_materializes_companion_worktrees_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingGit:
+            work_dir = tmp_path / "awf-work"
+
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                worktree = self.work_dir / "worktrees" / workspace_id
+                worktree.mkdir(parents=True, exist_ok=True)
+                return WorktreeLayout(
+                    mirror_path=self.work_dir / "mirrors" / f"{workspace_id}.git",
+                    worktree_path=worktree,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "a" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_companion"),
+                    compose_file=Path("/tmp/awf-compose/ws_companion/compose.yml"),
+                )
+
+        git = _RecordingGit()
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git,  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="companions",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                task_policy={
+                    "companions": [
+                        {
+                            "name": "backend",
+                            "repo_url": "git@github.com:example/backend.git",
+                            "base_branch": "main",
+                            "build_context": "services/api",
+                        }
+                    ]
+                },
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        await provisioner.provision(workspace_id)
+
+        assert git.add_worktree_calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": "git@github.com:example/app.git",
+                "base_branch": "development",
+                "new_branch": f"awf/{workspace_id}",
+            },
+            {
+                "workspace_id": f"{workspace_id}__companion__backend",
+                "repo_url": "git@github.com:example/backend.git",
+                "base_branch": "main",
+                "new_branch": f"awf/{workspace_id}/companion/backend",
+            },
+        ]
+        companion = launcher.requests[0].companions[0]
+        assert companion.spec.name == "backend"
+        assert companion.spec.build_context == "services/api"
+        assert companion.layout.worktree_path == (
+            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__backend"
+        )
+
+    @pytest.mark.unit
     async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(
         self,
         session_factory: async_sessionmaker[AsyncSession],

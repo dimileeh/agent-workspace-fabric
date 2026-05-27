@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import typer
 
 from awf.cli import workspace_commands
 from awf.cli.common import OutputFormat
@@ -54,6 +55,10 @@ def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch
         initial_review_grace_period_seconds=15.0,
         provider_readiness_override=True,
         provider_readiness_override_reason="operator approved",
+        companion_json=[
+            '{"name":"backend","repo_url":"git@example.com:repo/api.git",'
+            '"build_context":"services/api","depends_on":["docker"]}'
+        ],
         idempotency_key="idem-1",
         api_token="token",
         base_url="http://api",
@@ -102,6 +107,14 @@ def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch
             "provider_readiness_override": True,
             "provider_readiness_override_reason": "operator approved",
         },
+        "companions": [
+            {
+                "name": "backend",
+                "repo_url": "git@example.com:repo/api.git",
+                "build_context": "services/api",
+                "depends_on": ["docker"],
+            }
+        ],
     }
 
 
@@ -151,6 +164,7 @@ def test_workspace_create_builds_minimal_development_payload(
         initial_review_grace_period_seconds=None,
         provider_readiness_override=False,
         provider_readiness_override_reason=None,
+        companion_json=None,
         idempotency_key=None,
         api_token=None,
         base_url=None,
@@ -177,4 +191,86 @@ def test_workspace_create_builds_minimal_development_payload(
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
         },
+        "companions": [],
     }
+
+
+@pytest.mark.unit
+def test_workspace_create_rejects_non_object_companion_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_commands, "_call", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(typer.Exit) as raised:
+        workspace_commands.workspace_create(
+            repo_url="git@example.com:repo/app.git",
+            task_title="title",
+            task_prompt="prompt",
+            branch_base=None,
+            task_kind=TaskKind.feature_branch_pr.value,
+            source_branch=None,
+            agent="codex",
+            model=None,
+            effort=None,
+            task_class=None,
+            priority=None,
+            human_boost=None,
+            out_of_scope_changes_json=None,
+            provider_recovery_json=None,
+            owned_paths=None,
+            external_id=None,
+            cpu=None,
+            memory=None,
+            steady_state_cpu_cores=None,
+            steady_state_memory_gb=None,
+            peak_cpu_cores=None,
+            peak_memory_gb=None,
+            disk_mb=None,
+            profile_ref="auto",
+            test_commands=[],
+            requires_database=False,
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            provider_readiness_override=False,
+            provider_readiness_override_reason=None,
+            companion_json=["[]"],
+            idempotency_key=None,
+            api_token=None,
+            base_url=None,
+            fmt=OutputFormat.json,
+        )
+
+    assert raised.value.exit_code == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"repo": None, "pr_number": None, "pr_url": None},
+        {"repo": "owner/repo", "pr_number": None, "pr_url": "https://github.com/owner/repo/pull/1"},
+        {"repo": None, "pr_number": 1, "pr_url": "https://github.com/owner/repo/pull/1"},
+    ],
+)
+def test_workspace_adopt_pr_requires_exactly_one_selector(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(typer.BadParameter, match="exactly one selector"):
+        workspace_commands.workspace_adopt_pr(
+            repo=kwargs["repo"],  # type: ignore[arg-type]
+            pr_number=kwargs["pr_number"],  # type: ignore[arg-type]
+            pr_url=kwargs["pr_url"],  # type: ignore[arg-type]
+            agent="codex",
+            model=None,
+            effort=None,
+            owned_paths=None,
+            profile_ref="auto",
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            task_title=None,
+            task_prompt=None,
+            reason=None,
+            api_token=None,
+            base_url=None,
+            fmt=OutputFormat.json,
+        )

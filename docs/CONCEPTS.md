@@ -905,6 +905,45 @@ AWF starts and tears down both services with the per-workspace Compose stack.
 The agent container runs setup and validation commands from `/workspace`, while
 browser automation stays inside the Playwright service.
 
+### Cross-Repo Companion Services
+
+Profile services are still the preferred model for services that live in the
+same repository as the workspace. When a task needs a live stack from another
+repository, use workspace companions instead. A companion is a managed
+repo-relative checkout that AWF materializes beside the primary workspace and
+renders into the same Compose project.
+
+Example REST/MCP companion request:
+
+```json
+{
+  "name": "backend",
+  "repo_url": "git@github.com:example/api.git",
+  "base_branch": "development",
+  "build_context": ".",
+  "dockerfile": "Dockerfile",
+  "env_file": "config/dev.env",
+  "environment": {"APP_ENV": "test"},
+  "depends_on": ["docker"],
+  "healthcheck_cmd": "curl -fsS http://localhost:8000/health",
+  "ports": [[8000, 18000]],
+  "command": "python -m api",
+  "volumes": [["./fixtures", "/fixtures"]]
+}
+```
+
+`base_branch` defaults to the primary workspace base branch. `build_context`,
+`dockerfile`, `env_file`, and relative volume sources are resolved inside the
+managed companion checkout; absolute host paths and `..` escapes are rejected.
+Companion service names cannot collide with profile services or reserved
+services such as `agent` and `docker`.
+
+Companions share the parent workspace resource reservation and lifecycle. AWF
+keeps companion worktrees while the parent workspace is active, removes them
+with normal destroy/GC cleanup, and classifies
+`<workspace_id>__companion__<name>` worktrees as belonging to the parent during
+orphan-resource scans.
+
 ## Observability
 
 AWF includes a local Next.js console under `apps/console`. It talks to AWF

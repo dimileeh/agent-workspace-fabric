@@ -416,6 +416,22 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
         },
+        "companions": [
+            {
+                "name": "backend",
+                "repo_url": "git@github.com:example/backend.git",
+                "base_branch": "main",
+                "build_context": "services/backend",
+                "dockerfile": "docker/Dockerfile",
+                "env_file": "config/dev.env",
+                "environment": {"APP_ENV": "test"},
+                "depends_on": ["docker"],
+                "healthcheck_cmd": "curl -fsS http://localhost:8000/health",
+                "ports": [[8000, 18000]],
+                "command": "python -m backend",
+                "volumes": [["./fixtures", "/fixtures"]],
+            }
+        ],
     }
     rest_request = WorkspaceCreateRequest.model_validate(rest_payload)
 
@@ -463,6 +479,22 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "initial_review_grace_period_seconds": None,
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "main",
+                    "build_context": "services/backend",
+                    "dockerfile": "docker/Dockerfile",
+                    "env_file": "config/dev.env",
+                    "environment": {"APP_ENV": "test"},
+                    "depends_on": ["docker"],
+                    "healthcheck_cmd": "curl -fsS http://localhost:8000/health",
+                    "ports": [[8000, 18000]],
+                    "command": "python -m backend",
+                    "volumes": [["./fixtures", "/fixtures"]],
+                }
+            ],
         },
     )
     assert getattr(result, "isError", False) is False
@@ -494,6 +526,7 @@ async def test_mcp_create_omits_unspecified_optional_task_fields() -> None:
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
         },
+        "companions": [],
     }
     rest_request = WorkspaceCreateRequest.model_validate(rest_payload)
 

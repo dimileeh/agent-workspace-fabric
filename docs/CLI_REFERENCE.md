@@ -155,6 +155,28 @@ uv run --python 3.12 --extra dev awf workspace create \
 *Note: `--effort` is optional. When omitted, AWF resolves the provider-specific
 default from the workspace profile or adapter defaults.*
 
+For cross-repo E2E work, add one or more managed companion services with
+repeatable `--companion-json`. AWF clones each companion repo into a managed
+worktree, resolves `build_context`, `dockerfile`, `env_file`, and relative
+volume sources inside that checkout, and renders the companion into the same
+workspace Compose stack:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace create \
+  --repo git@github.com:example/web.git \
+  --base development \
+  --profile auto \
+  --agent codex \
+  --title "Exercise web against backend" \
+  --prompt "Update the web app and validate against the live backend companion." \
+  --companion-json '{"name":"backend","repo_url":"git@github.com:example/api.git","base_branch":"development","build_context":".","dockerfile":"Dockerfile","env_file":"config/dev.env","depends_on":["docker"],"healthcheck_cmd":"curl -fsS http://localhost:8000/health"}' \
+  --test "npm test"
+```
+
+Companion JSON must be one object per flag. Paths are repo-relative to the
+companion checkout; absolute paths and `..` escapes are rejected. Companion env
+files are repo files, not generated local secret files.
+
 Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
 comment, and `--initial-review-grace-period-seconds 0` only for explicit
 fast-path tests.

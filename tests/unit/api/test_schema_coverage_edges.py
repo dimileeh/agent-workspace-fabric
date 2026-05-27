@@ -115,6 +115,87 @@ def test_workspace_validation_accepts_non_empty_command_entries() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_companions_normalize_default_base_branch() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:example/app.git", "base_branch": "development"},
+            "task": _task(),
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/api.git",
+                    "build_context": "services/api",
+                    "dockerfile": "docker/Dockerfile",
+                    "env_file": "config/dev.env",
+                    "ports": [(8000, 18000)],
+                    "volumes": [("./fixtures", "/fixtures"), ("api-cache", "/cache")],
+                }
+            ],
+        }
+    )
+
+    companion = request.companions[0]
+    assert companion.base_branch == "development"
+    assert companion.depends_on == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("companions", "message"),
+    [
+        ([{"name": "agent", "repo_url": "git@example.com:api.git"}], "reserved"),
+        (
+            [
+                {"name": "api", "repo_url": "git@example.com:api.git"},
+                {"name": "api", "repo_url": "git@example.com:other.git"},
+            ],
+            "duplicate companion name",
+        ),
+        (
+            [{"name": "api", "repo_url": "git@example.com:api.git", "build_context": "../api"}],
+            "repo-relative path",
+        ),
+        (
+            [{"name": "api", "repo_url": "git@example.com:api.git", "env_file": "/tmp/.env"}],
+            "repo-relative path",
+        ),
+        (
+            [{"name": "api", "repo_url": "git@example.com:api.git", "ports": [(70000, 8000)]}],
+            "valid TCP port",
+        ),
+        (
+            [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],
+            "volume source",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("C:cache", "/x")],
+                }
+            ],
+            "volume source",
+        ),
+    ],
+)
+def test_workspace_companions_reject_invalid_public_contract(
+    companions: list[dict[str, object]],
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:example/app.git", "base_branch": "main"},
+                "task": _task(),
+                "companions": companions,
+            }
+        )
+
+    assert message in str(exc.value)
+
+
+@pytest.mark.unit
 def test_workspace_create_payload_without_legacy_repo_url_uses_normal_validation() -> None:
     with pytest.raises(ValidationError):
         api_schemas.WorkspaceCreateRequest.model_validate({"task_title": "Missing repo"})

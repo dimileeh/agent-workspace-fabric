@@ -139,6 +139,7 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
         "WorkspaceProfileSelection",
         "WorkspaceValidation",
         "WorkspaceResources",
+        "WorkspaceCompanionRequest",
     }.issubset(schemas)
     assert schemas["WorkspaceCreateRequest"]["properties"]["repo"]["$ref"] == (
         "#/components/schemas/WorkspaceRepo"
@@ -146,6 +147,9 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
     assert schemas["WorkspaceCreateRequest"]["properties"]["task"]["$ref"] == (
         "#/components/schemas/WorkspaceTask"
     )
+    companion_schema = schemas["WorkspaceCreateRequest"]["properties"]["companions"]
+    assert companion_schema["maxItems"] == 16
+    assert companion_schema["items"]["$ref"] == "#/components/schemas/WorkspaceCompanionRequest"
 
 
 @pytest.mark.unit
