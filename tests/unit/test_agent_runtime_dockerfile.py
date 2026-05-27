@@ -10,13 +10,14 @@ def _agent_runtime_dockerfile() -> str:
 
 
 @pytest.mark.unit
-def test_agent_runtime_installs_github_cli_from_official_apt_repository() -> None:
+def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "cli.github.com/packages" in dockerfile
-    assert "githubcli-archive-keyring.gpg" in dockerfile
     assert "ARG GH_VERSION=2.92.0" in dockerfile
-    assert "gh=${GH_VERSION}" in dockerfile
+    assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
+    assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
+    assert "amd64|arm64" in dockerfile
+    assert 'apt-get install -y --no-install-recommends "$gh_deb"' in dockerfile
     assert "gh --version" in dockerfile
 
 
