@@ -5,8 +5,22 @@
 
 const { spawnSync } = require("node:child_process");
 
-function normalizePlaywrightArgs(args, env = process.env) {
+function isCiChromiumInstall(args, env = process.env) {
   if (!env.CI || args[0] !== "install") {
+    return false;
+  }
+
+  const installArgs = args.slice(1);
+  const browserArgs = installArgs.filter((arg) => !arg.startsWith("-"));
+  return browserArgs.length === 1 && browserArgs[0] === "chromium";
+}
+
+function shouldSkipPlaywrightInstall(args, env = process.env) {
+  return isCiChromiumInstall(args, env);
+}
+
+function normalizePlaywrightArgs(args, env = process.env) {
+  if (shouldSkipPlaywrightInstall(args, env) || !env.CI || args[0] !== "install") {
     return args;
   }
 
@@ -32,6 +46,13 @@ function normalizePlaywrightArgs(args, env = process.env) {
 
 function run() {
   const originalArgs = process.argv.slice(2);
+  if (shouldSkipPlaywrightInstall(originalArgs, process.env)) {
+    console.error(
+      "AWF console CI: using the hosted runner Chrome channel; skipping Playwright browser download.",
+    );
+    process.exit(0);
+  }
+
   const args = normalizePlaywrightArgs(originalArgs, process.env);
   if (args !== originalArgs) {
     console.error(
@@ -48,4 +69,4 @@ if (require.main === module) {
   run();
 }
 
-module.exports = { normalizePlaywrightArgs };
+module.exports = { normalizePlaywrightArgs, shouldSkipPlaywrightInstall };

@@ -3,7 +3,10 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const { normalizePlaywrightArgs } = require("../scripts/playwright-ci-wrapper.cjs");
+const {
+  normalizePlaywrightArgs,
+  shouldSkipPlaywrightInstall,
+} = require("../scripts/playwright-ci-wrapper.cjs");
 
 test("normal Playwright commands are delegated unchanged", () => {
   assert.deepEqual(
@@ -16,25 +19,30 @@ test("normal Playwright commands are delegated unchanged", () => {
   );
 });
 
-test("CI Chromium installs use the headless shell artifact", () => {
+test("CI Chromium installs are skipped because CI uses the hosted Chrome channel", () => {
   assert.deepEqual(
     normalizePlaywrightArgs(["install", "chromium"], { CI: "true" }),
-    ["install", "--only-shell", "chromium"],
+    ["install", "chromium"],
+  );
+  assert.equal(
+    shouldSkipPlaywrightInstall(["install", "chromium"], { CI: "true" }),
+    true,
   );
 });
 
-test("CI Chromium install keeps installer flags that remain relevant", () => {
+test("CI Chromium install skips even when npm forwards installer flags", () => {
   assert.deepEqual(
-    normalizePlaywrightArgs(["install", "--dry-run", "--force", "chromium"], { CI: "true" }),
-    ["install", "--dry-run", "--force", "--only-shell", "chromium"],
+    normalizePlaywrightArgs(["install", "--with-deps", "--force", "chromium"], { CI: "true" }),
+    ["install", "--with-deps", "--force", "chromium"],
+  );
+  assert.equal(
+    shouldSkipPlaywrightInstall(["install", "--with-deps", "--force", "chromium"], { CI: "true" }),
+    true,
   );
 });
 
-test("CI Chromium install preserves unknown installer flags", () => {
-  assert.deepEqual(
-    normalizePlaywrightArgs(["install", "--trace", "--debug", "chromium"], { CI: "true" }),
-    ["install", "--trace", "--debug", "--only-shell", "chromium"],
-  );
+test("local Chromium install still delegates to Playwright", () => {
+  assert.equal(shouldSkipPlaywrightInstall(["install", "chromium"], {}), false);
 });
 
 test("CI install leaves non-Chromium browser requests unchanged", () => {
