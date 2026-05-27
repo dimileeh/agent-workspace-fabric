@@ -213,10 +213,11 @@ export function summarizeValidation(
 ): ValidationSummary {
   const validation = item.latest_validation;
   if (!validation) {
-    const reasonLabel = item.validation_reason_code ?? "validation_unavailable";
+    const reasonCode = item.validation_reason_code ?? "validation_unavailable";
+    const reasonLabel = formatValidationReasonLabel(reasonCode);
     return {
       label: "none",
-      detail: reasonLabel,
+      detail: reasonCode,
       freshLabel: formatFreshnessLabel(item.validation_freshness_status ?? "unavailable"),
       headLabel: "unknown -> unknown",
       coverageLabel: "coverage unknown",
@@ -234,6 +235,7 @@ export function summarizeValidation(
 
   const freshnessStatus = validation.freshness_status ?? freshnessStatusFromBoolean(validation.fresh_for_target);
   const freshnessReason = validation.freshness_reason_code ?? item.validation_reason_code ?? freshnessReasonFromStatus(freshnessStatus);
+  const freshnessReasonLabel = formatValidationReasonLabel(freshnessReason);
   const freshLabel = formatFreshnessLabel(freshnessStatus);
   const retryDetail = validation.retry_count > 0 ? ` / retries ${validation.retry_count}` : "";
   const detail = `${validation.reason_code ?? "no reason"}${retryDetail}`;
@@ -255,7 +257,7 @@ export function summarizeValidation(
     workspaceHeadShaLabel: compactSha(validation.workspace_head_sha),
     validatedTargetShaLabel,
     currentTargetShaLabel,
-    reasonLabel: `${validation.reason_code ?? "no reason"} / ${freshnessReason}`,
+    reasonLabel: `${validation.reason_code ?? "no reason"} / ${freshnessReasonLabel}`,
   };
 }
 
@@ -396,14 +398,39 @@ const blockerReasonLabels: Record<MergeBlockerReason, string> = {
   stale: "stale",
 };
 
+const staleReasonLabels: Record<string, string> = {
+  STALE_TARGET_ADVANCED: "STALE_TARGET_ADVANCED",
+  STALE_OVERLAP: "STALE_OVERLAP",
+  STALE_DEPENDENCY: "STALE_DEPENDENCY",
+  STALE_BUILD_CONFIG: "STALE_BUILD_CONFIG",
+  STALE_SCHEMA: "STALE_SCHEMA",
+  ADVISORY_PLAN_ARTIFACT_OVERLAP: "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+  validation_insufficient_tier: "validation tier not yet satisfied",
+  validation_missing_for_current_head: "AWF validation missing for current PR head",
+};
+
+const validationReasonLabels: Record<string, string> = {
+  VALIDATION_INSUFFICIENT_TIER: "validation tier not yet satisfied",
+  VALIDATION_MISSING_FOR_CURRENT_HEAD: "AWF validation missing for current PR head",
+  VALIDATION_SUCCEEDED: "validation succeeded",
+  validation_fresh: "validation fresh",
+  validation_insufficient_tier: "validation tier not yet satisfied",
+  validation_missing_for_current_head: "AWF validation missing for current PR head",
+  validation_target_stale: "validation target stale",
+  validation_target_unknown: "validation target unknown",
+  validation_unavailable: "validation unavailable",
+};
+
 function staleReasonLabel(reason: StaleReason): string {
-  return reason.trigger_ref ? `${reason.reason_code} @ ${reason.trigger_ref}` : reason.reason_code;
+  const reasonLabel = staleReasonLabels[reason.reason_code] ?? reason.reason_code;
+  return reason.trigger_ref ? `${reasonLabel} @ ${reason.trigger_ref}` : reasonLabel;
 }
 
 function staleReasonDetail(reason: StaleReason): string {
+  const reasonLabel = staleReasonLabels[reason.reason_code] ?? reason.reason_code;
   const trigger = reason.trigger_ref ? `${reason.trigger_type} @ ${reason.trigger_ref}` : reason.trigger_type;
   const prefix = staleReasonBlocksMerge(reason) ? "" : "advisory ";
-  return `${prefix}${reason.reason_code} / ${trigger}`;
+  return `${prefix}${reasonLabel} / ${trigger}`;
 }
 
 function staleReasonBlocksMerge(reason: StaleReason): boolean {
@@ -458,10 +485,12 @@ function requiredValidationTier(
   }
 
   const taskTier = taskClassRequiredTier(item.task_class);
-  if (
-    item.required_next_action === "validate" ||
-    item.readiness?.stale_reason === "validation_insufficient_tier"
-  ) {
+  const staleReason = item.readiness?.stale_reason;
+  const shouldInferHigherValidationTier =
+    staleReason === "validation_insufficient_tier" ||
+    (item.required_next_action === "validate" &&
+      staleReason !== "validation_missing_for_current_head");
+  if (shouldInferHigherValidationTier) {
     const satisfiedTier = latestSatisfiedValidationTier(item);
     if (satisfiedTier !== null) {
       return normalizeTier(Math.max(taskTier, Math.min(3, satisfiedTier + 1))) ?? taskTier;
@@ -546,6 +575,10 @@ function formatFreshnessLabel(status: ValidationFreshnessStatus): string {
     return "unavailable";
   }
   return "freshness unknown";
+}
+
+function formatValidationReasonLabel(reason: string): string {
+  return validationReasonLabels[reason] ?? reason;
 }
 
 function freshnessStatusFromBoolean(value: boolean | null | undefined): ValidationFreshnessStatus {

@@ -358,7 +358,7 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
       workspaceHeadShaLabel: "workspace-head",
       validatedTargetShaLabel: "1234567",
       currentTargetShaLabel: "fedcba9",
-      reasonLabel: "VALIDATION_OK / validation_fresh",
+      reasonLabel: "VALIDATION_OK / validation fresh",
     },
   );
 
@@ -414,7 +414,7 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
       workspaceHeadShaLabel: "unknown",
       validatedTargetShaLabel: "old-head",
       currentTargetShaLabel: "new-head",
-      reasonLabel: "COVERAGE_BELOW_THRESHOLD / validation_target_stale",
+      reasonLabel: "COVERAGE_BELOW_THRESHOLD / validation target stale",
     },
   );
 });
@@ -442,7 +442,7 @@ test("validation formatter labels unknown and unavailable identity", () => {
       workspaceHeadShaLabel: "unknown",
       validatedTargetShaLabel: "unknown",
       currentTargetShaLabel: "unknown",
-      reasonLabel: "validation_unavailable",
+      reasonLabel: "validation unavailable",
     },
   );
 
@@ -490,7 +490,7 @@ test("validation formatter labels unknown and unavailable identity", () => {
   assert.equal(summary.headLabel, "unknown -> target-head");
   assert.equal(summary.baseShaLabel, "legacy-base");
   assert.equal(summary.workspaceHeadShaLabel, "unknown");
-  assert.equal(summary.reasonLabel, "VALIDATION_OK / validation_target_unknown");
+  assert.equal(summary.reasonLabel, "VALIDATION_OK / validation target unknown");
 });
 
 test("validation formatter displays profile environment and reason labels", () => {
@@ -536,7 +536,7 @@ test("validation formatter displays profile environment and reason labels", () =
     }),
   );
 
-  assert.equal(recovery.validationReasonLabel, "VALIDATION_OK / validation_target_stale");
+  assert.equal(recovery.validationReasonLabel, "VALIDATION_OK / validation target stale");
   assert.equal(recovery.commandHashLabel, "ddddddd");
   assert.equal(recovery.profileLabel, "python@7");
   assert.equal(recovery.environmentLabel, "eeeeeee");

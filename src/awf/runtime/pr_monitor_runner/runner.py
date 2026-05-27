@@ -60,6 +60,7 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.runtime.pr_push_remote import (
     remote_push_url_for_workspace as _remote_push_url_for_workspace,
 )
+from awf.runtime.validation import ValidationRunner
 from awf.service.provider_recovery import PROVIDER_AUTH_FAILED
 
 
@@ -73,6 +74,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         runner: AsyncCommandRunner,
         adapter: AgentAdapter,
         gh: GitHubClient,
+        validation: ValidationRunner | None = None,
         monitor_config: MonitorConfig | None = None,
         runner_config: MonitorRunnerConfig | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -89,6 +91,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             runner=runner,
             adapter=adapter,
             gh=gh,
+            validation=validation,
             sleep=sleep,
             provider_recovery_default_model=provider_recovery_default_model,
             log_store=log_store,

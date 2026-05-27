@@ -50,6 +50,7 @@ from awf.db.repositories import (
 from awf.runtime.merge_eligibility import (
     DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+    VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
     stale_reason_blocks_merge,
     stale_reason_required_action,
 )
@@ -502,6 +503,7 @@ def _stale_reason_for_action(
     legacy_reason = candidate.stale_reason or ""
     if legacy_reason in (
         VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
         DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
     ):
         return legacy_reason

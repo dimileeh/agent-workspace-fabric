@@ -151,6 +151,8 @@ def test_metrics_to_utc_accepts_naive_datetime() -> None:
 async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    live_metrics_globals = metrics_resources._allocated_resources_for_session.__globals__  # noqa: SLF001
+
     calls: list[tuple[str, str]] = []
 
     async def metrics_totals(
@@ -182,18 +184,18 @@ async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
             defaulted_dind_slots=1,
         )
 
-    monkeypatch.setattr(
-        metrics_resources,
+    monkeypatch.setitem(
+        live_metrics_globals,
         "_active_latest_totals_for_metrics_allocation_scope",
         metrics_totals,
     )
-    monkeypatch.setattr(
-        metrics_resources,
+    monkeypatch.setitem(
+        live_metrics_globals,
         "_active_latest_totals_for_scheduler_allocation_scope",
         scheduler_totals,
     )
-    monkeypatch.setattr(
-        metrics_resources,
+    monkeypatch.setitem(
+        live_metrics_globals,
         "_allocated_resource_auxiliary_counts_for_session",
         auxiliary_counts,
     )

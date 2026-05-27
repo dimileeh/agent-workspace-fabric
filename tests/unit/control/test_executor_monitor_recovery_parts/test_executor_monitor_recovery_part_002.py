@@ -667,6 +667,7 @@ async def test_sync_feature_pr_recovery_runs_validation_before_monitor_handoff(
     assert recovery_ops[0].status == OperationStatus.succeeded.value
     assert len(runs) == 1
     assert runs[0].workspace_head_sha == "d" * 40
+    assert runs[0].target_head_sha == "d" * 40
     assert any(
         event.event_type == "workspace.state_changed"
         and event.reason_code == "RECOVERY_VALIDATION_OK"

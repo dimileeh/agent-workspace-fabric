@@ -1426,3 +1426,55 @@ async def test_sync_base_no_progress_state_is_persisted_across_restarts(
     assert state.sync_base_no_progress_signature == "abc|CONFLICTING|DIRTY|base_behind=0"
     assert state.sync_base_no_progress_count == 2
     assert state.threads_addressed_ids == {"T1": "fix_committed"}
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_body_change_creates_new_comment_identity(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session)
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="old body",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="old comment body",
+            source_workspace_id=workspace_id,
+        )
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="new-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="new body with new actionable content",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="defer",
+            reason="body changed, so the monitor must re-evaluate it",
+            source_workspace_id=workspace_id,
+        )
+        await session.commit()
+
+        rows = await repo.list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 2
+    assert {row.reason for row in rows} == {
+        "old comment body",
+        "body changed, so the monitor must re-evaluate it",
+    }

@@ -1,3 +1,5 @@
+"""Merge eligibility helpers for stale reason classification and required actions."""
+
 from __future__ import annotations
 
 from sqlalchemy import inspect
@@ -12,10 +14,12 @@ from awf.db.models import (
 
 DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
 VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
+VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON = "validation_missing_for_current_head"
 
 __all__ = [
     "DOCS_TASK_SCOPE_VIOLATION_STALE_REASON",
     "VALIDATION_INSUFFICIENT_TIER_STALE_REASON",
+    "VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON",
     "compute_stale_reason",
     "compute_stale_reason_for_attempt",
     "stale_reason_blocks_merge",
@@ -25,9 +29,13 @@ __all__ = [
 
 
 def stale_reason_required_action(reason_code: str | None) -> str | None:
+    """Return the recovery action implied by a merge stale reason."""
     if not stale_reason_blocks_merge(reason_code):
         return None
-    if reason_code == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+    if reason_code in (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
+    ):
         return "validate"
     if reason_code == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
         return "resolve_task_scope"
@@ -35,6 +43,7 @@ def stale_reason_required_action(reason_code: str | None) -> str | None:
 
 
 def _task_class_tier(task_class: str | None) -> int:
+    """Return the minimum validation tier required by task class."""
     if task_class == TaskClass.migration_task.value:
         return 3
     if task_class in (
@@ -150,6 +159,7 @@ def compute_stale_reason_for_attempt(
 
 
 def _successful_validation_run_tier(run: ValidationRun) -> int | None:
+    """Return the validation tier only for successful runs."""
     if run.status != "succeeded":
         return None
     return run.tier
