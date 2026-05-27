@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any
 
@@ -16,6 +18,19 @@ from awf.common.companions import (
 ServiceName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
 CompanionPath = Annotated[str, Field(min_length=1, max_length=1024)]
 CompanionVolume = tuple[CompanionPath, CompanionPath]
+_ENVIRONMENT_KEY_PATTERN_TEXT = r"^[A-Za-z_][A-Za-z0-9_]*$"
+EnvironmentKey = Annotated[
+    str, Field(min_length=1, max_length=256, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
+]
+
+_ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
+_ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
+    "propertyNames": {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
+    }
+}
 
 
 def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
@@ -48,7 +63,10 @@ class WorkspaceCompanionRequest(BaseModel):
         "Dockerfile"
     )
     env_file: Annotated[str | None, Field(default=None, min_length=1, max_length=1024)] = None
-    environment: dict[str, str] = Field(default_factory=dict)
+    environment: dict[EnvironmentKey, str] = Field(
+        default_factory=dict,
+        json_schema_extra=_ENVIRONMENT_KEY_SCHEMA,
+    )
     depends_on: list[ServiceName] = Field(default_factory=list, max_length=64)
     healthcheck_cmd: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = (
         None
@@ -78,6 +96,18 @@ class WorkspaceCompanionRequest(BaseModel):
     def _validate_repo_relative_path(cls, value: str | None, info: Any) -> str | None:
         if value is not None:
             _validate_companion_repo_relative_path(str(info.field_name), value)
+        return value
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def _validate_environment_keys(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            for key in value:
+                if not isinstance(key, str) or not _ENVIRONMENT_KEY_PATTERN.fullmatch(key):
+                    raise ValueError(
+                        "companion environment keys must be Docker-compatible "
+                        "environment variable names"
+                    )
         return value
 
     @field_validator("ports")

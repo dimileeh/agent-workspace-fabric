@@ -163,6 +163,17 @@ def test_workspace_companion_ports_document_container_first_order(openapi_spec: 
 
 
 @pytest.mark.unit
+def test_workspace_companion_environment_keys_document_docker_names(
+    openapi_spec: dict,
+) -> None:
+    environment = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"]["properties"][
+        "environment"
+    ]
+
+    assert environment["propertyNames"]["pattern"] == "^[A-Za-z_][A-Za-z0-9_]*$"
+
+
+@pytest.mark.unit
 def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: dict) -> None:
     command_items = openapi_spec["components"]["schemas"]["WorkspaceValidation"]["properties"][
         "commands"

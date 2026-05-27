@@ -127,6 +127,7 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
                     "build_context": "services/api",
                     "dockerfile": "docker/Dockerfile",
                     "env_file": "config/dev.env",
+                    "environment": {"API_URL": "http://api:8000", "_TOKEN": "secret"},
                     "ports": [(8000, 18000)],
                     "volumes": [("./fixtures", "/fixtures"), ("api-cache", "/cache")],
                 }
@@ -137,6 +138,7 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
     companion = request.companions[0]
     assert companion.base_branch == "development"
     assert companion.depends_on == []
+    assert companion.environment == {"API_URL": "http://api:8000", "_TOKEN": "secret"}
 
 
 @pytest.mark.unit
@@ -177,6 +179,26 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "ports": [(70000, 8000)]}],
             "valid TCP port",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "environment": {"BAD:KEY": "1"},
+                }
+            ],
+            "environment variable name",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "environment": {"BAD\nKEY": "1"},
+                }
+            ],
+            "environment variable name",
         ),
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],

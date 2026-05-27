@@ -7128,8 +7128,15 @@
             "title": "Env File"
           },
           "environment": {
-            "additionalProperties": {
-              "type": "string"
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_]*$": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
             },
             "title": "Environment",
             "type": "object"
