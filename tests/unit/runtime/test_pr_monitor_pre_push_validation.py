@@ -226,6 +226,7 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     committed: list[str] = []
 
     async def _commit_dirty(**kwargs: object) -> bool:
+        """Record a synthetic commit and return a successful outcome."""
         committed.append(str(kwargs["message"]))
         return True
 
@@ -283,6 +284,7 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
     committed: list[str] = []
 
     async def _commit_dirty(**kwargs: object) -> bool:
+        """Record a synthetic commit and return a successful outcome."""
         committed.append(str(kwargs["message"]))
         return True
 
@@ -327,6 +329,7 @@ async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reaso
     )
 
     async def _no_commit(**_kwargs: object) -> bool:
+        """Return a failed commit result for the fix-pass test."""
         return False
 
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _no_commit)
@@ -372,17 +375,20 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
     calls: list[str] = []
 
     async def _no_dirty(**_kwargs: object) -> None:
-        return None
+        """Indicate there is no pre-existing dirty worktree state."""
 
     monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        """Return a fixed starting head for the repair operation."""
         return ("start", None)
 
     async def _address(**_kwargs: object) -> str:
+        """Return a synthetic fixed commit id after thread addressing."""
         return "fix_committed"
 
     async def _clean_status(**_kwargs: object) -> object:
+        """Return a clean PR status used to continue the repair loop."""
         return PRStatus(
             number=42,
             head_sha="start",
@@ -395,9 +401,10 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
         )
 
     async def _no_block(**_kwargs: object) -> None:
-        return None
+        """Allow repair flow to bypass protected-scope checks."""
 
     async def _validated(**_kwargs: object) -> _GitPushResult:
+        """Simulate a validated-push failure and record the invocation."""
         calls.append("validated")
         return _GitPushResult(
             pushed=False,
@@ -408,9 +415,11 @@ async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failur
         )
 
     async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        """Fail loudly if raw push is called in this repair path."""
         pytest.fail("comment repair must not call raw push")
 
     async def _unexpected_resolve(**_kwargs: object) -> None:
+        """Fail loudly if threads are resolved before validation succeeds."""
         pytest.fail("threads must not be resolved when validation blocks push")
 
     monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
@@ -459,29 +468,34 @@ async def test_ci_repair_uses_validated_push(
     calls: list[str] = []
 
     async def _no_dirty(**_kwargs: object) -> None:
-        return None
+        """Indicate there is no pre-existing dirty worktree state."""
 
     monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_dirty)
 
     async def _provider_allows_cli(*_args: object) -> bool:
+        """Return a fixed provider policy for CLI suppression in repairs."""
         return False
 
     monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", _provider_allows_cli)
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        """Return a fixed starting head for CI repair simulation."""
         return ("start", None)
 
     async def _commit(**_kwargs: object) -> bool:
+        """Return a successful synthetic commit result."""
         return True
 
     async def _no_block(**_kwargs: object) -> None:
-        return None
+        """Allow the CI repair flow to skip protected-scope checks."""
 
     async def _validated(**_kwargs: object) -> _GitPushResult:
+        """Simulate a validated push success and track invocation."""
         calls.append("validated")
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
     async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        """Fail loudly if raw push is called in this repair path."""
         pytest.fail("CI repair must not call raw push")
 
     monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head)
@@ -532,16 +546,18 @@ async def test_sync_base_uses_validated_push(
     calls: list[str] = []
 
     async def _fetch_base(**_kwargs: object) -> None:
-        return None
+        """Mock base sync fetching for sync-base repair."""
 
     async def _no_block(**_kwargs: object) -> None:
-        return None
+        """Allow the sync-base flow to skip protected-scope checks."""
 
     async def _validated(**_kwargs: object) -> _GitPushResult:
+        """Simulate validated push success and record that it was used."""
         calls.append("validated")
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
     async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        """Fail loudly if raw push is called in sync-base repair."""
         pytest.fail("sync-base repair must not call raw push")
 
     monkeypatch.setattr(runner, "_fetch_base", _fetch_base)
