@@ -18,10 +18,12 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _SYNC_BASE_RESOLVABLE_STALE_REASONS,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
-    _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
