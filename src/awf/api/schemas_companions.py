@@ -25,14 +25,21 @@ EnvironmentKey = Annotated[
 
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
 _ENVIRONMENT_NAME_START_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_ENVIRONMENT_VALUE_INTERPOLATION_PATTERN_TEXT = r"(^|[^$])(?:\$\$)*\$(?:[A-Za-z_]|\{[A-Za-z_])"
 _NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _YAML_UNSAFE_COMPANION_PATH_PATTERN = re.compile(r'["\\\x00-\x1f\x7f-\x9f]')
-_ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
+_ENVIRONMENT_SCHEMA: dict[str, Any] = {
     "propertyNames": {
         "maxLength": 256,
         "minLength": 1,
         "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
-    }
+    },
+    "patternProperties": {
+        _ENVIRONMENT_KEY_PATTERN_TEXT: {
+            "type": "string",
+            "not": {"pattern": _ENVIRONMENT_VALUE_INTERPOLATION_PATTERN_TEXT},
+        },
+    },
 }
 
 
@@ -118,7 +125,11 @@ class WorkspaceCompanionRequest(BaseModel):
     env_file: Annotated[str | None, Field(default=None, min_length=1, max_length=1024)] = None
     environment: dict[EnvironmentKey, str] = Field(
         default_factory=dict,
-        json_schema_extra=_ENVIRONMENT_KEY_SCHEMA,
+        json_schema_extra=_ENVIRONMENT_SCHEMA,
+        description=(
+            "Literal environment variables for the companion container. Docker Compose "
+            "interpolation syntax such as $VAR and ${VAR} is rejected."
+        ),
     )
     depends_on: list[ServiceName] = Field(default_factory=list, max_length=64)
     healthcheck_cmd: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = (

@@ -150,6 +150,25 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_companion_environment_schema_documents_value_interpolation_rejection() -> None:
+    environment_schema = api_schemas.WorkspaceCompanionRequest.model_json_schema()["properties"][
+        "environment"
+    ]
+
+    assert "Docker Compose interpolation" in environment_schema["description"]
+    assert environment_schema["propertyNames"] == {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+    }
+    value_schema = environment_schema["patternProperties"]["^[A-Za-z_][A-Za-z0-9_]*$"]
+    assert value_schema == {
+        "type": "string",
+        "not": {"pattern": r"(^|[^$])(?:\$\$)*\$(?:[A-Za-z_]|\{[A-Za-z_])"},
+    }
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("name", ["foo.lock", "foo..bar", "."])
 def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
     with pytest.raises(ValidationError) as exc:

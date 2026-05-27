@@ -7128,8 +7128,12 @@
             "title": "Env File"
           },
           "environment": {
+            "description": "Literal environment variables for the companion container. Docker Compose interpolation syntax such as $VAR and ${VAR} is rejected.",
             "patternProperties": {
               "^[A-Za-z_][A-Za-z0-9_]*$": {
+                "not": {
+                  "pattern": "(^|[^$])(?:\\$\\$)*\\$(?:[A-Za-z_]|\\{[A-Za-z_])"
+                },
                 "type": "string"
               }
             },
