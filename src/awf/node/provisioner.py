@@ -38,11 +38,13 @@ from awf.node.companion_services import (
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
+    validate_companion_service_graph,
 )
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.compose import profile_services
 from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -175,9 +177,19 @@ class Provisioner:
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
             if self._stack_launcher is not None:
+                companion_specs = companion_specs_from_task_policy(ws.task_policy)
+                if companion_specs:
+                    validate_companion_service_graph(
+                        profile_services=profile_services(
+                            profile,
+                            base_path=layout.worktree_path,
+                        ),
+                        companions=companion_specs,
+                        docker_mode=profile.docker.mode,
+                    )
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
-                    companions=companion_specs_from_task_policy(ws.task_policy),
+                    companions=companion_specs,
                     default_base_branch=ws.branch_base,
                 )
                 if not await self._recheck_status(

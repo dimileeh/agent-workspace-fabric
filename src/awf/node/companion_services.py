@@ -44,6 +44,9 @@ class MaterializedCompanionService:
     layout: WorktreeLayout
 
 
+CompanionGraphInput = WorkspaceCompanionSpec | MaterializedCompanionService
+
+
 def companion_specs_from_task_policy(
     task_policy: Mapping[str, Any] | None,
 ) -> tuple[WorkspaceCompanionSpec, ...]:
@@ -80,7 +83,7 @@ def companion_service_from_materialized(
 def validate_companion_service_graph(
     *,
     profile_services: tuple[ComposeService, ...],
-    companions: tuple[MaterializedCompanionService, ...],
+    companions: tuple[CompanionGraphInput, ...],
     docker_mode: DockerMode,
 ) -> None:
     """Validate companion/profile service names, dependency targets, and cycles."""
@@ -92,7 +95,7 @@ def validate_companion_service_graph(
             reason_code="COMPANION_SERVICE_NAME_COLLISION",
         )
 
-    companion_names = {companion.spec.name for companion in companions}
+    companion_names = {_companion_graph_spec(companion).name for companion in companions}
     collisions = sorted(profile_names & companion_names)
     if collisions:
         raise ProfileResolutionError(
@@ -113,9 +116,10 @@ def validate_companion_service_graph(
             if dependency not in known_names
         )
     for companion in companions:
+        spec = _companion_graph_spec(companion)
         unknown.extend(
-            f"{companion.spec.name}->{dependency}"
-            for dependency in companion.spec.depends_on
+            f"{spec.name}->{dependency}"
+            for dependency in spec.depends_on
             if dependency not in known_names
         )
     if unknown:
@@ -135,7 +139,10 @@ def validate_companion_service_graph(
         )
 
     healthy_targets = {service.name for service in profile_services if service.healthcheck_cmd} | {
-        companion.spec.name for companion in companions if companion.spec.healthcheck_cmd
+        spec.name
+        for companion in companions
+        for spec in (_companion_graph_spec(companion),)
+        if spec.healthcheck_cmd
     }
     if docker_mode == DockerMode.dind:
         healthy_targets.add("docker")
@@ -148,9 +155,10 @@ def validate_companion_service_graph(
             if dependency not in healthy_targets
         )
     for companion in companions:
+        spec = _companion_graph_spec(companion)
         unhealthy.extend(
-            f"{companion.spec.name}->{dependency}"
-            for dependency in companion.spec.depends_on
+            f"{spec.name}->{dependency}"
+            for dependency in spec.depends_on
             if dependency not in healthy_targets
         )
     if unhealthy:
@@ -164,7 +172,7 @@ def validate_companion_service_graph(
 def _companion_service_dependency_cycle(
     *,
     profile_services: tuple[ComposeService, ...],
-    companions: tuple[MaterializedCompanionService, ...],
+    companions: tuple[CompanionGraphInput, ...],
 ) -> tuple[str, ...] | None:
     graph: dict[str, tuple[str, ...]] = {
         service.name: tuple(service.depends_on) for service in profile_services
@@ -176,12 +184,13 @@ def _companion_service_dependency_cycle(
             reason_code="COMPANION_SERVICE_NAME_COLLISION",
         )
     for companion in companions:
-        if companion.spec.name in graph:
+        spec = _companion_graph_spec(companion)
+        if spec.name in graph:
             raise ProfileResolutionError(
-                f"companion service name collides with profile service: {companion.spec.name}",
+                f"companion service name collides with profile service: {spec.name}",
                 reason_code="COMPANION_SERVICE_NAME_COLLISION",
             )
-        graph[companion.spec.name] = tuple(companion.spec.depends_on)
+        graph[spec.name] = tuple(spec.depends_on)
     visiting: set[str] = set()
     visited: set[str] = set()
     stack: list[str] = []
@@ -216,13 +225,21 @@ def _companion_service_dependency_cycle(
 
 
 def _duplicate_companion_service_names(
-    companions: tuple[MaterializedCompanionService, ...],
+    companions: tuple[CompanionGraphInput, ...],
 ) -> list[str]:
     return sorted(
         name
-        for name, count in Counter(companion.spec.name for companion in companions).items()
+        for name, count in Counter(
+            _companion_graph_spec(companion).name for companion in companions
+        ).items()
         if count > 1
     )
+
+
+def _companion_graph_spec(companion: CompanionGraphInput) -> WorkspaceCompanionSpec:
+    if isinstance(companion, WorkspaceCompanionSpec):
+        return companion
+    return companion.spec
 
 
 def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionSpec:
