@@ -164,6 +164,42 @@ def test_companion_service_from_materialized_rejects_escaping_paths(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_validate_companion_service_graph_rejects_duplicate_companion_names(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "backend-one"
+    second_root = tmp_path / "backend-two"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:first.git",
+            base_branch="main",
+        ),
+        layout=_layout(first_root),
+    )
+    second = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:second.git",
+            base_branch="main",
+        ),
+        layout=_layout(second_root),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=(),
+            companions=(first, second),
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
+    assert "duplicate companion service name: backend" in str(exc.value)
+
+
+@pytest.mark.unit
 def test_validate_companion_service_graph_rejects_unknown_dependencies(tmp_path: Path) -> None:
     companion_root = tmp_path / "backend"
     companion_root.mkdir()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,13 @@ def validate_companion_service_graph(
 ) -> None:
     """Validate companion/profile service names, dependency targets, and cycles."""
     profile_names = {service.name for service in profile_services}
+    duplicate_companion_names = _duplicate_companion_service_names(companions)
+    if duplicate_companion_names:
+        raise ProfileResolutionError(
+            f"duplicate companion service name: {', '.join(duplicate_companion_names)}",
+            reason_code="COMPANION_SERVICE_NAME_COLLISION",
+        )
+
     companion_names = {companion.spec.name for companion in companions}
     collisions = sorted(profile_names & companion_names)
     if collisions:
@@ -161,9 +169,19 @@ def _companion_service_dependency_cycle(
     graph: dict[str, tuple[str, ...]] = {
         service.name: tuple(service.depends_on) for service in profile_services
     }
-    graph.update(
-        {companion.spec.name: tuple(companion.spec.depends_on) for companion in companions}
-    )
+    duplicate_companion_names = _duplicate_companion_service_names(companions)
+    if duplicate_companion_names:
+        raise ProfileResolutionError(
+            f"duplicate companion service name: {', '.join(duplicate_companion_names)}",
+            reason_code="COMPANION_SERVICE_NAME_COLLISION",
+        )
+    for companion in companions:
+        if companion.spec.name in graph:
+            raise ProfileResolutionError(
+                f"companion service name collides with profile service: {companion.spec.name}",
+                reason_code="COMPANION_SERVICE_NAME_COLLISION",
+            )
+        graph[companion.spec.name] = tuple(companion.spec.depends_on)
     visiting: set[str] = set()
     visited: set[str] = set()
     stack: list[str] = []
@@ -195,6 +213,16 @@ def _companion_service_dependency_cycle(
         if cycle is not None:
             return cycle
     return None
+
+
+def _duplicate_companion_service_names(
+    companions: tuple[MaterializedCompanionService, ...],
+) -> list[str]:
+    return sorted(
+        name
+        for name, count in Counter(companion.spec.name for companion in companions).items()
+        if count > 1
+    )
 
 
 def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionSpec:
