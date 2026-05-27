@@ -12,7 +12,6 @@ from typing import Any, Protocol, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
-from awf.common.companions import companion_worktree_id, companions_from_task_policy
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -35,6 +34,7 @@ from awf.service.failure_causality import (
     primary_failure_reason_code,
     restore_primary_failure_row_fields,
 )
+from awf.service.gc_companions import companion_worktree_remove_targets
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
     SecretLeaseService,
@@ -1369,11 +1369,7 @@ from awf.service.controls_helpers import (  # noqa: E402
 
 
 def _companion_cleanup_worktrees(workspace: Workspace) -> tuple[tuple[str, str], ...]:
-    return tuple(
-        (companion_worktree_id(workspace.id, str(companion["name"])), str(companion["repo_url"]))
-        for companion in companions_from_task_policy(workspace.task_policy)
-        if "name" in companion and "repo_url" in companion
-    )
+    return companion_worktree_remove_targets(workspace)
 
 
 __all__ = [
