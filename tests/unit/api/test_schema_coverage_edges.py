@@ -127,7 +127,11 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
                     "build_context": "services/api",
                     "dockerfile": "docker/Dockerfile",
                     "env_file": "config/dev.env",
-                    "environment": {"API_URL": "http://api:8000", "_TOKEN": "secret"},
+                    "environment": {
+                        "API_URL": "http://api:8000",
+                        "_TOKEN": "secret",
+                        "PRICE_LABEL": "$5",
+                    },
                     "ports": [(8000, 18000)],
                     "volumes": [("./fixtures", "/fixtures"), ("api-cache", "/cache")],
                 }
@@ -138,7 +142,11 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
     companion = request.companions[0]
     assert companion.base_branch == "development"
     assert companion.depends_on == []
-    assert companion.environment == {"API_URL": "http://api:8000", "_TOKEN": "secret"}
+    assert companion.environment == {
+        "API_URL": "http://api:8000",
+        "_TOKEN": "secret",
+        "PRICE_LABEL": "$5",
+    }
 
 
 @pytest.mark.unit
@@ -229,6 +237,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 }
             ],
             "environment variable name",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "environment": {"LEAK": "${GITHUB_TOKEN}"},
+                }
+            ],
+            "environment values must not contain Docker Compose interpolation",
         ),
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],

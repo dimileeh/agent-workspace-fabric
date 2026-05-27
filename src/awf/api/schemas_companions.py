@@ -24,6 +24,7 @@ EnvironmentKey = Annotated[
 ]
 
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
+_ENVIRONMENT_NAME_START_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _YAML_UNSAFE_COMPANION_PATH_PATTERN = re.compile(r'["\\\x00-\x1f\x7f-\x9f]')
 _ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
@@ -63,6 +64,31 @@ def _validate_companion_yaml_safe_path(field_name: str, value: str) -> None:
             f"companion {field_name} must be a YAML-safe path without control, "
             "double quote, or backslash characters"
         )
+
+
+def _value_has_compose_interpolation(value: str) -> bool:
+    cursor = 0
+    while cursor < len(value):
+        dollar_index = value.find("$", cursor)
+        if dollar_index == -1:
+            return False
+        next_index = dollar_index + 1
+        if next_index >= len(value):
+            return False
+        next_char = value[next_index]
+        if next_char == "$":
+            cursor = next_index + 1
+            continue
+        if next_char in _ENVIRONMENT_NAME_START_CHARS:
+            return True
+        if (
+            next_char == "{"
+            and next_index + 1 < len(value)
+            and value[next_index + 1] in _ENVIRONMENT_NAME_START_CHARS
+        ):
+            return True
+        cursor = next_index
+    return False
 
 
 def _is_absolute_or_escaping_path(value: str) -> bool:
@@ -135,6 +161,17 @@ class WorkspaceCompanionRequest(BaseModel):
                         "companion environment keys must be Docker-compatible "
                         "environment variable names"
                     )
+        return value
+
+    @field_validator("environment")
+    @classmethod
+    def _validate_environment_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for environment_value in value.values():
+            if _value_has_compose_interpolation(environment_value):
+                raise ValueError(
+                    "companion environment values must not contain Docker Compose "
+                    "interpolation syntax"
+                )
         return value
 
     @field_validator("ports")
