@@ -1233,6 +1233,42 @@ async def test_merge_gate_clears_stale_state_when_computed_reason_changes(
 
 
 @pytest.mark.unit
+async def test_merge_gate_resyncs_stale_flag_when_reason_unchanged(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert candidate is not None
+        candidate.stale = True
+        candidate.stale_reason = None
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+    await runner._merge_gate_for_workspace(workspace_id)
+
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert candidate is not None
+
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
+
+
+@pytest.mark.unit
 async def test_auto_merge_waits_for_initial_review_grace_before_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

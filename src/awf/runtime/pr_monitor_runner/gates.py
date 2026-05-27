@@ -231,6 +231,11 @@ async def _merge_gate_for_workspace(
             should_be_stale = stale_reason is not None
             candidate.stale = should_be_stale
             candidate.stale_reason = stale_reason
+        else:
+            should_be_stale = stale_reason is not None
+            if candidate.stale != should_be_stale or candidate.stale_reason != stale_reason:
+                candidate.stale = should_be_stale
+                candidate.stale_reason = stale_reason
 
         sync_candidate_readiness(
             candidate,
