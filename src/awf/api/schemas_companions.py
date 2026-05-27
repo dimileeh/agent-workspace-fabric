@@ -7,7 +7,10 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from awf.common.companions import RESERVED_COMPANION_SERVICE_NAMES
+from awf.common.companions import (
+    RESERVED_COMPANION_SERVICE_NAMES,
+    companion_name_is_git_branch_component,
+)
 
 ServiceName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
 CompanionPath = Annotated[str, Field(min_length=1, max_length=1024)]
@@ -66,9 +69,11 @@ class WorkspaceCompanionRequest(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def _reject_reserved_service_name(cls, value: str) -> str:
+    def _validate_companion_name(cls, value: str) -> str:
         if value in RESERVED_COMPANION_SERVICE_NAMES:
             raise ValueError(f"companion name {value!r} is reserved")
+        if not companion_name_is_git_branch_component(value):
+            raise ValueError("companion name must be usable as a Git branch path component")
         return value
 
     @field_validator("build_context", "dockerfile", "env_file")

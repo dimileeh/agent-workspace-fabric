@@ -8,6 +8,23 @@ from typing import Any
 COMPANION_POLICY_KEY = "companions"
 COMPANION_WORKTREE_MARKER = "__companion__"
 RESERVED_COMPANION_SERVICE_NAMES = frozenset({"agent", "docker"})
+_GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
+
+
+def companion_name_is_git_branch_component(companion_name: str) -> bool:
+    """Return whether a companion name is safe as one Git branch component."""
+    return bool(companion_name) and not (
+        "/" in companion_name
+        or companion_name.startswith(".")
+        or companion_name.endswith(".")
+        or companion_name.endswith(".lock")
+        or ".." in companion_name
+        or "@{" in companion_name
+        or any(
+            char in _GIT_BRANCH_COMPONENT_FORBIDDEN_CHARS or ord(char) < 32 or ord(char) == 127
+            for char in companion_name
+        )
+    )
 
 
 def companion_worktree_id(workspace_id: str, companion_name: str) -> str:

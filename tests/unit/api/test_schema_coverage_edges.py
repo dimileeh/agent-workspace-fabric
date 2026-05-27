@@ -140,6 +140,21 @@ def test_workspace_companions_normalize_default_base_branch() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("name", ["foo.lock", "foo..bar", "."])
+def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:example/app.git", "base_branch": "main"},
+                "task": _task(),
+                "companions": [{"name": name, "repo_url": "git@example.com:api.git"}],
+            }
+        )
+
+    assert "Git branch path component" in str(exc.value)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("companions", "message"),
     [

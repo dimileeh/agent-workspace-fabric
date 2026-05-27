@@ -6,6 +6,7 @@ import pytest
 
 from awf.common.companions import (
     companion_branch_name,
+    companion_name_is_git_branch_component,
     companion_worktree_id,
     companions_from_task_policy,
     parent_workspace_id_from_companion_worktree_id,
@@ -24,6 +25,31 @@ def test_companion_worktree_and_branch_names_are_deterministic() -> None:
         )
         == "awf/ws_123/companion/backend"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("companion_name", "expected"),
+    [
+        ("backend", True),
+        ("api.v2", True),
+        ("-worker", True),
+        (".backend", False),
+        ("backend.", False),
+        ("foo.lock", False),
+        ("foo..bar", False),
+        (".", False),
+        ("", False),
+        ("api/worker", False),
+        ("api worker", False),
+        ("api@{worker", False),
+    ],
+)
+def test_companion_name_is_git_branch_component(
+    companion_name: str,
+    expected: bool,
+) -> None:
+    assert companion_name_is_git_branch_component(companion_name) is expected
 
 
 @pytest.mark.unit
