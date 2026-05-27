@@ -40,6 +40,7 @@ class WorkspaceStackLaunchRequest:
     layout: WorktreeLayout
     profile: WorkspaceProfile
     companions: tuple[MaterializedCompanionService, ...] = ()
+    companion_graph_prevalidated: bool = False
 
 
 class WorkspaceStackLauncher(Protocol):
@@ -128,12 +129,16 @@ class ComposeStackLauncher:
             profile,
             base_path=layout.worktree_path,
         )
-        await asyncio.to_thread(
-            validate_companion_service_graph,
-            profile_services=services,
-            companions=request.companions,
-            docker_mode=profile.docker.mode,
+        companion_graph_already_validated = (
+            bool(request.companions) and request.companion_graph_prevalidated
         )
+        if not companion_graph_already_validated:
+            await asyncio.to_thread(
+                validate_companion_service_graph,
+                profile_services=services,
+                companions=request.companions,
+                docker_mode=profile.docker.mode,
+            )
         companions = await asyncio.to_thread(
             lambda: tuple(
                 companion_service_from_materialized(companion) for companion in request.companions

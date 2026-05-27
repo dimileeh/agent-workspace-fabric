@@ -375,6 +375,7 @@ class TestSuccess:
         defaulted_companion = launcher.requests[0].companions[1]
         assert defaulted_companion.spec.name == "worker"
         assert defaulted_companion.spec.base_branch is None
+        assert launcher.requests[0].companion_graph_prevalidated is True
 
     @pytest.mark.unit
     async def test_rejects_invalid_companion_graph_before_materializing_companions(

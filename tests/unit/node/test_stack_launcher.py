@@ -609,6 +609,54 @@ async def test_compose_stack_launcher_passes_materialized_companions_to_compose(
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_skips_companion_graph_validation_when_prevalidated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+
+    def fail_validate_companion_service_graph(**_: object) -> None:
+        raise AssertionError("prevalidated companion graph should not be validated again")
+
+    monkeypatch.setattr(
+        stack_launcher_mod,
+        "validate_companion_service_graph",
+        fail_validate_companion_service_graph,
+    )
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="serviceful"),
+            companions=(
+                MaterializedCompanionService(
+                    spec=WorkspaceCompanionSpec(
+                        name="backend",
+                        repo_url="git@github.com:example/backend.git",
+                        base_branch="development",
+                    ),
+                    layout=WorktreeLayout(
+                        mirror_path=tmp_path / "backend.git",
+                        worktree_path=companion_root,
+                        branch_name="awf/ws_launcher/companion/backend",
+                    ),
+                ),
+            ),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert compose.specs[0].companions[0].name == "backend"
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_rejects_companion_profile_service_collision(
     tmp_path: Path,
 ) -> None:

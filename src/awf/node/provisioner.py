@@ -176,6 +176,7 @@ class Provisioner:
             destination_category = _egress_plan_destination_category(egress_plan.mode)
             stack_paths: ComposeProjectPaths | None = None
             materialized_companions: tuple[MaterializedCompanionService, ...] = ()
+            companion_graph_prevalidated = False
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
                 if companion_specs:
@@ -187,6 +188,7 @@ class Provisioner:
                         companions=companion_specs,
                         docker_mode=profile.docker.mode,
                     )
+                    companion_graph_prevalidated = True
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
                     companions=companion_specs,
@@ -213,6 +215,7 @@ class Provisioner:
                         layout=layout,
                         profile=profile,
                         companions=materialized_companions,
+                        companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
         except GitOperationError as exc:
