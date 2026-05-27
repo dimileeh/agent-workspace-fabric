@@ -124,6 +124,35 @@ def test_normalize_ccusage_json_preserves_cached_and_reasoning_tokens() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_ccusage_json_supports_cache_read_and_creation_tokens() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 100,
+                "cacheReadTokens": 250,
+                "cacheCreationTokens": 50,
+                "outputTokens": 40,
+                "totalTokens": 390,
+                "costUSD": 0.15,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage == NormalizedUsage(
+        input_tokens=100,
+        cached_input_tokens=300,
+        output_tokens=40,
+        total_tokens=390,
+        cost_estimate=0.15,
+        currency="USD",
+        model=None,
+    )
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_synthesizes_total_including_cached_tokens() -> None:
     raw = json.dumps({"totals": {"inputTokens": 100, "cachedInputTokens": 900}})
 

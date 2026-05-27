@@ -48,7 +48,14 @@ _PROVIDER_CCUSAGE_SOURCE: dict[AgentRuntime, str] = {
 }
 
 _INPUT_TOKEN_KEYS = ("inputTokens", "input_tokens")
-_CACHED_INPUT_TOKEN_KEYS = ("cachedInputTokens", "cached_input_tokens")
+_CACHED_INPUT_TOKEN_KEYS = (
+    "cachedInputTokens",
+    "cached_input_tokens",
+    "cacheCreationTokens",
+    "cacheReadTokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+)
 _OUTPUT_TOKEN_KEYS = ("outputTokens", "output_tokens")
 _REASONING_OUTPUT_TOKEN_KEYS = ("reasoningOutputTokens", "reasoning_output_tokens")
 _TOTAL_TOKEN_KEYS = ("totalTokens", "total_tokens")
@@ -125,9 +132,22 @@ def _first(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> Any:
     return None
 
 
+def _sum(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> int | None:
+    total = 0
+    seen = False
+    for key in keys:
+        if key not in mapping:
+            continue
+        coerced = coerce(mapping[key])
+        if coerced is not None:
+            total += coerced
+            seen = True
+    return total if seen else None
+
+
 def _usage_from_record(record: dict[str, Any], *, model: str | None) -> NormalizedUsage | None:
     input_tokens = _first(record, _INPUT_TOKEN_KEYS, _coerce_int)
-    cached_input_tokens = _first(record, _CACHED_INPUT_TOKEN_KEYS, _coerce_int)
+    cached_input_tokens = _sum(record, _CACHED_INPUT_TOKEN_KEYS, _coerce_int)
     output_tokens = _first(record, _OUTPUT_TOKEN_KEYS, _coerce_int)
     reasoning_output_tokens = _first(record, _REASONING_OUTPUT_TOKEN_KEYS, _coerce_int)
     total_tokens = _first(record, _TOTAL_TOKEN_KEYS, _coerce_int)
