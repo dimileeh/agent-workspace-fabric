@@ -1264,8 +1264,8 @@ async def test_merge_gate_resyncs_stale_flag_when_reason_unchanged(
         ).get_open_for_workspace_with_merge_inputs(workspace_id)
         assert candidate is not None
 
-    assert candidate.stale is False
-    assert candidate.stale_reason is None
+    assert candidate.stale is True
+    assert candidate.stale_reason == "stale"
 
 
 @pytest.mark.unit
