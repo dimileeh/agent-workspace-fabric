@@ -227,7 +227,11 @@ async def _run_pre_push_validation_fix_pass(
         pass_number=pass_number,
         total_passes=total_passes,
         test_commands=validation_commands,
-        reason_code=validation_result.reason_code,
+        reason_code=(
+            validation_result.validation_reason_code
+            if validation_result.validation_reason_code is not None
+            else validation_result.reason_code
+        ),
         coverage_percent=(
             validation_result.coverage.percent if validation_result.coverage is not None else None
         ),

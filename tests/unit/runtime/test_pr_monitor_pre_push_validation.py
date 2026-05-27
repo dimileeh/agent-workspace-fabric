@@ -55,7 +55,11 @@ class _FakeValidation:
         return None
 
 
-def _command_result(tmp_path: Path, *, ok: bool) -> ValidationCommandResult:
+def _command_result(
+    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+) -> ValidationCommandResult:
+    if reason_code is None:
+        reason_code = "VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE"
     stdout_path = tmp_path / ("ok.stdout" if ok else "failed.stdout")
     stderr_path = tmp_path / ("ok.stderr" if ok else "failed.stderr")
     stdout_path.write_text("passed\n" if ok else "failed\n", encoding="utf-8")
@@ -66,12 +70,14 @@ def _command_result(tmp_path: Path, *, ok: bool) -> ValidationCommandResult:
         duration_seconds=0.1,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
-        reason_code="VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE",
+        reason_code=reason_code,
     )
 
 
-def _validation_result(tmp_path: Path, *, ok: bool) -> ValidationResult:
-    return ValidationResult(commands=[_command_result(tmp_path, ok=ok)])
+def _validation_result(
+    tmp_path: Path, *, ok: bool, reason_code: str | None = None
+) -> ValidationResult:
+    return ValidationResult(commands=[_command_result(tmp_path, ok=ok, reason_code=reason_code)])
 
 
 async def _set_resolved_profile(
@@ -224,6 +230,61 @@ async def test_pre_push_validation_fix_pass_revalidates_before_push(
     assert len(adapter.calls) == 1
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].target_head_sha == fixed_head
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    first_head = "d" * 40
+    fixed_head = "e" * 40
+    cmd.queue_result(returncode=0, stdout=f"{first_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fixed_head}\n")
+    cmd.queue_result(returncode=0, stdout="", stderr="")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed validation\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(
+            tmp_path,
+            ok=False,
+            reason_code="PYTEST_TEST_FAILURE",
+        ),
+        _validation_result(tmp_path, ok=True),
+    )
+    committed: list[str] = []
+
+    async def _commit_dirty(**kwargs: object) -> bool:
+        committed.append(str(kwargs["message"]))
+        return True
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert committed == [f"awf: pre-push validation fix for {workspace_id}"]
+    assert len(adapter.calls) == 1
+    assert "Reason code: PYTEST_TEST_FAILURE" in adapter.calls[0]
 
 
 @pytest.mark.unit
