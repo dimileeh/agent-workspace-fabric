@@ -71,6 +71,11 @@ def _validate_companion_yaml_safe_path(field_name: str, value: str) -> None:
             f"companion {field_name} must be a YAML-safe path without control, "
             "double quote, or backslash characters"
         )
+    if "$" in value:
+        raise ValueError(
+            f"companion {field_name} must not contain Docker Compose interpolation "
+            "markers or dollar characters"
+        )
 
 
 def _value_has_compose_interpolation(value: str) -> bool:

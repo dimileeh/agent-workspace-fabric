@@ -214,10 +214,40 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 {
                     "name": "api",
                     "repo_url": "git@example.com:api.git",
+                    "build_context": "services/${GITHUB_TOKEN}",
+                }
+            ],
+            "Docker Compose interpolation",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "build_context": "services/$5",
+                }
+            ],
+            "dollar characters",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
                     "dockerfile": "docker/Dockerfile\nprod",
                 }
             ],
             "YAML-safe path",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "dockerfile": "docker/${DOCKERFILE}",
+                }
+            ],
+            "Docker Compose interpolation",
         ),
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "env_file": "/tmp/.env"}],
@@ -232,6 +262,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 }
             ],
             "YAML-safe path",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "env_file": "config/${ENV}.env",
+                }
+            ],
+            "Docker Compose interpolation",
         ),
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "ports": [(70000, 8000)]}],
@@ -306,6 +346,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 {
                     "name": "api",
                     "repo_url": "git@example.com:api.git",
+                    "volumes": [("./${GITHUB_TOKEN}", "/fixtures")],
+                }
+            ],
+            "Docker Compose interpolation",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
                     "volumes": [("C:cache", "/x")],
                 }
             ],
@@ -360,6 +410,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 }
             ],
             "YAML-safe path",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("api-cache", "/run/${GITHUB_TOKEN}")],
+                }
+            ],
+            "Docker Compose interpolation",
         ),
     ],
 )
