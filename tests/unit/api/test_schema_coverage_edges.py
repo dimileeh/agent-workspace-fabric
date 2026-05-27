@@ -173,8 +173,38 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
             "repo-relative path",
         ),
         (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "build_context": 'services/"api',
+                }
+            ],
+            "YAML-safe path",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "dockerfile": "docker/Dockerfile\nprod",
+                }
+            ],
+            "YAML-safe path",
+        ),
+        (
             [{"name": "api", "repo_url": "git@example.com:api.git", "env_file": "/tmp/.env"}],
             "repo-relative path",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "env_file": "config\\dev.env",
+                }
+            ],
+            "YAML-safe path",
         ),
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "ports": [(70000, 8000)]}],
@@ -203,6 +233,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
         (
             [{"name": "api", "repo_url": "git@example.com:api.git", "volumes": [("../x", "/x")]}],
             "volume source",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [('./fixtures"prod', "/fixtures")],
+                }
+            ],
+            "YAML-safe path",
         ),
         (
             [
@@ -253,6 +293,16 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 }
             ],
             "volume target",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("api-cache", '/cache"prod')],
+                }
+            ],
+            "YAML-safe path",
         ),
     ],
 )

@@ -25,6 +25,7 @@ EnvironmentKey = Annotated[
 
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
 _NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_YAML_UNSAFE_COMPANION_PATH_PATTERN = re.compile(r'["\\\x00-\x1f\x7f-\x9f]')
 _ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
     "propertyNames": {
         "maxLength": 256,
@@ -37,6 +38,7 @@ _ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
 def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
     if _is_absolute_or_escaping_path(value):
         raise ValueError(f"companion {field_name} must be a repo-relative path")
+    _validate_companion_yaml_safe_path(field_name, value)
 
 
 def _validate_companion_volume_target(value: str) -> None:
@@ -44,6 +46,7 @@ def _validate_companion_volume_target(value: str) -> None:
         raise ValueError(
             "companion volume target must be an absolute container path without mount options"
         )
+    _validate_companion_yaml_safe_path("volume target", value)
 
 
 def _validate_companion_named_volume_source(value: str) -> None:
@@ -51,6 +54,14 @@ def _validate_companion_named_volume_source(value: str) -> None:
         raise ValueError(
             "companion volume source named volume must start with an ASCII letter or digit "
             "and contain only ASCII letters, digits, dots, underscores, and hyphens"
+        )
+
+
+def _validate_companion_yaml_safe_path(field_name: str, value: str) -> None:
+    if _YAML_UNSAFE_COMPANION_PATH_PATTERN.search(value):
+        raise ValueError(
+            f"companion {field_name} must be a YAML-safe path without control, "
+            "double quote, or backslash characters"
         )
 
 
