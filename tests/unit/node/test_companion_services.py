@@ -190,7 +190,89 @@ def test_validate_companion_service_graph_rejects_unknown_dependencies(tmp_path:
 
 
 @pytest.mark.unit
-def test_validate_companion_service_graph_accepts_agent_dependency(tmp_path: Path) -> None:
+def test_validate_companion_service_graph_rejects_unhealthy_dependency_targets(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    worker_root = tmp_path / "worker"
+    companion_root.mkdir()
+    worker_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            base_branch="main",
+            depends_on=("agent", "web", "worker"),
+        ),
+        layout=_layout(companion_root),
+    )
+    worker = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="worker",
+            repo_url="git@example.com:worker.git",
+            base_branch="main",
+        ),
+        layout=_layout(worker_root),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=(ComposeService(name="web", depends_on=("agent",)),),
+            companions=(companion, worker),
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNHEALTHY"
+    assert "backend->agent" in str(exc.value)
+    assert "backend->web" in str(exc.value)
+    assert "backend->worker" in str(exc.value)
+    assert "web->agent" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_validate_companion_service_graph_accepts_healthchecked_dependencies(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    worker_root = tmp_path / "worker"
+    companion_root.mkdir()
+    worker_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            base_branch="main",
+            depends_on=("web", "worker"),
+        ),
+        layout=_layout(companion_root),
+    )
+    worker = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="worker",
+            repo_url="git@example.com:worker.git",
+            base_branch="main",
+            healthcheck_cmd="curl -fsS http://localhost:8001/health",
+        ),
+        layout=_layout(worker_root),
+    )
+
+    validate_companion_service_graph(
+        profile_services=(
+            ComposeService(
+                name="web",
+                depends_on=("worker",),
+                healthcheck_cmd="curl -fsS http://localhost:8000/health",
+            ),
+        ),
+        companions=(companion, worker),
+        docker_mode=DockerMode.none,
+    )
+
+
+@pytest.mark.unit
+def test_validate_companion_service_graph_accepts_dind_docker_dependency(
+    tmp_path: Path,
+) -> None:
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     companion = MaterializedCompanionService(
@@ -198,15 +280,15 @@ def test_validate_companion_service_graph_accepts_agent_dependency(tmp_path: Pat
             name="backend",
             repo_url="git@example.com:api.git",
             base_branch="main",
-            depends_on=("agent",),
+            depends_on=("docker",),
         ),
         layout=_layout(companion_root),
     )
 
     validate_companion_service_graph(
-        profile_services=(ComposeService(name="web", depends_on=("agent",)),),
+        profile_services=(),
         companions=(companion,),
-        docker_mode=DockerMode.none,
+        docker_mode=DockerMode.dind,
     )
 
 

@@ -123,6 +123,32 @@ def validate_companion_service_graph(
             reason_code="COMPANION_SERVICE_DEPENDENCY_CYCLE",
         )
 
+    healthy_targets = {service.name for service in profile_services if service.healthcheck_cmd} | {
+        companion.spec.name for companion in companions if companion.spec.healthcheck_cmd
+    }
+    if docker_mode == DockerMode.dind:
+        healthy_targets.add("docker")
+
+    unhealthy: list[str] = []
+    for service in profile_services:
+        unhealthy.extend(
+            f"{service.name}->{dependency}"
+            for dependency in service.depends_on
+            if dependency not in healthy_targets
+        )
+    for companion in companions:
+        unhealthy.extend(
+            f"{companion.spec.name}->{dependency}"
+            for dependency in companion.spec.depends_on
+            if dependency not in healthy_targets
+        )
+    if unhealthy:
+        raise ProfileResolutionError(
+            "companion/profile service dependency target has no healthcheck: "
+            f"{', '.join(sorted(unhealthy))}",
+            reason_code="COMPANION_SERVICE_DEPENDENCY_UNHEALTHY",
+        )
+
 
 def _companion_service_dependency_cycle(
     *,
