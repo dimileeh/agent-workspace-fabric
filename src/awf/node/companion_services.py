@@ -125,14 +125,18 @@ def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionS
             (str(key), str(value)) for key, value in _mapping_items(item.get("environment"))
         ),
         depends_on=tuple(
-            str(value) for value in item.get("depends_on", []) if isinstance(value, str)
+            str(value)
+            for value in _sequence_items_or_empty(item.get("depends_on"))
+            if isinstance(value, str)
         ),
         healthcheck_cmd=(
             str(item["healthcheck_cmd"]) if item.get("healthcheck_cmd") is not None else None
         ),
-        ports=tuple(_port_pair(value) for value in item.get("ports", [])),
+        ports=tuple(_port_pair(value) for value in _sequence_items_or_empty(item.get("ports"))),
         command=(str(item["command"]) if item.get("command") is not None else None),
-        volumes=tuple(_volume_pair(value) for value in item.get("volumes", [])),
+        volumes=tuple(
+            _volume_pair(value) for value in _sequence_items_or_empty(item.get("volumes"))
+        ),
     )
 
 
@@ -140,6 +144,12 @@ def _mapping_items(value: object) -> tuple[tuple[object, object], ...]:
     if not isinstance(value, Mapping):
         return ()
     return tuple(value.items())
+
+
+def _sequence_items_or_empty(value: Any) -> Any:
+    if value is None:
+        return ()
+    return value
 
 
 def _port_pair(value: object) -> tuple[int, int]:

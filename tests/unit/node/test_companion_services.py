@@ -82,6 +82,28 @@ def test_companion_specs_from_task_policy_stringifies_environment_values() -> No
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_treats_null_optional_sequences_as_empty() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "depends_on": None,
+                    "ports": None,
+                    "volumes": None,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.depends_on == ()
+    assert spec.ports == ()
+    assert spec.volumes == ()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "companion",
     [
