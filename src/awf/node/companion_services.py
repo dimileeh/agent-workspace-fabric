@@ -181,7 +181,7 @@ def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionS
         ),
         depends_on=tuple(
             str(value)
-            for value in _sequence_items_or_empty(item.get("depends_on"))
+            for value in _depends_on_items_or_empty(item.get("depends_on"))
             if isinstance(value, str)
         ),
         healthcheck_cmd=(
@@ -204,6 +204,14 @@ def _mapping_items(value: object) -> tuple[tuple[object, object], ...]:
 def _sequence_items_or_empty(value: Any) -> Any:
     if value is None:
         return ()
+    return value
+
+
+def _depends_on_items_or_empty(value: Any) -> Any:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
     return value
 
 

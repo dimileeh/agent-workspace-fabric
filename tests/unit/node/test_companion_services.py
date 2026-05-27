@@ -104,6 +104,24 @@ def test_companion_specs_from_task_policy_treats_null_optional_sequences_as_empt
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_treats_scalar_dependency_as_single_service() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "depends_on": "db",
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.depends_on == ("db",)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "companion",
     [
