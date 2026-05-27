@@ -92,9 +92,10 @@ async def _execute(
     monitor_log: WorkspaceLogSink | None,
     remote_push_url: str | None = None,
 ) -> bool:
-    """Execute one action. Returns True iff the monitor has reached a
-    terminal state (merged / notified / aborted / short-circuited)."""
+    """Execute one monitor action.
 
+    Returns True iff the monitor reached a terminal state.
+    """
     # One structured log line per iteration, BEFORE any side effect —
     # operators grepping logs need to see which arm the decision
     # core chose without having to correlate gh / git calls
