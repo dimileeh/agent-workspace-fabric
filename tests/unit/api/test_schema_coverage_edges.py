@@ -169,6 +169,71 @@ def test_workspace_companion_environment_schema_documents_value_interpolation_re
 
 
 @pytest.mark.unit
+def test_workspace_companion_accepts_non_default_repo_relative_paths() -> None:
+    companion = api_schemas.WorkspaceCompanionRequest.model_validate(
+        {
+            "name": "api",
+            "repo_url": "git@example.com:api.git",
+            "build_context": "services/api",
+            "dockerfile": "docker/Dockerfile",
+            "env_file": "config/dev.env",
+        }
+    )
+
+    assert companion.build_context == "services/api"
+    assert companion.dockerfile == "docker/Dockerfile"
+    assert companion.env_file == "config/dev.env"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["literal$", "$$TOKEN", "$-literal", "cost $5"])
+def test_workspace_companion_environment_accepts_literal_dollar_values(value: str) -> None:
+    companion = api_schemas.WorkspaceCompanionRequest.model_validate(
+        {
+            "name": "api",
+            "repo_url": "git@example.com:api.git",
+            "environment": {"VALUE": value},
+        }
+    )
+
+    assert companion.environment == {"VALUE": value}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["$TOKEN", "${TOKEN}"])
+def test_workspace_companion_environment_rejects_compose_interpolation_values(
+    value: str,
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment": {"VALUE": value},
+            }
+        )
+
+    assert "environment values must not contain Docker Compose interpolation" in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("environment", [{1: "x"}, {"BAD-NAME": "x"}])
+def test_workspace_companion_environment_rejects_invalid_raw_keys(
+    environment: dict[object, str],
+) -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment": environment,
+            }
+        )
+
+    assert "environment variable names" in str(exc.value)
+
+
+@pytest.mark.unit
 def test_workspace_companions_reject_repo_relative_volume_sources_with_colons() -> None:
     with pytest.raises(ValidationError) as exc:
         api_schemas.WorkspaceCreateRequest.model_validate(

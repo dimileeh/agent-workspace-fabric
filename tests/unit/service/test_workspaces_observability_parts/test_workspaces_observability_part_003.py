@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.pricing import PricingMetadata
 from awf.service.workspace_observability import (
     compute_cost_estimate,
+    workspace_recovery_summary,
     workspace_usage_summary,
 )
 from tests.postgres import postgres_test_engine
@@ -502,3 +504,54 @@ def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     assert usage.currency is None
     assert usage.status == "available"
     assert usage.source == "operations"
+
+
+@pytest.mark.unit
+def test_recovery_summary_bounds_json_payload_from_previous_recovery_event() -> None:
+    base = datetime(2026, 4, 27, 21, 42, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=20)
+    payload = {
+        "reason_code": "PAYLOAD_RECOVERY",
+        "action": "retry",
+        "when": reverse_at,
+        "nested": {f"k{index}": index for index in range(33)},
+        "items": list(range(25)),
+        "deep": {"a": {"b": {"c": {"d": {"too": "deep"}}}}},
+        "path": Path("artifact.txt"),
+        **{f"extra_{index}": index for index in range(40)},
+    }
+    workspace = _workspace_for_recovery(
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_previous_dispatch",
+                event_type="monitor.recovery_dispatched",
+                occurred_at=base + timedelta(seconds=5),
+                reason_code="RECOVERY_DISPATCH",
+                payload=payload,
+            ),
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.reason_code == "PAYLOAD_RECOVERY"
+    assert summary.action == "retry"
+    assert summary.recovery_mode is None
+    assert "AWF dispatched retry." in summary.summary
+    assert summary.payload is not None
+    assert summary.payload["when"] == reverse_at.isoformat()
+    assert summary.payload["nested"]["__truncated__"] is True
+    assert summary.payload["items"][-1] == "__truncated__"
+    assert summary.payload["deep"]["a"]["b"]["c"]["d"].startswith("{'too':")
+    assert summary.payload["path"] == "artifact.txt"
+    assert summary.payload["__truncated__"] is True

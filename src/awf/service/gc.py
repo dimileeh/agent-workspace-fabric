@@ -24,10 +24,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
-from awf.service.gc_companions import (
-    companion_worktree_paths_for_gc,
-    companion_worktree_remove_targets,
-)
+from awf.service import gc_worktrees as _gc_worktrees
+from awf.service.gc_companions import companion_worktree_paths_for_gc
 from awf.service.gc_time import normalize_statuses as _normalize_statuses
 from awf.service.gc_time import to_utc as _to_utc
 from awf.service.secret_leases import (
@@ -35,6 +33,14 @@ from awf.service.secret_leases import (
     SecretLeaseService,
     secret_lease_revocation_summary,
 )
+
+WorkspaceGCWorktreeRemoveResult = _gc_worktrees.WorkspaceGCWorktreeRemoveResult
+WorkspaceGCWorktreeRemoveTargetResult = _gc_worktrees.WorkspaceGCWorktreeRemoveTargetResult
+_blocked_worktree_paths_after_remove = _gc_worktrees.blocked_worktree_paths_after_remove
+_default_worktree_remover = _gc_worktrees.default_worktree_remover
+_run_worktree_remove = _gc_worktrees.run_worktree_remove
+_worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
+_worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 
 DEFAULT_MIN_AGE_HOURS = 168
 
@@ -155,51 +161,6 @@ class WorkspaceGCComposeTeardownResult:
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error:
-            payload["error"] = self.error
-        return payload
-
-
-@dataclass(frozen=True)
-class WorkspaceGCWorktreeRemoveResult:
-    """Structured outcome for optional git worktree removal before filesystem deletion."""
-
-    status: Literal["succeeded", "failed", "skipped", "partial"]
-    reason_code: str
-    error: str | None = None
-    target_results: tuple[WorkspaceGCWorktreeRemoveTargetResult, ...] = ()
-
-    @property
-    def ok(self) -> bool:
-        return self.status in {"succeeded", "skipped"}
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error:
-            payload["error"] = self.error
-        if self.target_results:
-            payload["target_results"] = [target.to_dict() for target in self.target_results]
-        return payload
-
-
-@dataclass(frozen=True)
-class WorkspaceGCWorktreeRemoveTargetResult:
-    """Structured result for one primary or companion git worktree removal."""
-
-    worktree_id: str
-    status: Literal["succeeded", "failed", "skipped"]
-    reason_code: str
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "worktree_id": self.worktree_id,
             "status": self.status,
             "reason_code": self.reason_code,
         }
@@ -1064,38 +1025,6 @@ def _worktree_remove_delete_errors(
     ]
 
 
-def _blocked_worktree_paths_after_remove(
-    candidate: WorkspaceGCCandidate,
-    worktree_remove: WorkspaceGCWorktreeRemoveResult,
-) -> set[Path]:
-    worktree_paths_by_id = _worktree_paths_by_id(candidate)
-    if not worktree_remove.target_results:
-        return set(worktree_paths_by_id.values())
-
-    reported_ids = {target.worktree_id for target in worktree_remove.target_results}
-    blocked_paths = {
-        worktree_paths_by_id[target.worktree_id]
-        for target in worktree_remove.target_results
-        if target.status == "failed" and target.worktree_id in worktree_paths_by_id
-    }
-    for worktree_id, path in worktree_paths_by_id.items():
-        if worktree_id not in reported_ids:
-            blocked_paths.add(path)
-    return blocked_paths
-
-
-def _worktree_paths_by_id(candidate: WorkspaceGCCandidate) -> dict[str, Path]:
-    paths = {candidate.workspace_id: candidate.worktree.path}
-    paths.update({target.path.name: target.path for target in candidate.companion_worktrees})
-    return paths
-
-
-def _worktree_id_for_gc_path(candidate: WorkspaceGCCandidate, path: WorkspaceGCPath) -> str:
-    if path.path == candidate.worktree.path:
-        return candidate.workspace_id
-    return path.path.name
-
-
 async def _run_compose_teardown(
     candidate: WorkspaceGCCandidate,
     compose_teardown: WorkspaceGCComposeTeardown | None,
@@ -1103,114 +1032,6 @@ async def _run_compose_teardown(
     if compose_teardown is None:
         return None
     result = compose_teardown(candidate)
-    if isawaitable(result):
-        result = await result
-    return result
-
-
-async def _default_worktree_remover(
-    candidate: WorkspaceGCCandidate,
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-    work_dir: Path,
-) -> WorkspaceGCWorktreeRemoveResult:
-    from awf.node.git_manager import GitManager
-
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, candidate.workspace_id)
-    if workspace is None or not workspace.repo_url:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="NO_REPO_URL",
-        )
-    git_manager = GitManager(work_dir / "git")
-    worktree_targets: list[tuple[str, str, bool]] = []
-    target_results: list[WorkspaceGCWorktreeRemoveTargetResult] = []
-    primary_path_exists = candidate.worktree.exists or candidate.worktree.path.exists()
-    if _is_existing_non_git_worktree(candidate.worktree.path):
-        target_results.append(
-            WorkspaceGCWorktreeRemoveTargetResult(
-                worktree_id=candidate.workspace_id,
-                status="skipped",
-                reason_code="WORKTREE_NOT_GIT_MANAGED",
-            )
-        )
-    else:
-        worktree_targets.append((candidate.workspace_id, workspace.repo_url, primary_path_exists))
-    companion_paths = {item.path.name: item for item in candidate.companion_worktrees}
-    for worktree_id, repo_url in companion_worktree_remove_targets(workspace):
-        companion_path = companion_paths.get(worktree_id)
-        companion_path_exists = companion_path is not None and (
-            companion_path.exists or companion_path.path.exists()
-        )
-        if companion_path is not None and _is_existing_non_git_worktree(companion_path.path):
-            target_results.append(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="skipped",
-                    reason_code="WORKTREE_NOT_GIT_MANAGED",
-                )
-            )
-            continue
-        worktree_targets.append((worktree_id, repo_url, companion_path_exists))
-    if not worktree_targets:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="WORKTREE_NOT_GIT_MANAGED",
-            target_results=tuple(target_results),
-        )
-    errors: list[str] = []
-    existing_path_successes: set[str] = set()
-    for worktree_id, repo_url, path_existed in worktree_targets:
-        try:
-            await git_manager.remove_worktree(workspace_id=worktree_id, repo_url=repo_url)
-        except Exception as exc:
-            error = str(exc)
-            errors.append(f"{worktree_id}: {error}")
-            target_results.append(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="failed",
-                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
-                    error=error,
-                )
-            )
-        else:
-            if path_existed:
-                existing_path_successes.add(worktree_id)
-            target_results.append(
-                WorkspaceGCWorktreeRemoveTargetResult(
-                    worktree_id=worktree_id,
-                    status="succeeded",
-                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
-                )
-            )
-    if errors:
-        status: Literal["failed", "partial"] = "partial" if existing_path_successes else "failed"
-        return WorkspaceGCWorktreeRemoveResult(
-            status=status,
-            reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error="; ".join(errors)[:1000],
-            target_results=tuple(target_results),
-        )
-    return WorkspaceGCWorktreeRemoveResult(
-        status="succeeded",
-        reason_code="WORKTREE_REMOVE_SUCCEEDED",
-        target_results=tuple(target_results),
-    )
-
-
-def _is_existing_non_git_worktree(path: Path) -> bool:
-    return path.exists() and not (path / ".git").exists()
-
-
-async def _run_worktree_remove(
-    candidate: WorkspaceGCCandidate,
-    worktree_remover: WorkspaceGCWorktreeRemove | None,
-) -> WorkspaceGCWorktreeRemoveResult | None:
-    if worktree_remover is None:
-        return None
-    result = worktree_remover(candidate)
     if isawaitable(result):
         result = await result
     return result
