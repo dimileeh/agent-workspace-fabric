@@ -397,6 +397,18 @@ const blockerReasonLabels: Record<MergeBlockerReason, string> = {
   stale: "stale",
 };
 
+const validationReasonLabels: Record<string, string> = {
+  VALIDATION_INSUFFICIENT_TIER: "validation tier not yet satisfied",
+  VALIDATION_MISSING_FOR_CURRENT_HEAD: "AWF validation missing for current PR head",
+  VALIDATION_SUCCEEDED: "validation succeeded",
+  validation_fresh: "validation fresh",
+  validation_insufficient_tier: "validation tier not yet satisfied",
+  validation_missing_for_current_head: "AWF validation missing for current PR head",
+  validation_target_stale: "validation target stale",
+  validation_target_unknown: "validation target unknown",
+  validation_unavailable: "validation unavailable",
+};
+
 function staleReasonLabel(reason: StaleReason): string {
   return reason.trigger_ref ? `${reason.reason_code} @ ${reason.trigger_ref}` : reason.reason_code;
 }
@@ -552,18 +564,7 @@ function formatFreshnessLabel(status: ValidationFreshnessStatus): string {
 }
 
 function formatValidationReasonLabel(reason: string): string {
-  const labels: Record<string, string> = {
-    VALIDATION_INSUFFICIENT_TIER: "validation tier not yet satisfied",
-    VALIDATION_MISSING_FOR_CURRENT_HEAD: "AWF validation missing for current PR head",
-    VALIDATION_SUCCEEDED: "validation succeeded",
-    validation_fresh: "validation fresh",
-    validation_insufficient_tier: "validation tier not yet satisfied",
-    validation_missing_for_current_head: "AWF validation missing for current PR head",
-    validation_target_stale: "validation target stale",
-    validation_target_unknown: "validation target unknown",
-    validation_unavailable: "validation unavailable",
-  };
-  return labels[reason] ?? reason;
+  return validationReasonLabels[reason] ?? reason;
 }
 
 function freshnessStatusFromBoolean(value: boolean | null | undefined): ValidationFreshnessStatus {
