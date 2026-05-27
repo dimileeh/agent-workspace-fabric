@@ -64,6 +64,29 @@ def test_companion_specs_from_task_policy_normalizes_optional_values(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "companion",
+    [
+        {
+            "name": "backend",
+            "repo_url": "git@example.com:api.git",
+        },
+        {
+            "name": "backend",
+            "repo_url": "git@example.com:api.git",
+            "base_branch": None,
+        },
+    ],
+)
+def test_companion_specs_from_task_policy_preserves_omitted_base_branch(
+    companion: dict[str, object],
+) -> None:
+    spec = companion_specs_from_task_policy({"companions": [companion]})[0]
+
+    assert spec.base_branch is None
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_stringifies_environment_values() -> None:
     spec = companion_specs_from_task_policy(
         {

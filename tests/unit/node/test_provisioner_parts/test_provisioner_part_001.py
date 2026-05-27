@@ -333,7 +333,11 @@ class TestSuccess:
                             "repo_url": "git@github.com:example/backend.git",
                             "base_branch": "main",
                             "build_context": "services/api",
-                        }
+                        },
+                        {
+                            "name": "worker",
+                            "repo_url": "git@github.com:example/worker.git",
+                        },
                     ]
                 },
             )
@@ -355,6 +359,12 @@ class TestSuccess:
                 "base_branch": "main",
                 "new_branch": f"awf/{workspace_id}/companion/backend",
             },
+            {
+                "workspace_id": f"{workspace_id}__companion__worker",
+                "repo_url": "git@github.com:example/worker.git",
+                "base_branch": "development",
+                "new_branch": f"awf/{workspace_id}/companion/worker",
+            },
         ]
         companion = launcher.requests[0].companions[0]
         assert companion.spec.name == "backend"
@@ -362,6 +372,9 @@ class TestSuccess:
         assert companion.layout.worktree_path == (
             tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__backend"
         )
+        defaulted_companion = launcher.requests[0].companions[1]
+        assert defaulted_companion.spec.name == "worker"
+        assert defaulted_companion.spec.base_branch is None
 
     @pytest.mark.unit
     async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(

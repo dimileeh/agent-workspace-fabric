@@ -24,7 +24,7 @@ class WorkspaceCompanionSpec:
 
     name: str
     repo_url: str
-    base_branch: str
+    base_branch: str | None = None
     build_context: str = "."
     dockerfile: str = "Dockerfile"
     env_file: str | None = None
@@ -226,10 +226,11 @@ def _duplicate_companion_service_names(
 
 
 def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionSpec:
+    base_branch = item.get("base_branch")
     return WorkspaceCompanionSpec(
         name=str(item["name"]),
         repo_url=str(item["repo_url"]),
-        base_branch=str(item["base_branch"]),
+        base_branch=str(base_branch) if base_branch is not None else None,
         build_context=str(item.get("build_context") or "."),
         dockerfile=str(item.get("dockerfile") or "Dockerfile"),
         env_file=(str(item["env_file"]) if item.get("env_file") is not None else None),

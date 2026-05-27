@@ -178,6 +178,7 @@ class Provisioner:
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
                     companions=companion_specs_from_task_policy(ws.task_policy),
+                    default_base_branch=ws.branch_base,
                 )
                 if not await self._recheck_status(
                     workspace_id,
@@ -367,14 +368,18 @@ class Provisioner:
         *,
         workspace_id: str,
         companions: tuple[WorkspaceCompanionSpec, ...],
+        default_base_branch: str,
     ) -> tuple[MaterializedCompanionService, ...]:
         materialized: list[MaterializedCompanionService] = []
         for companion in companions:
             companion_id = companion_worktree_id(workspace_id, companion.name)
+            base_branch = (
+                companion.base_branch if companion.base_branch is not None else default_base_branch
+            )
             layout = await self._git.add_worktree(
                 workspace_id=companion_id,
                 repo_url=companion.repo_url,
-                base_branch=companion.base_branch,
+                base_branch=base_branch,
                 new_branch=companion_branch_name(
                     branch_prefix=self._config.branch_prefix,
                     workspace_id=workspace_id,
