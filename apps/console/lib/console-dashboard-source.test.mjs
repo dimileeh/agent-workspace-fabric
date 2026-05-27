@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const dashboardSource = readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8");
+const dashboardSource = {
+  dashboard: readFileSync(new URL("../components/console-dashboard.tsx", import.meta.url), "utf8"),
+  overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
+  capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
+  shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
+};
 
 test("task details modal locks body scroll in a layout effect", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
@@ -37,11 +42,31 @@ test("capacity panel falls back to full reserved pressure reasons", () => {
 });
 
 function extractFunctionSource(functionName) {
-  const marker = `function ${functionName}(`;
-  const start = dashboardSource.indexOf(marker);
+  const markers = [`export function ${functionName}(`, `function ${functionName}(`];
+  let matchSource = null;
+  let start = -1;
+
+  for (const source of Object.values(dashboardSource)) {
+    for (const marker of markers) {
+      const found = source.indexOf(marker);
+      if (found >= 0) {
+        start = found;
+        matchSource = source;
+        break;
+      }
+    }
+    if (matchSource) {
+      break;
+    }
+  }
+
   assert.notEqual(start, -1, `Expected ${functionName} to exist`);
 
-  const nextFunction = dashboardSource.indexOf("\nfunction ", start + marker.length);
-  const end = nextFunction === -1 ? dashboardSource.length : nextFunction;
-  return dashboardSource.slice(start, end);
+  const nextFunction = matchSource.indexOf("\nexport function ", start + 1);
+  const nextPrivateFunction = matchSource.indexOf("\nfunction ", start + 1);
+  const next = [nextFunction, nextPrivateFunction]
+    .filter((idx) => idx > start)
+    .reduce((a, b) => (a === -1 || (b !== -1 && b < a) ? b : a), -1);
+  const end = next === -1 ? matchSource.length : next;
+  return matchSource.slice(start, end);
 }
