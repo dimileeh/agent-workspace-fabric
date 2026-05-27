@@ -226,19 +226,10 @@ async def _merge_gate_for_workspace(
         elif active_stale_reason is not None:
             candidate.stale = True
             candidate.stale_reason = active_stale_reason
-        elif (
-            candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
-            or (
-                docs_scope_validated_current_head
-                and candidate.stale_reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
-            )
-            or (
-                candidate.stale_reason is not None
-                and not stale_reason_blocks_merge(candidate.stale_reason)
-            )
-        ):
-            candidate.stale = False
-            candidate.stale_reason = None
+        elif candidate.stale_reason != stale_reason:
+            should_be_stale = stale_reason is not None
+            candidate.stale = should_be_stale
+            candidate.stale_reason = stale_reason
 
         sync_candidate_readiness(
             candidate,
