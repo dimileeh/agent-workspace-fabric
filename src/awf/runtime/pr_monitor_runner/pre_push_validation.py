@@ -52,6 +52,8 @@ PRE_PUSH_VALIDATION_FIX_FAILED_REASON = "PRE_PUSH_VALIDATION_FIX_FAILED"
 
 @dataclass(frozen=True)
 class _PrePushValidationResult:
+    """Pre-push validation outcome for a single workspace push attempt."""
+
     passed: bool
     validation_run_id: str | None
     workspace_head_sha: str | None
@@ -63,9 +65,11 @@ class _PrePushValidationResult:
 
     @property
     def first_failure(self) -> ValidationCommandResult | None:
+        """Return the first failed validation command, if any."""
         return self.result.first_failure if self.result is not None else None
 
     def failure_details(self) -> dict[str, object]:
+        """Build details payload for pre-push validation push failures."""
         details: dict[str, object] = {
             "phase": "pre_push_validation",
             "reason_code": self.reason_code,
@@ -94,6 +98,7 @@ async def _validated_git_push_result(
     refspec: str | None = None,
     state: object | None = None,
 ) -> _GitPushResult:
+    """Run pre-push validation with optional fix passes before pushing."""
     if self._deps.validation is None:
         return cast(
             _GitPushResult,
@@ -145,6 +150,7 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_url: str | None,
     state: object | None,
 ) -> _PrePushValidationResult:
+    """Execute pre-push validation plus optional fix/retry attempts."""
     max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
     validation_commands = await _pre_push_validation_commands(
         self,
@@ -198,6 +204,7 @@ async def _pre_push_validation_commands(
     workspace_id: str,
     worktree_path: Path,
 ) -> tuple[str, ...]:
+    """Load the post-agent and validate commands for a workspace profile."""
     async with self._deps.session_factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         if ws is None:
@@ -223,6 +230,7 @@ async def _run_pre_push_validation_fix_pass(
     total_passes: int,
     validation_commands: tuple[str, ...],
 ) -> bool:
+    """Attempt a validation fix pass using the failure context and evidence."""
     first_fail = validation_result.first_failure
     if first_fail is None:
         return False
@@ -324,6 +332,7 @@ async def _run_pre_push_validation(
     compose_file: Path,
     remote_branch: str,
 ) -> _PrePushValidationResult:
+    """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
         if ws is None:
@@ -447,6 +456,7 @@ async def _start_pre_push_validation_run(
     target_branch: str,
     tier: int,
 ) -> str:
+    """Create and start a pre-push validation run record."""
     command_records = _validation_run_command_records(
         profile=profile,
         phase_names=("post_agent", "validate"),
@@ -487,6 +497,7 @@ async def _finish_pre_push_validation_run(
     coverage: dict[str, object] | None = None,
     command_retries: list[int] | None = None,
 ) -> None:
+    """Finalize a pre-push validation run and persist completion details."""
     async with self._deps.session_factory() as session:
         await ValidationRunRepository(session).finish(
             validation_run_id,
