@@ -24,6 +24,12 @@ def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     )
     assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
     assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
+    assert "curl --fail --show-error --location" in dockerfile
+    assert "--retry 5" in dockerfile
+    assert "--retry-delay 2" in dockerfile
+    assert "--retry-all-errors" in dockerfile
+    assert "--connect-timeout 20" in dockerfile
+    assert "--max-time 300" in dockerfile
     assert "gh_${GH_VERSION}_checksums.txt" not in dockerfile
     assert 'expected_hash="${GH_AMD64_SHA256}"' in dockerfile
     assert 'expected_hash="${GH_ARM64_SHA256}"' in dockerfile

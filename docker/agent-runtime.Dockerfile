@@ -106,7 +106,14 @@ RUN set -eux; \
     fi; \
     gh_deb="/tmp/${gh_asset}"; \
     trap 'rm -f "$gh_deb"' EXIT; \
-    curl -fsSL -o "$gh_deb" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
+    curl --fail --show-error --location --silent \
+      --retry 5 \
+      --retry-delay 2 \
+      --retry-all-errors \
+      --connect-timeout 20 \
+      --max-time 300 \
+      -o "$gh_deb" \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
     actual_hash="$(sha256sum "$gh_deb")"; \
     actual_hash="${actual_hash%% *}"; \
     if [ "$actual_hash" != "$expected_hash" ]; then \
