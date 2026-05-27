@@ -213,10 +213,11 @@ export function summarizeValidation(
 ): ValidationSummary {
   const validation = item.latest_validation;
   if (!validation) {
-    const reasonLabel = formatValidationReasonLabel(item.validation_reason_code ?? "validation_unavailable");
+    const reasonCode = item.validation_reason_code ?? "validation_unavailable";
+    const reasonLabel = formatValidationReasonLabel(reasonCode);
     return {
       label: "none",
-      detail: reasonLabel,
+      detail: reasonCode,
       freshLabel: formatFreshnessLabel(item.validation_freshness_status ?? "unavailable"),
       headLabel: "unknown -> unknown",
       coverageLabel: "coverage unknown",
