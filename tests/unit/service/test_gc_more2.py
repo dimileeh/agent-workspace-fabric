@@ -505,7 +505,7 @@ async def test_gc_partial_worktree_remove_deletes_successful_worktree_paths(
         return WorkspaceGCWorktreeRemoveResult(
             status="partial",
             reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error="backend mirror not accessible",
+            error="one or more worktrees failed",
             target_results=(
                 WorkspaceGCWorktreeRemoveTargetResult(
                     worktree_id=workspace_id,
@@ -543,6 +543,16 @@ async def test_gc_partial_worktree_remove_deletes_successful_worktree_paths(
 
     assert result.status == "partial"
     assert result.worktree_removes[workspace_id].status == "partial"
+    assert [
+        (error.kind, error.path, error.reason_code, error.error) for error in result.delete_errors
+    ] == [
+        (
+            "worktree_remove",
+            backend,
+            "GIT_WORKTREE_REMOVE_FAILED",
+            "backend mirror not accessible",
+        )
+    ]
     assert paths["worktree"]["status"] == "deleted"
     assert paths[f"companion_worktree:{backend_id}"]["status"] == "skipped"
     assert paths[f"companion_worktree:{backend_id}"]["reason_code"] == (
@@ -1316,6 +1326,51 @@ async def test_gc_candidate_and_default_remover_include_companion_worktrees(
         "workspace_id": f"{workspace_id}__companion__backend",
         "repo_url": "git@github.com:example/backend.git",
     }
+
+
+async def test_gc_companion_worktree_paths_ignore_name_only_policy_entries(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    del engine
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="q" * 40,
+        task_policy={"companions": [{"name": "backend"}]},
+    )
+    companion_path = work_dir / "git" / "worktrees" / f"{workspace_id}__companion__backend"
+    _write(companion_path / ".git", "gitdir")
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+
+    candidate = next(item for item in plan.candidates if item.workspace_id == workspace_id)
+    assert candidate.companion_worktrees == ()
+
+    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
+        mock_gm = mock_gm_cls.return_value
+        mock_gm.remove_worktree = AsyncMock()
+        result = await _default_worktree_remover(
+            candidate,
+            session_factory=session_factory,
+            work_dir=work_dir,
+        )
+
+    assert result.status == "succeeded"
+    mock_gm.remove_worktree.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        repo_url="git@github.com:example/repo.git",
+    )
 
 
 async def test_default_worktree_remover_continues_after_companion_failure(

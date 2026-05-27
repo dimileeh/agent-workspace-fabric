@@ -955,15 +955,7 @@ async def _delete_gc_plan_paths(
         if wt_remove is not None:
             worktree_removes[candidate.workspace_id] = wt_remove
             if not wt_remove.ok:
-                delete_errors.append(
-                    WorkspaceGCDeleteError(
-                        workspace_id=candidate.workspace_id,
-                        kind="worktree_remove",
-                        path=candidate.worktree.path,
-                        error=wt_remove.error or wt_remove.reason_code,
-                        reason_code=wt_remove.reason_code,
-                    )
-                )
+                delete_errors.extend(_worktree_remove_delete_errors(candidate, wt_remove))
                 blocked_worktree_paths = _blocked_worktree_paths_after_remove(candidate, wt_remove)
                 target_results_by_id = {
                     target.worktree_id: target for target in wt_remove.target_results
@@ -1036,6 +1028,40 @@ async def _delete_gc_plan_paths(
                     )
                 )
     return deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes
+
+
+def _worktree_remove_delete_errors(
+    candidate: WorkspaceGCCandidate,
+    worktree_remove: WorkspaceGCWorktreeRemoveResult,
+) -> list[WorkspaceGCDeleteError]:
+    worktree_paths_by_id = _worktree_paths_by_id(candidate)
+    delete_errors: list[WorkspaceGCDeleteError] = []
+    for target in worktree_remove.target_results:
+        if target.status != "failed":
+            continue
+        target_path = worktree_paths_by_id.get(target.worktree_id)
+        if target_path is None:
+            continue
+        delete_errors.append(
+            WorkspaceGCDeleteError(
+                workspace_id=candidate.workspace_id,
+                kind="worktree_remove",
+                path=target_path,
+                error=target.error or worktree_remove.error or target.reason_code,
+                reason_code=target.reason_code,
+            )
+        )
+    if delete_errors:
+        return delete_errors
+    return [
+        WorkspaceGCDeleteError(
+            workspace_id=candidate.workspace_id,
+            kind="worktree_remove",
+            path=candidate.worktree.path,
+            error=worktree_remove.error or worktree_remove.reason_code,
+            reason_code=worktree_remove.reason_code,
+        )
+    ]
 
 
 def _blocked_worktree_paths_after_remove(
