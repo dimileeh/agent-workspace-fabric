@@ -169,6 +169,27 @@ def test_workspace_companion_environment_schema_documents_value_interpolation_re
 
 
 @pytest.mark.unit
+def test_workspace_companions_reject_repo_relative_volume_sources_with_colons() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCreateRequest.model_validate(
+            {
+                "repo": {"url": "git@github.com:example/app.git", "base_branch": "main"},
+                "task": _task(),
+                "companions": [
+                    {
+                        "name": "api",
+                        "repo_url": "git@example.com:api.git",
+                        "volumes": [("data:ro/files", "/fixtures")],
+                    }
+                ],
+            }
+        )
+
+    assert "volume source" in str(exc.value)
+    assert "colon" in str(exc.value)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("name", ["foo.lock", "foo..bar", "."])
 def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
     with pytest.raises(ValidationError) as exc:

@@ -49,6 +49,12 @@ def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
     _validate_companion_yaml_safe_path(field_name, value)
 
 
+def _validate_companion_repo_relative_volume_source(value: str) -> None:
+    _validate_companion_repo_relative_path("volume source", value)
+    if ":" in value:
+        raise ValueError("companion volume source must not contain colon characters")
+
+
 def _validate_companion_volume_target(value: str) -> None:
     if ":" in value or not PurePosixPath(value).is_absolute():
         raise ValueError(
@@ -225,7 +231,7 @@ class WorkspaceCompanionRequest(BaseModel):
     def _validate_volume_sources(cls, value: list[tuple[str, str]]) -> list[tuple[str, str]]:
         for source, target in value:
             if companion_volume_source_is_repo_relative(source):
-                _validate_companion_repo_relative_path("volume source", source)
+                _validate_companion_repo_relative_volume_source(source)
             elif _is_absolute_or_escaping_path(source):
                 raise ValueError("volume source must be a named volume or repo-relative path")
             else:
