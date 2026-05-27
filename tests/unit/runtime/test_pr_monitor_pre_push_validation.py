@@ -162,6 +162,7 @@ async def test_pre_push_validation_failure_does_not_push(
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=0,
     )
     runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
 

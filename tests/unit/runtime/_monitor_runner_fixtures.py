@@ -313,6 +313,7 @@ def make_runner(
     non_check_reviewer_logins: tuple[str, ...] | list[str] = ("greptile-apps",),
     stale_pending_check_warning_seconds: float = 900,
     max_outer_iterations: int = 20,
+    pre_push_validation_fix_passes: int = 1,
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
     merge_coordinator: object | None = None,
@@ -337,6 +338,7 @@ def make_runner(
         "runner_config": MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
             max_fix_cycle_passes=3,
+            pre_push_validation_fix_passes=pre_push_validation_fix_passes,
         ),
         "sleep": sleep_fn,
         "worktrees_root": worktrees_root,
