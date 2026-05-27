@@ -1,3 +1,5 @@
+"""Merge eligibility helpers for stale reason classification and required actions."""
+
 from __future__ import annotations
 
 from sqlalchemy import inspect
@@ -27,6 +29,7 @@ __all__ = [
 
 
 def stale_reason_required_action(reason_code: str | None) -> str | None:
+    """Return the recovery action implied by a merge stale reason."""
     if not stale_reason_blocks_merge(reason_code):
         return None
     if reason_code in (
