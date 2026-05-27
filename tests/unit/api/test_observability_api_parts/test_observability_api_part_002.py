@@ -377,12 +377,14 @@ class TestOperationsAndControls:
                 *,
                 workspace_id: str,
                 repo_url: str,
-                remove_volumes: bool,
-                remove_worktree: bool,
+                companion_worktrees: tuple[tuple[str, str], ...] = (),
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
                 compose_project_name: str | None = None,
                 compose_file_path: Path | None = None,
                 worktree_host_path: Path | None = None,
             ) -> list[str]:
+                _ = companion_worktrees
                 calls.append(
                     {
                         "workspace_id": workspace_id,

@@ -92,12 +92,14 @@ class RecordingCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> list[str]:
+        _ = companion_worktrees
         self.calls.append(
             CleanupCall(
                 workspace_id=workspace_id,
@@ -122,6 +124,7 @@ class StaleCallbackCleaner(RecordingCleaner):
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -131,6 +134,7 @@ class StaleCallbackCleaner(RecordingCleaner):
         result = await super().cleanup(
             workspace_id=workspace_id,
             repo_url=repo_url,
+            companion_worktrees=companion_worktrees,
             compose_project_name=compose_project_name,
             compose_file_path=compose_file_path,
             worktree_host_path=worktree_host_path,
@@ -685,6 +689,7 @@ async def test_destroy_workspace_revokes_active_secret_leases_before_cleanup(
             *,
             workspace_id: str,
             repo_url: str,
+            companion_worktrees: tuple[tuple[str, str], ...] = (),
             compose_project_name: str | None = None,
             compose_file_path: Path | None = None,
             worktree_host_path: Path | None = None,
@@ -696,6 +701,7 @@ async def test_destroy_workspace_revokes_active_secret_leases_before_cleanup(
             return await super().cleanup(
                 workspace_id=workspace_id,
                 repo_url=repo_url,
+                companion_worktrees=companion_worktrees,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
                 worktree_host_path=worktree_host_path,

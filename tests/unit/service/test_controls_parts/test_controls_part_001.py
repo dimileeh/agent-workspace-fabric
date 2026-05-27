@@ -130,12 +130,14 @@ class _RecordingCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> list[str]:
+        _ = companion_worktrees
         self.calls.append(
             {
                 "workspace_id": workspace_id,
@@ -160,12 +162,14 @@ class _SequencedCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> Mapping[str, object]:
+        _ = companion_worktrees
         self.calls.append(
             {
                 "workspace_id": workspace_id,
@@ -756,6 +760,7 @@ async def test_destroy_cleanup_failure_without_primary_evidence_records_secondar
                 *,
                 workspace_id: str,
                 repo_url: str,
+                companion_worktrees: tuple[tuple[str, str], ...] = (),
                 compose_project_name: str | None = None,
                 compose_file_path: Path | None = None,
                 worktree_host_path: Path | None = None,
@@ -765,6 +770,7 @@ async def test_destroy_cleanup_failure_without_primary_evidence_records_secondar
                 failures = await super().cleanup(
                     workspace_id=workspace_id,
                     repo_url=repo_url,
+                    companion_worktrees=companion_worktrees,
                     compose_project_name=compose_project_name,
                     compose_file_path=compose_file_path,
                     worktree_host_path=worktree_host_path,
@@ -1040,6 +1046,7 @@ async def test_destroy_cleanup_failure_records_secondary_when_workspace_already_
                 *,
                 workspace_id: str,
                 repo_url: str,
+                companion_worktrees: tuple[tuple[str, str], ...] = (),
                 compose_project_name: str | None = None,
                 compose_file_path: Path | None = None,
                 worktree_host_path: Path | None = None,
@@ -1049,6 +1056,7 @@ async def test_destroy_cleanup_failure_records_secondary_when_workspace_already_
                 failures = await super().cleanup(
                     workspace_id=workspace_id,
                     repo_url=repo_url,
+                    companion_worktrees=companion_worktrees,
                     compose_project_name=compose_project_name,
                     compose_file_path=compose_file_path,
                     worktree_host_path=worktree_host_path,

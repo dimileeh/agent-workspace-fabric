@@ -650,12 +650,14 @@ async def test_workspace_service_control_wrappers_commit_results(
             *,
             workspace_id: str,
             repo_url: str,
+            companion_worktrees: tuple[tuple[str, str], ...] = (),
             compose_project_name: str | None = None,
             compose_file_path: Path | None = None,
             worktree_host_path: Path | None = None,
             remove_volumes: bool = True,
             remove_worktree: bool = True,
         ) -> list[str]:
+            _ = companion_worktrees
             assert repo_url == "git@github.com:example/controls.git"
             assert compose_file_path is None
             assert worktree_host_path is None
