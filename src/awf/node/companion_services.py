@@ -79,7 +79,7 @@ def validate_companion_service_graph(
     companions: tuple[MaterializedCompanionService, ...],
     docker_mode: DockerMode,
 ) -> None:
-    """Validate companion/profile service names and dependency targets."""
+    """Validate companion/profile service names, dependency targets, and cycles."""
     profile_names = {service.name for service in profile_services}
     companion_names = {companion.spec.name for companion in companions}
     collisions = sorted(profile_names & companion_names)
@@ -111,6 +111,60 @@ def validate_companion_service_graph(
             f"unknown companion/profile service dependency target: {', '.join(sorted(unknown))}",
             reason_code="COMPANION_SERVICE_DEPENDENCY_UNKNOWN",
         )
+
+    cycle = _companion_service_dependency_cycle(
+        profile_services=profile_services,
+        companions=companions,
+    )
+    if cycle is not None:
+        raise ProfileResolutionError(
+            f"circular companion/profile service dependency: {'->'.join(cycle)}",
+            reason_code="COMPANION_SERVICE_DEPENDENCY_CYCLE",
+        )
+
+
+def _companion_service_dependency_cycle(
+    *,
+    profile_services: tuple[ComposeService, ...],
+    companions: tuple[MaterializedCompanionService, ...],
+) -> tuple[str, ...] | None:
+    graph: dict[str, tuple[str, ...]] = {
+        service.name: tuple(service.depends_on) for service in profile_services
+    }
+    graph.update(
+        {companion.spec.name: tuple(companion.spec.depends_on) for companion in companions}
+    )
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+    stack_indexes: dict[str, int] = {}
+
+    def visit(name: str) -> tuple[str, ...] | None:
+        if name in visited:
+            return None
+        if name in visiting:
+            return (*stack[stack_indexes[name] :], name)
+
+        visiting.add(name)
+        stack_indexes[name] = len(stack)
+        stack.append(name)
+        for dependency in graph[name]:
+            if dependency not in graph:
+                continue
+            cycle = visit(dependency)
+            if cycle is not None:
+                return cycle
+        stack.pop()
+        del stack_indexes[name]
+        visiting.remove(name)
+        visited.add(name)
+        return None
+
+    for service_name in graph:
+        cycle = visit(service_name)
+        if cycle is not None:
+            return cycle
+    return None
 
 
 def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionSpec:

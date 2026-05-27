@@ -169,3 +169,66 @@ def test_validate_companion_service_graph_rejects_unknown_dependencies(tmp_path:
     assert exc.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNKNOWN"
     assert "backend->missing-companion-target" in str(exc.value)
     assert "web->missing-profile-target" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_validate_companion_service_graph_rejects_self_dependency(tmp_path: Path) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            base_branch="main",
+            depends_on=("backend",),
+        ),
+        layout=_layout(companion_root),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=(),
+            companions=(companion,),
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_CYCLE"
+    assert "backend->backend" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_validate_companion_service_graph_rejects_companion_dependency_cycle(
+    tmp_path: Path,
+) -> None:
+    api_root = tmp_path / "api"
+    worker_root = tmp_path / "worker"
+    api_root.mkdir()
+    worker_root.mkdir()
+    api = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="api",
+            repo_url="git@example.com:api.git",
+            base_branch="main",
+            depends_on=("worker",),
+        ),
+        layout=_layout(api_root),
+    )
+    worker = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="worker",
+            repo_url="git@example.com:worker.git",
+            base_branch="main",
+            depends_on=("api",),
+        ),
+        layout=_layout(worker_root),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        validate_companion_service_graph(
+            profile_services=(),
+            companions=(api, worker),
+            docker_mode=DockerMode.none,
+        )
+
+    assert exc.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_CYCLE"
+    assert "api->worker->api" in str(exc.value)
