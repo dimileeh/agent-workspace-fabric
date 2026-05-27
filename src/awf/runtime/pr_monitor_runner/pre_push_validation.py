@@ -418,7 +418,7 @@ async def _run_pre_push_validation(
             passed=False,
             validation_run_id=validation_run_id,
             workspace_head_sha=workspace_head_sha,
-            reason_code=exc.reason_code,
+            reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message=message,
         )
     except Exception as exc:

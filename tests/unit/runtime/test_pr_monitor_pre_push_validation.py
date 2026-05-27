@@ -25,7 +25,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
 )
-from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
 from awf.runtime.validation_types import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -390,7 +390,7 @@ async def test_pre_push_validation_cleanup_error_records_failed_run(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Validation cleanup failures should persist the cleanup reason and block push."""
+    """Cleanup failures should persist cleanup detail but classify push as infrastructure."""
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -424,8 +424,10 @@ async def test_pre_push_validation_cleanup_error_records_failed_run(
     )
 
     assert result.failed is True
-    assert result.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+    assert result.reason_code == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
+    assert _git_push_failure_outcome(result) == "pre_push_validation_failed"
     assert result.details is not None
+    assert result.details["reason_code"] == "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
     assert result.details["workspace_head_sha"] == local_head
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].status == "failed"
