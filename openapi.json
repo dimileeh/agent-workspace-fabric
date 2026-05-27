@@ -7155,6 +7155,7 @@
             "type": "string"
           },
           "ports": {
+            "description": "Port mappings use [container_port, host_port] order. AWF renders them to Docker Compose as host_port:container_port.",
             "items": {
               "maxItems": 2,
               "minItems": 2,

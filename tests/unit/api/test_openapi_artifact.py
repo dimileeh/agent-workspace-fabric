@@ -153,6 +153,16 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
 
 
 @pytest.mark.unit
+def test_workspace_companion_ports_document_container_first_order(openapi_spec: dict) -> None:
+    description = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"]["properties"][
+        "ports"
+    ]["description"]
+
+    assert "[container_port, host_port]" in description
+    assert "host_port:container_port" in description
+
+
+@pytest.mark.unit
 def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: dict) -> None:
     command_items = openapi_spec["components"]["schemas"]["WorkspaceValidation"]["properties"][
         "commands"

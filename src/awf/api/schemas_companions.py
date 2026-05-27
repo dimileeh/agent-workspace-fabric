@@ -53,7 +53,14 @@ class WorkspaceCompanionRequest(BaseModel):
     healthcheck_cmd: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = (
         None
     )
-    ports: list[tuple[int, int]] = Field(default_factory=list, max_length=64)
+    ports: list[tuple[int, int]] = Field(
+        default_factory=list,
+        max_length=64,
+        description=(
+            "Port mappings use [container_port, host_port] order. AWF renders "
+            "them to Docker Compose as host_port:container_port."
+        ),
+    )
     command: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = None
     volumes: list[CompanionVolume] = Field(default_factory=list, max_length=64)
 
