@@ -972,7 +972,7 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
         operations = await OperationRepository(session).list_all(workspace_id=ws_id)
     recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     assert recovery_operations
-    assert recovery_operations[-1].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+    assert recovery_operations[-1].payload["reason_code"] == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
     assert recovery_operations[-1].payload["source_head_sha"] == "head-b"
     assert any(
         entry.get("event") == "monitor.non_check_reviewer_settle_started" for entry in captured
