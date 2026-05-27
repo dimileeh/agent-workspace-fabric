@@ -16,7 +16,12 @@ def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     assert "ARG GH_VERSION=2.92.0" in dockerfile
     assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
     assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
+    assert "gh_${GH_VERSION}_checksums.txt" in dockerfile
+    assert "sha256sum -c -" in dockerfile
     assert "amd64|arm64" in dockerfile
+    assert dockerfile.index("sha256sum -c -") < dockerfile.index(
+        'apt-get install -y --no-install-recommends "$gh_deb"'
+    )
     assert 'apt-get install -y --no-install-recommends "$gh_deb"' in dockerfile
     assert "gh --version" in dockerfile
 

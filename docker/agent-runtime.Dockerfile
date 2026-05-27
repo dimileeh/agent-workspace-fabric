@@ -96,10 +96,14 @@ RUN set -eux; \
       amd64|arm64) ;; \
       *) echo "Unsupported GitHub CLI architecture: $gh_arch" >&2; exit 1 ;; \
     esac; \
-    gh_deb="/tmp/gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
-    curl -fsSL -o "$gh_deb" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
+    gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
+    gh_deb="/tmp/${gh_asset}"; \
+    gh_checksums="/tmp/gh_${GH_VERSION}_checksums.txt"; \
+    trap 'rm -f "$gh_deb" "$gh_checksums"' EXIT; \
+    curl -fsSL -o "$gh_deb" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
+    curl -fsSL -o "$gh_checksums" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
+    (cd /tmp && grep -F "  ${gh_asset}" "$gh_checksums" | sha256sum -c -); \
     apt-get install -y --no-install-recommends "$gh_deb"; \
-    rm -f "$gh_deb"; \
     gh --version
 
 # ── Stage 4: Node.js (for coding CLIs which are all npm packages) ──────────
