@@ -400,7 +400,7 @@ async def test_pr_166_regression_auto_merge_blocks_when_pr_head_changed_after_va
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
     recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     assert len(recovery_operations) == 1
-    assert recovery_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+    assert recovery_operations[0].payload["reason_code"] == "VALIDATION_MISSING_FOR_CURRENT_HEAD"
     assert recovery_operations[0].payload["requested_action"] == "validate"
     assert recovery_operations[0].payload["source_head_sha"] == "post-review-fix-head"
 

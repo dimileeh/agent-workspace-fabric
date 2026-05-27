@@ -176,6 +176,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "runner": runner,
             "adapter": adapter,
             "gh": gh,
+            "validation": validation,
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,

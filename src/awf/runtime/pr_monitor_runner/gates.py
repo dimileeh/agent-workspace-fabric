@@ -82,6 +82,7 @@ def _has_successful_validation_for_pr_head(
     attempt_id: str,
     current_head_sha: str | None,
 ) -> bool:
+    """Return ``True`` when the attempt has a succeeded run for ``current_head_sha``."""
     if current_head_sha is None:
         return False
     state = inspect(workspace)
@@ -113,6 +114,7 @@ async def _merge_gate_for_workspace(
     from awf.runtime.merge_eligibility import (
         DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
         VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
         compute_stale_reason_for_attempt,
         stale_reason_blocks_merge,
         stale_reason_required_action,
@@ -155,15 +157,15 @@ async def _merge_gate_for_workspace(
                 current_head_sha=current_head_sha,
             )
         ):
-            validation_reason = VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+            validation_reason = VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON
             validation_action = "validate"
 
         persisted_stale_reason = candidate.stale_reason or "stale" if candidate.stale else None
         if not stale_reason_blocks_merge(persisted_stale_reason):
             persisted_stale_reason = None
-        if (
-            validation_reason is None
-            and persisted_stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+        if validation_reason is None and persisted_stale_reason in (
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            VALIDATION_MISSING_FOR_CURRENT_HEAD_STALE_REASON,
         ):
             persisted_stale_reason = None
         docs_scope_validated_current_head = (
@@ -226,18 +228,11 @@ async def _merge_gate_for_workspace(
             candidate.stale = True
             candidate.stale_reason = active_stale_reason
         elif (
-            candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
-            or (
-                docs_scope_validated_current_head
-                and candidate.stale_reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
-            )
-            or (
-                candidate.stale_reason is not None
-                and not stale_reason_blocks_merge(candidate.stale_reason)
-            )
+            candidate.stale != (stale_reason is not None) or candidate.stale_reason != stale_reason
         ):
-            candidate.stale = False
-            candidate.stale_reason = None
+            should_be_stale = stale_reason is not None
+            candidate.stale = should_be_stale
+            candidate.stale_reason = stale_reason
 
         sync_candidate_readiness(
             candidate,

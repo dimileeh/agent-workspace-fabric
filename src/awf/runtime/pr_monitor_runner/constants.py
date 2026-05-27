@@ -106,6 +106,15 @@ _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 
+_VALIDATION_MISSING_CURRENT_HEAD_STALE_REASON = "validation_missing_for_current_head"
+
+_VALIDATION_RECOVERY_STALE_REASONS = frozenset(
+    {
+        _VALIDATION_INSUFFICIENT_STALE_REASON,
+        _VALIDATION_MISSING_CURRENT_HEAD_STALE_REASON,
+    }
+)
+
 _SYNC_BASE_RESOLVABLE_STALE_REASONS: frozenset[str] = frozenset(
     {
         REASON_TARGET_ADVANCED,
@@ -214,6 +223,9 @@ _PR_MONITOR_STALE_REASON_MESSAGES = {
     "validation_insufficient_tier": (
         "Required validation tier has not passed for this merge candidate."
     ),
+    "validation_missing_for_current_head": (
+        "AWF validation has not passed for the current PR head."
+    ),
     "docs_task_scope_violation": "Changed files are outside the docs task scope.",
     "STALE_TARGET_ADVANCED": "Target branch advanced after this merge candidate was validated.",
     "STALE_OVERLAP": "Target branch changed an owned path for this merge candidate.",
@@ -225,6 +237,7 @@ _PR_MONITOR_STALE_REASON_MESSAGES = {
 
 _PR_MONITOR_REASON_CODES_BY_STALE_REASON = {
     "validation_insufficient_tier": "VALIDATION_INSUFFICIENT_TIER",
+    "validation_missing_for_current_head": "VALIDATION_MISSING_FOR_CURRENT_HEAD",
     "docs_task_scope_violation": "DOCS_TASK_SCOPE_VIOLATION",
     "stale": "STALE",
 }

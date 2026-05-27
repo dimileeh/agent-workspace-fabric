@@ -20,6 +20,11 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_VALIDATION_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -54,6 +59,8 @@ _TERMINAL_WORKSPACE_STATUSES = {
 
 @dataclass(frozen=True)
 class _GitPushResult:
+    """Result envelope for a monitor-owned git push attempt."""
+
     pushed: bool
     failed: bool
     returncode: int
@@ -65,12 +72,14 @@ class _GitPushResult:
 
     @property
     def error_message(self: Any) -> str | None:
+        """Return a normalized push error message when the push failed."""
         if not self.failed:
             return None
         return self.stderr.strip() or "<no output>"
 
     @property
     def protected_scope_blocked(self: Any) -> bool:
+        """Return whether protected-scope policy blocked this push."""
         return self.failed and self.reason_code in {
             _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
             _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
@@ -78,10 +87,12 @@ class _GitPushResult:
 
     @property
     def protected_scope_diff_unavailable(self) -> bool:
+        """Return whether protected-scope diff evidence could not be gathered."""
         return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 
     @property
     def terminal_monitor_failure(self: Any) -> bool:
+        """Return whether the push failure should end monitor recovery."""
         return self.failed and (
             self.protected_scope_blocked
             or self.reason_code
@@ -94,6 +105,7 @@ class _GitPushResult:
         )
 
     def failure_evidence(self: Any) -> dict[str, object]:
+        """Build structured evidence for a failed push operation."""
         evidence: dict[str, object] = {
             "operation": "git push",
             "returncode": self.returncode,
@@ -109,12 +121,21 @@ class _GitPushResult:
 
 @dataclass(frozen=True)
 class _ProtectedScopePushBlock:
+    """Protected-scope policy decision that blocks a monitor push."""
+
     message: str
     reason_code: str
     violations: tuple[Any, ...] = ()
 
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
+    """Map a push result to the monitor operation outcome label."""
+    if push_result.reason_code in {
+        _PRE_PUSH_VALIDATION_FAILED_REASON,
+        _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+        _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+    }:
+        return "pre_push_validation_failed"
     if push_result.protected_scope_diff_unavailable:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:
@@ -129,6 +150,7 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
 
 
 def _git_failure_message(operation: str, result: CommandResult) -> str:
+    """Format a concise failure message for a git command result."""
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
     output = f"; stderr: {stderr}" if stderr else f"; stdout: {stdout}" if stdout else ""
@@ -141,6 +163,7 @@ def _append_git_recovery_failure(
     recovery_stderr: str | None,
     operation: str,
 ) -> str:
+    """Append recovery failure context to the original push failure output."""
     push_msg = (push_stderr or "").strip()
     recovery_msg = (recovery_stderr or "").strip()
     lines = []
@@ -159,6 +182,7 @@ async def _refresh_supply_chain_policy_before_push(
     command_evidence: Sequence[str],
     changed_paths: Sequence[str],
 ) -> str | None:
+    """Refresh supply-chain policy findings before a monitor-authored push."""
     from awf.runtime.pr_monitor_runner.helpers import _supply_chain_policy_blocked_message
     from awf.service.supply_chain_policy import (
         SupplyChainPolicyRefreshError,
@@ -195,6 +219,7 @@ async def _fetch_base(
     worktree_path: Path,
     base_branch: str,
 ) -> None:
+    """Fetch the PR base branch, repairing orphaned AWF refs when possible."""
     result = await runner._fetch_base_once(worktree_path=worktree_path, base_branch=base_branch)
     repairs_attempted = 0
     while not result.ok and repairs_attempted < _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS:
@@ -236,6 +261,7 @@ async def _fetch_base_once(
     worktree_path: Path,
     base_branch: str,
 ) -> CommandResult:
+    """Run one forced fetch of the base branch into the local origin mirror."""
     return await runner._deps.runner.run(
         [
             "git",
@@ -256,6 +282,7 @@ async def _repair_orphaned_broken_awf_ref(
     worktree_path: Path,
     stderr: str,
 ) -> bool:
+    """Remove an orphaned AWF ref that prevents fetching from the origin mirror."""
     match = _BROKEN_AWF_REF_RE.search(stderr or "")
     if match is None:
         return False
@@ -315,6 +342,7 @@ async def _repair_orphaned_broken_awf_ref(
 
 
 async def _can_remove_broken_awf_ref(self: Any, broken_workspace_id: str) -> bool:
+    """Return whether an AWF ref belongs to a terminal or unknown workspace."""
     async with self._deps.session_factory() as session:
         workspace = await WorkspaceRepository(session).get(broken_workspace_id)
         if workspace is None:
@@ -323,6 +351,7 @@ async def _can_remove_broken_awf_ref(self: Any, broken_workspace_id: str) -> boo
 
 
 async def _count_base_behind(self: Any, *, worktree_path: Path, base_branch: str) -> int:
+    """Count commits by which the worktree HEAD trails the fetched base branch."""
     result = await self._deps.runner.run(
         [
             "git",
@@ -345,6 +374,7 @@ async def _count_base_behind(self: Any, *, worktree_path: Path, base_branch: str
 
 
 async def _rev_parse_head(self: Any, worktree_path: Path) -> str | None:
+    """Resolve the current worktree HEAD SHA, returning None on failure."""
     result = await self._deps.runner.run(
         [
             "git",
@@ -368,6 +398,7 @@ async def _git_push(
     remote_branch: str,
     remote_url: str | None = None,
 ) -> bool:
+    """Push HEAD to the remote branch and report whether anything was pushed."""
     refspec = f"HEAD:refs/heads/{remote_branch}"
     result = await runner._git_push_result(
         worktree_path=worktree_path,
@@ -386,6 +417,7 @@ async def _git_push_result(
     remote_url: str | None = None,
     refspec: str | None = None,
 ) -> _GitPushResult:
+    """Push HEAD and return detailed failure or resync information."""
     from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
 
     remote = remote_url or "origin"
@@ -485,6 +517,7 @@ async def _run_sync_base(
     runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
+    state: object | None = None,
     repo: RepoRef,
     pr_number: int,
     base_branch: str,
@@ -493,12 +526,14 @@ async def _run_sync_base(
     compose_project: str,
     compose_file: Path,
 ) -> _GitPushResult:
+    """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
     from awf.runtime.pr_monitor_runner.comments import _git_worktree_command
 
     worktree_path = runner._worktrees_root / workspace_id
 
     async def _git(*args: str) -> tuple[int, str, str]:
+        """Run a git command in the sync-base worktree."""
         r = await runner._deps.runner.run(_git_worktree_command(worktree_path, *args))
         return r.returncode, r.stdout, r.stderr
 
@@ -591,10 +626,14 @@ async def _run_sync_base(
             stderr=protected_scope_block.message,
             reason_code=protected_scope_block.reason_code,
         )
-    return await runner._git_push_result(
+    return await runner._validated_git_push_result(
+        workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
+        compose_project=compose_project,
+        compose_file=compose_file,
         remote_url=remote_push_url,
+        state=state,
     )
 
 
@@ -604,6 +643,7 @@ async def _refresh_staleness_after_sync_base(
     workspace_id: str,
     base_branch: str,
 ) -> None:
+    """Refresh candidate stale state after a successful sync-base repair."""
     from awf.db.repositories import (
         MergeCandidateRepository,
         StaleReasonCreate,

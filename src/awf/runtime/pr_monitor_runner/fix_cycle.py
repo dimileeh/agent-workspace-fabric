@@ -257,10 +257,14 @@ async def _run_fix_cycle(
             source_head_sha=operation_start_head,
         )
         if protected_scope_block is not None
-        else await self._git_push_result(
+        else await self._validated_git_push_result(
+            workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
             remote_url=remote_push_url,
+            state=state,
         )
     )
     pushed_head_sha: str | None = None

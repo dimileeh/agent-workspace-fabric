@@ -89,6 +89,22 @@ async def ready_app_and_client(
         work_dir=str(tmp_path / "work"),
     )
     monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
+
+    # Part 002 covers Docker/orphan-resource readiness paths. The DB health
+    # probe and egress summary timeout behavior have dedicated coverage in part
+    # 001, so keep these endpoint tests isolated from CI database latency.
+    async def _db_ok(_factory: Any) -> health_route.CheckResult:
+        return health_route.CheckResult(ok=True, status="ok")
+
+    async def _empty_egress_counts(_factory: Any, _state: Any) -> dict[str, int]:
+        return {}
+
+    monkeypatch.setattr(health_route, "_check_db", _db_ok)
+    monkeypatch.setattr(
+        health_route,
+        "_egress_audit_summary_counts_with_timeout",
+        _empty_egress_counts,
+    )
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     try:

@@ -82,7 +82,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TOKEN_RE,
     _TRANSIENT_GITHUB_ERROR_MARKERS,
     _URL_CREDENTIAL_RE,
-    _VALIDATION_INSUFFICIENT_STALE_REASON,
+    _VALIDATION_RECOVERY_STALE_REASONS,
     _VERDICT_DEFER,
     _VERDICT_FALSE_POSITIVE,
 )
@@ -913,8 +913,9 @@ def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
 
 
 def _gate_requires_validation_recovery(gate: _MergeGateResult) -> bool:
-    return gate.stale_reason == _VALIDATION_INSUFFICIENT_STALE_REASON and (
-        gate.req_action in (None, "validate")
+    return gate.stale_reason in _VALIDATION_RECOVERY_STALE_REASONS and gate.req_action in (
+        None,
+        "validate",
     )
 
 

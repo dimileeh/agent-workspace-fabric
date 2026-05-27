@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const ciBrowserChannel = process.env.CI ? { channel: "chrome" as const } : {};
+
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
@@ -17,7 +19,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: { ...devices["Desktop Chrome"], ...ciBrowserChannel },
     },
   ],
 });
