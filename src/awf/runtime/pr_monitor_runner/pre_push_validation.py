@@ -177,6 +177,8 @@ async def _run_pre_push_validation_with_fix_passes(
         last_result = validation_result
         if validation_result.reason_code == PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON:
             return validation_result
+        if validation_result.first_failure is None:
+            return validation_result
         if pass_index >= max_fix_passes:
             break
         committed = await _run_pre_push_validation_fix_pass(
