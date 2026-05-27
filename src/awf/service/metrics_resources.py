@@ -120,7 +120,7 @@ def _local_capacity_source_summary(
         source = detected.source
     reason_code = detected.reason_code
     detail = detected.detail
-    if source in {"operator_config", "mixed"}:
+    if source == "operator_config":
         reason_code = None
         detail = None
 

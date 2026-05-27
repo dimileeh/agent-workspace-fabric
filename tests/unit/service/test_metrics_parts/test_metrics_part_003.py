@@ -215,10 +215,17 @@ async def test_resource_saturation_reports_reserved_disk_dind_and_available_capa
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("cpu_configured", "memory_configured", "expected_source"),
     (
-        (True, True, "operator_config"),
-        (True, False, "mixed"),
+        "cpu_configured",
+        "memory_configured",
+        "expected_source",
+        "expected_reason_code",
+        "expected_detail",
+    ),
+    (
+        (True, True, "operator_config", None, None),
+        (True, False, "mixed", "DOCKER_INFO_UNAVAILABLE", "docker daemon down"),
+        (False, True, "mixed", "DOCKER_INFO_UNAVAILABLE", "docker daemon down"),
     ),
 )
 async def test_resource_saturation_omits_docker_errors_for_operator_overrides(
@@ -226,6 +233,8 @@ async def test_resource_saturation_omits_docker_errors_for_operator_overrides(
     cpu_configured: bool,
     memory_configured: bool,
     expected_source: str,
+    expected_reason_code: str | None,
+    expected_detail: str | None,
 ) -> None:
     from awf.service.metrics import summarize_resource_saturation
 
@@ -254,8 +263,8 @@ async def test_resource_saturation_omits_docker_errors_for_operator_overrides(
     assert summary.local_capacity.source == expected_source
     assert summary.local_capacity.cpu_cores == (24.0 if cpu_configured else 8.0)
     assert summary.local_capacity.memory_gb == (96.0 if memory_configured else 16.0)
-    assert summary.local_capacity.reason_code is None
-    assert summary.local_capacity.detail is None
+    assert summary.local_capacity.reason_code == expected_reason_code
+    assert summary.local_capacity.detail == expected_detail
 
 
 @pytest.mark.unit
