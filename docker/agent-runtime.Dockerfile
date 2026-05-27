@@ -102,7 +102,14 @@ RUN set -eux; \
     trap 'rm -f "$gh_deb" "$gh_checksums"' EXIT; \
     curl -fsSL -o "$gh_deb" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
     curl -fsSL -o "$gh_checksums" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
-    (cd /tmp && grep -F "  ${gh_asset}" "$gh_checksums" | sha256sum -c -); \
+    expected_hash="$(awk -v asset="$gh_asset" '$2 == asset { print $1; found=1 } END { exit found ? 0 : 1 }' "$gh_checksums")" \
+      || { echo "Missing GitHub CLI checksum for ${gh_asset}" >&2; exit 1; }; \
+    actual_hash="$(sha256sum "$gh_deb")"; \
+    actual_hash="${actual_hash%% *}"; \
+    if [ "$actual_hash" != "$expected_hash" ]; then \
+      echo "GitHub CLI checksum mismatch for ${gh_asset}: expected ${expected_hash}, got ${actual_hash}" >&2; \
+      exit 1; \
+    fi; \
     apt-get install -y --no-install-recommends "$gh_deb"; \
     gh --version
 

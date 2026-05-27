@@ -17,9 +17,19 @@ def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
     assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
     assert "gh_${GH_VERSION}_checksums.txt" in dockerfile
-    assert "sha256sum -c -" in dockerfile
+    assert 'expected_hash="$(awk -v asset="$gh_asset"' in dockerfile
+    assert 'actual_hash="$(sha256sum "$gh_deb")"' in dockerfile
+    assert 'actual_hash="${actual_hash%% *}"' in dockerfile
+    assert "Missing GitHub CLI checksum for ${gh_asset}" in dockerfile
+    assert 'if [ "$actual_hash" != "$expected_hash" ]; then' in dockerfile
+    assert "GitHub CLI checksum mismatch for ${gh_asset}" in dockerfile
+    assert "grep -F" not in dockerfile
+    assert "sha256sum -c -" not in dockerfile
     assert "amd64|arm64" in dockerfile
-    assert dockerfile.index("sha256sum -c -") < dockerfile.index(
+    assert dockerfile.index('expected_hash="$(awk -v asset="$gh_asset"') < dockerfile.index(
+        'actual_hash="$(sha256sum "$gh_deb")"'
+    )
+    assert dockerfile.index('if [ "$actual_hash" != "$expected_hash" ]; then') < dockerfile.index(
         'apt-get install -y --no-install-recommends "$gh_deb"'
     )
     assert 'apt-get install -y --no-install-recommends "$gh_deb"' in dockerfile
