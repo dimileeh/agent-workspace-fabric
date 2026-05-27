@@ -288,6 +288,49 @@ async def test_pre_push_validation_fix_prompt_includes_underlying_reason_code(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_commit_fail_returns_fix_failed_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'f' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    async def _no_commit(**_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _no_commit)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FIX_FAILED"
+    assert result.details is not None
+    assert result.details["validation_reason_code"] == "PYTEST_TEST_FAILURE"
+    assert "fix pass failed" in result.stderr
+
+
+@pytest.mark.unit
 async def test_comment_repair_uses_validated_push_and_does_not_resolve_on_failure(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

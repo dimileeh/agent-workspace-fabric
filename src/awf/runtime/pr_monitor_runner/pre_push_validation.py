@@ -180,7 +180,14 @@ async def _run_pre_push_validation_with_fix_passes(
             validation_commands=validation_commands,
         )
         if not committed:
-            break
+            return replace(
+                validation_result,
+                reason_code=PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+                message=(
+                    "PR monitor pre-push validation fix pass failed after "
+                    f"{pass_index + 1}/{max_fix_passes} attempts: {validation_result.message}"
+                ),
+            )
     assert last_result is not None
     return last_result
 
