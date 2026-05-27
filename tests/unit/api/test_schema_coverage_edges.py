@@ -219,6 +219,26 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
                 {
                     "name": "api",
                     "repo_url": "git@example.com:api.git",
+                    "volumes": [("api-cache:ro", "/cache")],
+                }
+            ],
+            "named volume",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("api\ncache", "/cache")],
+                }
+            ],
+            "named volume",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
                     "volumes": [("api-cache", "cache")],
                 }
             ],

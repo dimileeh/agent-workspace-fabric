@@ -24,6 +24,7 @@ EnvironmentKey = Annotated[
 ]
 
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
+_NAMED_VOLUME_SOURCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENVIRONMENT_KEY_SCHEMA: dict[str, Any] = {
     "propertyNames": {
         "maxLength": 256,
@@ -42,6 +43,14 @@ def _validate_companion_volume_target(value: str) -> None:
     if ":" in value or not PurePosixPath(value).is_absolute():
         raise ValueError(
             "companion volume target must be an absolute container path without mount options"
+        )
+
+
+def _validate_companion_named_volume_source(value: str) -> None:
+    if not _NAMED_VOLUME_SOURCE_PATTERN.fullmatch(value):
+        raise ValueError(
+            "companion volume source named volume must start with an ASCII letter or digit "
+            "and contain only ASCII letters, digits, dots, underscores, and hyphens"
         )
 
 
@@ -133,5 +142,7 @@ class WorkspaceCompanionRequest(BaseModel):
                 _validate_companion_repo_relative_path("volume source", source)
             elif _is_absolute_or_escaping_path(source):
                 raise ValueError("volume source must be a named volume or repo-relative path")
+            else:
+                _validate_companion_named_volume_source(source)
             _validate_companion_volume_target(target)
         return value
