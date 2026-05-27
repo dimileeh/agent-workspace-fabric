@@ -30,6 +30,11 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.pr_monitor_runner.constants import (
+    _PRE_PUSH_VALIDATION_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.validation import profile_phase_command_plan
 from awf.runtime.validation_identity import (
@@ -45,9 +50,9 @@ from awf.runtime.validation_types import (
 
 _log = get_logger(__name__)
 
-PRE_PUSH_VALIDATION_FAILED_REASON = "PRE_PUSH_VALIDATION_FAILED"
-PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED"
-PRE_PUSH_VALIDATION_FIX_FAILED_REASON = "PRE_PUSH_VALIDATION_FIX_FAILED"
+PRE_PUSH_VALIDATION_FAILED_REASON = _PRE_PUSH_VALIDATION_FAILED_REASON
+PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+PRE_PUSH_VALIDATION_FIX_FAILED_REASON = _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
 
 
 @dataclass(frozen=True)
