@@ -250,6 +250,8 @@ class WorkerConcurrencySettingsResponse(BaseModel):
 
 
 class LocalCapacitySourceResponse(BaseModel):
+    """Local runtime capacity origin metadata exposed in saturation responses."""
+
     model_config = ConfigDict(from_attributes=True)
 
     cpu_cores: float | None

@@ -101,6 +101,13 @@ def _local_capacity_source_summary(
     settings: Settings,
     detected_local_capacity: LocalCapacityLimits | None,
 ) -> LocalCapacitySourceSummary:
+    """Describe where local capacity values come from and normalize metadata.
+
+    When operator overrides are provided, those values take precedence and the
+    source is marked as ``operator_config``/``mixed`` so consumers can display
+    the exact origin of runtime saturation inputs.
+    """
+
     detected = detected_local_capacity or LocalCapacityLimits()
     cpu_configured = settings.local_capacity_cpu_cores is not None
     memory_configured = settings.local_capacity_memory_gb is not None

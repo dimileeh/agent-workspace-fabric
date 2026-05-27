@@ -256,6 +256,8 @@ class ProviderRecoveryStateSummary:
 
 @dataclass(frozen=True)
 class LocalCapacitySourceSummary:
+    """Runtime capacity origin metadata used by saturation summaries."""
+
     cpu_cores: float | None
     memory_gb: float | None
     source: str | None

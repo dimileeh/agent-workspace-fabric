@@ -133,6 +133,8 @@ def _first(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> Any:
 
 
 def _sum(mapping: dict[str, Any], keys: tuple[str, ...], coerce: Any) -> int | None:
+    """Sum a fixed list of numeric fields after coercion, ignoring missing keys."""
+
     total = 0
     seen = False
     for key in keys:
