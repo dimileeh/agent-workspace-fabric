@@ -214,6 +214,26 @@ def test_workspace_companions_reject_git_invalid_names(name: str) -> None:
             ],
             "volume source",
         ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("api-cache", "cache")],
+                }
+            ],
+            "volume target",
+        ),
+        (
+            [
+                {
+                    "name": "api",
+                    "repo_url": "git@example.com:api.git",
+                    "volumes": [("api-cache", "/cache:ro")],
+                }
+            ],
+            "volume target",
+        ),
     ],
 )
 def test_workspace_companions_reject_invalid_public_contract(

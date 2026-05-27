@@ -38,6 +38,13 @@ def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
         raise ValueError(f"companion {field_name} must be a repo-relative path")
 
 
+def _validate_companion_volume_target(value: str) -> None:
+    if ":" in value or not PurePosixPath(value).is_absolute():
+        raise ValueError(
+            "companion volume target must be an absolute container path without mount options"
+        )
+
+
 def _is_absolute_or_escaping_path(value: str) -> bool:
     posix_path = PurePosixPath(value)
     windows_path = PureWindowsPath(value)
@@ -121,9 +128,10 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("volumes")
     @classmethod
     def _validate_volume_sources(cls, value: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        for source, _target in value:
+        for source, target in value:
             if companion_volume_source_is_repo_relative(source):
                 _validate_companion_repo_relative_path("volume source", source)
             elif _is_absolute_or_escaping_path(source):
                 raise ValueError("volume source must be a named volume or repo-relative path")
+            _validate_companion_volume_target(target)
         return value
