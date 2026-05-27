@@ -179,16 +179,15 @@ class Provisioner:
             companion_graph_prevalidated = False
             if self._stack_launcher is not None:
                 companion_specs = companion_specs_from_task_policy(ws.task_policy)
-                if companion_specs:
-                    validate_companion_service_graph(
-                        profile_services=profile_services(
-                            profile,
-                            base_path=layout.worktree_path,
-                        ),
-                        companions=companion_specs,
-                        docker_mode=profile.docker.mode,
-                    )
-                    companion_graph_prevalidated = True
+                validate_companion_service_graph(
+                    profile_services=profile_services(
+                        profile,
+                        base_path=layout.worktree_path,
+                    ),
+                    companions=companion_specs,
+                    docker_mode=profile.docker.mode,
+                )
+                companion_graph_prevalidated = True
                 materialized_companions = await self._materialize_companions(
                     workspace_id=workspace_id,
                     companions=companion_specs,

@@ -489,6 +489,85 @@ class TestSuccess:
             assert reloaded.failure_reason == "profile_resolution_failure"
 
     @pytest.mark.unit
+    async def test_rejects_profile_only_invalid_service_graph_before_secret_leases(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.node.companion_services import validate_companion_service_graph
+        from awf.profiles.compose import profile_services
+
+        class _ValidatingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                services = profile_services(
+                    request.profile,
+                    base_path=request.layout.worktree_path,
+                )
+                validate_companion_service_graph(
+                    profile_services=services,
+                    companions=request.companions,
+                    docker_mode=request.profile.docker.mode,
+                )
+                raise AssertionError("invalid profile service graph should fail before launch")
+
+        launcher = _ValidatingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="profile services",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "profile-only-invalid-dependency",
+                    "services": [
+                        {"name": "cache", "image": "redis:7-alpine"},
+                        {
+                            "name": "api",
+                            "image": "python:3.12-alpine",
+                            "depends_on": ["cache"],
+                        },
+                    ],
+                    "secrets": [
+                        {
+                            "name": "api-token",
+                            "kind": "env",
+                            "target": "API_TOKEN",
+                            "provider": "env",
+                            "ref": "env/API_TOKEN",
+                        }
+                    ],
+                },
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        with pytest.raises(ProfileResolutionError) as raised:
+            await provisioner.provision(workspace_id)
+
+        assert raised.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNHEALTHY"
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
+            leases = await SecretLeaseRepository(s).list_for_workspace(workspace_id)
+            assert leases == []
+
+    @pytest.mark.unit
     async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
