@@ -33,7 +33,9 @@ export interface WorkspaceLifecycleStage {
 
 export interface LlmUsageSummary {
   input_tokens: number | null;
+  cached_input_tokens?: number | null;
   output_tokens: number | null;
+  reasoning_output_tokens?: number | null;
   total_tokens: number | null;
   cost_estimate: number | null;
   currency: string | null;
@@ -635,6 +637,16 @@ export interface WorkerConcurrencySettings {
   max_concurrent_executions: number;
 }
 
+export type LocalCapacitySourceValue = "docker" | "operator_config" | "mixed";
+
+export interface LocalCapacitySource {
+  cpu_cores: number | null;
+  memory_gb: number | null;
+  source: string | null;
+  reason_code: string | null;
+  detail: string | null;
+}
+
 export interface WorkspaceResourceDefaults {
   steady_cpu: number;
   steady_memory_gb: number;
@@ -724,6 +736,7 @@ export interface ResourceSaturationSummary {
   generated_at: string;
   workspace_counts: WorkspaceSaturationCounts;
   worker: WorkerConcurrencySettings;
+  local_capacity: LocalCapacitySource;
   resource_defaults: WorkspaceResourceDefaults;
   reserved_resources: ReservedResources;
   capacity: ResourceCapacitySummary;

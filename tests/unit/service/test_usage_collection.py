@@ -163,7 +163,9 @@ async def test_baseline_subtracted_from_final_sample(tmp_path: Path) -> None:
     assert snap.output_tokens == 1
     assert snap.baseline == {
         "input_tokens": 3,
+        "cached_input_tokens": None,
         "output_tokens": 2,
+        "reasoning_output_tokens": None,
         "total_tokens": 5,
         "cost_estimate": None,
         "currency": None,

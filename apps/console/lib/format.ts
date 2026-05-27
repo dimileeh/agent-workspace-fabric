@@ -66,7 +66,9 @@ export function fallbackLlmUsage(
   const hasReason = usage !== undefined && usage !== null && "reason" in usage;
   return {
     input_tokens: usage?.input_tokens ?? null,
+    cached_input_tokens: usage?.cached_input_tokens ?? null,
     output_tokens: usage?.output_tokens ?? null,
+    reasoning_output_tokens: usage?.reasoning_output_tokens ?? null,
     total_tokens: usage?.total_tokens ?? null,
     cost_estimate: usage?.cost_estimate ?? null,
     currency: usage?.currency ?? null,
@@ -118,27 +120,30 @@ export function formatCostWithPricing(
   cost: number | null,
   currency: string | null | undefined,
   pricing: PricingMetadata | null | undefined,
+  source?: string | null,
 ): string {
   if (cost === null || cost === undefined) {
     return "—";
   }
-  if (pricing && !pricing.is_current) {
-    return "—";
-  }
   const c = currency || pricing?.currency || "USD";
+  let formatted: string;
   try {
-    return new Intl.NumberFormat(undefined, {
+    formatted = new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: c,
       minimumFractionDigits: 4,
       maximumFractionDigits: 4,
     }).format(cost);
   } catch {
-    return new Intl.NumberFormat(undefined, {
+    formatted = new Intl.NumberFormat(undefined, {
       minimumFractionDigits: 4,
       maximumFractionDigits: 4,
     }).format(cost);
   }
+  if (pricing && !pricing.is_current && source !== "ccusage") {
+    return `${formatted} (stale pricing)`;
+  }
+  return formatted;
 }
 
 export function pricingAvailabilityReason(

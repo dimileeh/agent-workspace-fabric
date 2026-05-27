@@ -154,6 +154,8 @@ class LlmUsageSummary:
     status: LlmUsageStatus
     source: str
     reason: str | None
+    cached_input_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,9 @@ class LifecycleStagePayload(TypedDict):
 
 class LlmUsagePayload(TypedDict):
     input_tokens: int | None
+    cached_input_tokens: int | None
     output_tokens: int | None
+    reasoning_output_tokens: int | None
     total_tokens: int | None
     cost_estimate: float | None
     currency: str | None
@@ -637,7 +641,9 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     if snapshot is not None and snapshot.has_metrics:
         return LlmUsageSummary(
             input_tokens=snapshot.input_tokens,
+            cached_input_tokens=snapshot.cached_input_tokens,
             output_tokens=snapshot.output_tokens,
+            reasoning_output_tokens=snapshot.reasoning_output_tokens,
             total_tokens=snapshot.total_tokens,
             cost_estimate=snapshot.cost_estimate,
             currency=snapshot.currency,
@@ -653,7 +659,9 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     if snapshot is not None:
         return LlmUsageSummary(
             input_tokens=None,
+            cached_input_tokens=None,
             output_tokens=None,
+            reasoning_output_tokens=None,
             total_tokens=None,
             cost_estimate=None,
             currency=None,
@@ -664,7 +672,9 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
 
     return LlmUsageSummary(
         input_tokens=None,
+        cached_input_tokens=None,
         output_tokens=None,
+        reasoning_output_tokens=None,
         total_tokens=None,
         cost_estimate=None,
         currency=None,
@@ -753,7 +763,9 @@ def _operations_usage_summary(workspace: Workspace) -> LlmUsageSummary | None:
 
     return LlmUsageSummary(
         input_tokens=input_tokens,
+        cached_input_tokens=None,
         output_tokens=output_tokens,
+        reasoning_output_tokens=None,
         total_tokens=total_tokens,
         cost_estimate=cost_estimate,
         currency=currency,
@@ -879,7 +891,9 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
         cost_reason = None
     return {
         "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
         "total_tokens": usage.total_tokens,
         "cost_estimate": cost,
         "currency": usage.currency or (pricing.currency if pricing is not None else None),

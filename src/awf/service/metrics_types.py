@@ -255,10 +255,22 @@ class ProviderRecoveryStateSummary:
 
 
 @dataclass(frozen=True)
+class LocalCapacitySourceSummary:
+    """Runtime capacity origin metadata used by saturation summaries."""
+
+    cpu_cores: float | None
+    memory_gb: float | None
+    source: str | None
+    reason_code: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
 class ResourceSaturationSummary:
     generated_at: datetime
     workspace_counts: WorkspaceSaturationCounts
     worker: WorkerConcurrencySettings
+    local_capacity: LocalCapacitySourceSummary
     resource_defaults: WorkspaceResourceDefaults
     reserved_resources: ReservedResources
     capacity: ResourceCapacitySummary

@@ -86,7 +86,9 @@ test("formatUsageProvenance passes through unknown source and reason", () => {
 test("fallbackLlmUsage protects legacy workspace payloads", () => {
   assert.deepEqual(fallbackLlmUsage(undefined), {
     input_tokens: null,
+    cached_input_tokens: null,
     output_tokens: null,
+    reasoning_output_tokens: null,
     total_tokens: null,
     cost_estimate: null,
     currency: null,
@@ -100,7 +102,9 @@ test("fallbackLlmUsage preserves available provider usage", () => {
   assert.deepEqual(
     fallbackLlmUsage({
       input_tokens: 10,
+      cached_input_tokens: 3,
       output_tokens: 5,
+      reasoning_output_tokens: 2,
       total_tokens: 15,
       cost_estimate: 0.12,
       currency: "USD",
@@ -110,7 +114,9 @@ test("fallbackLlmUsage preserves available provider usage", () => {
     }),
     {
       input_tokens: 10,
+      cached_input_tokens: 3,
       output_tokens: 5,
+      reasoning_output_tokens: 2,
       total_tokens: 15,
       cost_estimate: 0.12,
       currency: "USD",
@@ -123,6 +129,48 @@ test("fallbackLlmUsage preserves available provider usage", () => {
 
 test("formatCostWithPricing renders computed usage cost without pricing metadata", () => {
   assert.equal(formatCostWithPricing(0.05, "USD", null), "$0.0500");
+});
+
+test("formatCostWithPricing appends stale-pricing suffix when pricing is stale and source is not ccusage", () => {
+  const stalePricing = {
+    provider: "openai",
+    model: "gpt-4o",
+    currency: "USD",
+    unit: "per_1m_tokens",
+    price_per_unit: 5.0,
+    timestamp: "2025-01-01T00:00:00Z",
+    version: 1,
+    is_current: false,
+  };
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing),
+    "$0.1200 (stale pricing)",
+  );
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, "operations"),
+    "$0.1200 (stale pricing)",
+  );
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, null),
+    "$0.1200 (stale pricing)",
+  );
+});
+
+test("formatCostWithPricing suppresses stale-pricing suffix when source is ccusage", () => {
+  const stalePricing = {
+    provider: "openai",
+    model: "gpt-4o",
+    currency: "USD",
+    unit: "per_1m_tokens",
+    price_per_unit: 5.0,
+    timestamp: "2025-01-01T00:00:00Z",
+    version: 1,
+    is_current: false,
+  };
+  assert.equal(
+    formatCostWithPricing(0.12, "USD", stalePricing, "ccusage"),
+    "$0.1200",
+  );
 });
 
 test("toneFillClass maps warning and bad pressure to distinct fills", () => {

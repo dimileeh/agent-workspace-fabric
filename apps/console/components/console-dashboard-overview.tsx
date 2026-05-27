@@ -1169,9 +1169,19 @@ export function UsageSummaryBlock({
 }) {
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
-  const showCost = safeUsage.cost_estimate !== null && (!pricing || pricing.is_current);
+  const showCost = safeUsage.cost_estimate !== null;
 
-  if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
+  if (
+    safeUsage.status === "unavailable" ||
+    (
+      safeUsage.input_tokens == null &&
+      safeUsage.cached_input_tokens == null &&
+      safeUsage.output_tokens == null &&
+      safeUsage.reasoning_output_tokens == null &&
+      safeUsage.total_tokens == null &&
+      safeUsage.cost_estimate == null
+    )
+  ) {
     return (
       <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
         <div className="flex items-center justify-between gap-2">
@@ -1200,22 +1210,24 @@ export function UsageSummaryBlock({
           <Badge value={safeUsage.status} />
         </div>
       </div>
-      <div className="mt-2 grid gap-2 sm:grid-cols-4">
+      <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {safeUsage.input_tokens != null && <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />}
+        {safeUsage.cached_input_tokens != null && <UsageMetric label="Cached" value={formatTokenCount(safeUsage.cached_input_tokens)} />}
         {safeUsage.output_tokens != null && <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />}
+        {safeUsage.reasoning_output_tokens != null && <UsageMetric label="Reasoning" value={formatTokenCount(safeUsage.reasoning_output_tokens)} />}
         {safeUsage.total_tokens != null && <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />}
         <UsageMetric
           label="Cost"
           value={
             showCost
-              ? formatCostWithPricing(safeUsage.cost_estimate, safeUsage.currency, pricing)
+              ? formatCostWithPricing(safeUsage.cost_estimate, safeUsage.currency, pricing, safeUsage.source)
               : "—"
           }
         />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
         {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
-        {pricingReason ? (
+        {pricingReason && !showCost ? (
           <>
             <span className="text-slate-300">|</span>
             <span className="text-amber-600">{pricingReason}</span>

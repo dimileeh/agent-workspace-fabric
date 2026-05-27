@@ -78,7 +78,7 @@ class TestExecutorFixPassWarnings:
     before the workspace is marked failed with a reason code."""
 
     @pytest.mark.unit
-    async def test_fix_pass_add_and_commit_failures_log_and_continue(self, tmp_path: Path) -> None:
+    async def test_fix_pass_add_failure_marks_workspace_failed(self, tmp_path: Path) -> None:
         from awf.adapters import base as _adapter_base
         from awf.adapters import registry as _registry  # noqa: F401
         from awf.adapters.codex import CodexAdapter

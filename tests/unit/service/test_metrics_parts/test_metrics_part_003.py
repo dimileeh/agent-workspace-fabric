@@ -20,6 +20,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+from awf.service.resource_capacity import LocalCapacityLimits
 from tests.unit.helpers import create_operation, create_workspace
 
 _MIB = 1024 * 1024
@@ -192,6 +193,9 @@ async def test_resource_saturation_reports_reserved_disk_dind_and_available_capa
 
     assert legacy_workspace_id
     assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.local_capacity.cpu_cores == 24.0
+    assert summary.local_capacity.memory_gb == 96.0
+    assert summary.local_capacity.source == "operator_config"
     assert summary.reserved_resources.steady_cpu == 7.0
     assert summary.reserved_resources.peak_cpu == 14.0
     assert summary.reserved_resources.steady_memory_gb == 22.0
@@ -207,6 +211,60 @@ async def test_resource_saturation_reports_reserved_disk_dind_and_available_capa
     assert summary.capacity.dind_slots.limit == 4
     assert summary.capacity.dind_slots.available == 3
     assert summary.capacity.pressure_reasons == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    (
+        "cpu_configured",
+        "memory_configured",
+        "expected_source",
+        "expected_reason_code",
+        "expected_detail",
+    ),
+    (
+        (True, True, "operator_config", None, None),
+        (True, False, "mixed", "DOCKER_INFO_UNAVAILABLE", "docker daemon down"),
+        (False, True, "mixed", "DOCKER_INFO_UNAVAILABLE", "docker daemon down"),
+    ),
+)
+async def test_resource_saturation_omits_docker_errors_for_operator_overrides(
+    session_factory: async_sessionmaker[AsyncSession],
+    cpu_configured: bool,
+    memory_configured: bool,
+    expected_source: str,
+    expected_reason_code: str | None,
+    expected_detail: str | None,
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        local_capacity_cpu_cores=24.0 if cpu_configured else None,
+        local_capacity_memory_gb=96.0 if memory_configured else None,
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(free_bytes=16 * 1024 * _MIB),
+        detected_local_capacity=LocalCapacityLimits(
+            cpu_cores=8.0,
+            memory_gb=16.0,
+            reason_code="DOCKER_INFO_UNAVAILABLE",
+            detail="docker daemon down",
+        ),
+        now=now,
+    )
+
+    assert summary.local_capacity.source == expected_source
+    assert summary.local_capacity.cpu_cores == (24.0 if cpu_configured else 8.0)
+    assert summary.local_capacity.memory_gb == (96.0 if memory_configured else 16.0)
+    assert summary.local_capacity.reason_code == expected_reason_code
+    assert summary.local_capacity.detail == expected_detail
 
 
 @pytest.mark.unit

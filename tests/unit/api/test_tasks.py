@@ -163,7 +163,9 @@ class TestTaskList:
         for row in (legacy, attempt):
             assert row["llm_usage"] == {
                 "input_tokens": None,
+                "cached_input_tokens": None,
                 "output_tokens": None,
+                "reasoning_output_tokens": None,
                 "total_tokens": None,
                 "cost_estimate": None,
                 "currency": None,

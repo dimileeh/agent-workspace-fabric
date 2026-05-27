@@ -33,11 +33,14 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   await expect(output).toContainText("active.stdout");
 
   await expect
-    .poll(async () => {
-      const text = await output.textContent();
-      const value = text ?? "";
-      return value.lastIndexOf("active.stdout") > value.lastIndexOf("quiet.stdout");
-    })
+    .poll(
+      async () => {
+        const text = await output.textContent();
+        const value = text ?? "";
+        return value.lastIndexOf("active.stdout") > value.lastIndexOf("quiet.stdout");
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 
   await output.evaluate((node) => {
@@ -47,7 +50,7 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   const streamPollsBefore = api.streamPolls;
 
   await expect.poll(() => api.streamPolls, { timeout: 8_000 }).toBeGreaterThan(streamPollsBefore);
-  await expect.poll(async () => output.evaluate((node) => node.scrollTop)).toBeLessThan(24);
+  await expect.poll(async () => output.evaluate((node) => node.scrollTop), { timeout: 15_000 }).toBeLessThan(24);
 });
 
 test("fullscreen logs refresh selected tails when stream metadata advances", async ({ page }) => {

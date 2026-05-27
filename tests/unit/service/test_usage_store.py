@@ -38,7 +38,9 @@ _ALLOWED_SNAPSHOT_KEYS = {
     "phase",
     "captured_at",
     "input_tokens",
+    "cached_input_tokens",
     "output_tokens",
+    "reasoning_output_tokens",
     "total_tokens",
     "cost_estimate",
     "currency",
@@ -92,12 +94,156 @@ def test_normalize_ccusage_json_reads_totals() -> None:
 
 
 @pytest.mark.unit
+def test_normalize_ccusage_json_preserves_cached_and_reasoning_tokens() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 100,
+                "cachedInputTokens": 900,
+                "outputTokens": 40,
+                "reasoningOutputTokens": 25,
+                "totalTokens": 1040,
+                "costUSD": 0.25,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage == NormalizedUsage(
+        input_tokens=100,
+        cached_input_tokens=900,
+        output_tokens=40,
+        reasoning_output_tokens=25,
+        total_tokens=1040,
+        cost_estimate=0.25,
+        currency="USD",
+        model=None,
+    )
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_supports_cache_read_and_creation_tokens() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 100,
+                "cacheReadTokens": 250,
+                "cacheCreationTokens": 50,
+                "outputTokens": 40,
+                "totalTokens": 390,
+                "costUSD": 0.15,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage == NormalizedUsage(
+        input_tokens=100,
+        cached_input_tokens=300,
+        output_tokens=40,
+        total_tokens=390,
+        cost_estimate=0.15,
+        currency="USD",
+        model=None,
+    )
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_prefers_unified_cached_tokens_over_split_tokens() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 10,
+                "cachedInputTokens": 900,
+                "cacheCreationTokens": 250,
+                "cacheReadTokens": 50,
+                "outputTokens": 40,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage == NormalizedUsage(
+        input_tokens=10,
+        cached_input_tokens=900,
+        output_tokens=40,
+        total_tokens=950,
+        model=None,
+    )
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_synthesizes_total_including_cached_tokens() -> None:
+    raw = json.dumps({"totals": {"inputTokens": 100, "cachedInputTokens": 900}})
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens == 100
+    assert usage.cached_input_tokens == 900
+    assert usage.total_tokens == 1000
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_synthesizes_total_with_reasoning_fallback() -> None:
+    raw = json.dumps({"totals": {"inputTokens": 50, "reasoningOutputTokens": 30}})
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens == 50
+    assert usage.output_tokens is None
+    assert usage.reasoning_output_tokens == 30
+    # reasoning stands in for output when output is absent, so total = 50 + 30 = 80.
+    assert usage.total_tokens == 80
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_synthesizes_total_with_output_and_reasoning() -> None:
+    raw = json.dumps(
+        {"totals": {"inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 25}}
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 40
+    assert usage.reasoning_output_tokens == 25
+    # reasoning is a subset of output, so total = input + output, not input + output + reasoning.
+    assert usage.total_tokens == 140
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_sums_daily_when_no_totals() -> None:
     raw = json.dumps(
         {
             "daily": [
-                {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15, "totalCost": 0.01},
-                {"inputTokens": 20, "outputTokens": 10, "totalTokens": 30, "totalCost": 0.02},
+                {
+                    "inputTokens": 10,
+                    "cachedInputTokens": 100,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 2,
+                    "totalTokens": 115,
+                    "totalCost": 0.01,
+                },
+                {
+                    "inputTokens": 20,
+                    "cachedInputTokens": 200,
+                    "outputTokens": 10,
+                    "reasoningOutputTokens": 3,
+                    "totalTokens": 230,
+                    "totalCost": 0.02,
+                },
             ]
         }
     )
@@ -105,8 +251,10 @@ def test_normalize_ccusage_json_sums_daily_when_no_totals() -> None:
     assert reason is None
     assert usage is not None
     assert usage.input_tokens == 30
+    assert usage.cached_input_tokens == 300
     assert usage.output_tokens == 15
-    assert usage.total_tokens == 45
+    assert usage.reasoning_output_tokens == 5
+    assert usage.total_tokens == 345
     assert usage.cost_estimate is not None
     assert abs(usage.cost_estimate - 0.03) < 1e-9
 
@@ -261,28 +409,45 @@ def test_snapshot_baseline_usage_helper() -> None:
 
 @pytest.mark.unit
 def test_subtract_baseline_with_partial_baseline_fields() -> None:
-    current = NormalizedUsage(input_tokens=10, total_tokens=10, cost_estimate=0.5)
+    current = NormalizedUsage(
+        input_tokens=10, cached_input_tokens=20, total_tokens=30, cost_estimate=0.5
+    )
     baseline = NormalizedUsage(input_tokens=4)  # only input has a baseline value
     delta = subtract_baseline(current, baseline)
     assert delta.input_tokens == 6
+    assert delta.cached_input_tokens == 20
     # baseline missing for these -> current passes through unchanged
-    assert delta.total_tokens == 10
+    assert delta.total_tokens == 30
     assert delta.cost_estimate == 0.5
 
 
 @pytest.mark.unit
 def test_subtract_baseline_clamps_to_non_negative() -> None:
     current = NormalizedUsage(
-        input_tokens=150, output_tokens=60, total_tokens=210, cost_estimate=0.30, currency="USD"
+        input_tokens=150,
+        cached_input_tokens=1000,
+        output_tokens=60,
+        reasoning_output_tokens=40,
+        total_tokens=1210,
+        cost_estimate=0.30,
+        currency="USD",
     )
     baseline = NormalizedUsage(
-        input_tokens=100, output_tokens=80, total_tokens=180, cost_estimate=0.25, currency="USD"
+        input_tokens=100,
+        cached_input_tokens=1500,
+        output_tokens=80,
+        reasoning_output_tokens=10,
+        total_tokens=1680,
+        cost_estimate=0.25,
+        currency="USD",
     )
     delta = subtract_baseline(current, baseline)
     assert delta.input_tokens == 50
+    assert delta.cached_input_tokens == 0
     # baseline larger than current -> clamped to 0, never negative
     assert delta.output_tokens == 0
-    assert delta.total_tokens == 30
+    assert delta.reasoning_output_tokens == 30
+    assert delta.total_tokens == 0
     assert delta.cost_estimate is not None
     assert abs(delta.cost_estimate - 0.05) < 1e-9
     assert delta.currency == "USD"
@@ -337,7 +502,9 @@ def test_write_and_read_snapshot_round_trip(tmp_path: Path) -> None:
         run_status="timeout",
         model="gpt-5",
         input_tokens=12,
+        cached_input_tokens=99,
         output_tokens=8,
+        reasoning_output_tokens=3,
         total_tokens=20,
         cost_estimate=0.02,
         currency="USD",

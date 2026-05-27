@@ -161,7 +161,8 @@ async function seedDarkAccessiblePreferences(page: Page) {
 
 async function waitForConsoleReady(page: Page) {
   await expect(page.getByRole("heading", { name: "AWF Console" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Resource / Capacity" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Resource / Runtime Capacity" })).toBeVisible();
+  await expect(page.getByText("Docker runtime").first()).toBeVisible();
   await expect(page.getByText(workspaceId, { exact: true }).first()).toBeVisible();
 }
 
@@ -609,6 +610,13 @@ function resourceSaturation() {
     worker: {
       max_concurrent_provisions: 2,
       max_concurrent_executions: 2,
+    },
+    local_capacity: {
+      cpu_cores: 8,
+      memory_gb: 24,
+      source: "docker",
+      reason_code: null,
+      detail: null,
     },
     resource_defaults: {
       steady_cpu: 1,

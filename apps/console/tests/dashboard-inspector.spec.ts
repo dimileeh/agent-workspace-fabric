@@ -115,7 +115,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     await expect(page).toHaveURL(/workspaceId=ws_mock123/);
 
     // Measure global pane to check for jumps later
-    const capacityPanel = page.locator("text=Resource / Capacity").first();
+    const capacityPanel = page.locator("text=Resource / Runtime Capacity").first();
     await capacityPanel.waitFor({ state: "visible" });
     const initialBox = await capacityPanel.boundingBox();
 
