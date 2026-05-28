@@ -62,6 +62,10 @@ awf service status --format pretty
 stack, and `awf service status --format pretty` confirms API, database, Docker,
 image, disk, provider, and cleanup health.
 
+In source checkouts with local Compose assets, `awf start` and
+`awf service bootstrap` persist Compose-interpolated service values in
+`docker/compose/.env`.
+
 If you set or refresh the GitHub token after starting Core, rerun the service
 bootstrap so Compose recreates the service containers with the updated
 environment:
