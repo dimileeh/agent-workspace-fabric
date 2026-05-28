@@ -496,7 +496,7 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 
     result = _runner.invoke(app, ["init", "--include-smoke-request"])
 
-    output = result.output
+    output = result.stderr
     assert result.exit_code == 2
     assert "--include-smoke-request" in output
     assert "project path" in output
