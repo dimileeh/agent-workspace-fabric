@@ -70,11 +70,13 @@ passing formula audit; it is not a supported install channel yet.
 ### Recommended First-Run Sequence
 
 Once AWF is installed, the current runnable first-run sequence is local Core
-startup, health check, then project onboarding. Export the GitHub token before
-bootstrapping Core so the API and worker containers receive it when Compose
-creates them:
+startup, health check, then project onboarding. Export the required local
+service values before bootstrapping Core so Compose can interpolate the API,
+worker, and Postgres service environment:
 
 ```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf service bootstrap
 awf service status --format pretty
