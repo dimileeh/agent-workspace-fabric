@@ -14,6 +14,27 @@ from awf.control.executor import monitor_handoff as executor_monitor_handoff
 from awf.node import companion_services
 
 
+def _backend_optional_env_secret_specs() -> tuple[companion_services.WorkspaceCompanionSpec, ...]:
+    return executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+
 @pytest.mark.unit
 def test_compose_string_key_loader_rejects_non_mapping_node() -> None:
     """The compose string-key loader rejects non-mapping YAML nodes."""
@@ -124,24 +145,7 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
     """Optional env-secret refresh logs read failures without breaking resume."""
     compose_file = tmp_path / "compose.yml"
     compose_file.mkdir()
-    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
-        {
-            "companions": [
-                {
-                    "name": "backend",
-                    "repo_url": "git@github.com:x/backend.git",
-                    "environment_secrets": {
-                        "OPTIONAL_TOKEN": {
-                            "provider": "env",
-                            "kind": "env",
-                            "value_from": "OPTIONAL_TOKEN_SOURCE",
-                            "required": False,
-                        },
-                    },
-                }
-            ],
-        }
-    )
+    companion_specs = _backend_optional_env_secret_specs()
 
     with structlog.testing.capture_logs() as captured:
         executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
@@ -164,24 +168,7 @@ def test_companion_env_secret_refresh_parse_failure_logs_warning(tmp_path: Path)
     """Optional env-secret refresh logs invalid Compose YAML without mutating it."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services: [", encoding="utf-8")
-    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
-        {
-            "companions": [
-                {
-                    "name": "backend",
-                    "repo_url": "git@github.com:x/backend.git",
-                    "environment_secrets": {
-                        "OPTIONAL_TOKEN": {
-                            "provider": "env",
-                            "kind": "env",
-                            "value_from": "OPTIONAL_TOKEN_SOURCE",
-                            "required": False,
-                        },
-                    },
-                }
-            ],
-        }
-    )
+    companion_specs = _backend_optional_env_secret_specs()
 
     with structlog.testing.capture_logs() as captured:
         executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
@@ -215,24 +202,7 @@ services:
 """.lstrip(),
         encoding="utf-8",
     )
-    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
-        {
-            "companions": [
-                {
-                    "name": "backend",
-                    "repo_url": "git@github.com:x/backend.git",
-                    "environment_secrets": {
-                        "OPTIONAL_TOKEN": {
-                            "provider": "env",
-                            "kind": "env",
-                            "value_from": "OPTIONAL_TOKEN_SOURCE",
-                            "required": False,
-                        },
-                    },
-                }
-            ],
-        }
-    )
+    companion_specs = _backend_optional_env_secret_specs()
 
     def _unexpected_write(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("refresh should not write unchanged compose payload")
@@ -265,24 +235,7 @@ services:
 """.lstrip(),
         encoding="utf-8",
     )
-    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
-        {
-            "companions": [
-                {
-                    "name": "backend",
-                    "repo_url": "git@github.com:x/backend.git",
-                    "environment_secrets": {
-                        "OPTIONAL_TOKEN": {
-                            "provider": "env",
-                            "kind": "env",
-                            "value_from": "OPTIONAL_TOKEN_SOURCE",
-                            "required": False,
-                        },
-                    },
-                }
-            ],
-        }
-    )
+    companion_specs = _backend_optional_env_secret_specs()
 
     def _raise_write(*_args: object, **_kwargs: object) -> None:
         raise OSError("disk full")
@@ -322,24 +275,7 @@ services:
 """.lstrip(),
         encoding="utf-8",
     )
-    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
-        {
-            "companions": [
-                {
-                    "name": "backend",
-                    "repo_url": "git@github.com:x/backend.git",
-                    "environment_secrets": {
-                        "OPTIONAL_TOKEN": {
-                            "provider": "env",
-                            "kind": "env",
-                            "value_from": "OPTIONAL_TOKEN_SOURCE",
-                            "required": False,
-                        },
-                    },
-                }
-            ],
-        }
-    )
+    companion_specs = _backend_optional_env_secret_specs()
     original_write_text = Path.write_text
     direct_target_writes: list[str] = []
 
