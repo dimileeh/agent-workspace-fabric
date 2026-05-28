@@ -50,6 +50,22 @@ def _run_checker(path: Path, minimum: str = "99") -> subprocess.CompletedProcess
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("minimum", ["-1", "100.1", "nan", "inf"])
+def test_checker_rejects_invalid_minimum_percent_values(
+    tmp_path: Path,
+    minimum: str,
+) -> None:
+    coverage_xml = tmp_path / "coverage.xml"
+    _write_coverage_xml(coverage_xml, lines_valid=100, lines_covered=100)
+
+    result = _run_checker(coverage_xml, minimum)
+
+    assert result.returncode == 2
+    assert "minimum percent must be a finite value from 0 to 100" in result.stderr
+    assert "Coverage totals:" not in result.stdout
+
+
+@pytest.mark.unit
 def test_checker_passes_when_combined_coverage_meets_threshold(tmp_path: Path) -> None:
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(

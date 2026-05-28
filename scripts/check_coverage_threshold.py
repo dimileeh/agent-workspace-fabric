@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
@@ -83,11 +84,23 @@ def _format_optional_percent(value: float | None) -> str:
     return f"{value:.2f}%"
 
 
+def _validate_minimum_percent(value: float) -> float:
+    if not math.isfinite(value) or value < 0.0 or value > 100.0:
+        raise ValueError("minimum percent must be a finite value from 0 to 100")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("coverage_xml", type=Path)
     parser.add_argument("--minimum-percent", type=float, required=True)
     args = parser.parse_args(argv)
+
+    try:
+        minimum_percent = _validate_minimum_percent(args.minimum_percent)
+    except ValueError as exc:
+        print(f"::error title=Coverage threshold invalid::{exc}", file=sys.stderr)
+        return 2
 
     try:
         totals = load_coverage_totals(args.coverage_xml)
@@ -108,14 +121,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"branch={_format_optional_percent(branch_percent)} "
         f"covered={totals.covered_total}/{totals.valid_total}"
     )
-    print(f"Required minimum: {args.minimum_percent:.2f}%")
+    print(f"Required minimum: {minimum_percent:.2f}%")
 
-    if combined_percent + 1e-9 < args.minimum_percent:
+    if combined_percent + 1e-9 < minimum_percent:
         sys.stdout.flush()
         print(
             "::error title=Coverage below required threshold::"
             f"Combined line+branch coverage {combined_percent:.2f}% is below "
-            f"required {args.minimum_percent:.2f}%. Add meaningful tests without "
+            f"required {minimum_percent:.2f}%. Add meaningful tests without "
             "lowering coverage thresholds.",
             file=sys.stderr,
         )
