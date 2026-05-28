@@ -290,12 +290,11 @@ def write_host_setup_config(
     except _SecretPayloadError as exc:
         raise _config_secret_error(config_path, details=exc.details()) from exc
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    _chmod_best_effort(config_path.parent, 0o700)
-
     tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
     text = yaml.safe_dump(payload, sort_keys=False)
     try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        _chmod_best_effort(config_path.parent, 0o700)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)

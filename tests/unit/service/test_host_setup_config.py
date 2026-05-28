@@ -120,6 +120,24 @@ def test_host_setup_config_write_uses_unique_temp_paths(
 
 
 @pytest.mark.unit
+def test_host_setup_config_write_parent_creation_error_is_reason_coded(
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.parent.mkdir(parents=True)
+    config_path.parent.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(HostSetupConfig(), path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "FileExistsError"}
+    assert "not a directory" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         ProviderConfig(credential_ref="ghp_abcdefghijklmnopqrstuvwxyz123456")
