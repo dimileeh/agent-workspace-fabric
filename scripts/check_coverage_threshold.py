@@ -84,23 +84,28 @@ def _format_optional_percent(value: float | None) -> str:
     return f"{value:.2f}%"
 
 
-def _validate_minimum_percent(value: float) -> float:
+def _minimum_percent_arg(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "minimum percent must be a finite value from 0 to 100"
+        ) from exc
     if not math.isfinite(value) or value < 0.0 or value > 100.0:
-        raise ValueError("minimum percent must be a finite value from 0 to 100")
+        raise argparse.ArgumentTypeError("minimum percent must be a finite value from 0 to 100")
     return value
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, exit_on_error=False)
     parser.add_argument("coverage_xml", type=Path)
-    parser.add_argument("--minimum-percent", type=float, required=True)
-    args = parser.parse_args(argv)
-
+    parser.add_argument("--minimum-percent", type=_minimum_percent_arg, required=True)
     try:
-        minimum_percent = _validate_minimum_percent(args.minimum_percent)
-    except ValueError as exc:
+        args = parser.parse_args(argv)
+    except argparse.ArgumentError as exc:
         print(f"::error title=Coverage threshold invalid::{exc}", file=sys.stderr)
         return 2
+    minimum_percent = args.minimum_percent
 
     try:
         totals = load_coverage_totals(args.coverage_xml)

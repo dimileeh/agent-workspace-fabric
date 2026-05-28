@@ -61,7 +61,11 @@ def test_checker_rejects_invalid_minimum_percent_values(
     result = _run_checker(coverage_xml, minimum)
 
     assert result.returncode == 2
-    assert "minimum percent must be a finite value from 0 to 100" in result.stderr
+    assert (
+        "::error title=Coverage threshold invalid::"
+        "argument --minimum-percent: "
+        "minimum percent must be a finite value from 0 to 100"
+    ) in result.stderr
     assert "Coverage totals:" not in result.stdout
 
 
