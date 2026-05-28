@@ -38,6 +38,10 @@ respects an eight-workspace local capacity cap.
 - Launch preflight: before launching implementation workspaces, clean expired
   AWF resources, rebuild local service images, and rerun AWF bootstrap.
 
+H01 and H02 are complete for scheduling purposes. Later dependency references
+keep the graph traceable, but they are not additional human approval holds unless
+a human operator explicitly reopens one of the decisions above.
+
 ## What Already Exists
 
 These are reuse targets, not work to rebuild:
@@ -74,35 +78,37 @@ These are reuse targets, not work to rebuild:
 
 ## Task Backlog
 
-| ID | Title | Owner type | Priority | Depends on | Parallel group |
-| --- | --- | --- | --- | --- | --- |
-| H01 | Decide public installer hosting and release trust contract | human | P0 | - | human |
-| H02 | Decide first-run provider copy and plain-secret consent wording | human | P1 | - | human |
-| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | P0 | - | foundation |
-| T02 | Add host setup config schema and source-checkout asset model | workspace | P0 | - | foundation |
-| T03 | Add first-run error contract and rendering helpers | workspace | P0 | T02 | foundation |
-| T04 | Add `awf setup --dry-run` system checks and readiness payload | workspace | P0 | T01, T02, T03 | setup |
-| T05 | Add `awf start` wrapper over existing service bootstrap | workspace | P0 | T01, T02, T03 | start |
-| T06 | Add keychain/env/plain-file credential ref backends | workspace | P0 | T02, T03, H02 | credentials |
-| T07 | Add provider setup orchestration with GitHub first-class | workspace | P0 | T04, T06 | credentials |
-| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | P1 | T02, T03 | clients |
-| T09 | Add setup/start/init/client MCP tools | workspace | P1 | T04, T05, T08 | mcp |
-| T10 | Add no-token local proof and mocked smoke path | workspace | P0 | T04, T05 | smoke |
-| T11 | Add install manifest generator and release metadata contract | workspace | P0 | T01, H01 | release |
-| T12 | Add checked-in `install.sh` with checksum verification | workspace | P0 | T11, H01 | installer |
-| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | P0 | T02, T11 | packaging |
-| T14 | Add clean-install and source-lane E2E smoke harness | workspace | P0 | T05, T10, T12, T13 | e2e |
-| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | P0 | T01, T04, T05, T10, T12 | docs |
-| T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | P0 | T11, T12, T13, H01 | release |
-| T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | P0 | T06, T07 | security |
-| T18 | Add docs drift tests for setup/start/init command grammar | workspace | P1 | T01, T15 | docs |
-| T19 | Final integration, full coverage, and first-run lane validation | coordination | P0 | T07, T09, T14, T15, T16, T17, T18 | final |
+| ID | Title | Owner type | Status | Priority | Depends on | Parallel group |
+| --- | --- | --- | --- | --- | --- | --- |
+| H01 | Decide public installer hosting and release trust contract | human | done - locked | P0 | - | human |
+| H02 | Decide first-run provider copy and plain-secret consent wording | human | done - locked | P1 | - | human |
+| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | planned | P0 | - | foundation |
+| T02 | Add host setup config schema and source-checkout asset model | workspace | planned | P0 | - | foundation |
+| T03 | Add first-run error contract and rendering helpers | workspace | planned | P0 | T02 | foundation |
+| T04 | Add `awf setup --dry-run` system checks and readiness payload | workspace | planned | P0 | T01, T02, T03 | setup |
+| T05 | Add `awf start` wrapper over existing service bootstrap | workspace | planned | P0 | T01, T02, T03 | start |
+| T06 | Add keychain/env/plain-file credential ref backends | workspace | planned | P0 | T02, T03, H02 | credentials |
+| T07 | Add provider setup orchestration with GitHub first-class | workspace | planned | P0 | T04, T06 | credentials |
+| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | planned | P1 | T02, T03 | clients |
+| T09 | Add setup/start/init/client MCP tools | workspace | planned | P1 | T04, T05, T08 | mcp |
+| T10 | Add no-token local proof and mocked smoke path | workspace | planned | P0 | T04, T05 | smoke |
+| T11 | Add install manifest generator and release metadata contract | workspace | planned | P0 | T01, H01 | release |
+| T12 | Add checked-in `install.sh` with checksum verification | workspace | planned | P0 | T11, H01 | installer |
+| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | planned | P0 | T02, T11 | packaging |
+| T14 | Add clean-install and source-lane E2E smoke harness | workspace | planned | P0 | T05, T10, T12, T13 | e2e |
+| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | planned | P0 | T01, T04, T05, T10, T12 | docs |
+| T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | planned | P0 | T11, T12, T13, H01 | release |
+| T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | planned | P0 | T06, T07 | security |
+| T18 | Add docs drift tests for setup/start/init command grammar | workspace | planned | P1 | T01, T15 | docs |
+| T19 | Final integration, full coverage, and first-run lane validation | coordination | planned | P0 | T07, T09, T14, T15, T16, T17, T18 | final |
 
 ## Task Cards
 
 ### H01 - Decide Public Installer Hosting And Release Trust Contract
 
 Owner type: human
+
+Status: done - locked in [Locked Human Decisions](#locked-human-decisions)
 
 Depends on: none
 
@@ -128,6 +134,8 @@ Acceptance criteria:
 ### H02 - Decide First-Run Provider Copy And Plain-Secret Consent Wording
 
 Owner type: human
+
+Status: done - locked in [Locked Human Decisions](#locked-human-decisions)
 
 Depends on: none
 
@@ -820,10 +828,11 @@ Legend:
 - `Hxx` means human dependency.
 - `Txx` means implementation workspace or coordination task.
 - `*` means task can run in a workspace.
-- `!` means task should not start until a human dependency is satisfied.
+- `!` means a human dependency is tracked in the graph. In this backlog, H01 and
+  H02 are already satisfied by [Locked Human Decisions](#locked-human-decisions).
 
 ```text
-H01 ! installer hosting/trust
+H01 ! installer hosting/trust (done)
   +--> T11* install manifest
           +--> T12* install.sh
                  +--> T14* E2E first-run lanes
@@ -835,10 +844,10 @@ T12* install.sh
 T13* package assets
   +--> T16* release workflow checks (after T12 + T13)
 
-H02 ! credential consent wording
+H02 ! credential consent wording (done)
   +--> T06* credential ref backends
           +--> T07* provider orchestration
-          +--> T17* setup secret redaction
+                  +--> T17* setup secret redaction
 
 T01* CLI grammar/init switch
   +--> T04* setup dry-run
@@ -885,15 +894,18 @@ likely to collide or wait idle.
 
 ### Human Gate Before Wave 1
 
-Run immediately outside AWF capacity:
+Status: H01 and H02 are already satisfied by
+[Locked Human Decisions](#locked-human-decisions). Run this gate again outside
+AWF capacity only if a human operator reopens one of those decisions:
 
-| Item | Required before | Notes |
-| --- | --- | --- |
-| H01 | T11, T12, T16 | Installer hosting and trust-chain decision. |
-| H02 | T06 | Plain-secret consent and provider prompt wording. |
+| Item | Status | Required before | Notes |
+| --- | --- | --- | --- |
+| H01 | done - locked | T11, T12, T16 | Installer hosting and trust-chain decision. |
+| H02 | done - locked | T06 | Plain-secret consent and provider prompt wording. |
 
-If H01 is not ready, skip T11/T12/T16 and fill capacity with only CLI/setup
-work. If H02 is not ready, do not launch credential storage.
+Do not hold T06/T11/T12/T16 for additional H01/H02 approval. If a future
+operator reopens H01, skip T11/T12/T16 and fill capacity with only CLI/setup
+work. If H02 is reopened, do not launch credential storage.
 
 ### Wave 1 - Foundation
 
@@ -917,11 +929,12 @@ Conflict flags:
 
 ### Release Manifest Gate
 
-Capacity used: 1 workspace when both prerequisites are satisfied.
+Capacity used: 1 workspace when T01 is merged or explicitly satisfied. H01 is
+already locked.
 
 | Slot | Task | Why now |
 | --- | --- | --- |
-| 1 | T11 install manifest | Can start only after H01 is decided and T01 is merged or explicitly satisfied by the human operator. |
+| 1 | T11 install manifest | H01 is done; can start after T01 is merged or explicitly satisfied by the human operator. |
 
 ### Wave 2 - Setup, Start, Credentials, Clients, Packaging
 
@@ -935,7 +948,7 @@ need the shared error contract before they start.
 | 1 | T03 first-run errors/rendering | T02 |
 | 2 | T04 setup dry-run | T01, T02, T03 |
 | 3 | T05 start wrapper | T01, T02, T03 |
-| 4 | T06 credential backends | T02, T03, H02 |
+| 4 | T06 credential backends | T02, T03, H02 (done) |
 | 5 | T08 client config helpers | T02, T03 |
 | 6 | T13 package/source assets | T02, T11 |
 
@@ -964,16 +977,16 @@ Capacity used: up to 6 workspaces.
 | 1 | T07 provider orchestration | T04, T06 |
 | 2 | T09 MCP setup tools | T04, T05, T08 |
 | 3 | T10 no-token smoke proof | T04, T05 |
-| 4 | T12 install.sh | T11, H01 |
-| 5 | T16 release workflow checks | T11, T12, T13, H01 |
+| 4 | T12 install.sh | T11, H01 (done) |
+| 5 | T16 release workflow checks | T11, T12, T13, H01 (done) |
 | 6 | T17 setup secret redaction | T06, T07 |
 
 Recommended launch:
 
 - Launch T07, T09, T10, and T12 together once their dependencies are merged.
-- Launch T16 only after T11, T12, T13, and H01 are merged or explicitly
-  satisfied. Keep T16 queued while T12 or T13 is still only in PR monitor so
-  release checks smoke the final installer and package artifact set.
+- Launch T16 only after T11, T12, and T13 are merged or explicitly satisfied.
+  H01 is already locked. Keep T16 queued while T12 or T13 is still only in PR
+  monitor so release checks smoke the final installer and package artifact set.
 - Launch T17 after T07 defines provider setup payloads.
 
 Conflict flags:
@@ -1041,24 +1054,24 @@ Lane A - CLI/setup foundation
 
 Lane B - Config/start/source assets
   T02 -> T03 -> T05 -> T10 -> T14 -> T19
-      \       \       \         /
-       \       \       +-> T13 -
-        \       +-> T06 -> T07
-         +-> T08 -> T09 -> T19
+      \       \
+       \       +-> T06 -> T07
+        +-> T08 -> T09 -> T19
 
 Lane C - Installer/release
-  H01 -> T11 -> T12 ----\
-              \-> T13 ---+-> T16 -> T19
-                    \-> T14 (requires T12)
+  H01(done) -> T11 -> T12 -> T14 -> T19
+                     \       \-> T16 -> T19
+                      +-> T13 -> T14
+                             \-> T16
 
 Lane D - Docs/DX
   T01 -> T04 -> T10 -> T15 -> T18 -> T19
    |      |
    +-> T05 ----^
-  H01 -> T11 -> T12 -^
+  H01(done) -> T11 -> T12 -^
 
 Lane E - Human credential consent
-  H02 -> T06
+  H02(done) -> T06
 ```
 
 At no point does the recommended schedule require more than six simultaneous
