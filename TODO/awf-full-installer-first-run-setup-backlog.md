@@ -361,6 +361,8 @@ Acceptance criteria:
 - Keyring backend is default when available.
 - Env ref stores only variable names such as `OPENAI_API_KEY` or `GH_TOKEN`.
 - Plain file storage requires `--allow-plain-secrets` and approved consent.
+- Plain file storage is rejected on non-Linux or non-headless hosts even when
+  `--allow-plain-secrets` and consent are present.
 - Headless Linux without keychain offers env ref or explicit plain-file opt-in.
 - Raw tokens do not appear in stdout, stderr, config, logs, or test snapshots.
 
@@ -369,6 +371,7 @@ Required tests:
 - `tests/unit/service/test_host_setup_credentials.py`
 - Backend unavailable tests.
 - Permission tests for any plain-file fallback.
+- Non-Linux and non-headless rejection tests for the plain-file backend.
 - Redaction tests for token-shaped inputs.
 
 ### T07 - Add Provider Setup Orchestration With GitHub First-Class
