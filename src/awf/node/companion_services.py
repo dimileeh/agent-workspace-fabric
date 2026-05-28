@@ -381,7 +381,7 @@ def _resolve_environment_secrets(
             )
         secret_metadata = _environment_secret_metadata(spec.name, secret)
         if host_env.get(secret.value_from) is not None:
-            environment.append((secret.target, f"${{{secret.value_from}}}"))
+            environment.append((secret.target, _environment_secret_compose_ref(spec.name, secret)))
             env_secret_metadata.append(secret_metadata)
             continue
         if secret.required:
@@ -401,6 +401,19 @@ def _resolve_environment_secrets(
         payload["omitted_optional_env_secret_count"] = len(omitted_optional)
         payload["omitted_optional_env_secrets"] = tuple(omitted_optional)
     return tuple(environment), payload
+
+
+def _environment_secret_compose_ref(
+    companion_name: str,
+    secret: CompanionEnvironmentSecretRef,
+) -> str:
+    if not secret.required:
+        return f"${{{secret.value_from}}}"
+    return (
+        f"${{{secret.value_from}?{COMPANION_ENV_SECRET_SOURCE_MISSING}: "
+        f"companion={companion_name}, target={secret.target}, provider={secret.provider}, "
+        f"source={secret.value_from}}}"
+    )
 
 
 def _environment_secret_metadata(

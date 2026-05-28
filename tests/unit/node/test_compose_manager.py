@@ -270,7 +270,14 @@ class TestRender:
                 CompanionService(
                     name="backend",
                     build_context="/host/backend",
-                    environment=(("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),),
+                    environment=(
+                        (
+                            "AIRA_API_KEY",
+                            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+                            "companion=backend, target=AIRA_API_KEY, provider=env, "
+                            "source=ANTHROPIC_API_KEY}",
+                        ),
+                    ),
                     depends_on=("docker",),
                     healthcheck_cmd="curl -fsS http://localhost:8000/healthz",
                 ),
@@ -285,7 +292,11 @@ class TestRender:
             "docker": {"condition": "service_healthy"}
         }
         assert parsed["services"]["backend"]["environment"] == {
-            "AIRA_API_KEY": "${ANTHROPIC_API_KEY}"
+            "AIRA_API_KEY": (
+                "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+                "companion=backend, target=AIRA_API_KEY, provider=env, "
+                "source=ANTHROPIC_API_KEY}"
+            )
         }
         assert "raw-secret-value" not in rendered
 

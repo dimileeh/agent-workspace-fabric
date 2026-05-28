@@ -736,7 +736,14 @@ async def test_compose_stack_launcher_resolves_companion_environment_secrets(
     )
 
     rendered = compose.specs[0].companions[0]
-    assert rendered.environment == (("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),)
+    assert rendered.environment == (
+        (
+            "AIRA_API_KEY",
+            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+            "companion=backend, target=AIRA_API_KEY, provider=env, "
+            "source=ANTHROPIC_API_KEY}",
+        ),
+    )
     assert "raw-secret-value" not in repr(rendered)
     assert paths.secret_lease_mount_metadata["companion_env_secret_count"] == 1
     assert paths.secret_lease_mount_metadata["companion_env_secrets"] == (

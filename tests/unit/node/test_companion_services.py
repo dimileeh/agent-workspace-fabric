@@ -192,7 +192,12 @@ def test_companion_service_from_materialized_resolves_environment_secret_placeho
 
     assert service.environment == (
         ("APP_ENV", "test"),
-        ("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),
+        (
+            "AIRA_API_KEY",
+            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+            "companion=backend, target=AIRA_API_KEY, provider=env, "
+            "source=ANTHROPIC_API_KEY}",
+        ),
     )
     assert service.secret_metadata["env_secret_count"] == 1
     assert service.secret_metadata["env_secrets"] == (
@@ -237,8 +242,51 @@ def test_companion_service_from_materialized_accepts_empty_environment_secret_va
         host_env={"ANTHROPIC_API_KEY": ""},
     )
 
-    assert service.environment == (("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),)
+    assert service.environment == (
+        (
+            "AIRA_API_KEY",
+            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+            "companion=backend, target=AIRA_API_KEY, provider=env, "
+            "source=ANTHROPIC_API_KEY}",
+        ),
+    )
     assert service.secret_metadata["env_secret_count"] == 1
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_preserves_optional_present_secret_ref(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
+    )
+
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE}"),)
+    assert service.secret_metadata["env_secret_count"] == 1
+    assert "raw-optional-secret" not in repr(service)
 
 
 @pytest.mark.unit
