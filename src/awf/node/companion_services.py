@@ -477,15 +477,20 @@ def _environment_secret_ref(target: object, value: object) -> CompanionEnvironme
         )
     return CompanionEnvironmentSecretRef(
         target=target,
-        provider=provider,
-        kind=kind,
+        provider="env",
+        kind="env",
         value_from=value_from,
         required=_environment_secret_required(value.get("required", True)),
     )
 
 
-def _environment_secret_scope_value(value: Mapping[object, object], field: str) -> str:
-    return str(value.get(field, "env"))
+def _environment_secret_scope_value(value: Mapping[object, object], field: str) -> str | None:
+    if field not in value:
+        return "env"
+    field_value = value[field]
+    if field_value is None:
+        return None
+    return str(field_value)
 
 
 def _environment_secret_required(value: object) -> bool:

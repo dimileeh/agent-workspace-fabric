@@ -348,6 +348,35 @@ def test_companion_specs_from_task_policy_rejects_unsupported_environment_secret
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_reports_null_environment_secret_scope_field_without_stringifying_none() -> (
+    None
+):
+    with pytest.raises(ValueError) as exc_info:
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": {
+                                "provider": None,
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "provider=None" in message
+    assert "provider='None'" not in message
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None:
     spec = companion_specs_from_task_policy(
         {
