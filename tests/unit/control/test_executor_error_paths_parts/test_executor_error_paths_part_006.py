@@ -115,37 +115,39 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
 
 
 @pytest.mark.unit
-def test_optional_companion_env_secret_compose_ref_uses_canonical_builder(
+def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: list[str] = []
 
-    def _fake_environment_secret_compose_ref(
-        companion_name: str,
-        secret: companion_services.CompanionEnvironmentSecretRef,
-    ) -> str:
-        captured["companion_name"] = companion_name
-        captured["target"] = secret.target
-        captured["value_from"] = secret.value_from
-        captured["required"] = secret.required
+    def _fake_optional_env_secret_compose_placeholder(value_from: str) -> str:
+        captured.append(value_from)
         return "${CANONICAL:-sentinel}"
 
     monkeypatch.setattr(
-        companion_services,
-        "_environment_secret_compose_ref",
-        _fake_environment_secret_compose_ref,
+        executor_monitor_handoff,
+        "optional_env_secret_compose_placeholder",
+        _fake_optional_env_secret_compose_placeholder,
+    )
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    value_from="OPTIONAL_TOKEN_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
     )
 
-    assert (
-        executor_monitor_handoff._optional_companion_env_secret_compose_ref("OPTIONAL_TOKEN_SOURCE")
-        == "${CANONICAL:-sentinel}"
-    )
-    assert captured == {
-        "companion_name": "",
-        "target": "",
-        "value_from": "OPTIONAL_TOKEN_SOURCE",
-        "required": False,
-    }
+    assert executor_monitor_handoff._present_optional_companion_env_secret_refs(
+        companion_specs=companion_specs,
+        environ={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
+    ) == {"backend": {"OPTIONAL_TOKEN": "${CANONICAL:-sentinel}"}}
+    assert captured == ["OPTIONAL_TOKEN_SOURCE"]
 
 
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:

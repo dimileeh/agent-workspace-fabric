@@ -76,7 +76,11 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.node.companion_services import WorkspaceCompanionSpec, companion_specs_from_task_policy
+from awf.node.companion_services import (
+    WorkspaceCompanionSpec,
+    companion_specs_from_task_policy,
+    optional_env_secret_compose_placeholder,
+)
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
@@ -378,21 +382,9 @@ def _present_optional_companion_env_secret_refs(
             if secret.value_from not in environ:
                 continue
             present_refs.setdefault(spec.name, {})[secret.target] = (
-                _optional_companion_env_secret_compose_ref(secret.value_from)
+                optional_env_secret_compose_placeholder(secret.value_from)
             )
     return present_refs
-
-
-def _optional_companion_env_secret_compose_ref(value_from: str) -> str:
-    from awf.node.companion_services import (
-        CompanionEnvironmentSecretRef,
-        _environment_secret_compose_ref,
-    )
-
-    return _environment_secret_compose_ref(
-        "",
-        CompanionEnvironmentSecretRef(target="", value_from=value_from, required=False),
-    )
 
 
 def _remove_compose_environment_targets(

@@ -412,6 +412,14 @@ def _resolve_environment_secrets(
     return tuple(environment), payload
 
 
+def optional_env_secret_compose_placeholder(value_from: str) -> str:
+    """Build the Compose placeholder for an optional env-backed secret source."""
+    return _environment_secret_compose_ref(
+        "",
+        CompanionEnvironmentSecretRef(target="", value_from=value_from, required=False),
+    )
+
+
 def _environment_secret_compose_ref(
     companion_name: str,
     secret: CompanionEnvironmentSecretRef,

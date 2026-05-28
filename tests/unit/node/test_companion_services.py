@@ -14,6 +14,7 @@ from awf.node.companion_services import (
     WorkspaceCompanionSpec,
     companion_service_from_materialized,
     companion_specs_from_task_policy,
+    optional_env_secret_compose_placeholder,
     validate_companion_service_graph,
 )
 from awf.node.compose_manager import ComposeService
@@ -493,6 +494,14 @@ def test_companion_service_from_materialized_preserves_optional_present_secret_r
     assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE:-}"),)
     assert service.secret_metadata["env_secret_count"] == 1
     assert "raw-optional-secret" not in repr(service)
+
+
+@pytest.mark.unit
+def test_optional_env_secret_compose_placeholder_uses_optional_default() -> None:
+    assert (
+        optional_env_secret_compose_placeholder("OPTIONAL_TOKEN_SOURCE")
+        == "${OPTIONAL_TOKEN_SOURCE:-}"
+    )
 
 
 @pytest.mark.unit
