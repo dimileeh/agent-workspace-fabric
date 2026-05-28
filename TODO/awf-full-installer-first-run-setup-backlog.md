@@ -91,7 +91,7 @@ These are reuse targets, not work to rebuild:
 | T05 | Add `awf start` wrapper over existing service bootstrap | workspace | planned | P0 | T01, T02, T03 | start |
 | T06 | Add keychain/env/plain-file credential ref backends | workspace | planned | P0 | T02, T03, H02 | credentials |
 | T07 | Add provider setup orchestration with GitHub first-class | workspace | planned | P0 | T04, T06 | credentials |
-| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | planned | P1 | T02, T03 | clients |
+| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | planned | P1 | T02, T03, T04 | clients |
 | T09 | Add setup/start/init/client MCP tools | workspace | planned | P1 | T04, T05, T08 | mcp |
 | T10 | Add no-token local proof and mocked smoke path | workspace | planned | P0 | T04, T05 | smoke |
 | T11 | Add install manifest generator and release metadata contract | workspace | planned | P0 | T01, H01 | release |
@@ -481,10 +481,12 @@ Owner type: workspace
 Modules touched:
 
 - `src/awf/host_setup/clients.py`
+- `src/awf/cli/setup_commands.py` for `--client` parser/dispatch after T04
+  lands
 - `docs/MCP_SETUP.md`
 - client integration tests
 
-Depends on: T02, T03
+Depends on: T02, T03, T04
 
 What:
 
@@ -503,6 +505,8 @@ Acceptance criteria:
 
 Required tests:
 
+- CLI parser and dispatch tests for `--client claude`, `--client codex`,
+  unknown clients, and dry-run no-mutation.
 - Config missing, already configured, conflicting config, write failure, backup
   creation, and dry-run no-mutation.
 - Official CLI path and file-fallback path with fakes.
@@ -938,10 +942,10 @@ T02* config/source asset model
           +--> T04* setup dry-run
           +--> T05* start wrapper
           +--> T06* credential backends
-          +--> T08* client config helpers
 
 T04* setup dry-run
   +--> T07* provider orchestration
+  +--> T08* client config helpers
   +--> T09* MCP setup tools
   +--> T10* no-token smoke proof
           +--> T14* E2E first-run lanes
@@ -1022,10 +1026,11 @@ already locked.
 
 ### Wave 2 - Setup, Start, Credentials, Clients, Packaging
 
-Capacity used: up to 6 workspaces.
+Capacity used: up to 6 workspaces over the wave; T08 is queued behind T04.
 
 Start when T01 and T02 are merged. Launch T03 first because T04/T05/T06/T08
-need the shared error contract before they start.
+need the shared error contract before they start. T08 also waits for T04 so
+the setup CLI and dry-run surface exist before client dispatch is added.
 
 | Slot | Task | Depends on |
 | --- | --- | --- |
@@ -1033,14 +1038,16 @@ need the shared error contract before they start.
 | 2 | T04 setup dry-run | T01, T02, T03 |
 | 3 | T05 start wrapper | T01, T02, T03 |
 | 4 | T06 credential backends | T02, T03, H02 (done) |
-| 5 | T08 client config helpers | T02, T03 |
+| 5 | T08 client config helpers | T02, T03, T04 |
 | 6 | T13 package/source assets | T02, T11 |
 
 Recommended launch:
 
 - Launch T03 first if possible.
-- Launch T04/T05/T06/T08 only after T03 is merged or explicitly satisfied by
-  the human operator.
+- Launch T04/T05/T06 only after T03 is merged or explicitly satisfied by the
+  human operator.
+- Launch T08 only after T04 is merged or explicitly satisfied by the human
+  operator.
 - Launch T13 only after T11 is merged or explicitly satisfied by the human
   operator; it can run alongside post-T03 wave-2 work only when both dependency
   gates are clean.
@@ -1049,6 +1056,8 @@ Conflict flags:
 
 - T04, T06, and T08 all touch `src/awf/host_setup`. Keep each task scoped to
   its own module plus shared models only.
+- T04 and T08 share the setup CLI surface. T08 consumes T04's command shell and
+  owns only client selector dispatch plus client helper wiring.
 - T05 and T13 both care about package/source assets. T13 owns asset inclusion;
   T05 owns startup selection and diagnostics.
 
@@ -1135,12 +1144,14 @@ Recommended launch:
 ```text
 Lane A - CLI/setup foundation
   T01 -> T04 -> T07 -> T17 -> T19
+          \
+           +-> T08 -> T09 -> T19
 
 Lane B - Config/start/source assets
   T02 -> T03 -> T05 -> T10 -> T14 -> T19
       \       \
        \       +-> T06 -> T07
-        +-> T08 -> T09 -> T19
+        +-------> T08 -> T09 -> T19
 
 Lane C - Installer/release
   H01(done) -> T11 -> T12 -> T14 -> T19
