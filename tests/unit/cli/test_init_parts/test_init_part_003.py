@@ -9,11 +9,8 @@ from typing import Any
 
 import pytest
 import yaml
-from typer.testing import CliRunner
 
 from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service_bootstrap
-
-_runner = CliRunner()
 
 
 def _docker_diagnostic(status: str = "ok") -> Any:
