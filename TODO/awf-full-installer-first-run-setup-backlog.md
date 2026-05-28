@@ -927,8 +927,8 @@ Capacity used: 1 workspace when both prerequisites are satisfied.
 
 Capacity used: up to 6 workspaces.
 
-Start when T01 and T02 are merged. T03 should land early in this wave because
-T04/T05/T06/T08 need the shared error contract.
+Start when T01 and T02 are merged. Launch T03 first because T04/T05/T06/T08
+need the shared error contract before they start.
 
 | Slot | Task | Depends on |
 | --- | --- | --- |
@@ -941,10 +941,12 @@ T04/T05/T06/T08 need the shared error contract.
 
 Recommended launch:
 
-- Launch T03 first if possible and let the other wave-2 tasks depend on its PR.
-- If AWF can schedule queued work safely, submit T04/T05/T06/T08/T13 after T03
-  is in PR monitor, but mark dependencies clearly so they do not implement
-  incompatible error payloads.
+- Launch T03 first if possible.
+- Launch T04/T05/T06/T08 only after T03 is merged or explicitly satisfied by
+  the human operator.
+- Launch T13 only after T11 is merged or explicitly satisfied by the human
+  operator; it can run alongside post-T03 wave-2 work only when both dependency
+  gates are clean.
 
 Conflict flags:
 
