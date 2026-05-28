@@ -27,6 +27,7 @@ from awf.host_setup import (
     verified_source_from_metadata,
     write_host_setup_config,
 )
+from awf.host_setup.config import _ensure_no_secret_payload, _SecretPayloadError
 from awf.host_setup.source_assets import SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS
 
 _FIXED_NOW = datetime(2026, 5, 28, 12, 0, tzinfo=UTC)
@@ -109,6 +110,54 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
     assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
     assert error.path == config_path
     assert "ghp_raw_secret" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw_config", "expected_issue", "expected_path"),
+    [
+        (
+            "version: 1\naudit:\n  - sk-raw-secret-value\n",
+            "secret-like value",
+            "audit.[0]",
+        ),
+        (
+            "version: 1\naudit:\n  - token: ghp_raw_secret\n",
+            "secret-bearing key",
+            "audit.[0].token",
+        ),
+    ],
+)
+def test_host_setup_config_rejects_secret_payloads_inside_lists(
+    tmp_path: Path,
+    raw_config: str,
+    expected_issue: str,
+    expected_path: str,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(raw_config, encoding="utf-8")
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    assert error.path == config_path
+    assert error.details == {"issue": expected_issue, "path": expected_path}
+    assert "sk-raw-secret-value" not in str(error.to_dict())
+    assert "ghp_raw_secret" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
+    with pytest.raises(_SecretPayloadError) as exc_info:
+        _ensure_no_secret_payload({"audit": ({"token": "ghp_raw_secret"},)})
+
+    assert exc_info.value.details() == {
+        "issue": "secret-bearing key",
+        "path": "audit.[0].token",
+    }
 
 
 @pytest.mark.unit

@@ -279,6 +279,10 @@ def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> N
                 raise _SecretPayloadError(path=child_path, issue="secret-bearing key")
             _ensure_no_secret_payload(raw_value, path=child_path)
         return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _ensure_no_secret_payload(item, path=(*path, f"[{index}]"))
+        return
     if isinstance(value, str) and _looks_like_secret_value(value):
         raise _SecretPayloadError(path=path, issue="secret-like value")
 
