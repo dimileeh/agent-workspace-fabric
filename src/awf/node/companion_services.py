@@ -387,7 +387,9 @@ def _resolve_environment_secrets(
                 reason_code=COMPANION_ENV_SECRET_UNSUPPORTED,
             )
         secret_metadata = _environment_secret_metadata(spec.name, secret)
-        if secret.value_from in host_env:
+        source_is_set = secret.value_from in host_env
+        source_is_empty = source_is_set and host_env[secret.value_from] == ""
+        if source_is_set and (not secret.required or not source_is_empty):
             environment.append((secret.target, _environment_secret_compose_ref(spec.name, secret)))
             env_secret_metadata.append(secret_metadata)
             continue
@@ -418,7 +420,7 @@ def _environment_secret_compose_ref(
     if not secret.required:
         return f"${{{secret.value_from}:-}}"
     return (
-        f"${{{secret.value_from}?{COMPANION_ENV_SECRET_SOURCE_MISSING}: "
+        f"${{{secret.value_from}:?{COMPANION_ENV_SECRET_SOURCE_MISSING}: "
         f"companion={companion_name}, target={secret.target}, provider={secret.provider}, "
         f"source={secret.value_from}}}"
     )

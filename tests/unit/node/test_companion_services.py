@@ -404,7 +404,7 @@ def test_companion_service_from_materialized_resolves_environment_secret_placeho
         ("APP_ENV", "test"),
         (
             "AIRA_API_KEY",
-            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING: "
             "companion=backend, target=AIRA_API_KEY, provider=env, "
             "source=ANTHROPIC_API_KEY}",
         ),
@@ -423,7 +423,7 @@ def test_companion_service_from_materialized_resolves_environment_secret_placeho
 
 
 @pytest.mark.unit
-def test_companion_service_from_materialized_accepts_empty_environment_secret_value(
+def test_companion_service_from_materialized_fails_required_empty_environment_secret_value(
     tmp_path: Path,
 ) -> None:
     companion_root = tmp_path / "backend"
@@ -447,20 +447,16 @@ def test_companion_service_from_materialized_accepts_empty_environment_secret_va
         }
     )[0]
 
-    service = companion_service_from_materialized(
-        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
-        host_env={"ANTHROPIC_API_KEY": ""},
-    )
+    with pytest.raises(ProfileResolutionError) as exc:
+        companion_service_from_materialized(
+            MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+            host_env={"ANTHROPIC_API_KEY": ""},
+        )
 
-    assert service.environment == (
-        (
-            "AIRA_API_KEY",
-            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
-            "companion=backend, target=AIRA_API_KEY, provider=env, "
-            "source=ANTHROPIC_API_KEY}",
-        ),
-    )
-    assert service.secret_metadata["env_secret_count"] == 1
+    assert exc.value.reason_code == COMPANION_ENV_SECRET_SOURCE_MISSING
+    assert "backend" in str(exc.value)
+    assert "AIRA_API_KEY" in str(exc.value)
+    assert "ANTHROPIC_API_KEY" in str(exc.value)
 
 
 @pytest.mark.unit

@@ -273,7 +273,7 @@ class TestRender:
                     environment=(
                         (
                             "AIRA_API_KEY",
-                            "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+                            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING: "
                             "companion=backend, target=AIRA_API_KEY, provider=env, "
                             "source=ANTHROPIC_API_KEY}",
                         ),
@@ -293,7 +293,7 @@ class TestRender:
         }
         assert parsed["services"]["backend"]["environment"] == {
             "AIRA_API_KEY": (
-                "${ANTHROPIC_API_KEY?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+                "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING: "
                 "companion=backend, target=AIRA_API_KEY, provider=env, "
                 "source=ANTHROPIC_API_KEY}"
             )
