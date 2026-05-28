@@ -25,12 +25,11 @@ respects an eight-workspace local capacity cap.
 
 ## Locked Human Decisions
 
-- H01 installer hosting: GitHub Releases is the canonical artifact and manifest
-  source for v1. `aira.pro` may serve or redirect `install.sh` and can mirror
-  release artifacts later.
-- H01 installer trust: v1 requires manifest-pinned `sha256` verification.
-  Reserve signature fields for a later signing slice, but do not block v1 on
-  release signing infrastructure.
+- H01 installer hosting and trust: GitHub Releases is the canonical artifact
+  and manifest source for v1. `aira.pro` may serve or redirect `install.sh`
+  and can mirror release artifacts later. v1 requires manifest-pinned `sha256`
+  verification. Reserve signature fields for a later signing slice, but do not
+  block v1 on release signing infrastructure.
 - H02 plain-secret policy: allow `chmod 600` plain-file provider secrets only
   for Linux/headless setups after explicit warning and consent. Keyring and env
   refs remain preferred.
