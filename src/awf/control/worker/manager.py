@@ -130,9 +130,8 @@ class ControlWorker(WorkerDelegatesMixin):
                 select(func.count())
                 .select_from(Workspace)
                 .where(Workspace.status.in_(status_values))
+                .where(Workspace.node_id == self._config.node_id)
             )
-            if self._config.node_id is not None:
-                stmt = stmt.where(Workspace.node_id == self._config.node_id)
             occupied = await session.scalar(stmt)
             return int(occupied or 0)
 
