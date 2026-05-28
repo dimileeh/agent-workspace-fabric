@@ -69,7 +69,7 @@ class SourceCheckoutAssetMetadata(BaseModel):
 
     root: Path
     verified_at: datetime
-    markers: tuple[str, ...] = Field(default_factory=lambda: SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
+    markers: tuple[str, ...] = Field(default=SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
     asset_paths: SourceCheckoutAssetPaths = Field(default_factory=SourceCheckoutAssetPaths)
 
 

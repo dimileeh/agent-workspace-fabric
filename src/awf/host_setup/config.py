@@ -145,6 +145,9 @@ def _construct_mapping_without_duplicate_keys(
             node.start_mark,
         )
 
+    # flatten_mapping expands YAML merge keys before duplicate detection. This
+    # intentionally rejects merge-then-override patterns that SafeLoader would
+    # otherwise collapse, keeping machine-written config.yml deterministic.
     loader.flatten_mapping(node)
     seen_keys: set[object] = set()
     constructed_keys: list[object] = []
