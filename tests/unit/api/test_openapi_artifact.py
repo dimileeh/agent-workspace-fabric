@@ -189,7 +189,7 @@ def test_workspace_companion_compose_timeout_documents_bounds(openapi_spec: dict
     timeout_schema = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"][
         "properties"
     ]["compose_up_timeout_seconds"]
-    integer_schema = timeout_schema["anyOf"][0]
+    integer_schema = next(item for item in timeout_schema["anyOf"] if item.get("type") == "integer")
 
     assert integer_schema["minimum"] == 1
     assert integer_schema["maximum"] == 1800
