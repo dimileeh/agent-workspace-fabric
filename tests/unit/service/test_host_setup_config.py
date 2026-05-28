@@ -138,6 +138,77 @@ def test_host_setup_config_write_parent_creation_error_is_reason_coded(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_host_setup_config_path_resolution_failure_for_default_home_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    def _home_unavailable() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", _home_unavailable)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        if operation == "read":
+            read_host_setup_config()
+        else:
+            write_host_setup_config(HostSetupConfig())
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == Path("~/.awf/config.yml")
+    assert error.details == {"error_type": "RuntimeError"}
+    assert "Could not determine home directory" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_host_setup_config_path_resolution_failure_for_explicit_path_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    config_path = Path("~/awf-config.yml")
+
+    def _expanduser_unavailable(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        if operation == "read":
+            read_host_setup_config(path=config_path)
+        else:
+            write_host_setup_config(HostSetupConfig(), path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "RuntimeError"}
+    assert "Could not determine home directory" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_default_host_setup_config_path_resolution_failure_for_explicit_home_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = Path("~/awf-home")
+
+    def _expanduser_unavailable(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        default_host_setup_config_path(home=home)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == home / ".awf" / "config.yml"
+    assert error.details == {"error_type": "RuntimeError"}
+    assert "Could not determine home directory" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         ProviderConfig(credential_ref="ghp_abcdefghijklmnopqrstuvwxyz123456")

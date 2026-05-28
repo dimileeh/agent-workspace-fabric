@@ -234,7 +234,12 @@ class HostSetupConfig(_HostSetupBaseModel):
 
 def default_host_setup_config_path(*, home: str | Path | None = None) -> Path:
     """Return the default host setup config path."""
-    base = Path.home() if home is None else Path(home).expanduser()
+    unresolved_home = Path("~") if home is None else Path(home)
+    unresolved_path = unresolved_home / ".awf" / "config.yml"
+    try:
+        base = Path.home() if home is None else unresolved_home.expanduser()
+    except (OSError, RuntimeError) as exc:
+        raise _config_path_resolution_error(unresolved_path, exc) from exc
     return base / ".awf" / "config.yml"
 
 
@@ -315,7 +320,20 @@ def _resolve_config_path(path: str | Path | None) -> Path:
     """Return the explicit config path or the default host setup path."""
     if path is None:
         return default_host_setup_config_path()
-    return Path(path).expanduser()
+    base = Path(path)
+    try:
+        return base.expanduser()
+    except (OSError, RuntimeError) as exc:
+        raise _config_path_resolution_error(base, exc) from exc
+
+
+def _config_path_resolution_error(path: Path, exc: OSError | RuntimeError) -> HostSetupConfigError:
+    """Build a sanitized error for config path expansion failures."""
+    return _config_corrupt_error(
+        path,
+        message="Unable to resolve host setup config path.",
+        details={"error_type": type(exc).__name__},
+    )
 
 
 def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> None:
