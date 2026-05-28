@@ -632,6 +632,35 @@ async def test_requested_workspace_stays_queued_when_node_active_rows_fill_slots
 
 
 @pytest.mark.unit
+async def test_default_worker_counts_local_node_active_rows_as_occupied(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _create_active_slot(session_factory, node_id="local")
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id="local",
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=5,
+            max_concurrent_executions=1,
+            node_id=None,
+        ),
+    )
+    worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+    assert await worker.run_once() == 0
+
+    assert provisioner.calls == []
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.requested.value
+
+
+@pytest.mark.unit
 async def test_named_node_worker_counts_null_node_provisioning_rows_as_occupied(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

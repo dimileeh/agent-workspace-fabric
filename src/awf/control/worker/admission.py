@@ -53,14 +53,12 @@ async def _requested_admission_row_slots(
         return 0
     status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     stmt = select(func.count()).select_from(Workspace).where(Workspace.status.in_(status_values))
-    if config.node_id is None:
-        stmt = stmt.where(Workspace.node_id.is_(None))
-    else:
-        stmt = stmt.where(
-            or_(
-                Workspace.node_id == config.node_id,
-                Workspace.node_id.is_(None),
-            )
+    node_id = config.node_id or "local"
+    stmt = stmt.where(
+        or_(
+            Workspace.node_id == node_id,
+            Workspace.node_id.is_(None),
         )
+    )
     occupied = await session.scalar(stmt)
     return max(0, max_executions - int(occupied or 0))
