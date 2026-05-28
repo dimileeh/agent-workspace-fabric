@@ -846,17 +846,18 @@ T01* CLI grammar/init switch
   +--> T11* install manifest
 
 T02* config/source asset model
+  +--> T13* package assets
   +--> T03* first-run errors/rendering
           +--> T04* setup dry-run
           +--> T05* start wrapper
           +--> T06* credential backends
           +--> T08* client config helpers
-          +--> T13* package assets
 
 T04* setup dry-run
   +--> T07* provider orchestration
   +--> T09* MCP setup tools
   +--> T10* no-token smoke proof
+          +--> T14* E2E first-run lanes
           +--> T15* docs lanes
                   +--> T18* docs drift tests
 
