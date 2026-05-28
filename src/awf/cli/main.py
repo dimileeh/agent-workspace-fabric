@@ -16,6 +16,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import click
 import httpx
@@ -129,7 +130,7 @@ def _init_migration_payload(legacy_flags: list[str]) -> dict[str, object]:
     return payload
 
 
-def _emit_init_migration_error(fmt: OutputFormat, legacy_flags: list[str]) -> None:
+def _emit_init_migration_error(fmt: OutputFormat, legacy_flags: list[str]) -> NoReturn:
     payload = _init_migration_payload(legacy_flags)
     if fmt == OutputFormat.json:
         _emit(payload, fmt)
@@ -267,7 +268,6 @@ def init(
         if _explicit("write_env"):
             rejected_flags.append("--write-env" if write_env else "--no-write-env")
         _emit_init_migration_error(fmt, rejected_flags)
-        return
 
     bootstrap_only_flags: list[str] = []
     if _explicit("skip_agent_runtime_build"):
