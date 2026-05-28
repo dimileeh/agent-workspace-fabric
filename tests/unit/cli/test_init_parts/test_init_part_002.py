@@ -1085,6 +1085,25 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
 
 
 @pytest.mark.unit
+def test_init_bootstrap_helper_rejects_unknown_provider_before_local_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy helper provider validation should fail before Compose discovery."""
+    from awf.cli import init_ops
+
+    def _fail_compose_resolution() -> None:
+        pytest.fail("provider validation should run before Compose path resolution")
+
+    monkeypatch.setattr(init_ops, "_resolve_service_compose_paths", _fail_compose_resolution)
+
+    result = invoke_init_service_bootstrap(["--provider", "bogus"])
+
+    assert result.exit_code == 2
+    assert "error: unknown provider(s): bogus" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
 def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
