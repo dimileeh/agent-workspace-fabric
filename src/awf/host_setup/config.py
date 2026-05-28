@@ -8,10 +8,19 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
 
@@ -165,8 +174,10 @@ class HostSetupConfig(_HostSetupBaseModel):
     install: InstallConfig = Field(default_factory=InstallConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     work_dir: str = Field(default=DEFAULT_HOST_SETUP_WORK_DIR, min_length=1, max_length=4096)
-    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
-    clients: dict[str, ClientIntegrationConfig] = Field(default_factory=dict)
+    providers: Mapping[str, ProviderConfig] = Field(default_factory=dict, validate_default=True)
+    clients: Mapping[str, ClientIntegrationConfig] = Field(
+        default_factory=dict, validate_default=True
+    )
     consent: ConsentConfig = Field(default_factory=ConsentConfig)
     source_checkout: SourceCheckoutAssetMetadata | None = None
 
@@ -184,6 +195,40 @@ class HostSetupConfig(_HostSetupBaseModel):
         if value != HOST_SETUP_CONFIG_VERSION:
             raise ValueError(f"unsupported host setup config version: {value}")
         return value
+
+    @field_validator("providers", mode="after")
+    @classmethod
+    def _freeze_providers(
+        cls,
+        value: Mapping[str, ProviderConfig],
+    ) -> Mapping[str, ProviderConfig]:
+        """Prevent post-validation provider state from being mutated in place."""
+        return MappingProxyType(dict(value))
+
+    @field_validator("clients", mode="after")
+    @classmethod
+    def _freeze_clients(
+        cls,
+        value: Mapping[str, ClientIntegrationConfig],
+    ) -> Mapping[str, ClientIntegrationConfig]:
+        """Prevent post-validation client state from being mutated in place."""
+        return MappingProxyType(dict(value))
+
+    @field_serializer("providers")
+    def _serialize_providers(
+        self,
+        value: Mapping[str, ProviderConfig],
+    ) -> dict[str, ProviderConfig]:
+        """Serialize immutable provider mappings as plain mappings."""
+        return dict(value)
+
+    @field_serializer("clients")
+    def _serialize_clients(
+        self,
+        value: Mapping[str, ClientIntegrationConfig],
+    ) -> dict[str, ClientIntegrationConfig]:
+        """Serialize immutable client mappings as plain mappings."""
+        return dict(value)
 
 
 def default_host_setup_config_path(*, home: str | Path | None = None) -> Path:

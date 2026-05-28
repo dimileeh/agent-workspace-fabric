@@ -147,6 +147,25 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_host_setup_config_rejects_in_place_provider_mutation() -> None:
+    empty_config = HostSetupConfig()
+
+    with pytest.raises(TypeError):
+        empty_config.providers["github"] = {"token": "ghp_raw"}
+
+    assert "github" not in empty_config.providers
+
+    configured = HostSetupConfig(
+        providers={"github": ProviderConfig(credential_ref="env://GITHUB_TOKEN")}
+    )
+
+    with pytest.raises(TypeError):
+        configured.providers["openai"] = {"credential_ref": "sk-raw-secret-value"}
+
+    assert set(configured.providers) == {"github"}
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("raw_config", "expected_issue", "expected_path"),
     [
