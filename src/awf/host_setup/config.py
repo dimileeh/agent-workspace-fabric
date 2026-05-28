@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
@@ -242,7 +243,7 @@ def write_host_setup_config(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_best_effort(config_path.parent, 0o700)
 
-    tmp_path = config_path.with_name(f".{config_path.name}.tmp")
+    tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
     text = yaml.safe_dump(payload, sort_keys=False)
     try:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

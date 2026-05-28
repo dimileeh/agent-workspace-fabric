@@ -87,6 +87,39 @@ def test_host_setup_config_round_trips_with_conservative_permissions(tmp_path: P
 
 
 @pytest.mark.unit
+def test_host_setup_config_write_uses_unique_temp_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    opened_paths: list[Path] = []
+    original_open = os.open
+
+    def _record_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        opened_paths.append(Path(os.fsdecode(path)))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _record_open)
+
+    write_host_setup_config(HostSetupConfig(api=ApiConfig(host_port=8124)), path=config_path)
+    write_host_setup_config(HostSetupConfig(api=ApiConfig(host_port=8125)), path=config_path)
+
+    assert len(opened_paths) == 2
+    assert opened_paths[0].parent == config_path.parent
+    assert opened_paths[1].parent == config_path.parent
+    assert opened_paths[0].name.startswith(f".{config_path.name}.")
+    assert opened_paths[1].name.startswith(f".{config_path.name}.")
+    assert opened_paths[0].name.endswith(".tmp")
+    assert opened_paths[1].name.endswith(".tmp")
+    assert opened_paths[0] != opened_paths[1]
+    assert read_host_setup_config(path=config_path).api.host_port == 8125
+
+
+@pytest.mark.unit
 def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         ProviderConfig(credential_ref="ghp_abcdefghijklmnopqrstuvwxyz123456")
