@@ -134,6 +134,28 @@ def test_host_setup_config_write_preserves_explicit_awf_parent_permissions(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks only")
+def test_host_setup_config_write_preserves_parent_for_explicit_symlink_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_path = default_host_setup_config_path()
+    config_dir = tmp_path / "shared"
+    config_dir.mkdir()
+    config_dir.chmod(0o755)
+    config_path = config_dir / "config.yml"
+    config_path.symlink_to(default_path)
+
+    write_host_setup_config(HostSetupConfig(api=ApiConfig(host_port=8126)), path=config_path)
+
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+    assert not config_path.is_symlink()
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert read_host_setup_config(path=config_path).api.host_port == 8126
+
+
+@pytest.mark.unit
 def test_host_setup_config_write_secures_explicit_default_parent_permissions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -731,10 +753,10 @@ def test_config_path_helpers_handle_resolution_and_platform_fallbacks(
     write_host_setup_config(HostSetupConfig(), path=config_path)
     assert read_host_setup_config(path=config_path) == HostSetupConfig()
 
-    def _resolve_unavailable(self: Path, *args: object, **kwargs: object) -> Path:
+    def _absolute_unavailable(self: Path) -> Path:
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "resolve", _resolve_unavailable)
+    monkeypatch.setattr(Path, "absolute", _absolute_unavailable)
     assert host_setup_config._normalized_config_path(config_path) == config_path
 
     monkeypatch.setattr(host_setup_config.os, "name", "nt")

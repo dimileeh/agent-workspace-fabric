@@ -433,9 +433,9 @@ def _is_standard_awf_config_path(path: Path) -> bool:
 
 
 def _normalized_config_path(path: Path) -> Path:
-    """Return a stable path value for config path identity checks."""
+    """Return a stable path value for identity checks without following symlinks."""
     try:
-        return path.resolve(strict=False)
+        return path.expanduser().absolute()
     except (OSError, RuntimeError):
         return path
 
