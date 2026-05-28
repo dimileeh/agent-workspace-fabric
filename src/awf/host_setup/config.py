@@ -357,7 +357,7 @@ def _looks_like_secret_value(value: str) -> bool:
     """Return whether a string resembles a raw credential value."""
     stripped = value.strip()
     lower = stripped.lower()
-    return lower.startswith("bearer ") or stripped.startswith(_SECRET_VALUE_PREFIXES)
+    return lower.startswith("bearer ") or lower.startswith(_SECRET_VALUE_PREFIXES)
 
 
 def _format_path(path: tuple[str, ...]) -> str:

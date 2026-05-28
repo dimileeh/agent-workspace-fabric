@@ -275,6 +275,26 @@ def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw_secret",
+    [
+        "SK-proj-raw-secret-value",
+        "GHP_raw_secret_value",
+        "XOXB-raw-secret-value",
+    ],
+)
+def test_secret_payload_scan_rejects_uppercase_token_prefixes(raw_secret: str) -> None:
+    with pytest.raises(_SecretPayloadError) as exc_info:
+        _ensure_no_secret_payload({"audit": [raw_secret]})
+
+    assert exc_info.value.details() == {
+        "issue": "secret-like value",
+        "path": "audit.[0]",
+    }
+    assert raw_secret not in str(exc_info.value.details())
+
+
+@pytest.mark.unit
 def test_corrupt_config_has_reason_code_and_path_details(tmp_path: Path) -> None:
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
