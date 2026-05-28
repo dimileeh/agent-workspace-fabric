@@ -7,13 +7,10 @@ then edit the draft and decide when to submit a real workspace request.
 
 ## First-run operator command
 
-`awf init` has two shapes:
+Use the first-run commands in order:
 
-- `awf init` (no path) — the AWF-on-this-machine local service bootstrap. It
-  checks Docker, ensures the host state directory, optionally seeds `.env`
-  from `.env.example`, and starts or validates the local Postgres + migrate
-  + API + worker stack. Use this once per machine before running any
-  workspace-related commands.
+- `awf setup` — prepare this machine for AWF.
+- `awf start` — start or validate local AWF Core.
 - `awf init <path>` — the project-onboarding pass described on this page. It
   inspects a checked-out repository, runs local readiness checks without
   calling the AWF API, and creates or previews `.awf/workspace.yml`. Interactive
@@ -21,7 +18,8 @@ then edit the draft and decide when to submit a real workspace request.
   `--write-profile --yes` to write detected defaults.
 
 ```bash
-awf init                          # one-time local service bootstrap
+awf setup
+awf start
 awf init .                        # guided project onboarding for ./.
 awf init . --write-profile --yes  # silent profile write with detected defaults
 awf init . --include-smoke-request

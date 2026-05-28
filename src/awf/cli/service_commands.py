@@ -22,9 +22,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 _DX_FIRST_PATH_HELP = """
-For first-time users: the recommended first path is to run `awf init`
-to verify prerequisites and bootstrap your local service stack, followed by
-`awf init <path>` to prepare your project repository.
+For first-time users: the recommended first path is `awf setup`, then
+`awf start`, then `awf init <path>` to prepare your project repository.
 """
 _PROVIDER_HELP = (
     "Repeatable provider strictness check: github, codex, claude_code, gemini, opencode, or docker."

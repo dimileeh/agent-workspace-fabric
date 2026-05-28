@@ -44,23 +44,25 @@ uv tool install . --force
 Homebrew is planned after AWF has stable tagged Python artifacts and a passing
 formula audit.
 
-## Bootstrap AWF
+## Set Up And Start AWF
 
-For PR creation and monitoring, export a GitHub token before bootstrapping so
-the API and worker containers receive it when they are created:
+The public first-run sequence is machine setup, local Core startup, then
+project onboarding. For PR creation and monitoring, export a GitHub token
+before starting Core so the API and worker containers receive it when they are
+created:
 
 ```bash
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf init
+awf setup
+awf start
 awf service status --format pretty
 ```
 
-`awf init` without a path checks local prerequisites, creates the host state
-directory, writes `docker/compose/.env` from `.env.example` when the source
-checkout contains `docker/compose/local-service.yml` (or `.env` in package
-installs), and starts the local Postgres, migration, API, and worker stack.
+`awf setup` prepares the machine for AWF, `awf start` starts the local AWF Core
+stack, and `awf service status --format pretty` confirms API, database, Docker,
+image, disk, provider, and cleanup health.
 
-If you set or refresh the GitHub token after `awf init`, rerun the service
+If you set or refresh the GitHub token after starting Core, rerun the service
 bootstrap so Compose recreates the service containers with the updated
 environment:
 

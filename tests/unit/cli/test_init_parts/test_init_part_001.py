@@ -15,6 +15,7 @@ import yaml
 from typer.testing import CliRunner
 
 from awf.cli.main import app
+from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service_bootstrap
 
 _runner = CliRunner()
 
@@ -295,12 +296,89 @@ def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.unit
-def test_init_write_env_help_names_compose_target() -> None:
-    """Document the concrete Compose env target in init help text."""
+def test_init_help_documents_project_onboarding_and_new_first_run_flow() -> None:
+    """Document that public init is now only project onboarding."""
     result = _runner.invoke(app, ["init", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0, result.output
-    assert "docker/compose/.env" in result.output
+    assert "awf setup" in result.output
+    assert "awf start" in result.output
+    assert "awf init <path>" in result.output
+    assert "Path to a checked-out repository" in result.output
+    assert "docker/compose/.env" not in result.output
+    assert "--write-env" not in result.output
+    assert "--timeout-seconds" not in result.output
+    assert "--poll-interval-seconds" not in result.output
+    assert "--skip-agent-runtime-build" not in result.output
+    assert "--provider" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_returns_migration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.cli import main as cli_main
+
+    def _fail_bootstrap(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("no-path awf init must not run service bootstrap")
+
+    monkeypatch.setattr(cli_main, "_run_init_service_bootstrap", _fail_bootstrap, raising=False)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.output
+    assert "`awf init` no longer bootstraps the local service stack" in result.output
+    assert "awf setup" in result.output
+    assert "awf start" in result.output
+    assert "awf init <path>" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_returns_migration_payload() -> None:
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload == {
+        "status": "error",
+        "reason_code": "AWF_INIT_REQUIRES_PROJECT_PATH",
+        "command": "awf init",
+        "message": "`awf init` requires a project path.",
+        "next_steps": [
+            "Run awf setup to prepare this machine.",
+            "Run awf start to start local AWF Core.",
+            "Run awf init <path> to onboard a project repository.",
+        ],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("extra_args", "expected_flag"),
+    (
+        (["--write-env"], "--write-env"),
+        (["--no-write-env"], "--no-write-env"),
+        (["--timeout-seconds", "5"], "--timeout-seconds"),
+        (["--poll-interval-seconds", "0.5"], "--poll-interval-seconds"),
+        (["--skip-agent-runtime-build"], "--skip-agent-runtime-build"),
+        (["--provider", "github"], "--provider"),
+    ),
+)
+def test_init_without_path_rejects_legacy_bootstrap_flags_with_migration(
+    extra_args: list[str],
+    expected_flag: str,
+) -> None:
+    result = _runner.invoke(app, ["init", *extra_args])
+
+    assert result.exit_code == 2
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.output
+    assert expected_flag in result.output
+    assert "awf setup" in result.output
+    assert "awf start" in result.output
+    assert "awf init <path>" in result.output
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.unit
@@ -1076,7 +1154,7 @@ def test_init_without_path_runs_service_bootstrap(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(state_dir))
     captured = _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert "AWF init: local service bootstrap" in result.output
@@ -1104,7 +1182,7 @@ def test_stub_bootstrap_mode_replaces_settings_constructor(
     monkeypatch.setattr(common_config, "Settings", ExplodingSettings)
     captured = _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert len(captured["settings_instances"]) == 1
@@ -1128,7 +1206,7 @@ def test_init_without_path_seeds_source_compose_env_when_missing(
     example.write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
@@ -1153,7 +1231,7 @@ def test_init_without_path_prefers_compose_env_example_over_root(
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
@@ -1207,7 +1285,7 @@ def test_init_without_path_merges_existing_root_env_into_source_compose_env(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
@@ -1264,7 +1342,7 @@ def test_init_without_path_reports_overlay_only_keys_without_values(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (
@@ -1298,7 +1376,7 @@ def test_init_without_path_json_reports_overlay_only_keys_without_values(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1341,7 +1419,7 @@ def test_init_without_path_preserves_root_env_file_header_at_top(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -1394,7 +1472,7 @@ def test_init_without_path_avoids_duplicate_overlay_and_seed_file_headers(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -1443,7 +1521,7 @@ def test_init_without_path_avoids_single_overlay_header_when_seed_has_header(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (

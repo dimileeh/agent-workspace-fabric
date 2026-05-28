@@ -113,11 +113,40 @@ def test_project_onboarding_docs_make_awf_init_primary() -> None:
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
+    assert "awf setup" in quickstart_text
+    assert "awf start" in quickstart_text
     assert "awf init . --write-profile --yes" in quickstart_text
+    assert "awf setup" in getting_started_text
+    assert "awf start" in getting_started_text
     assert "awf init <path> --write-profile --yes" in getting_started_text
     assert "awf init . --write-profile --yes" in onboarding_text
     assert "v2 request-shaped" not in onboarding_text
     assert "awf profile init . --write" not in quickstart_text
+
+
+def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None:
+    public_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            README_PATH,
+            REPO_ROOT / "docs" / "QUICKSTART.md",
+            REPO_ROOT / "docs" / "GETTING_STARTED.md",
+            REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md",
+            REPO_ROOT / "docs" / "CLI_REFERENCE.md",
+        )
+    )
+    forbidden_patterns = [
+        r"`awf init`\s+without a path",
+        r"`awf init`\s+\(no path\)",
+        r"awf init\s+#\s+.*bootstrap",
+        r"run `awf init` to verify prerequisites and bootstrap",
+        r"`awf init`\. With no arguments it bootstraps",
+    ]
+
+    for pattern in forbidden_patterns:
+        assert not re.search(pattern, public_text, flags=re.IGNORECASE), pattern
+    assert "awf setup" in public_text
+    assert "awf start" in public_text
 
 
 def test_changelog_and_upgrade_guide_are_discoverable() -> None:

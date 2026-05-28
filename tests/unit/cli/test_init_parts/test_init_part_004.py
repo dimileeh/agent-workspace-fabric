@@ -12,6 +12,7 @@ import yaml
 from typer.testing import CliRunner
 
 from awf.cli.main import app
+from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service_bootstrap
 
 _runner = CliRunner()
 
@@ -282,7 +283,7 @@ def test_init_without_path_ensures_state_directory_and_prints_path(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(state_dir))
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert state_dir.exists()
@@ -309,7 +310,7 @@ def test_init_without_path_uses_compose_env_host_work_dir_for_state_directory(
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert compose_state_dir.exists()
@@ -337,7 +338,7 @@ def test_init_without_path_prefers_shell_host_work_dir_over_seeded_compose_env(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(shell_state_dir))
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert shell_state_dir.exists()
@@ -365,7 +366,7 @@ def test_init_without_path_uses_host_home_when_service_env_sets_home(
     )
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (host_home / ".awf" / "service").exists()
@@ -418,7 +419,9 @@ def test_init_with_path_rejects_bootstrap_only_flags_with_clear_error(
     output = result.output
     assert result.exit_code == 2
     assert "--skip-agent-runtime-build" in output
-    assert "without a project path" in output or "no path" in output
+    assert "not valid for project onboarding" in output
+    assert "awf setup" in output
+    assert "awf start" in output
     assert "Traceback" not in output
 
 
@@ -436,7 +439,9 @@ def test_init_with_path_rejects_no_write_env_flag(
     output = result.output
     assert result.exit_code == 2
     assert "--no-write-env" in output
-    assert "without a project path" in output or "no path" in output
+    assert "not valid for project onboarding" in output
+    assert "awf setup" in output
+    assert "awf start" in output
     assert "Traceback" not in output
 
 
@@ -501,14 +506,16 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 
 
 @pytest.mark.unit
-def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
-    """Assert README guidance matches compose env bootstrap behavior."""
+def test_getting_started_recommends_setup_start_then_project_init() -> None:
+    """Assert public first-run guidance follows the locked T01 grammar."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
 
-    assert "awf init" in readme
+    assert "awf setup" in readme
+    assert "awf start" in readme
     assert "awf init <path>" in readme
     assert "awf service status --format pretty" in readme
     assert "docker/compose/.env" in readme
+    assert "`awf init`. With no arguments it bootstraps" not in readme
     assert "cp .env.example .env" not in readme
 
 
@@ -532,9 +539,11 @@ def test_getting_started_compose_env_snippet_replaces_token_placeholders() -> No
 def test_project_onboarding_doc_distinguishes_init_modes() -> None:
     doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
+    assert "awf setup" in doc
+    assert "awf start" in doc
     assert "awf init" in doc
     assert "awf init <path>" in doc
-    assert "AWF-on-this-machine" in doc or "local service bootstrap" in doc
+    assert "`awf init` (no path)" not in doc
 
 
 @pytest.mark.unit
@@ -579,7 +588,9 @@ def test_init_without_path_rejects_unknown_provider_without_traceback(
 
     output = result.output
     assert result.exit_code == 2
-    assert "error: unknown provider(s): bogus" in output
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in output
+    assert "--provider" in output
+    assert "unknown provider" not in output
     assert "Traceback" not in output
 
 
@@ -615,7 +626,7 @@ def test_init_without_path_keeps_single_leading_comment_with_overlay_key(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
