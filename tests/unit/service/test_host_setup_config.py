@@ -509,6 +509,28 @@ def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+def test_host_setup_config_write_revalidates_model_copy_updates(tmp_path: Path) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    copied_config = HostSetupConfig().model_copy(
+        update={"providers": {"github": {"credential_ref": "literal-token-file"}}}
+    )
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(copied_config, path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {
+        "error_count": 1,
+        "error_types": ["value_error"],
+        "locations": ["providers.github.credential_ref"],
+    }
+    assert "literal-token-file" not in str(error.to_dict())
+    assert not config_path.exists()
+
+
+@pytest.mark.unit
 def test_host_setup_config_write_wraps_recursive_payload_scan_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

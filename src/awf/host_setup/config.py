@@ -391,13 +391,28 @@ def write_host_setup_config(
     """Atomically write host setup config with conservative permissions."""
     config_path = _resolve_config_path(path)
     secures_parent_permissions = _is_standard_awf_config_path(config_path)
-    payload = cast(dict[str, object], config.model_dump(mode="json", exclude_none=True))
+    payload = cast(
+        dict[str, object],
+        config.model_dump(mode="json", exclude_none=True, warnings=False),
+    )
     try:
         _ensure_no_secret_payload(payload)
     except _SecretPayloadError as exc:
         raise _config_secret_error(config_path, details=exc.details()) from exc
     except _RecursivePayloadError as exc:
         raise _config_corrupt_error(config_path, details=exc.details()) from exc
+
+    try:
+        validated_config = HostSetupConfig.model_validate(payload)
+    except ValidationError as exc:
+        details = _validation_error_details(exc)
+        if _validation_contains_secret_error(exc):
+            raise _config_secret_error(config_path, details=details) from exc
+        raise _config_corrupt_error(config_path, details=details) from exc
+    payload = cast(
+        dict[str, object],
+        validated_config.model_dump(mode="json", exclude_none=True),
+    )
 
     tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
     text = yaml.safe_dump(payload, sort_keys=False)
