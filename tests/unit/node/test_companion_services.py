@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
     COMPANION_ENV_SECRET_SOURCE_MISSING,
     CompanionEnvironmentSecretRef,
     MaterializedCompanionService,
@@ -168,6 +169,32 @@ def test_companion_specs_from_task_policy_environment_secret_required_string_fal
     )[0]
 
     assert spec.environment_secrets[0].required is False
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_required_null_defaults_required() -> (
+    None
+):
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                            "required": None,
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].required is True
 
 
 @pytest.mark.unit
@@ -454,7 +481,8 @@ def test_companion_service_from_materialized_fails_required_empty_environment_se
             host_env={"ANTHROPIC_API_KEY": ""},
         )
 
-    assert exc.value.reason_code == COMPANION_ENV_SECRET_SOURCE_MISSING
+    assert exc.value.reason_code == COMPANION_ENV_SECRET_SOURCE_EMPTY
+    assert COMPANION_ENV_SECRET_SOURCE_EMPTY in str(exc.value)
     assert "backend" in str(exc.value)
     assert "AIRA_API_KEY" in str(exc.value)
     assert "ANTHROPIC_API_KEY" in str(exc.value)

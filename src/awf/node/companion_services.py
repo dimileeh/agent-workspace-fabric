@@ -20,6 +20,7 @@ from awf.node.git_manager import WorktreeLayout
 from awf.profiles.models import DockerMode
 from awf.profiles.resolver import ProfileResolutionError
 
+COMPANION_ENV_SECRET_SOURCE_EMPTY = "COMPANION_ENV_SECRET_SOURCE_EMPTY"
 COMPANION_ENV_SECRET_SOURCE_MISSING = "COMPANION_ENV_SECRET_SOURCE_MISSING"
 COMPANION_ENV_SECRET_UNSUPPORTED = "COMPANION_ENV_SECRET_UNSUPPORTED"
 MIN_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS = 1
@@ -394,10 +395,15 @@ def _resolve_environment_secrets(
             env_secret_metadata.append(secret_metadata)
             continue
         if secret.required:
+            reason = (
+                COMPANION_ENV_SECRET_SOURCE_EMPTY
+                if source_is_empty
+                else COMPANION_ENV_SECRET_SOURCE_MISSING
+            )
             raise ProfileResolutionError(
-                f"{COMPANION_ENV_SECRET_SOURCE_MISSING}: companion={spec.name}, "
+                f"{reason}: companion={spec.name}, "
                 f"target={secret.target}, provider={secret.provider}, source={secret.value_from}",
-                reason_code=COMPANION_ENV_SECRET_SOURCE_MISSING,
+                reason_code=reason,
             )
         omitted_optional.append(secret_metadata)
 
@@ -474,6 +480,8 @@ def _environment_secret_ref(target: object, value: object) -> CompanionEnvironme
 def _environment_secret_required(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() not in {"false", "0", "no", "off"}
+    if value is None:
+        return True
     return bool(value)
 
 
