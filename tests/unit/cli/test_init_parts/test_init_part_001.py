@@ -314,15 +314,12 @@ def test_init_help_documents_project_onboarding_and_new_first_run_flow() -> None
 
 
 @pytest.mark.unit
-def test_init_without_path_returns_migration_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_init_without_path_returns_migration_error() -> None:
     from awf.cli import main as cli_main
 
-    def _fail_bootstrap(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("no-path awf init must not run service bootstrap")
-
-    monkeypatch.setattr(cli_main, "_run_init_service_bootstrap", _fail_bootstrap, raising=False)
+    # Service bootstrap is no longer exposed through cli_main; no-path init now
+    # fails with migration guidance before any service bootstrap path can run.
+    assert not hasattr(cli_main, "_run_init_service_bootstrap")
 
     result = _runner.invoke(app, ["init"])
 
