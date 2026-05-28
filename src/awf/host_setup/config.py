@@ -307,8 +307,8 @@ def write_host_setup_config(
     path: str | Path | None = None,
 ) -> None:
     """Atomically write host setup config with conservative permissions."""
-    owns_parent_permissions = path is None
     config_path = _resolve_config_path(path)
+    secures_parent_permissions = _is_standard_awf_config_path(config_path)
     payload = cast(dict[str, object], config.model_dump(mode="json", exclude_none=True))
     try:
         _ensure_no_secret_payload(payload)
@@ -321,7 +321,7 @@ def write_host_setup_config(
     text = yaml.safe_dump(payload, sort_keys=False)
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        if owns_parent_permissions:
+        if secures_parent_permissions:
             _chmod_best_effort(config_path.parent, 0o700)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -347,6 +347,11 @@ def _resolve_config_path(path: str | Path | None) -> Path:
         return base.expanduser()
     except (OSError, RuntimeError) as exc:
         raise _config_path_resolution_error(base, exc) from exc
+
+
+def _is_standard_awf_config_path(path: Path) -> bool:
+    """Return whether a path names the standard AWF host setup config file."""
+    return path.name == "config.yml" and path.parent.name == ".awf"
 
 
 def _config_path_resolution_error(path: Path, exc: OSError | RuntimeError) -> HostSetupConfigError:

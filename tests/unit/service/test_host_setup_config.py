@@ -114,6 +114,33 @@ def test_host_setup_config_write_preserves_explicit_parent_permissions(
 
 
 @pytest.mark.unit
+def test_host_setup_config_write_secures_explicit_default_parent_permissions(
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+
+    if os.name == "posix":
+        original_umask = os.umask(0o022)
+        try:
+            write_host_setup_config(
+                HostSetupConfig(api=ApiConfig(host_port=8125)),
+                path=config_path,
+            )
+        finally:
+            os.umask(original_umask)
+    else:
+        write_host_setup_config(
+            HostSetupConfig(api=ApiConfig(host_port=8125)),
+            path=config_path,
+        )
+
+    if os.name == "posix":
+        assert stat.S_IMODE(config_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert read_host_setup_config(path=config_path).api.host_port == 8125
+
+
+@pytest.mark.unit
 def test_host_setup_config_write_uses_unique_temp_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
