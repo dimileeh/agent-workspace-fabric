@@ -329,7 +329,8 @@ What:
 
 - Implement `awf setup` as the one-time machine setup wizard shell.
 - Support repeatable `--provider PROVIDER`, `--dry-run`, `--non-interactive`,
-  `--source-checkout PATH`, and `--format json|pretty`.
+  `--allow-plain-secrets`, `--source-checkout PATH`, and
+  `--format json|pretty`.
 - Check Docker, Compose, Git, `gh`, Python/runtime, ports, disk, shell/PATH,
   and local capacity without starting Core.
 - Write safe config updates only when not in dry-run mode.
@@ -339,6 +340,9 @@ Acceptance criteria:
 - `awf setup --dry-run` never writes secrets and never starts Core.
 - `awf setup --provider github --dry-run` accepts and forwards the provider
   selector so later provider setup can recheck a single provider.
+- `awf setup --allow-plain-secrets` accepts and forwards the plain-file
+  consent gate for T06 credential backends without making plain-file storage the
+  default.
 - Unknown provider names fail with a reason-coded setup diagnostic instead of
   silently falling back to all-provider setup.
 - Missing Docker or stopped daemon returns a setup readiness failure with next
@@ -352,7 +356,7 @@ Required tests:
 
 - `tests/unit/cli/test_setup_commands.py`
 - CLI parser tests for no selector, single-provider selector, repeated
-  selectors, and unknown provider rejection.
+  selectors, unknown provider rejection, and plain-secret consent dispatch.
 - Unit tests for pass/fail system-check fixtures.
 - Non-interactive secret-needed path returns `INTERACTIVE_INPUT_REQUIRED`.
 
