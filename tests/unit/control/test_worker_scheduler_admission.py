@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.control.worker.admission import _acquire_requested_admission_lock
+from awf.control.worker import claims as worker_claims
+from awf.control.worker.admission import (
+    _acquire_requested_admission_lock,
+    _requested_admission_row_slots,
+)
 from awf.control.worker.claims import _requested_claim_admission_slots
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import WorkspaceStatus
@@ -71,8 +77,23 @@ class _RecordingRuntimeInspector:
         return self._snapshots[compose_project_name]
 
 
+class _NonPostgresSession:
+    def __init__(self) -> None:
+        self.executed = False
+
+    def get_bind(self) -> SimpleNamespace:
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def execute(self, *_args: object, **_kwargs: object) -> None:
+        self.executed = True
+
+
 async def _never_finishes() -> None:
     await asyncio.Event().wait()
+
+
+async def _raises_execution_failure() -> None:
+    raise RuntimeError("execution failed")
 
 
 async def _create_requested(
@@ -242,6 +263,28 @@ def _gate_admission_prechecks(
         monkeypatch.setattr(worker, "_requested_admission_row_slots", _gated)
 
     return all_observed, release
+
+
+@pytest.mark.unit
+async def test_requested_admission_lock_is_noop_for_non_postgres() -> None:
+    session = _NonPostgresSession()
+
+    await _acquire_requested_admission_lock(session, node_id="local")  # type: ignore[arg-type]
+
+    assert not session.executed
+
+
+@pytest.mark.unit
+async def test_requested_admission_row_slots_zero_when_execution_limit_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        slots = await _requested_admission_row_slots(
+            session,
+            config=WorkerConfig(max_concurrent_executions=0),
+        )
+
+    assert slots == 0
 
 
 @pytest.mark.unit
@@ -566,6 +609,122 @@ async def test_concurrent_local_capacity_claims_recheck_admission_slots_atomical
 
 
 @pytest.mark.unit
+async def test_requested_provisioning_claim_stops_when_admission_rows_are_full(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_requested(session_factory, create_attempt=False)
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+        ),
+    )
+
+    async def _no_row_slots(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(worker_claims, "_requested_claim_admission_slots", _no_row_slots)
+
+    assert not await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.requested.value
+
+
+@pytest.mark.unit
+async def test_local_capacity_claims_stop_when_admission_rows_are_full(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_requested(session_factory, create_attempt=True)
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    async def _no_row_slots(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def _fail_capacity_claim(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("capacity claim must not run when admission rows are full")
+
+    monkeypatch.setattr(worker_claims, "_requested_claim_admission_slots", _no_row_slots)
+    monkeypatch.setattr(worker, "_claim_requested_ids_with_capacity", _fail_capacity_claim)
+
+    assert await worker._claim_requested_ids([workspace_id], limit=1) == []  # noqa: SLF001
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.requested.value
+
+
+@pytest.mark.unit
+async def test_requested_capacity_claim_zero_effective_limit_returns_empty_result(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    async with session_factory() as session:
+        result = await worker._claim_requested_ids_with_capacity(  # noqa: SLF001
+            session,
+            resume_after=None,
+            resume_allocated_signature=None,
+            resume_requested_queue_signature=None,
+            resume_provider_suppression_expires_at=None,
+            claim_limit=0,
+        )
+
+    assert result.workspace_ids == []
+    assert result.resume_after is None
+    assert result.allocated_signature is None
+    assert result.requested_queue_signature is None
+    assert result.provider_suppression_resume_expires_at is None
+
+
+@pytest.mark.unit
+async def test_requested_capacity_candidates_empty_batch_returns_no_claims(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    async with session_factory() as session:
+        claimed = await worker._claim_requested_capacity_candidates(  # noqa: SLF001
+            session,
+            repo=WorkspaceRepository(session),
+            reservation_repo=ResourceReservationRepository(session),
+            candidates=[],
+            allocated=worker_claims._AllocatedReservationTotals(),  # noqa: SLF001
+            claim_slots=1,
+            decided_at=datetime.now(UTC),
+        )
+
+    assert claimed == []
+
+
+@pytest.mark.unit
 async def test_local_capacity_claims_also_wait_for_execution_slot_capacity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -803,6 +962,49 @@ async def test_run_once_redispatches_healthy_ready_workspace_after_recovery_scan
     assert executor.calls == [workspace_id]
     assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.ready.value
     assert await _stale_events(session_factory, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_wait_for_execution_tasks_drops_cancelled_task(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_executions=1),
+    )
+    task = asyncio.create_task(_never_finishes())
+    worker._execution_tasks["ws_cancelled"] = task  # noqa: SLF001
+    worker._execution_task_kinds["ws_cancelled"] = _ExecutionTaskKind.READY  # noqa: SLF001
+    task.cancel()
+
+    await worker.wait_for_execution_tasks()
+
+    assert worker._execution_tasks == {}  # noqa: SLF001
+    assert worker._execution_task_kinds == {}  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_wait_for_execution_tasks_raises_completed_task_exception(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_executions=1),
+    )
+    worker._execution_tasks["ws_failed"] = asyncio.create_task(  # noqa: SLF001
+        _raises_execution_failure()
+    )
+    worker._execution_task_kinds["ws_failed"] = _ExecutionTaskKind.READY  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="execution failed"):
+        await worker.wait_for_execution_tasks()
+
+    assert worker._execution_tasks == {}  # noqa: SLF001
+    assert worker._execution_task_kinds == {}  # noqa: SLF001
 
 
 @pytest.mark.unit
