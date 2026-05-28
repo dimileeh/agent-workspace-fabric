@@ -147,6 +147,38 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> None:
+    raw_secret_key = "ghp_raw_secret"
+    safe_provider = ProviderConfig(credential_ref="env://GITHUB_TOKEN")
+
+    with pytest.raises(ValidationError) as exc_info:
+        HostSetupConfig(providers={raw_secret_key: safe_provider})
+
+    assert raw_secret_key not in str(exc_info.value)
+
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    bypassed_config = HostSetupConfig.model_construct(
+        version=1,
+        install=InstallConfig(),
+        api=ApiConfig(),
+        work_dir="~/.awf/service",
+        providers={raw_secret_key: safe_provider},
+        clients={},
+        consent=ConsentConfig(),
+        source_checkout=None,
+    )
+
+    with pytest.raises(HostSetupConfigError) as write_exc_info:
+        write_host_setup_config(bypassed_config, path=config_path)
+
+    error = write_exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    assert error.details == {"issue": "secret-like key", "path": "providers.<secret-key>"}
+    assert raw_secret_key not in str(error.to_dict())
+    assert not config_path.exists()
+
+
+@pytest.mark.unit
 def test_host_setup_config_rejects_in_place_provider_mutation() -> None:
     empty_config = HostSetupConfig()
 

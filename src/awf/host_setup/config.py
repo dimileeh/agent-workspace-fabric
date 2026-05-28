@@ -116,6 +116,7 @@ class _HostSetupBaseModel(BaseModel):
         extra="forbid",
         str_strip_whitespace=True,
         frozen=True,
+        hide_input_in_errors=True,
     )
 
 
@@ -325,10 +326,18 @@ def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> N
         return
     if isinstance(value, Mapping):
         for raw_key, raw_value in value.items():
-            key = str(raw_key)
-            child_path = (*path, key)
-            if isinstance(raw_key, str) and _is_secret_key(raw_key):
-                raise _SecretPayloadError(path=child_path, issue="secret-bearing key")
+            if isinstance(raw_key, str):
+                if _is_secret_key(raw_key):
+                    raise _SecretPayloadError(
+                        path=(*path, raw_key),
+                        issue="secret-bearing key",
+                    )
+                if _looks_like_secret_value(raw_key):
+                    raise _SecretPayloadError(
+                        path=(*path, "<secret-key>"),
+                        issue="secret-like key",
+                    )
+            child_path = (*path, str(raw_key))
             _ensure_no_secret_payload(raw_value, path=child_path)
         return
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
