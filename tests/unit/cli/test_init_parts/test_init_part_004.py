@@ -584,12 +584,12 @@ def test_init_without_path_rejects_unknown_provider_without_traceback(
 
     result = _runner.invoke(app, ["init", "--provider", "bogus"])
 
-    output = result.output
     assert result.exit_code == 2
-    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in output
-    assert "--provider" in output
-    assert "unknown provider" not in output
-    assert "Traceback" not in output
+    assert result.stdout == ""
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
+    assert "--provider" in result.stderr
+    assert "unknown provider" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit

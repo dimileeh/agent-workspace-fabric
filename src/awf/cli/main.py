@@ -114,7 +114,10 @@ _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = "2"
 _INIT_REQUIRES_PROJECT_PATH_REASON = "AWF_INIT_REQUIRES_PROJECT_PATH"
 
 
-def _init_migration_payload(legacy_flags: list[str]) -> dict[str, object]:
+def _init_migration_payload(
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "status": "error",
         "reason_code": _INIT_REQUIRES_PROJECT_PATH_REASON,
@@ -127,11 +130,18 @@ def _init_migration_payload(legacy_flags: list[str]) -> dict[str, object]:
     }
     if legacy_flags:
         payload["rejected_flags"] = legacy_flags
+    if path_required_flags:
+        payload["path_required_flags"] = path_required_flags
     return payload
 
 
-def _emit_init_migration_error(fmt: OutputFormat, legacy_flags: list[str]) -> NoReturn:
-    payload = _init_migration_payload(legacy_flags)
+def _emit_init_migration_error(
+    fmt: OutputFormat,
+    *,
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> NoReturn:
+    payload = _init_migration_payload(legacy_flags, path_required_flags)
     if fmt == OutputFormat.json:
         _emit(payload, fmt)
     else:
@@ -144,6 +154,11 @@ def _emit_init_migration_error(fmt: OutputFormat, legacy_flags: list[str]) -> No
         if legacy_flags:
             typer.echo(
                 "Rejected legacy no-path init flag(s): " + ", ".join(legacy_flags),
+                err=True,
+            )
+        if path_required_flags:
+            typer.echo(
+                "Project path required for flag(s): " + ", ".join(path_required_flags),
                 err=True,
             )
         typer.echo("Next:", err=True)
@@ -241,30 +256,35 @@ def init(
         return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
     if path is None:
-        rejected_flags: list[str] = []
+        path_required_flags: list[str] = []
+        legacy_flags: list[str] = []
         if include_smoke_request:
-            rejected_flags.append("--include-smoke-request")
+            path_required_flags.append("--include-smoke-request")
         if _explicit("guided"):
-            rejected_flags.append("--guided" if guided else "--no-guided")
+            path_required_flags.append("--guided" if guided else "--no-guided")
         if _explicit("write_profile"):
-            rejected_flags.append("--write-profile")
+            path_required_flags.append("--write-profile")
         if _explicit("yes"):
-            rejected_flags.append("--yes")
+            path_required_flags.append("--yes")
         if _explicit("template"):
-            rejected_flags.append("--template")
+            path_required_flags.append("--template")
         if _explicit("force"):
-            rejected_flags.append("--force")
+            path_required_flags.append("--force")
         if _explicit("skip_agent_runtime_build"):
-            rejected_flags.append("--skip-agent-runtime-build")
+            legacy_flags.append("--skip-agent-runtime-build")
         if _explicit("provider"):
-            rejected_flags.append("--provider")
+            legacy_flags.append("--provider")
         if _explicit("timeout_seconds"):
-            rejected_flags.append("--timeout-seconds")
+            legacy_flags.append("--timeout-seconds")
         if _explicit("poll_interval_seconds"):
-            rejected_flags.append("--poll-interval-seconds")
+            legacy_flags.append("--poll-interval-seconds")
         if _explicit("write_env"):
-            rejected_flags.append("--write-env" if write_env else "--no-write-env")
-        _emit_init_migration_error(fmt, rejected_flags)
+            legacy_flags.append("--write-env" if write_env else "--no-write-env")
+        _emit_init_migration_error(
+            fmt,
+            legacy_flags=legacy_flags,
+            path_required_flags=path_required_flags,
+        )
 
     bootstrap_only_flags: list[str] = []
     if _explicit("skip_agent_runtime_build"):

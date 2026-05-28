@@ -382,6 +382,35 @@ def test_init_without_path_rejects_legacy_bootstrap_flags_with_migration(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("extra_args", "expected_flag"),
+    (
+        (["--include-smoke-request"], "--include-smoke-request"),
+        (["--guided"], "--guided"),
+        (["--no-guided"], "--no-guided"),
+        (["--write-profile"], "--write-profile"),
+        (["--yes"], "--yes"),
+        (["--template", "python"], "--template"),
+        (["--force"], "--force"),
+    ),
+)
+def test_init_without_path_rejects_project_mode_flags_as_path_required(
+    extra_args: list[str],
+    expected_flag: str,
+) -> None:
+    result = _runner.invoke(app, ["init", *extra_args])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
+    assert "Project path required for flag(s):" in result.stderr
+    assert expected_flag in result.stderr
+    assert "Rejected legacy no-path init flag(s)" not in result.stderr
+    assert "awf init <path>" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
 def test_init_without_path_json_rejects_invalid_legacy_timeout_with_migration() -> None:
     result = _runner.invoke(
         app,
@@ -392,6 +421,17 @@ def test_init_without_path_json_rejects_invalid_legacy_timeout_with_migration() 
     payload = json.loads(result.output)
     assert payload["reason_code"] == "AWF_INIT_REQUIRES_PROJECT_PATH"
     assert payload["rejected_flags"] == ["--timeout-seconds"]
+
+
+@pytest.mark.unit
+def test_init_without_path_json_reports_project_mode_flags_as_path_required() -> None:
+    result = _runner.invoke(app, ["init", "--write-profile", "--format", "json"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["reason_code"] == "AWF_INIT_REQUIRES_PROJECT_PATH"
+    assert payload["path_required_flags"] == ["--write-profile"]
+    assert "rejected_flags" not in payload
 
 
 @pytest.mark.unit
