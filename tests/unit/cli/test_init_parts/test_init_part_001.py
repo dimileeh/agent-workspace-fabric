@@ -361,7 +361,11 @@ def test_init_without_path_json_returns_migration_payload() -> None:
         (["--write-env"], "--write-env"),
         (["--no-write-env"], "--no-write-env"),
         (["--timeout-seconds", "5"], "--timeout-seconds"),
+        (["--timeout-seconds", "not-a-number"], "--timeout-seconds"),
+        (["--timeout-seconds", "-1"], "--timeout-seconds"),
         (["--poll-interval-seconds", "0.5"], "--poll-interval-seconds"),
+        (["--poll-interval-seconds", "not-a-number"], "--poll-interval-seconds"),
+        (["--poll-interval-seconds", "0"], "--poll-interval-seconds"),
         (["--skip-agent-runtime-build"], "--skip-agent-runtime-build"),
         (["--provider", "github"], "--provider"),
     ),
@@ -379,6 +383,19 @@ def test_init_without_path_rejects_legacy_bootstrap_flags_with_migration(
     assert "awf start" in result.output
     assert "awf init <path>" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_init_without_path_json_rejects_invalid_legacy_timeout_with_migration() -> None:
+    result = _runner.invoke(
+        app,
+        ["init", "--timeout-seconds", "not-a-number", "--format", "json"],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["reason_code"] == "AWF_INIT_REQUIRES_PROJECT_PATH"
+    assert payload["rejected_flags"] == ["--timeout-seconds"]
 
 
 @pytest.mark.unit

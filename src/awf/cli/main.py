@@ -108,8 +108,8 @@ app.command(
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
-_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
-_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
+_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = "180"
+_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = "2"
 _INIT_REQUIRES_PROJECT_PATH_REASON = "AWF_INIT_REQUIRES_PROJECT_PATH"
 
 
@@ -204,17 +204,15 @@ def init(
         help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
         hidden=True,
     ),
-    timeout_seconds: float = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+    timeout_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS,
         "--timeout-seconds",
-        min=0.0,
         help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
         hidden=True,
     ),
-    poll_interval_seconds: float = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+    poll_interval_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS,
         "--poll-interval-seconds",
-        min=0.01,
         help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
         hidden=True,
     ),
