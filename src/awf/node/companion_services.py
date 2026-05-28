@@ -431,7 +431,7 @@ def _environment_secret_metadata(
 
 def _environment_secret_ref(target: object, value: object) -> CompanionEnvironmentSecretRef:
     if not isinstance(value, Mapping):
-        return CompanionEnvironmentSecretRef(target=str(target), value_from="")
+        raise ValueError(f"companion environment_secrets entry for {target} must be a mapping")
     return CompanionEnvironmentSecretRef(
         target=str(target),
         provider=str(value.get("provider") or "env"),
