@@ -31,6 +31,11 @@ Focused checks:
   `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_check_coverage_threshold.py::test_checker_failure_reports_unrounded_combined_coverage_near_threshold -q`
   failed because stdout printed `combined=99.00%` and stderr printed
   `Combined line+branch coverage 99.00% is below required 99.00%`.
+- During implementation, this same regression test was renamed from
+  `test_checker_failure_reports_unrounded_combined_coverage_near_threshold`
+  to
+  `test_checker_failure_reports_detailed_combined_coverage_near_threshold`
+  to match the final diagnostic behavior.
 - After implementation,
   `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_check_coverage_threshold.py::test_checker_failure_reports_detailed_combined_coverage_near_threshold -q`
   passed.
