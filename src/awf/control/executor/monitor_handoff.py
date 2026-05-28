@@ -341,6 +341,8 @@ def _refresh_optional_companion_env_secrets_for_resume(
         )
         return
 
+    # This best-effort resume repair uses PyYAML, which preserves Compose
+    # interpolation via the custom dumper but not comments or block-scalar style.
     removed_count = _remove_compose_environment_targets(payload, missing_targets)
     restored_count = _restore_compose_environment_refs(payload, present_refs)
     if removed_count == 0 and restored_count == 0:
@@ -494,6 +496,7 @@ def _restore_compose_environment_list_refs(
 ) -> int:
     restored_count = 0
     seen_targets: set[str] = set()
+    restored_targets: set[str] = set()
     for index, item in enumerate(environment):
         if not isinstance(item, str):
             continue
@@ -505,7 +508,9 @@ def _restore_compose_environment_list_refs(
         replacement = f"{key}={ref}"
         if item != replacement:
             environment[index] = replacement
-            restored_count += 1
+            if key not in restored_targets:
+                restored_targets.add(key)
+                restored_count += 1
 
     for target, ref in refs.items():
         if target in seen_targets:

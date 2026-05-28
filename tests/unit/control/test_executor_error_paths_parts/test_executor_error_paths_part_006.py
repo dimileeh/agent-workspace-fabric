@@ -203,6 +203,27 @@ def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
     assert captured == ["OPTIONAL_TOKEN_SOURCE"]
 
 
+@pytest.mark.unit
+def test_restore_compose_environment_list_refs_counts_duplicate_targets_once() -> None:
+    environment: list[object] = [
+        "OPTIONAL_TOKEN=stale-one",
+        "OPTIONAL_TOKEN=stale-two",
+        "APP_ENV=test",
+    ]
+
+    restored_count = executor_monitor_handoff._restore_compose_environment_list_refs(
+        environment,
+        {"OPTIONAL_TOKEN": "${OPTIONAL_TOKEN_SOURCE:-}"},
+    )
+
+    assert restored_count == 1
+    assert environment == [
+        "OPTIONAL_TOKEN=${OPTIONAL_TOKEN_SOURCE:-}",
+        "OPTIONAL_TOKEN=${OPTIONAL_TOKEN_SOURCE:-}",
+        "APP_ENV=test",
+    ]
+
+
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
