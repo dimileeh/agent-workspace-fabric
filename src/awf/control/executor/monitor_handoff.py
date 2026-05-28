@@ -77,6 +77,8 @@ from awf.db.enums import (
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
+    COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
     optional_env_secret_compose_placeholder,
@@ -210,6 +212,10 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         return
 
     try:
+        _precheck_required_companion_env_secrets_for_resume(
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
         _refresh_optional_companion_env_secrets_for_resume(
             workspace_id=workspace_id,
             compose_file=Path(compose_file_path),
@@ -303,6 +309,38 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         compose_project=compose_project,
         compose_file=Path(compose_file_path),
     )
+
+
+def _precheck_required_companion_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if not secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            source_is_set = secret.value_from in environ
+            source_is_empty = source_is_set and environ[secret.value_from] == ""
+            if source_is_set and not source_is_empty:
+                continue
+            reason_code = (
+                COMPANION_ENV_SECRET_SOURCE_EMPTY
+                if source_is_empty
+                else COMPANION_ENV_SECRET_SOURCE_MISSING
+            )
+            stderr = (
+                f"{reason_code}: companion={spec.name}, target={secret.target}, "
+                f"provider={secret.provider}, source={secret.value_from}"
+            )
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr=stderr,
+                reason_code=reason_code,
+            )
 
 
 def _refresh_optional_companion_env_secrets_for_resume(

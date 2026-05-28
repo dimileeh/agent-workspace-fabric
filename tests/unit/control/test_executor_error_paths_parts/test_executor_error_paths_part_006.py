@@ -1322,6 +1322,105 @@ class TestExecutorCoverageEdgesPart002:
         assert captured["compose_up_timeout_seconds"] == 900
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("source_value", "expected_reason_code"),
+        (
+            (None, companion_services.COMPANION_ENV_SECRET_SOURCE_MISSING),
+            ("", companion_services.COMPANION_ENV_SECRET_SOURCE_EMPTY),
+        ),
+    )
+    async def test_resume_pr_monitor_preserves_required_companion_env_secret_reason_code(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source_value: str | None,
+        expected_reason_code: str,
+    ) -> None:
+        if source_value is None:
+            monkeypatch.delenv("REQUIRED_TOKEN_SOURCE", raising=False)
+        else:
+            monkeypatch.setenv("REQUIRED_TOKEN_SOURCE", source_value)
+        compose_calls: list[str] = []
+        monitor_calls: list[str] = []
+
+        class _Compose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
+            ) -> None:
+                del project_name, compose_file, wait, compose_up_timeout_seconds
+                compose_calls.append(workspace_id)
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="compose interpolation failed",
+                    reason_code="COMPOSE_COMMAND_FAILED",
+                )
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@github.com:x/backend.git",
+                        "environment_secrets": {
+                            "REQUIRED_TOKEN": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "REQUIRED_TOKEN_SOURCE",
+                                "required": True,
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_Compose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == []
+        assert monitor_calls == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            compose_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.monitor_runtime_restart_failed"
+            ]
+        assert len(compose_events) == 1
+        assert compose_events[0].payload["reason_code"] == expected_reason_code
+        assert expected_reason_code in compose_events[0].payload["stderr"]
+        assert "REQUIRED_TOKEN_SOURCE" in compose_events[0].payload["stderr"]
+
+    @pytest.mark.unit
     async def test_resume_pr_monitor_omits_missing_optional_companion_env_secret(
         self,
         fake: FakeCommandRunner,
