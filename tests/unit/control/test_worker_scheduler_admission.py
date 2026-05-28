@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,6 +22,8 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.postgres import postgres_test_engine
+
+WORKER_TEST_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.fixture
@@ -194,6 +196,31 @@ async def _stale_events(
         )
 
 
+def _gate_admission_prechecks(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: list[ControlWorker],
+) -> tuple[asyncio.Event, asyncio.Event]:
+    observed = 0
+    all_observed = asyncio.Event()
+    release = asyncio.Event()
+
+    for worker in workers:
+        original: Callable[[], Awaitable[int]] = worker._requested_admission_row_slots  # noqa: SLF001
+
+        async def _gated(original: Callable[[], Awaitable[int]] = original) -> int:
+            nonlocal observed
+            slots = await original()
+            observed += 1
+            if observed == len(workers):
+                all_observed.set()
+            await release.wait()
+            return slots
+
+        monkeypatch.setattr(worker, "_requested_admission_row_slots", _gated)
+
+    return all_observed, release
+
+
 @pytest.mark.unit
 async def test_requested_workspace_stays_queued_when_execution_slots_are_saturated(
     session_factory: async_sessionmaker[AsyncSession],
@@ -225,6 +252,141 @@ async def test_requested_workspace_stays_queued_when_execution_slots_are_saturat
         existing_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await existing_task
+
+
+@pytest.mark.unit
+async def test_concurrent_requested_claims_recheck_admission_slots_atomically(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id="local",
+    )
+    second_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id="local",
+    )
+    provisioner = _RecordingProvisioner()
+    worker_a = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+    worker_b = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+    worker_a._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+    worker_b._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+    all_observed, release = _gate_admission_prechecks(
+        monkeypatch,
+        [worker_a, worker_b],
+    )
+
+    async def _list_first() -> list[str]:
+        return [first_id]
+
+    async def _list_second() -> list[str]:
+        return [second_id]
+
+    monkeypatch.setattr(worker_a, "_list_requested", _list_first)
+    monkeypatch.setattr(worker_b, "_list_requested", _list_second)
+
+    runs = [
+        asyncio.create_task(worker_a.run_once()),
+        asyncio.create_task(worker_b.run_once()),
+    ]
+    await asyncio.wait_for(
+        all_observed.wait(),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+    release.set()
+    dispatched = await asyncio.wait_for(
+        asyncio.gather(*runs),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    statuses = [
+        await _workspace_status(session_factory, first_id),
+        await _workspace_status(session_factory, second_id),
+    ]
+    assert sorted(dispatched) == [0, 1]
+    assert len(provisioner.calls) == 1
+    assert statuses.count(WorkspaceStatus.provisioning.value) == 1
+    assert statuses.count(WorkspaceStatus.requested.value) == 1
+
+
+@pytest.mark.unit
+async def test_concurrent_local_capacity_claims_recheck_admission_slots_atomically(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_id = await _create_requested(session_factory, create_attempt=True)
+    second_id = await _create_requested(session_factory, create_attempt=True)
+    provisioner = _RecordingProvisioner()
+    worker_a = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+    worker_b = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+    worker_a._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+    worker_b._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+    all_observed, release = _gate_admission_prechecks(
+        monkeypatch,
+        [worker_a, worker_b],
+    )
+
+    runs = [
+        asyncio.create_task(worker_a.run_once()),
+        asyncio.create_task(worker_b.run_once()),
+    ]
+    await asyncio.wait_for(
+        all_observed.wait(),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+    release.set()
+    dispatched = await asyncio.wait_for(
+        asyncio.gather(*runs),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    statuses = [
+        await _workspace_status(session_factory, first_id),
+        await _workspace_status(session_factory, second_id),
+    ]
+    assert sorted(dispatched) == [0, 1]
+    assert len(provisioner.calls) == 1
+    assert statuses.count(WorkspaceStatus.provisioning.value) == 1
+    assert statuses.count(WorkspaceStatus.requested.value) == 1
 
 
 @pytest.mark.unit

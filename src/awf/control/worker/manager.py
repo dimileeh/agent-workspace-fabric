@@ -25,12 +25,11 @@ from datetime import (
 )
 from typing import Any
 
-from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig
 from awf.control.worker.constants import (
-    _REQUESTED_ADMISSION_SLOT_STATUSES,
     ORDERED_MONITOR_RESUME_REASON,
     ORDERED_READY_EXECUTION_REASON,
     ORDERED_REQUESTED_PROVISIONING_REASON,
@@ -53,7 +52,6 @@ from awf.control.worker.types import (
     _RequestedCapacityQueueSignature,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
@@ -120,35 +118,17 @@ class ControlWorker(WorkerDelegatesMixin):
         return int(min(provision_limit, task_available, row_available))
 
     async def _requested_admission_row_slots(self: Any) -> int:
-        max_executions = int(max(0, self._config.max_concurrent_executions))
-        if max_executions <= 0:
-            return 0
-        status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
-
         async def _operation(session: AsyncSession) -> int:
-            stmt = (
-                select(func.count())
-                .select_from(Workspace)
-                .where(Workspace.status.in_(status_values))
+            return await _requested_admission_row_slots(
+                session,
+                config=self._config,
             )
-            if self._config.node_id is None:
-                stmt = stmt.where(Workspace.node_id.is_(None))
-            else:
-                stmt = stmt.where(
-                    or_(
-                        Workspace.node_id == self._config.node_id,
-                        Workspace.node_id.is_(None),
-                    )
-                )
-            occupied = await session.scalar(stmt)
-            return int(occupied or 0)
 
-        occupied = await run_db_operation_with_retry(
+        return await run_db_operation_with_retry(
             self._session_factory,
             _operation,
             on_retry=self._log_transient_db_retry,
         )
-        return max(0, max_executions - occupied)
 
     async def run_once(self: Any) -> int:
         """List + dispatch requested provisioning and workspace runtime tasks.

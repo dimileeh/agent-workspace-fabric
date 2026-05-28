@@ -18,6 +18,11 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.control.worker.admission import (
+    _acquire_requested_admission_lock,
+    _requested_admission_lock_node_id,
+    _requested_admission_row_slots,
+)
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
@@ -78,6 +83,16 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.service.scheduler import SchedulerOrderCursor
 
 
+def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:
+    return _RequestedCapacityClaimResult(
+        workspace_ids=[],
+        resume_after=None,
+        allocated_signature=None,
+        requested_queue_signature=None,
+        provider_suppression_resume_expires_at=None,
+    )
+
+
 async def _claim_requested_ids(
     self: Any,
     workspace_ids: list[str] | None = None,
@@ -105,6 +120,13 @@ async def _claim_requested_ids(
         return claimed
 
     async def _operation(session: AsyncSession) -> _RequestedCapacityClaimResult:
+        await _acquire_requested_admission_lock(
+            session,
+            node_id=_requested_admission_lock_node_id(self._config.node_id),
+        )
+        row_slots = await _requested_admission_row_slots(session, config=self._config)
+        if row_slots <= 0:
+            return _empty_requested_capacity_claim_result()
         await _acquire_local_capacity_scheduler_lock(
             session,
             node_id=self._config.node_id or "local",
@@ -119,7 +141,7 @@ async def _claim_requested_ids(
                 resume_provider_suppression_expires_at=(
                     self._requested_capacity_resume_provider_suppression_expires_at
                 ),
-                claim_limit=claim_limit,
+                claim_limit=min(claim_limit, row_slots),
             ),
         )
 
@@ -153,13 +175,7 @@ async def _claim_requested_ids_with_capacity(
     if claim_limit is not None:
         effective_claim_limit = min(effective_claim_limit, max(0, claim_limit))
     if effective_claim_limit <= 0:
-        return _RequestedCapacityClaimResult(
-            workspace_ids=[],
-            resume_after=None,
-            allocated_signature=None,
-            requested_queue_signature=None,
-            provider_suppression_resume_expires_at=None,
-        )
+        return _empty_requested_capacity_claim_result()
     reservation_repo = ResourceReservationRepository(session)
     allocated = await _allocated_totals_for_capacity_gate(
         session,
@@ -384,6 +400,13 @@ async def _log_stale_requested_claims(
 
 async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> bool:
     async with self._session_factory() as session:
+        await _acquire_requested_admission_lock(
+            session,
+            node_id=_requested_admission_lock_node_id(self._config.node_id),
+        )
+        row_slots = await _requested_admission_row_slots(session, config=self._config)
+        if row_slots <= 0:
+            return False
         repo = WorkspaceRepository(session)
         ws = await repo.transition_if_current(
             workspace_id,
