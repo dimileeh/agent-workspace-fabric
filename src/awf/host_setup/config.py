@@ -26,6 +26,7 @@ from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
 
 HOST_SETUP_CONFIG_CORRUPT = "HOST_SETUP_CONFIG_CORRUPT"
 HOST_SETUP_CONFIG_SECRET_VALUE = "HOST_SETUP_CONFIG_SECRET_VALUE"
+HOST_SETUP_CONFIG_WRITE_FAILED = "HOST_SETUP_CONFIG_WRITE_FAILED"
 HOST_SETUP_CONFIG_VERSION = 1
 DEFAULT_INSTALL_CHANNEL = "stable"
 DEFAULT_API_HOST_PORT = 8000
@@ -309,9 +310,8 @@ def write_host_setup_config(
     except OSError as exc:
         with suppress(OSError):
             tmp_path.unlink()
-        raise _config_corrupt_error(
+        raise _config_write_failed_error(
             config_path,
-            message="Unable to write host setup config.",
             details={"error_type": type(exc).__name__},
         ) from exc
 
@@ -406,6 +406,20 @@ def _config_corrupt_error(
     )
 
 
+def _config_write_failed_error(
+    path: Path,
+    *,
+    details: Mapping[str, object],
+) -> HostSetupConfigError:
+    """Build a reason-coded write-failure config error."""
+    return HostSetupConfigError(
+        reason_code=HOST_SETUP_CONFIG_WRITE_FAILED,
+        message="Unable to write host setup config.",
+        path=path,
+        details=details,
+    )
+
+
 def _config_secret_error(
     path: Path,
     *,
@@ -453,6 +467,7 @@ __all__ = [
     "DEFAULT_INSTALL_CHANNEL",
     "HOST_SETUP_CONFIG_CORRUPT",
     "HOST_SETUP_CONFIG_SECRET_VALUE",
+    "HOST_SETUP_CONFIG_WRITE_FAILED",
     "HOST_SETUP_CONFIG_VERSION",
     "ApiConfig",
     "ClientIntegrationConfig",

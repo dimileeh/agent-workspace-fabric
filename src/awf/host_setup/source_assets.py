@@ -206,16 +206,11 @@ def verified_source_from_metadata(
             },
         ) from exc
 
-    expected_asset_paths = SourceCheckoutAssetPaths()
-    stale_details: dict[str, object] = {"fallback_used": False}
-    if metadata.markers != SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS:
-        stale_details["expected_markers"] = list(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
-        stale_details["recorded_markers"] = list(metadata.markers)
-    if metadata.asset_paths != expected_asset_paths:
-        stale_details["expected_asset_paths"] = expected_asset_paths.model_dump(mode="json")
-        stale_details["recorded_asset_paths"] = metadata.asset_paths.model_dump(mode="json")
-
-    if len(stale_details) > 1:
+    contract_stale, stale_details = _source_checkout_contract_staleness(
+        metadata,
+        baseline_details={"fallback_used": False},
+    )
+    if contract_stale:
         raise SourceCheckoutError(
             reason_code=SOURCE_CHECKOUT_ASSETS_STALE,
             message="Stored AWF source checkout metadata does not match current asset contract.",
@@ -224,6 +219,27 @@ def verified_source_from_metadata(
         )
 
     return verified
+
+
+def _source_checkout_contract_staleness(
+    metadata: SourceCheckoutAssetMetadata,
+    *,
+    baseline_details: Mapping[str, object],
+) -> tuple[bool, dict[str, object]]:
+    """Return whether metadata diverges from the current source asset contract."""
+    expected_asset_paths = SourceCheckoutAssetPaths()
+    markers_stale = metadata.markers != SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS
+    asset_paths_stale = metadata.asset_paths != expected_asset_paths
+    stale_details = dict(baseline_details)
+
+    if markers_stale:
+        stale_details["expected_markers"] = list(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
+        stale_details["recorded_markers"] = list(metadata.markers)
+    if asset_paths_stale:
+        stale_details["expected_asset_paths"] = expected_asset_paths.model_dump(mode="json")
+        stale_details["recorded_asset_paths"] = metadata.asset_paths.model_dump(mode="json")
+
+    return markers_stale or asset_paths_stale, stale_details
 
 
 def _resolve_candidate(root: str | Path) -> Path:

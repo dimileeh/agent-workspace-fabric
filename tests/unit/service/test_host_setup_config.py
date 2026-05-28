@@ -12,6 +12,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+import awf.host_setup as host_setup
 import awf.host_setup.source_assets as source_assets
 from awf.host_setup import (
     ApiConfig,
@@ -131,10 +132,37 @@ def test_host_setup_config_write_parent_creation_error_is_reason_coded(
         write_host_setup_config(HostSetupConfig(), path=config_path)
 
     error = exc_info.value
-    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.reason_code == "HOST_SETUP_CONFIG_WRITE_FAILED"
     assert error.path == config_path
     assert error.details == {"error_type": "FileExistsError"}
     assert "not a directory" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_host_setup_config_write_persistence_error_uses_write_failed_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+
+    def _open_fails(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "open", _open_fails)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(HostSetupConfig(), path=config_path)
+
+    error = exc_info.value
+    assert host_setup.HOST_SETUP_CONFIG_WRITE_FAILED == "HOST_SETUP_CONFIG_WRITE_FAILED"
+    assert error.reason_code == "HOST_SETUP_CONFIG_WRITE_FAILED"
+    assert error.path == config_path
+    assert error.details == {"error_type": "OSError"}
+    assert "disk full" not in str(error.to_dict())
 
 
 @pytest.mark.unit
@@ -547,3 +575,28 @@ def test_stale_source_checkout_metadata_fails_without_package_fallback(tmp_path:
     assert error.reason_code == "SOURCE_CHECKOUT_ASSETS_STALE"
     assert error.root == checkout.resolve()
     assert error.missing_markers == ("docker/control-plane.Dockerfile",)
+
+
+@pytest.mark.unit
+def test_source_checkout_metadata_stale_detection_ignores_baseline_detail_count(
+    tmp_path: Path,
+) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
+
+    is_stale, details = source_assets._source_checkout_contract_staleness(
+        metadata,
+        baseline_details={
+            "fallback_used": False,
+            "revalidated_at": _FIXED_NOW.isoformat(),
+        },
+    )
+
+    assert is_stale is False
+    assert details == {
+        "fallback_used": False,
+        "revalidated_at": _FIXED_NOW.isoformat(),
+    }
+    assert (
+        verified_source_from_metadata(metadata, clock=lambda: _FIXED_NOW).root == checkout.resolve()
+    )
