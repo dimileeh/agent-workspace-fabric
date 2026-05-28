@@ -819,6 +819,7 @@ Legend:
 H01 ! installer hosting/trust
   +--> T11* install manifest
           +--> T12* install.sh
+                 +--> T15* docs lanes
           +--> T13* package assets
                  +--> T14* E2E first-run lanes
           +--> T16* release workflow checks
@@ -832,8 +833,6 @@ T01* CLI grammar/init switch
   +--> T04* setup dry-run
   +--> T05* start wrapper
   +--> T11* install manifest
-  +--> T15* docs lanes
-          +--> T18* docs drift tests
 
 T02* config/source asset model
   +--> T03* first-run errors/rendering
@@ -847,6 +846,8 @@ T04* setup dry-run
   +--> T07* provider orchestration
   +--> T09* MCP setup tools
   +--> T10* no-token smoke proof
+          +--> T15* docs lanes
+                  +--> T18* docs drift tests
 
 T05* start wrapper
   +--> T09* MCP setup tools
@@ -884,25 +885,21 @@ work. If H02 is not ready, do not launch credential storage.
 
 ### Wave 1 - Foundation
 
-Capacity used: 2 to 4 workspaces, depending on human readiness.
+Capacity used: 2 to 3 workspaces, depending on human readiness.
 
 | Slot | Task | Why now |
 | --- | --- | --- |
 | 1 | T01 CLI grammar/init switch | Locks public command names for every downstream task. |
 | 2 | T02 config/source asset model | Locks shared setup/start/provider/client contract. |
 | 3 | T11 install manifest | Can start if H01 is decided and T01 command names are accepted. |
-| 4 | T15 docs skeleton | Optional early docs draft after T01 starts; final docs wait for later waves. |
 
 Recommended launch:
 
 - Launch T01 and T02 first.
 - Launch T11 only after H01 is clear.
-- Launch T15 as a docs skeleton only if the implementer explicitly avoids
-  finalizing examples before T04/T05/T10/T12 land.
 
 Conflict flags:
 
-- T01 and T15 can both touch docs. Keep T15 to skeleton/matrix work or wait.
 - T02 and T11 should not conflict unless both edit package metadata.
 
 ### Wave 2 - Setup, Start, Credentials, Clients, Packaging
@@ -961,27 +958,43 @@ Conflict flags:
 - T09 and T08 should not overlap after T08 lands; T09 consumes the client helper
   contract.
 
-### Wave 4 - Docs Drift And End-To-End Proof
+### Wave 4 - Documentation And End-To-End Proof
 
 Capacity used: 2 workspaces.
 
 | Slot | Task | Depends on |
 | --- | --- | --- |
 | 1 | T14 clean-install/source-lane E2E smoke | T05, T10, T12, T13 |
-| 2 | T18 docs drift tests | T01, T15 |
+| 2 | T15 README, Quickstart, upgrade, uninstall, and source lanes | T01, T04, T05, T10, T12 |
 
 Recommended launch:
 
-- Run T14 and T18 in parallel.
-- Keep T18 focused on drift tests and doc corrections. Avoid changing CLI
-  behavior in this wave.
+- Run T14 and T15 in parallel after their listed dependencies are merged.
+- Keep T15 focused on documenting the implemented setup/start/init/install
+  behavior. Avoid changing CLI behavior in this wave.
 
 Conflict flags:
 
 - T14 may expose bugs in earlier tasks. Fixes should usually go back to the
   owning task PR if it is still open; otherwise make a narrow follow-up.
+- T15 consumes behavior from T04/T05/T10/T12. Do not launch a docs skeleton
+  before those dependencies are merged unless it is split into a separate task.
 
-### Wave 5 - Final Integration
+### Wave 5 - Docs Drift
+
+Capacity used: 1 workspace.
+
+| Slot | Task | Depends on |
+| --- | --- | --- |
+| 1 | T18 docs drift tests | T01, T15 |
+
+Recommended launch:
+
+- Launch T18 after T15 is merged.
+- Keep T18 focused on drift tests and doc corrections. Avoid changing CLI
+  behavior in this wave.
+
+### Wave 6 - Final Integration
 
 Capacity used: 1 coordination workspace or local operator run.
 
@@ -1013,7 +1026,10 @@ Lane C - Installer/release
               \-> T13 -> T14
 
 Lane D - Docs/DX
-  T01 -> T15 -> T18 -> T19
+  T01 -> T04 -> T10 -> T15 -> T18 -> T19
+   |      |
+   +-> T05 ----^
+  H01 -> T11 -> T12 -^
 
 Lane E - Human credential consent
   H02 -> T06
