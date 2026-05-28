@@ -152,6 +152,8 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             worktree_path=self._config.worktrees_root / workspace_id,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
+        # Keep the profile timeout as the fallback if stored companion policy
+        # cannot be parsed during monitor recovery.
         compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
