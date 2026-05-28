@@ -21,6 +21,10 @@ warning after the exact coverage threshold gate was added.
   undocumented helper callables in `src/awf/runtime/ci_failure_evidence.py`.
   The change remains behavior-neutral and does not edit protected workflow,
   quality-gate, or configuration files.
+- Iteration 3 expands the docstring remediation to the remaining Python
+  callables added or directly touched by this PR. A diff-scoped AST audit found
+  undocumented API-schema, companion-service, executor edge, validation helper,
+  and remonitor lifecycle test callables.
 
 ## Requirements Checklist
 
@@ -32,6 +36,8 @@ warning after the exact coverage threshold gate was added.
       annotation handling.
 - [x] Newly added executor error-path tests describe the edge case being
       protected.
+- [x] Remaining PR-added Python test helpers and regression tests describe the
+      edge case they protect.
 - [x] Focused local verification is recorded; full AWF/GitHub validation remains
       post-agent owned.
 
@@ -45,7 +51,9 @@ warning after the exact coverage threshold gate was added.
    coverage threshold annotation.
 5. Add one-line docstrings to the executor error-path tests added for the same
    PR's expanded coverage.
-6. Run targeted checks for the changed files and document the evidence.
+6. Add one-line docstrings to the remaining diff-added callables found by the
+   focused AST audit.
+7. Run targeted checks for the changed files and document the evidence.
 
 ## Verification Commands
 
@@ -55,5 +63,6 @@ warning after the exact coverage threshold gate was added.
 - Focused AST audit for production callables in
   `scripts/check_coverage_threshold.py` and
   `src/awf/runtime/ci_failure_evidence.py`.
+- Diff-scoped AST audit for PR-added/touched Python callables.
 
 Full AWF/GitHub validation remains owned by AWF after agent completion.

@@ -524,6 +524,7 @@ def test_companion_specs_from_task_policy_warns_on_boolean_compose_up_timeout(
 def test_companion_specs_from_task_policy_ignores_invalid_compose_up_timeout_types(
     timeout: object,
 ) -> None:
+    """Invalid compose-up timeout payload types are ignored."""
     spec = companion_specs_from_task_policy(
         {
             "companions": [
@@ -798,6 +799,7 @@ def test_companion_service_from_materialized_fails_required_missing_environment_
 def test_companion_service_from_materialized_rejects_literal_secret_target_overlap(
     tmp_path: Path,
 ) -> None:
+    """Companion materialization rejects literal and secret target overlaps."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     spec = WorkspaceCompanionSpec(
@@ -826,6 +828,7 @@ def test_companion_service_from_materialized_rejects_literal_secret_target_overl
 def test_companion_service_from_materialized_rejects_unsupported_secret_scope(
     tmp_path: Path,
 ) -> None:
+    """Companion materialization rejects unsupported env-secret scopes."""
     companion_root = tmp_path / "backend"
     companion_root.mkdir()
     spec = WorkspaceCompanionSpec(

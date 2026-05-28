@@ -25,20 +25,26 @@ from tests.postgres import postgres_test_session
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
+    """Yield an isolated Postgres test session."""
     async with postgres_test_session() as s:
         yield s
 
 
 @dataclass
 class _RecordingStopper:
+    """Record compose project stop calls made by the service."""
+
     calls: list[str | None] = field(default_factory=list)
 
     async def __call__(self, compose_project_name: str | None) -> None:
+        """Record the compose project name requested for shutdown."""
         self.calls.append(compose_project_name)
 
 
 @dataclass
 class _RecordingCleaner:
+    """Record workspace cleanup calls made by the service."""
+
     calls: list[str] = field(default_factory=list)
 
     async def cleanup(
@@ -53,6 +59,7 @@ class _RecordingCleaner:
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> list[str]:
+        """Record the workspace cleanup request and report no warnings."""
         del (
             repo_url,
             companion_worktrees,
@@ -72,6 +79,7 @@ async def _workspace(
     status: WorkspaceStatus,
     title: str = "control lifecycle",
 ) -> Workspace:
+    """Create a workspace in the requested lifecycle status."""
     workspace = await WorkspaceRepository(session).create(
         repo_url="git@github.com:example/control-lifecycle.git",
         branch_base="development",
@@ -93,6 +101,7 @@ async def _workspace_with_candidate(
     status: WorkspaceStatus,
     title: str,
 ) -> tuple[Workspace, MergeCandidate]:
+    """Create a workspace with an associated merge candidate."""
     workspace = await _workspace(session, status=status, title=title)
     workspace.branch_name = f"awf/{workspace.id}"
     workspace.remote_push_branch = workspace.branch_name
@@ -126,6 +135,7 @@ async def _workspace_with_candidate(
 
 
 def _service(session: AsyncSession) -> WorkspaceControlService:
+    """Build a control service with recording lifecycle collaborators."""
     cleaner = _RecordingCleaner()
     return WorkspaceControlService(
         session,
@@ -138,6 +148,7 @@ def _service(session: AsyncSession) -> WorkspaceControlService:
 async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     session: AsyncSession,
 ) -> None:
+    """Remonitoring reopens stale-closed candidates and resets monitor state."""
     workspace, candidate = await _workspace_with_candidate(
         session,
         status=WorkspaceStatus.failed,

@@ -313,6 +313,7 @@ def test_workspace_companion_accepts_non_default_repo_relative_paths() -> None:
 
 @pytest.mark.unit
 def test_workspace_companion_accepts_explicit_null_optional_repo_path() -> None:
+    """Explicit null repo-relative optional paths remain valid."""
     companion = api_schemas.WorkspaceCompanionRequest.model_validate(
         {
             "name": "api",
@@ -374,6 +375,7 @@ def test_workspace_companion_environment_rejects_invalid_raw_keys(
 
 @pytest.mark.unit
 def test_workspace_companion_environment_rejects_non_mapping_payload() -> None:
+    """Non-mapping companion environment payloads fail validation."""
     with pytest.raises(ValidationError):
         api_schemas.WorkspaceCompanionRequest.model_validate(
             {
@@ -386,6 +388,7 @@ def test_workspace_companion_environment_rejects_non_mapping_payload() -> None:
 
 @pytest.mark.unit
 def test_workspace_companion_environment_secrets_rejects_non_mapping_payload() -> None:
+    """Non-mapping companion environment secret payloads fail validation."""
     with pytest.raises(ValidationError):
         api_schemas.WorkspaceCompanionRequest.model_validate(
             {

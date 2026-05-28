@@ -464,6 +464,7 @@ def test_inject_pytest_parallel_workers_keeps_unparseable_or_non_pytest_commands
 def test_inject_pytest_parallel_workers_keeps_command_when_parse_or_pytest_lookup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Pytest worker injection preserves commands when parsing cannot proceed."""
     monkeypatch.setattr(coverage_helpers, "_is_pytest_coverage_command", lambda _command: True)
 
     assert (

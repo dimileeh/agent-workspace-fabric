@@ -15,6 +15,7 @@ from awf.node import companion_services
 
 
 def _backend_optional_env_secret_specs() -> tuple[companion_services.WorkspaceCompanionSpec, ...]:
+    """Build a backend companion spec with one optional env-secret reference."""
     return executor_monitor_handoff.companion_specs_from_task_policy(
         {
             "companions": [
@@ -205,6 +206,7 @@ services:
     companion_specs = _backend_optional_env_secret_specs()
 
     def _unexpected_write(*_args: object, **_kwargs: object) -> None:
+        """Fail if refresh tries to write an unchanged compose file."""
         raise AssertionError("refresh should not write unchanged compose payload")
 
     monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _unexpected_write)
@@ -238,6 +240,7 @@ services:
     companion_specs = _backend_optional_env_secret_specs()
 
     def _raise_write(*_args: object, **_kwargs: object) -> None:
+        """Simulate an atomic compose write failure."""
         raise OSError("disk full")
 
     monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _raise_write)
@@ -285,6 +288,7 @@ services:
         *args: Any,
         **kwargs: Any,
     ) -> int:
+        """Reject direct writes to the target compose file."""
         if path == compose_file:
             direct_target_writes.append(str(path))
             raise OSError("direct compose-file write should not be used")
