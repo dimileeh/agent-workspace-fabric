@@ -113,6 +113,24 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
+def test_quickstart_uses_runnable_startup_path() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    startup_section = quickstart_text.split("## Set Up And Start AWF", maxsplit=1)[1].split(
+        "## Open The Console",
+        maxsplit=1,
+    )[0]
+
+    assert (
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty"
+    ) in startup_section
+    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert not re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" in startup_section
+    assert "AWF_START_PLACEHOLDER" in startup_section
+
+
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")

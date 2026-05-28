@@ -46,25 +46,28 @@ formula audit.
 
 ## Set Up And Start AWF
 
-The public first-run sequence is machine setup, local Core startup, then
-project onboarding. For PR creation and monitoring, export a GitHub token
+The current runnable first-run sequence is local Core startup, health check,
+then project onboarding. For PR creation and monitoring, export a GitHub token
 before starting Core so the API and worker containers receive it when they are
 created:
 
 ```bash
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf setup
-awf start
+awf service bootstrap
 awf service status --format pretty
 ```
 
-`awf setup` prepares the machine for AWF, `awf start` starts the local AWF Core
-stack, and `awf service status --format pretty` confirms API, database, Docker,
-image, disk, provider, and cleanup health.
+`awf service bootstrap` starts the local AWF Core stack, and
+`awf service status --format pretty` confirms API, database, Docker, image,
+disk, provider, and cleanup health.
 
-In source checkouts with local Compose assets, `awf start` and
-`awf service bootstrap` persist Compose-interpolated service values in
-`docker/compose/.env`.
+`awf setup` and `awf start` are reserved first-run command surfaces. They are
+present in help for the future grammar, but today `awf setup` exits with
+`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
+`awf service bootstrap` until those setup and start slices land.
+
+In source checkouts with local Compose assets, `awf service bootstrap` persists
+Compose-interpolated service values in `docker/compose/.env`.
 
 If you set or refresh the GitHub token after starting Core, rerun the service
 bootstrap so Compose recreates the service containers with the updated
