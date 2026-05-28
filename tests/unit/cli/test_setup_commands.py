@@ -28,11 +28,12 @@ def test_setup_placeholder_pretty_has_stable_reason_code() -> None:
     result = _runner.invoke(app, ["setup"])
 
     assert result.exit_code == 1
-    assert "AWF_SETUP_PLACEHOLDER" in result.output
-    assert "awf setup" in result.output
-    assert "awf start" in result.output
-    assert "awf init <path>" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    assert "AWF_SETUP_PLACEHOLDER" in result.stderr
+    assert "awf setup" in result.stderr
+    assert "awf start" in result.stderr
+    assert "awf init <path>" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit

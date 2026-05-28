@@ -31,13 +31,14 @@ def setup_command(
     if fmt == OutputFormat.json:
         _emit(_SETUP_PLACEHOLDER_PAYLOAD, fmt)
     else:
-        typer.echo("AWF setup: first-run host setup is reserved")
-        typer.echo(f"Reason: {SETUP_PLACEHOLDER_REASON}")
+        typer.echo("AWF setup: first-run host setup is reserved", err=True)
+        typer.echo(f"Reason: {SETUP_PLACEHOLDER_REASON}", err=True)
         typer.echo(
             "Problem: `awf setup` is a stable command surface; host setup checks "
-            "land in a later setup slice."
+            "land in a later setup slice.",
+            err=True,
         )
-        typer.echo("Next:")
-        typer.echo("  - Run `awf start` after setup is implemented.")
-        typer.echo("  - Run `awf init <path>` to onboard a project repository.")
+        typer.echo("Next:", err=True)
+        typer.echo("  - Run `awf start` after setup is implemented.", err=True)
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
     raise typer.Exit(code=1)

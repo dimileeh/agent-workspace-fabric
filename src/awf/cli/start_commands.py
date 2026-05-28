@@ -31,13 +31,14 @@ def start_command(
     if fmt == OutputFormat.json:
         _emit(_START_PLACEHOLDER_PAYLOAD, fmt)
     else:
-        typer.echo("AWF start: local AWF Core startup is reserved")
-        typer.echo(f"Reason: {START_PLACEHOLDER_REASON}")
+        typer.echo("AWF start: local AWF Core startup is reserved", err=True)
+        typer.echo(f"Reason: {START_PLACEHOLDER_REASON}", err=True)
         typer.echo(
             "Problem: `awf start` is a stable command surface; local Core startup "
-            "lands in a later start slice."
+            "lands in a later start slice.",
+            err=True,
         )
-        typer.echo("Next:")
-        typer.echo("  - Run `awf setup` first once setup is implemented.")
-        typer.echo("  - Run `awf init <path>` to onboard a project repository.")
+        typer.echo("Next:", err=True)
+        typer.echo("  - Run `awf setup` first once setup is implemented.", err=True)
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
     raise typer.Exit(code=1)
