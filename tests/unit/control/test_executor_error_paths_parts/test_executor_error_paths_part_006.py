@@ -115,6 +115,60 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_required_compose_interpolation(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?COMPANION_ENV_SECRET_SOURCE_MISSING: companion=backend, target=REQUIRED_TOKEN, provider=env, source=REQUIRED_TOKEN_SOURCE}"
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "REQUIRED_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "REQUIRED_TOKEN_SOURCE",
+                            "required": True,
+                        },
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_interpolation",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={"REQUIRED_TOKEN_SOURCE": "raw-required-secret"},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "'${REQUIRED_TOKEN_SOURCE:?" not in rendered
+    assert 'REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?' in rendered
+    assert "raw-required-secret" not in rendered
+
+
+@pytest.mark.unit
 def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

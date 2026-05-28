@@ -98,6 +98,24 @@ from awf.runtime.validation import (
 )
 
 
+class _ComposeInterpolationPreservingDumper(yaml.SafeDumper):
+    """Safe YAML dumper that keeps Compose interpolation scalars active."""
+
+
+def _represent_compose_interpolation_string(
+    dumper: _ComposeInterpolationPreservingDumper,
+    value: str,
+) -> Any:
+    style = '"' if "${" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_ComposeInterpolationPreservingDumper.add_representer(
+    str,
+    _represent_compose_interpolation_string,
+)
+
+
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
 
@@ -329,7 +347,10 @@ def _refresh_optional_companion_env_secrets_for_resume(
         return
 
     try:
-        compose_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        compose_file.write_text(
+            _safe_dump_compose_payload_for_resume(payload),
+            encoding="utf-8",
+        )
     except OSError:
         _log.warning(
             "executor.resume_companion_env_secret_refresh_write_failed",
@@ -351,6 +372,14 @@ def _refresh_optional_companion_env_secrets_for_resume(
             compose_file=str(compose_file),
             restored_count=restored_count,
         )
+
+
+def _safe_dump_compose_payload_for_resume(payload: object) -> str:
+    return yaml.dump(
+        payload,
+        Dumper=_ComposeInterpolationPreservingDumper,
+        sort_keys=False,
+    )
 
 
 def _missing_optional_companion_env_secret_targets(
