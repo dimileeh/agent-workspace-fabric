@@ -147,6 +147,7 @@ def _construct_mapping_without_duplicate_keys(
 
     loader.flatten_mapping(node)
     seen_keys: set[object] = set()
+    constructed_keys: list[object] = []
     for key_node, _value_node in node.value:
         key = _construct_yaml_object(loader, key_node, deep=deep)
         try:
@@ -161,10 +162,10 @@ def _construct_mapping_without_duplicate_keys(
         if key in seen_keys:
             raise _DuplicateYamlKeyError()
         seen_keys.add(key)
+        constructed_keys.append(key)
 
     mapping: dict[object, object] = {}
-    for key_node, value_node in node.value:
-        key = _construct_yaml_object(loader, key_node, deep=deep)
+    for (_key_node, value_node), key in zip(node.value, constructed_keys, strict=True):
         mapping[key] = _construct_yaml_object(loader, value_node, deep=deep)
     return mapping
 
@@ -271,7 +272,15 @@ class HostSetupConfig(_HostSetupBaseModel):
     version: int = HOST_SETUP_CONFIG_VERSION
     install: InstallConfig = Field(default_factory=InstallConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
-    work_dir: str = Field(default=DEFAULT_HOST_SETUP_WORK_DIR, min_length=1, max_length=4096)
+    work_dir: str = Field(
+        default=DEFAULT_HOST_SETUP_WORK_DIR,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "Working directory path; callers must expand '~' via "
+            "Path(work_dir).expanduser() before filesystem use."
+        ),
+    )
     providers: Mapping[str, ProviderConfig] = Field(default_factory=dict, validate_default=True)
     clients: Mapping[str, ClientIntegrationConfig] = Field(
         default_factory=dict, validate_default=True
@@ -563,7 +572,7 @@ def _config_corrupt_error(
     path: Path,
     *,
     message: str = "Host setup config is corrupt or unsupported.",
-    details: Mapping[str, object],
+    details: Mapping[str, object] | None = None,
 ) -> HostSetupConfigError:
     """Build a reason-coded corrupt-config error."""
     return HostSetupConfigError(

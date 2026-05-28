@@ -391,6 +391,42 @@ def test_host_setup_config_rejects_duplicate_yaml_keys_before_secret_scan(
 
 
 @pytest.mark.unit
+def test_duplicate_key_loader_constructs_each_key_node_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loader = host_setup_config._DuplicateKeyRejectingSafeLoader("version: 1\n")
+    node = loader.get_single_node()
+    assert node is not None
+    key_node, value_node = node.value[0]
+    constructed_nodes: list[object] = []
+
+    def _construct_once(_loader: object, yaml_node: object, *, deep: bool) -> object:
+        del deep
+        constructed_nodes.append(yaml_node)
+        if yaml_node is key_node:
+            return "version"
+        if yaml_node is value_node:
+            return 1
+        raise AssertionError("unexpected YAML node")
+
+    monkeypatch.setattr(host_setup_config, "_construct_yaml_object", _construct_once)
+
+    assert host_setup_config._construct_mapping_without_duplicate_keys(loader, node) == {
+        "version": 1
+    }
+    assert sum(1 for constructed in constructed_nodes if constructed is key_node) == 1
+
+
+@pytest.mark.unit
+def test_host_setup_work_dir_documents_expanduser_contract() -> None:
+    description = HostSetupConfig.model_fields["work_dir"].description
+
+    assert description is not None
+    assert "expanduser" in description
+    assert "~" in description
+
+
+@pytest.mark.unit
 def test_host_setup_config_reads_missing_and_empty_yaml_as_defaults(tmp_path: Path) -> None:
     config_path = default_host_setup_config_path(home=tmp_path / "home")
 
@@ -750,6 +786,20 @@ def test_host_setup_error_to_dict_omits_empty_details(tmp_path: Path) -> None:
         "reason_code": "HOST_SETUP_CONFIG_CORRUPT",
         "message": "Host setup config is corrupt or unsupported.",
         "path": str(tmp_path / "config.yml"),
+    }
+
+
+@pytest.mark.unit
+def test_config_corrupt_error_accepts_default_details(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yml"
+
+    error = host_setup_config._config_corrupt_error(config_path)
+
+    assert error.to_dict() == {
+        "status": "failed",
+        "reason_code": "HOST_SETUP_CONFIG_CORRUPT",
+        "message": "Host setup config is corrupt or unsupported.",
+        "path": str(config_path),
     }
 
 
