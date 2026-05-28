@@ -1,0 +1,376 @@
+"""Host setup config schema and safe YAML IO helpers."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from contextlib import suppress
+from datetime import datetime
+from pathlib import Path
+from typing import ClassVar, cast
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
+
+HOST_SETUP_CONFIG_CORRUPT = "HOST_SETUP_CONFIG_CORRUPT"
+HOST_SETUP_CONFIG_SECRET_VALUE = "HOST_SETUP_CONFIG_SECRET_VALUE"
+HOST_SETUP_CONFIG_VERSION = 1
+DEFAULT_INSTALL_CHANNEL = "stable"
+DEFAULT_API_HOST_PORT = 8000
+DEFAULT_HOST_SETUP_WORK_DIR = "~/.awf/service"
+
+_SAFE_CREDENTIAL_REF_PREFIXES = ("keyring://", "env://", "plain-file://")
+_SECRET_VALUE_PREFIXES = (
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "glpat-",
+)
+_SECRET_KEY_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "apikey",
+        "secret",
+        "client_secret",
+        "password",
+        "private_key",
+        "github_token",
+        "openai_api_key",
+    }
+)
+
+
+class _SecretPayloadError(ValueError):
+    """Internal sanitized error for secret-bearing config payloads."""
+
+    def __init__(self, *, path: tuple[str, ...], issue: str) -> None:
+        self.path = path
+        self.issue = issue
+        super().__init__(f"{issue} at {_format_path(path)}")
+
+    def details(self) -> dict[str, object]:
+        return {
+            "issue": self.issue,
+            "path": _format_path(self.path),
+        }
+
+
+class HostSetupConfigError(RuntimeError):
+    """Reason-coded host setup config failure."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        path: Path,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.message = message
+        self.path = path
+        self.details = dict(details or {})
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable diagnostic payload."""
+
+        payload: dict[str, object] = {
+            "status": "failed",
+            "reason_code": self.reason_code,
+            "message": self.message,
+            "path": str(self.path),
+        }
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+
+class _HostSetupBaseModel(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        frozen=True,
+    )
+
+
+class InstallConfig(_HostSetupBaseModel):
+    """AWF install channel metadata."""
+
+    channel: str = Field(default=DEFAULT_INSTALL_CHANNEL, min_length=1, max_length=64)
+
+
+class ApiConfig(_HostSetupBaseModel):
+    """Local AWF API host settings."""
+
+    host_port: int = Field(default=DEFAULT_API_HOST_PORT, ge=1, le=65535)
+
+
+class ProviderConfig(_HostSetupBaseModel):
+    """Provider setup state with a credential reference, never a credential value."""
+
+    credential_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    source: str | None = Field(default=None, min_length=1, max_length=128)
+    status: str = Field(default="missing", min_length=1, max_length=128)
+
+    @field_validator("credential_ref")
+    @classmethod
+    def _validate_credential_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _looks_like_secret_value(value):
+            raise ValueError("credential_ref must be a reference, not a secret value")
+        if not value.startswith(_SAFE_CREDENTIAL_REF_PREFIXES):
+            raise ValueError(
+                "credential_ref must use keyring://, env://, or plain-file:// references"
+            )
+        return value
+
+
+class ClientIntegrationConfig(_HostSetupBaseModel):
+    """Client integration state written by setup flows."""
+
+    status: str = Field(default="not_configured", min_length=1, max_length=128)
+    updated_at: datetime | None = None
+
+
+class ConsentConfig(_HostSetupBaseModel):
+    """Machine-level consent flags recorded by setup flows."""
+
+    plain_file_secrets: bool = False
+    source_checkout_assets: bool = False
+
+
+class HostSetupConfig(_HostSetupBaseModel):
+    """Versioned host setup config persisted at ``~/.awf/config.yml``."""
+
+    version: int = HOST_SETUP_CONFIG_VERSION
+    install: InstallConfig = Field(default_factory=InstallConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
+    work_dir: str = Field(default=DEFAULT_HOST_SETUP_WORK_DIR, min_length=1, max_length=4096)
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    clients: dict[str, ClientIntegrationConfig] = Field(default_factory=dict)
+    consent: ConsentConfig = Field(default_factory=ConsentConfig)
+    source_checkout: SourceCheckoutAssetMetadata | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_secret_payload(cls, value: object) -> object:
+        _ensure_no_secret_payload(value)
+        return value
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: int) -> int:
+        if value != HOST_SETUP_CONFIG_VERSION:
+            raise ValueError(f"unsupported host setup config version: {value}")
+        return value
+
+
+def default_host_setup_config_path(*, home: str | Path | None = None) -> Path:
+    """Return the default host setup config path."""
+
+    base = Path.home() if home is None else Path(home).expanduser()
+    return base / ".awf" / "config.yml"
+
+
+def read_host_setup_config(*, path: str | Path | None = None) -> HostSetupConfig:
+    """Read host setup config, returning defaults when the config is absent."""
+
+    config_path = _resolve_config_path(path)
+    if not config_path.exists():
+        return HostSetupConfig()
+
+    try:
+        raw_text = config_path.read_text(encoding="utf-8")
+        raw: object = yaml.safe_load(raw_text)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise _config_corrupt_error(
+            config_path,
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise _config_corrupt_error(config_path, details={"error_type": "non_mapping_yaml"})
+
+    try:
+        _ensure_no_secret_payload(raw)
+    except _SecretPayloadError as exc:
+        raise _config_secret_error(config_path, details=exc.details()) from exc
+
+    try:
+        return HostSetupConfig.model_validate(raw)
+    except ValidationError as exc:
+        if _validation_contains_secret_error(exc):
+            raise _config_secret_error(
+                config_path,
+                details=_validation_error_details(exc),
+            ) from exc
+        raise _config_corrupt_error(
+            config_path,
+            details=_validation_error_details(exc),
+        ) from exc
+
+
+def write_host_setup_config(
+    config: HostSetupConfig,
+    *,
+    path: str | Path | None = None,
+) -> None:
+    """Atomically write host setup config with conservative permissions."""
+
+    config_path = _resolve_config_path(path)
+    payload = cast(dict[str, object], config.model_dump(mode="json", exclude_none=True))
+    try:
+        _ensure_no_secret_payload(payload)
+    except _SecretPayloadError as exc:
+        raise _config_secret_error(config_path, details=exc.details()) from exc
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_best_effort(config_path.parent, 0o700)
+
+    tmp_path = config_path.with_name(f".{config_path.name}.tmp")
+    text = yaml.safe_dump(payload, sort_keys=False)
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        _chmod_best_effort(tmp_path, 0o600)
+        tmp_path.replace(config_path)
+        _chmod_best_effort(config_path, 0o600)
+    except OSError as exc:
+        with suppress(OSError):
+            tmp_path.unlink()
+        raise _config_corrupt_error(
+            config_path,
+            message="Unable to write host setup config.",
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+
+def _resolve_config_path(path: str | Path | None) -> Path:
+    if path is None:
+        return default_host_setup_config_path()
+    return Path(path).expanduser()
+
+
+def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> None:
+    if isinstance(value, BaseModel):
+        _ensure_no_secret_payload(value.model_dump(mode="json"), path=path)
+        return
+    if isinstance(value, Mapping):
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            child_path = (*path, key)
+            if isinstance(raw_key, str) and _is_secret_key(raw_key):
+                raise _SecretPayloadError(path=child_path, issue="secret-bearing key")
+            _ensure_no_secret_payload(raw_value, path=child_path)
+        return
+    if isinstance(value, str) and _looks_like_secret_value(value):
+        raise _SecretPayloadError(path=path, issue="secret-like value")
+
+
+def _is_secret_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in _SECRET_KEY_NAMES
+
+
+def _looks_like_secret_value(value: str) -> bool:
+    stripped = value.strip()
+    lower = stripped.lower()
+    return lower.startswith("bearer ") or stripped.startswith(_SECRET_VALUE_PREFIXES)
+
+
+def _format_path(path: tuple[str, ...]) -> str:
+    return ".".join(path) if path else "<root>"
+
+
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    if os.name != "posix":
+        return
+    with suppress(OSError):
+        path.chmod(mode)
+
+
+def _config_corrupt_error(
+    path: Path,
+    *,
+    message: str = "Host setup config is corrupt or unsupported.",
+    details: Mapping[str, object],
+) -> HostSetupConfigError:
+    return HostSetupConfigError(
+        reason_code=HOST_SETUP_CONFIG_CORRUPT,
+        message=message,
+        path=path,
+        details=details,
+    )
+
+
+def _config_secret_error(
+    path: Path,
+    *,
+    details: Mapping[str, object],
+) -> HostSetupConfigError:
+    return HostSetupConfigError(
+        reason_code=HOST_SETUP_CONFIG_SECRET_VALUE,
+        message="Host setup config contains a secret value or secret-bearing key.",
+        path=path,
+        details=details,
+    )
+
+
+def _validation_error_details(exc: ValidationError) -> dict[str, object]:
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    return {
+        "error_count": exc.error_count(),
+        "error_types": sorted({str(error.get("type", "validation_error")) for error in errors}),
+        "locations": [_format_validation_location(error.get("loc", ())) for error in errors],
+    }
+
+
+def _validation_contains_secret_error(exc: ValidationError) -> bool:
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    return any(
+        "secret" in str(error.get("msg", "")).lower()
+        or "credential_ref must be a reference" in str(error.get("msg", ""))
+        for error in errors
+    )
+
+
+def _format_validation_location(location: object) -> str:
+    if not isinstance(location, tuple):
+        return str(location)
+    return ".".join(str(item) for item in location) if location else "<root>"
+
+
+__all__ = [
+    "DEFAULT_API_HOST_PORT",
+    "DEFAULT_HOST_SETUP_WORK_DIR",
+    "DEFAULT_INSTALL_CHANNEL",
+    "HOST_SETUP_CONFIG_CORRUPT",
+    "HOST_SETUP_CONFIG_SECRET_VALUE",
+    "HOST_SETUP_CONFIG_VERSION",
+    "ApiConfig",
+    "ClientIntegrationConfig",
+    "ConsentConfig",
+    "HostSetupConfig",
+    "HostSetupConfigError",
+    "InstallConfig",
+    "ProviderConfig",
+    "default_host_setup_config_path",
+    "read_host_setup_config",
+    "write_host_setup_config",
+]
