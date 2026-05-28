@@ -118,6 +118,22 @@ _ComposeInterpolationPreservingDumper.add_representer(
 )
 
 
+class CompanionEnvSecretPrecheckError(ComposeOperationError):
+    """Raised when monitor resume cannot satisfy required companion env secrets."""
+
+    def __init__(self, *, stderr: str, reason_code: str) -> None:
+        self.operation = "companion_env_secret_precheck"
+        self.returncode = 0
+        self.stdout = ""
+        self.stderr = stderr
+        self.reason_code = reason_code
+        Exception.__init__(
+            self,
+            "companion env secret precheck failed "
+            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
+        )
+
+
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
 
@@ -229,6 +245,20 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             wait=True,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
+    except CompanionEnvSecretPrecheckError as exc:
+        _log.error(
+            "executor.resume_companion_env_secret_precheck_failed",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            stderr=exc.stderr[:1000],
+        )
+        await self._record_monitor_runtime_restart_failed(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file_path=compose_file_path,
+            error=exc,
+            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+        )
     except ComposeOperationError as exc:
         _log.error(
             "executor.resume_compose_up_failed",
@@ -334,10 +364,7 @@ def _precheck_required_companion_env_secrets_for_resume(
                 f"{reason_code}: companion={spec.name}, target={secret.target}, "
                 f"provider={secret.provider}, source={secret.value_from}"
             )
-            raise ComposeOperationError(
-                operation="up",
-                returncode=1,
-                stdout="",
+            raise CompanionEnvSecretPrecheckError(
                 stderr=stderr,
                 reason_code=reason_code,
             )
@@ -1271,6 +1298,7 @@ async def _record_monitor_runtime_restart_failed(
     compose_project: str,
     compose_file_path: str,
     error: ComposeOperationError,
+    event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
 ) -> None:
     try:
         async with self._session_factory() as session:
@@ -1281,7 +1309,7 @@ async def _record_monitor_runtime_restart_failed(
             await repo.add_event(
                 ws,
                 event_type="workspace.monitor_runtime_restart_failed",
-                reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+                reason_code=event_reason_code,
                 payload={
                     "compose_project_name": compose_project,
                     "compose_file_path": compose_file_path,

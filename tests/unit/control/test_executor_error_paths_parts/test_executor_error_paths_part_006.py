@@ -1403,10 +1403,18 @@ class TestExecutorCoverageEdgesPart002:
             pr_monitor_factory=lambda *_args: _Monitor(),
         )
 
-        await executor.resume_pr_monitor(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor(ws_id)
 
         assert compose_calls == []
         assert monitor_calls == [ws_id]
+        assert any(
+            entry["event"] == "executor.resume_companion_env_secret_precheck_failed"
+            and entry["workspace_id"] == ws_id
+            and entry["reason_code"] == expected_reason_code
+            for entry in captured
+        )
+        assert not any(entry["event"] == "executor.resume_compose_up_failed" for entry in captured)
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -1416,6 +1424,8 @@ class TestExecutorCoverageEdgesPart002:
                 if event.event_type == "workspace.monitor_runtime_restart_failed"
             ]
         assert len(compose_events) == 1
+        assert compose_events[0].reason_code == "MONITOR_RECOVERY_PRECHECK_FAILED"
+        assert compose_events[0].payload["operation"] == "companion_env_secret_precheck"
         assert compose_events[0].payload["reason_code"] == expected_reason_code
         assert expected_reason_code in compose_events[0].payload["stderr"]
         assert "REQUIRED_TOKEN_SOURCE" in compose_events[0].payload["stderr"]
