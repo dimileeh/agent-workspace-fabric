@@ -378,6 +378,10 @@ async def _claim_requested_capacity_candidates(
         if ws is None:
             await self._log_stale_requested_claims(session, [workspace.id])
             continue
+        if self._config.node_id is not None:
+            # Recovery for named workers is node-scoped, so ownership must be
+            # persisted with the claim before a provisioner crash can strand it.
+            ws.node_id = self._config.node_id
         if demand.defaulted:
             await _record_capacity_queue_decision(
                 session,
@@ -434,6 +438,10 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
             reason_code="WORKER_CLAIMED",
         )
         if ws is not None:
+            if self._config.node_id is not None:
+                # Keep the provisioning row recoverable if the worker crashes
+                # before the provisioner writes placement metadata.
+                ws.node_id = self._config.node_id
             await session.commit()
             return True
 

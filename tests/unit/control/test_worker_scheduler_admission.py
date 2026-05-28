@@ -185,6 +185,16 @@ async def _workspace_status(
         return workspace.status
 
 
+async def _workspace_node_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> str | None:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        return workspace.node_id
+
+
 async def _stale_events(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -276,6 +286,37 @@ async def test_provision_only_worker_claims_requested_without_execution_row_slot
 
 
 @pytest.mark.unit
+async def test_named_worker_stamps_node_id_when_claiming_requested_for_provisioning(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+    worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+    assert await worker.run_once() == 1
+
+    assert provisioner.calls == [workspace_id]
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+    assert await _workspace_node_id(session_factory, workspace_id) == "local"
+
+
+@pytest.mark.unit
 async def test_provision_only_local_capacity_worker_claims_requested_without_execution_row_slots(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -298,6 +339,38 @@ async def test_provision_only_local_capacity_worker_claims_requested_without_exe
     assert await _workspace_status(session_factory, workspace_id) == (
         WorkspaceStatus.provisioning.value
     )
+
+
+@pytest.mark.unit
+async def test_named_local_capacity_worker_stamps_node_id_when_claiming_requested(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=True,
+        node_id=None,
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+    worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+    assert await worker.run_once() == 1
+
+    assert provisioner.calls == [workspace_id]
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+    assert await _workspace_node_id(session_factory, workspace_id) == "local"
 
 
 @pytest.mark.unit
