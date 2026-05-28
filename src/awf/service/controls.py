@@ -34,6 +34,7 @@ from awf.service.failure_causality import (
     primary_failure_reason_code,
     restore_primary_failure_row_fields,
 )
+from awf.service.gc_companions import companion_worktree_remove_targets
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
     SecretLeaseService,
@@ -101,6 +102,7 @@ class WorkspaceCleanerProtocol(Protocol):
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -984,10 +986,12 @@ class WorkspaceControlService:
 
         await self._session.flush()
         cleaner = self._cleaner_factory()
+        companion_worktrees = companion_worktree_remove_targets(workspace)
         cleanup_result = _normalize_cleanup_result(
             await cleaner.cleanup(
                 workspace_id=workspace_id,
                 repo_url=workspace.repo_url,
+                companion_worktrees=companion_worktrees,
                 compose_project_name=workspace.compose_project_name,
                 compose_file_path=(
                     Path(workspace.compose_file_path) if workspace.compose_file_path else None

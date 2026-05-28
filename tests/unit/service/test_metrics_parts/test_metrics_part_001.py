@@ -151,9 +151,7 @@ def test_metrics_to_utc_accepts_naive_datetime() -> None:
 async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from awf.service import metrics
-
-    live_metrics_globals = metrics._allocated_resources_for_session.__globals__  # noqa: SLF001
+    live_metrics_globals = metrics_resources._allocated_resources_for_session.__globals__  # noqa: SLF001
 
     calls: list[tuple[str, str]] = []
 
@@ -208,12 +206,12 @@ async def test_allocated_resource_helpers_load_auxiliary_counts_when_missing(
         peak_memory_gb=4.0,
     )
 
-    allocated_resources = await metrics._allocated_resources_for_session(  # noqa: SLF001
+    allocated_resources = await metrics_resources._allocated_resources_for_session(  # noqa: SLF001
         object(),  # type: ignore[arg-type]
         node_id="node-a",
         resource_defaults=defaults,
     )
-    scheduler_resources = await metrics._scheduler_allocated_resources_for_session(  # noqa: SLF001
+    scheduler_resources = await metrics_resources._scheduler_allocated_resources_for_session(  # noqa: SLF001
         object(),  # type: ignore[arg-type]
         node_id="node-b",
         resource_defaults=defaults,

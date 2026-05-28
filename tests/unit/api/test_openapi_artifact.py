@@ -139,6 +139,7 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
         "WorkspaceProfileSelection",
         "WorkspaceValidation",
         "WorkspaceResources",
+        "WorkspaceCompanionRequest",
     }.issubset(schemas)
     assert schemas["WorkspaceCreateRequest"]["properties"]["repo"]["$ref"] == (
         "#/components/schemas/WorkspaceRepo"
@@ -146,6 +147,30 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
     assert schemas["WorkspaceCreateRequest"]["properties"]["task"]["$ref"] == (
         "#/components/schemas/WorkspaceTask"
     )
+    companion_schema = schemas["WorkspaceCreateRequest"]["properties"]["companions"]
+    assert companion_schema["maxItems"] == 16
+    assert companion_schema["items"]["$ref"] == "#/components/schemas/WorkspaceCompanionRequest"
+
+
+@pytest.mark.unit
+def test_workspace_companion_ports_document_container_first_order(openapi_spec: dict) -> None:
+    description = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"]["properties"][
+        "ports"
+    ]["description"]
+
+    assert "[container_port, host_port]" in description
+    assert "host_port:container_port" in description
+
+
+@pytest.mark.unit
+def test_workspace_companion_environment_keys_document_docker_names(
+    openapi_spec: dict,
+) -> None:
+    environment = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"]["properties"][
+        "environment"
+    ]
+
+    assert environment["propertyNames"]["pattern"] == "^[A-Za-z_][A-Za-z0-9_]*$"
 
 
 @pytest.mark.unit

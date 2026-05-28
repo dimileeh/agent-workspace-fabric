@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -78,6 +78,35 @@ class TestCleanup:
         git.remove_worktree.assert_awaited_once_with(
             workspace_id="ws_clean", repo_url="git@x:y.git"
         )
+
+    @pytest.mark.unit
+    async def test_cleanup_removes_companion_worktrees_with_primary(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+
+        failures = await wc.cleanup(
+            workspace_id="ws_clean",
+            repo_url="git@x:app.git",
+            companion_worktrees=(
+                ("ws_clean__companion__backend", "git@x:backend.git"),
+                ("ws_clean__companion__web", "git@x:web.git"),
+            ),
+        )
+
+        assert failures == []
+        compose.down.assert_awaited_once()
+        assert git.remove_worktree.await_args_list == [
+            call(workspace_id="ws_clean", repo_url="git@x:app.git"),
+            call(
+                workspace_id="ws_clean__companion__backend",
+                repo_url="git@x:backend.git",
+            ),
+            call(
+                workspace_id="ws_clean__companion__web",
+                repo_url="git@x:web.git",
+            ),
+        ]
 
     @pytest.mark.unit
     async def test_uses_stored_compose_file_path_for_compose_down(
@@ -189,6 +218,48 @@ class TestCleanup:
         )
 
         assert failures == []
+        compose.down.assert_awaited_once()
+        git.remove_worktree.assert_not_awaited()
+
+    @pytest.mark.unit
+    async def test_companion_worktree_skip_records_all_targets_when_remove_worktree_false(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+
+        result = await wc.cleanup(
+            workspace_id="ws_keep_worktree",
+            repo_url="git@x:app.git",
+            companion_worktrees=(
+                ("ws_keep_worktree__companion__backend", "git@x:backend.git"),
+                ("ws_keep_worktree__companion__web", "git@x:web.git"),
+            ),
+            remove_worktree=False,
+        )
+
+        assert result.status == "succeeded"
+        assert [step.to_dict() for step in result.steps] == [
+            {
+                "name": "compose_down",
+                "status": "succeeded",
+                "reason_code": "COMPOSE_DOWN_SUCCEEDED",
+            },
+            {
+                "name": "worktree_remove",
+                "status": "skipped",
+                "reason_code": "WORKTREE_REMOVE_SKIPPED",
+            },
+            {
+                "name": "companion_worktree_remove:ws_keep_worktree__companion__backend",
+                "status": "skipped",
+                "reason_code": "WORKTREE_REMOVE_SKIPPED",
+            },
+            {
+                "name": "companion_worktree_remove:ws_keep_worktree__companion__web",
+                "status": "skipped",
+                "reason_code": "WORKTREE_REMOVE_SKIPPED",
+            },
+        ]
         compose.down.assert_awaited_once()
         git.remove_worktree.assert_not_awaited()
 

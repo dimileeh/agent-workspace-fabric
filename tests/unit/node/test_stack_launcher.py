@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
+from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
 from awf.node.compose_manager import (
     AuthMount,
     ComposeOperationError,
@@ -28,6 +29,7 @@ from awf.profiles.models import (
     ProfileService,
     WorkspaceProfile,
 )
+from awf.profiles.resolver import ProfileResolutionError
 
 
 class _RecordingCompose:
@@ -358,6 +360,40 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_preflights_profile_dependencies_without_companions() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        services=[
+            ProfileService(name="postgres", image="postgres:16-alpine"),
+            ProfileService(
+                name="app",
+                image="example/app:latest",
+                depends_on=["postgres"],
+                healthcheck_cmd="curl -fsS http://localhost:8080/health",
+            ),
+        ],
+    )
+
+    with pytest.raises(ProfileResolutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+            )
+        )
+
+    assert raised.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNHEALTHY"
+    assert "app->postgres" in str(raised.value)
+    assert compose.specs == []
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_default_restricted_egress_uses_internal_flags() -> None:
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
@@ -493,14 +529,172 @@ async def test_compose_stack_launcher_resolves_profile_services_in_thread(
         )
     )
 
-    assert calls == [
-        (
-            stack_launcher_mod.profile_services,
-            (profile,),
-            {"base_path": layout.worktree_path},
-        )
-    ]
+    assert calls[0] == (
+        stack_launcher_mod.profile_services,
+        (profile,),
+        {"base_path": layout.worktree_path},
+    )
+    assert calls[1] == (
+        stack_launcher_mod.validate_companion_service_graph,
+        (),
+        {
+            "profile_services": compose.specs[0].services,
+            "companions": (),
+            "docker_mode": profile.docker.mode,
+        },
+    )
+    assert calls[2][1] == ()
+    assert calls[2][2] == {}
     assert compose.specs[0].services[0].name == "sidecar"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_passes_materialized_companions_to_compose(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    (companion_root / "services" / "api").mkdir(parents=True)
+    (companion_root / "config").mkdir()
+    (companion_root / "fixtures").mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    layout = _layout()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            base_branch="development",
+            build_context="services/api",
+            dockerfile="docker/Dockerfile",
+            env_file="config/dev.env",
+            environment=(("APP_ENV", "test"),),
+            depends_on=("docker",),
+            healthcheck_cmd="curl -fsS http://localhost:8000/health",
+            ports=((8000, 18000),),
+            command="python -m backend",
+            volumes=(("./fixtures", "/fixtures"),),
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(mode=DockerMode.dind),
+            ),
+            companions=(companion,),
+        )
+    )
+
+    rendered = compose.specs[0].companions[0]
+    assert rendered.name == "backend"
+    assert rendered.build_context == str(companion_root / "services" / "api")
+    assert rendered.dockerfile == "../../docker/Dockerfile"
+    assert rendered.env_file == str(companion_root / "config" / "dev.env")
+    assert rendered.depends_on == ("docker",)
+    assert rendered.healthcheck_cmd == "curl -fsS http://localhost:8000/health"
+    assert rendered.ports == ((8000, 18000),)
+    assert rendered.command == "python -m backend"
+    assert rendered.volumes == ((str(companion_root / "fixtures"), "/fixtures"),)
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_skips_companion_graph_validation_when_prevalidated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+
+    def fail_validate_companion_service_graph(**_: object) -> None:
+        raise AssertionError("prevalidated companion graph should not be validated again")
+
+    monkeypatch.setattr(
+        stack_launcher_mod,
+        "validate_companion_service_graph",
+        fail_validate_companion_service_graph,
+    )
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="serviceful"),
+            companions=(
+                MaterializedCompanionService(
+                    spec=WorkspaceCompanionSpec(
+                        name="backend",
+                        repo_url="git@github.com:example/backend.git",
+                        base_branch="development",
+                    ),
+                    layout=WorktreeLayout(
+                        mirror_path=tmp_path / "backend.git",
+                        worktree_path=companion_root,
+                        branch_name="awf/ws_launcher/companion/backend",
+                    ),
+                ),
+            ),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert compose.specs[0].companions[0].name == "backend"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_rejects_companion_profile_service_collision(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    with pytest.raises(ProfileResolutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile(
+                    name="serviceful",
+                    services=[ProfileService(name="backend", image="backend:latest")],
+                ),
+                companions=(
+                    MaterializedCompanionService(
+                        spec=WorkspaceCompanionSpec(
+                            name="backend",
+                            repo_url="git@github.com:example/backend.git",
+                            base_branch="development",
+                        ),
+                        layout=WorktreeLayout(
+                            mirror_path=tmp_path / "backend.git",
+                            worktree_path=companion_root,
+                            branch_name="awf/ws_launcher/companion/backend",
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    assert raised.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
 
 
 @pytest.mark.unit
@@ -974,7 +1168,7 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     )
     await launcher.launch(request)
 
-    assert len(calls) == 2
+    assert len(calls) == 4
     func, args, kwargs = calls[0]
     assert func == auth_mount_resolver.resolve
     assert args == ()
@@ -987,3 +1181,13 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     assert func == stack_launcher_mod.profile_services
     assert args == (request.profile,)
     assert kwargs == {"base_path": layout.worktree_path}
+    func, args, kwargs = calls[2]
+    assert func == stack_launcher_mod.validate_companion_service_graph
+    assert args == ()
+    assert kwargs == {
+        "profile_services": (),
+        "companions": (),
+        "docker_mode": request.profile.docker.mode,
+    }
+    assert calls[3][1] == ()
+    assert calls[3][2] == {}

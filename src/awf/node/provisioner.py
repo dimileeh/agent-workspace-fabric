@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
@@ -33,10 +34,17 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.node.companion_services import (
+    MaterializedCompanionService,
+    WorkspaceCompanionSpec,
+    companion_specs_from_task_policy,
+    validate_companion_service_graph,
+)
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.compose import profile_services
 from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -167,7 +175,31 @@ class Provisioner:
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
             stack_paths: ComposeProjectPaths | None = None
+            materialized_companions: tuple[MaterializedCompanionService, ...] = ()
+            companion_graph_prevalidated = False
             if self._stack_launcher is not None:
+                companion_specs = companion_specs_from_task_policy(ws.task_policy)
+                validate_companion_service_graph(
+                    profile_services=profile_services(
+                        profile,
+                        base_path=layout.worktree_path,
+                    ),
+                    companions=companion_specs,
+                    docker_mode=profile.docker.mode,
+                )
+                companion_graph_prevalidated = True
+                materialized_companions = await self._materialize_companions(
+                    workspace_id=workspace_id,
+                    companions=companion_specs,
+                    default_base_branch=ws.branch_base,
+                )
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.provisioning,
+                    action="provision",
+                    reason_code="PROVISIONER_STALE_STATUS",
+                ):
+                    return
                 await self._issue_secret_leases(workspace_id, profile)
                 if not await self._recheck_status(
                     workspace_id,
@@ -181,6 +213,8 @@ class Provisioner:
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        companions=materialized_companions,
+                        companion_graph_prevalidated=companion_graph_prevalidated,
                     )
                 )
         except GitOperationError as exc:
@@ -342,6 +376,32 @@ class Provisioner:
             branch=layout.branch_name,
             base_commit=base_commit,
         )
+
+    async def _materialize_companions(
+        self,
+        *,
+        workspace_id: str,
+        companions: tuple[WorkspaceCompanionSpec, ...],
+        default_base_branch: str,
+    ) -> tuple[MaterializedCompanionService, ...]:
+        materialized: list[MaterializedCompanionService] = []
+        for companion in companions:
+            companion_id = companion_worktree_id(workspace_id, companion.name)
+            base_branch = (
+                companion.base_branch if companion.base_branch is not None else default_base_branch
+            )
+            layout = await self._git.add_worktree(
+                workspace_id=companion_id,
+                repo_url=companion.repo_url,
+                base_branch=base_branch,
+                new_branch=companion_branch_name(
+                    branch_prefix=self._config.branch_prefix,
+                    workspace_id=workspace_id,
+                    companion_name=companion.name,
+                ),
+            )
+            materialized.append(MaterializedCompanionService(spec=companion, layout=layout))
+        return tuple(materialized)
 
     async def _load_and_claim(self, session: AsyncSession, workspace_id: str) -> Workspace | None:
         """Transition requested -> provisioning. Returns the loaded workspace or None.

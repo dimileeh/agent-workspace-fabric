@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awf.api import schemas_operations as _schemas_operations
+from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.callback_events import is_valid_callback_subscription_event_type
 from awf.common.callback_targets import (
     is_public_callback_target_host,
@@ -29,45 +30,24 @@ from awf.db.enums import (
 )
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
-OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
-ValidationCommand = Annotated[str, Field(min_length=1)]
-MergeBlockerReason = Literal[
-    "ready_to_merge_or_waiting_for_github",
-    "manual_merge_required",
-    "waiting_for_monitor",
-    "waiting_for_older_candidate",
-    "workspace_not_terminal",
-    "completed",
-    "failed_or_cancelled",
-    "not_canonical",
-    "policy_blocked",
-    "stale",
-]
-MergeCandidateStatus = Literal["open", "merged", "closed"]
-MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
-ValidationTier = Literal[1, 2, 3]
-ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
-ValidationFreshnessStatus = Literal["fresh", "stale", "unknown", "unavailable"]
-ValidationIdentitySource = Literal["persisted", "legacy_fallback"]
-AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
-WorkspaceLifecycleStageStatus = Literal[
-    "pending",
-    "active",
-    "completed",
-    "terminal_skipped",
-]
-LlmUsageStatus = Literal["available", "unavailable"]
-WorkspaceOverlapGraphQueueState = Literal["queued", "running"]
-WorkspaceOverlapGraphSeverity = Literal["advisory"]
-WorkspaceOverlapGraphReasonCode = Literal["OWNED_PATH_OVERLAP_RISK"]
-WorkspaceOverlapPathMatchReasonCode = Literal[
-    "OWNED_PATH_EXACT_MATCH",
-    "OWNED_PATH_ANCESTOR_MATCH",
-    "OWNED_PATH_WILDCARD_MATCH",
-]
-CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
-NetworkPosture = Literal["offline", "restricted", "open"]
-
+OwnedPath = _schemas_operations.OwnedPath
+ValidationCommand = _schemas_operations.ValidationCommand
+MergeBlockerReason = _schemas_operations.MergeBlockerReason
+MergeCandidateStatus = _schemas_operations.MergeCandidateStatus
+MergeQueueBlockerState = _schemas_operations.MergeQueueBlockerState
+ValidationTier = _schemas_operations.ValidationTier
+ValidationProvenanceStatus = _schemas_operations.ValidationProvenanceStatus
+ValidationFreshnessStatus = _schemas_operations.ValidationFreshnessStatus
+ValidationIdentitySource = _schemas_operations.ValidationIdentitySource
+AgentIdentitySource = _schemas_operations.AgentIdentitySource
+WorkspaceLifecycleStageStatus = _schemas_operations.WorkspaceLifecycleStageStatus
+LlmUsageStatus = _schemas_operations.LlmUsageStatus
+WorkspaceOverlapGraphQueueState = _schemas_operations.WorkspaceOverlapGraphQueueState
+WorkspaceOverlapGraphSeverity = _schemas_operations.WorkspaceOverlapGraphSeverity
+WorkspaceOverlapGraphReasonCode = _schemas_operations.WorkspaceOverlapGraphReasonCode
+WorkspaceOverlapPathMatchReasonCode = _schemas_operations.WorkspaceOverlapPathMatchReasonCode
+CallbackEventType = _schemas_operations.CallbackEventType
+NetworkPosture = _schemas_operations.NetworkPosture
 OperationListResponse = _schemas_operations.OperationListResponse
 OperationResponse = _schemas_operations.OperationResponse
 log_stream_ids = _schemas_operations.log_stream_ids
@@ -77,12 +57,7 @@ _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
 _LEGACY_FLAT_REPO_BASE_BRANCH_DEFAULT = "development"
 _LEGACY_DATABASE_PROFILE_REF = "aira"
-# Task kinds operators may request directly via REST/MCP workspace creation.
-# ``sync_feature_pr`` is intentionally absent: it is created through the
-# PR-adoption endpoint, not direct workspace creation.
-PUBLIC_DIRECT_CREATE_TASK_KINDS = frozenset(
-    {TaskKind.feature_branch_pr.value, TaskKind.sync_release_pr.value}
-)
+PUBLIC_DIRECT_CREATE_TASK_KINDS = _schemas_operations.PUBLIC_DIRECT_CREATE_TASK_KINDS
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -237,6 +212,7 @@ class WorkspaceCreateRequest(BaseModel):
         default_factory=lambda: WorkspaceResources(cpu=None, memory=None)
     )
     preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
+    companions: list[WorkspaceCompanionRequest] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="before")
     @classmethod
@@ -287,6 +263,29 @@ class WorkspaceCreateRequest(BaseModel):
             "resources": {},
         }
         return coerced
+
+    @model_validator(mode="after")
+    def _normalize_companions(self) -> WorkspaceCreateRequest:
+        names: set[str] = set()
+        companion_host_ports: dict[int, str] = {}
+        normalized: list[WorkspaceCompanionRequest] = []
+        for companion in self.companions:
+            if companion.name in names:
+                raise ValueError(f"duplicate companion name {companion.name!r}")
+            names.add(companion.name)
+            for _, host_port in companion.ports:
+                previous_companion = companion_host_ports.get(host_port)
+                if previous_companion is not None:
+                    raise ValueError(
+                        f"duplicate companion host port {host_port} requested by "
+                        f"{previous_companion!r} and {companion.name!r}"
+                    )
+                companion_host_ports[host_port] = companion.name
+            if companion.base_branch is None:
+                companion = companion.model_copy(update={"base_branch": self.repo.base_branch})
+            normalized.append(companion)
+        self.companions = normalized
+        return self
 
     @property
     def repo_url(self) -> str:

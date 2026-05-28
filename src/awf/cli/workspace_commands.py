@@ -130,6 +130,11 @@ def workspace_create(
         "--provider-readiness-override-reason",
         help="Audit reason for --provider-readiness-override.",
     ),
+    companion_json: list[str] | None = typer.Option(
+        None,
+        "--companion-json",
+        help="Repeatable JSON companion service definition.",
+    ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -159,6 +164,7 @@ def workspace_create(
             "provider_readiness_override": provider_readiness_override,
             "provider_readiness_override_reason": provider_readiness_override_reason,
         },
+        "companions": [],
     }
 
     if model is not None:
@@ -200,6 +206,10 @@ def workspace_create(
         body["resources"]["peak_memory_gb"] = peak_memory_gb
     if disk_mb is not None:
         body["resources"]["disk_mb"] = disk_mb
+    if companion_json is not None:
+        body["companions"] = [
+            _parse_json_option("--companion-json", companion) for companion in companion_json
+        ]
 
     headers = _api_token_headers(api_token)
     if idempotency_key:

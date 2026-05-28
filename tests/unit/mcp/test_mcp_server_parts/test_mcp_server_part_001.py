@@ -170,6 +170,22 @@ def _optional_object_schema(schema: dict[str, object]) -> dict[str, object]:
     return object_schema
 
 
+def _optional_array_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    if any_of is None:
+        assert schema.get("type") == "array"
+        return schema
+
+    assert isinstance(any_of, list)
+    array_schema = next(
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "array"),
+        None,
+    )
+    assert array_schema is not None, f"Could not find array schema in anyOf: {any_of}"
+    assert isinstance(array_schema, dict)
+    return array_schema
+
+
 def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
     string_schema = _optional_string_schema(schema)
     assert str(schema["description"]).startswith("Required idempotency key")
@@ -494,6 +510,7 @@ class TestToolRegistration:
         owned_paths = create.inputSchema["properties"]["owned_paths"]
         out_of_scope_changes = create.inputSchema["properties"]["out_of_scope_changes"]
         provider_recovery = create.inputSchema["properties"]["provider_recovery"]
+        companions = create.inputSchema["properties"]["companions"]
 
         assert base_branch["default"] == "development"
         assert "Defaults to development" in base_branch["description"]
@@ -508,6 +525,9 @@ class TestToolRegistration:
         }
         assert _optional_object_schema(out_of_scope_changes)["type"] == "object"
         assert _optional_object_schema(provider_recovery)["type"] == "object"
+        companion_schema = _optional_array_schema(companions)
+        assert companion_schema["maxItems"] == 16
+        assert companion_schema["items"]["type"] == "object"
         assert create.inputSchema["properties"]["provider_readiness_override"]["default"] is False
         assert (
             create.inputSchema["properties"]["provider_readiness_override_reason"]["default"]

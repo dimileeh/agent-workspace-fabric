@@ -16,6 +16,7 @@ from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.companions import parent_workspace_id_from_companion_worktree_id
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine
@@ -435,7 +436,7 @@ def scan_managed_worktrees(work_dir: str | Path) -> ResourceScan:
     resources = tuple(
         DetectedResource(
             kind="worktree",
-            workspace_id=entry.name,
+            workspace_id=parent_workspace_id_from_companion_worktree_id(entry.name) or entry.name,
             path=str(entry),
         )
         for entry in entries

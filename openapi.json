@@ -7059,6 +7059,167 @@
         "title": "WorkspaceArtifactResponse",
         "type": "object"
       },
+      "WorkspaceCompanionRequest": {
+        "additionalProperties": false,
+        "description": "Managed cross-repo companion service requested for one workspace.",
+        "properties": {
+          "base_branch": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Branch"
+          },
+          "build_context": {
+            "default": ".",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Build Context",
+            "type": "string"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "depends_on": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9_.-]+$",
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Depends On",
+            "type": "array"
+          },
+          "dockerfile": {
+            "default": "Dockerfile",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Dockerfile",
+            "type": "string"
+          },
+          "env_file": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env File"
+          },
+          "environment": {
+            "description": "Literal environment variables for the companion container. Docker Compose interpolation syntax such as $VAR and ${VAR} is rejected.",
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_]*$": {
+                "not": {
+                  "pattern": "(^|[^$])(?:\\$\\$)*\\$(?:[A-Za-z_]|\\{[A-Za-z_])"
+                },
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "title": "Environment",
+            "type": "object"
+          },
+          "healthcheck_cmd": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Healthcheck Cmd"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9_.-]+$",
+            "title": "Name",
+            "type": "string"
+          },
+          "ports": {
+            "description": "Port mappings use [container_port, host_port] order. AWF renders them to Docker Compose as host_port:container_port.",
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "maxItems": 64,
+            "title": "Ports",
+            "type": "array"
+          },
+          "repo_url": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "volumes": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "maxItems": 64,
+            "title": "Volumes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "repo_url"
+        ],
+        "title": "WorkspaceCompanionRequest",
+        "type": "object"
+      },
       "WorkspaceControlRequest": {
         "additionalProperties": false,
         "properties": {
@@ -7178,6 +7339,14 @@
         "additionalProperties": false,
         "description": "Canonical workspace creation contract for ``POST /v1/workspaces``.",
         "properties": {
+          "companions": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceCompanionRequest"
+            },
+            "maxItems": 16,
+            "title": "Companions",
+            "type": "array"
+          },
           "preflight": {
             "$ref": "#/components/schemas/WorkspaceLaunchPreflight"
           },

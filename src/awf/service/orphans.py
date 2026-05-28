@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from awf.common.companions import parent_workspace_id_from_companion_worktree_id
 from awf.db.enums import WorkspaceStatus
 from awf.service.gc import (
     DEFAULT_MIN_AGE_HOURS,
@@ -610,7 +611,8 @@ def _scan_worktrees(work_dir: Path) -> tuple[list[ManagedResource], list[Resourc
                 resource_kind="worktree",
                 resource_id=str(child),
                 resource_name=child.name,
-                workspace_id=child.name,
+                workspace_id=parent_workspace_id_from_companion_worktree_id(child.name)
+                or child.name,
                 detail={"path": str(child)},
             )
         )

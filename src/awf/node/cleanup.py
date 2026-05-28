@@ -151,6 +151,7 @@ class WorkspaceCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -216,40 +217,54 @@ class WorkspaceCleaner:
                 )
             )
 
+        worktree_targets = (
+            (workspace_id, repo_url, "worktree_remove"),
+            *(
+                (companion_id, companion_repo_url, f"companion_worktree_remove:{companion_id}")
+                for companion_id, companion_repo_url in companion_worktrees
+            ),
+        )
+
         # Step 2: git worktree remove (idempotent already per GitManager).
         if remove_worktree:
-            try:
-                await self._git.remove_worktree(workspace_id=workspace_id, repo_url=repo_url)
-                steps.append(
-                    WorkspaceCleanupStepResult(
-                        name="worktree_remove",
-                        status="succeeded",
-                        reason_code=WORKTREE_REMOVE_SUCCEEDED,
+            for worktree_id, worktree_repo_url, step_name in worktree_targets:
+                try:
+                    await self._git.remove_worktree(
+                        workspace_id=worktree_id,
+                        repo_url=worktree_repo_url,
                     )
-                )
-            except GitOperationError as exc:
-                _log.warning(
-                    "cleanup.git_remove_failed",
-                    workspace_id=workspace_id,
-                    reason_code=exc.reason_code,
-                    stderr=exc.stderr[:1000],
-                )
-                steps.append(
-                    WorkspaceCleanupStepResult(
-                        name="worktree_remove",
-                        status="failed",
+                    steps.append(
+                        WorkspaceCleanupStepResult(
+                            name=step_name,
+                            status="succeeded",
+                            reason_code=WORKTREE_REMOVE_SUCCEEDED,
+                        )
+                    )
+                except GitOperationError as exc:
+                    _log.warning(
+                        "cleanup.git_remove_failed",
+                        workspace_id=workspace_id,
+                        worktree_id=worktree_id,
                         reason_code=exc.reason_code,
-                        error=_operation_error_detail(exc),
+                        stderr=exc.stderr[:1000],
+                    )
+                    steps.append(
+                        WorkspaceCleanupStepResult(
+                            name=step_name,
+                            status="failed",
+                            reason_code=exc.reason_code,
+                            error=_operation_error_detail(exc),
+                        )
+                    )
+        else:
+            for _, _, step_name in worktree_targets:
+                steps.append(
+                    WorkspaceCleanupStepResult(
+                        name=step_name,
+                        status="skipped",
+                        reason_code=WORKTREE_REMOVE_SKIPPED,
                     )
                 )
-        else:
-            steps.append(
-                WorkspaceCleanupStepResult(
-                    name="worktree_remove",
-                    status="skipped",
-                    reason_code=WORKTREE_REMOVE_SKIPPED,
-                )
-            )
 
         return WorkspaceCleanupResult.from_steps(steps)
 

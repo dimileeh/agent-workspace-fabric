@@ -26,8 +26,8 @@ from awf.service.gc import (
     WorkspaceGCPath,
     WorkspaceGCPreserved,
     WorkspaceGCWorktreeRemoveResult,
+    WorkspaceGCWorktreeRemoveTargetResult,
     _classify_workspace_for_gc,
-    _default_worktree_remover,
     _pr_has_merged,
     _release_gc_reservations,
     _run_worktree_remove,
@@ -81,6 +81,7 @@ async def _workspace(
     compose_file_path: str | None = None,
     pr: bool = False,
     pr_merge_sha: str | None = None,
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -90,6 +91,7 @@ async def _workspace(
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         workspace.status = status.value
         workspace.updated_at = updated_at
@@ -385,6 +387,184 @@ async def test_gc_partial_worktree_remove_failure_still_deletes_other_paths(
     assert workspace_id in result.reservation_releases
 
 
+async def test_gc_partial_worktree_remove_failure_marks_companion_worktrees_skipped(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="f" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                }
+            ]
+        },
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    companion = work_dir / "git" / "worktrees" / f"{workspace_id}__companion__backend"
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(companion / "repo.txt", "companion")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    async def _failing_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error="mirror not accessible",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_failing_worktree_remover,
+    )
+
+    payload = result.to_dict()
+    candidate_payload = next(
+        item for item in payload["candidates"] if item["workspace_id"] == workspace_id
+    )
+    paths = candidate_payload["paths"]
+    companion_payload = paths[f"companion_worktree:{companion.name}"]
+
+    assert result.status == "partial"
+    assert paths["worktree"]["status"] == "skipped"
+    assert companion_payload["status"] == "skipped"
+    assert companion_payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
+    assert companion_payload["error"] == "mirror not accessible"
+    assert worktree.exists()
+    assert companion.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+
+
+async def test_gc_partial_worktree_remove_deletes_successful_worktree_paths(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    del engine
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="f" * 40,
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/backend.git",
+                    "base_branch": "development",
+                },
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "base_branch": "development",
+                },
+            ]
+        },
+    )
+    backend_id = f"{workspace_id}__companion__backend"
+    web_id = f"{workspace_id}__companion__web"
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    backend = work_dir / "git" / "worktrees" / backend_id
+    web = work_dir / "git" / "worktrees" / web_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(backend / "repo.txt", "backend")
+    _write(web / "repo.txt", "web")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+
+    async def _partial_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        del candidate
+        return WorkspaceGCWorktreeRemoveResult(
+            status="partial",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error="one or more worktrees failed",
+            target_results=(
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=workspace_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=backend_id,
+                    status="failed",
+                    reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                    error="backend mirror not accessible",
+                ),
+                WorkspaceGCWorktreeRemoveTargetResult(
+                    worktree_id=web_id,
+                    status="succeeded",
+                    reason_code="WORKTREE_REMOVE_SUCCEEDED",
+                ),
+            ),
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_partial_worktree_remover,
+    )
+
+    payload = result.to_dict()
+    candidate_payload = next(
+        item for item in payload["candidates"] if item["workspace_id"] == workspace_id
+    )
+    paths = candidate_payload["paths"]
+
+    assert result.status == "partial"
+    assert result.worktree_removes[workspace_id].status == "partial"
+    assert [
+        (error.kind, error.path, error.reason_code, error.error) for error in result.delete_errors
+    ] == [
+        (
+            "worktree_remove",
+            backend,
+            "GIT_WORKTREE_REMOVE_FAILED",
+            "backend mirror not accessible",
+        )
+    ]
+    assert paths["worktree"]["status"] == "deleted"
+    assert paths[f"companion_worktree:{backend_id}"]["status"] == "skipped"
+    assert paths[f"companion_worktree:{backend_id}"]["reason_code"] == (
+        "GIT_WORKTREE_REMOVE_FAILED"
+    )
+    assert paths[f"companion_worktree:{web_id}"]["status"] == "deleted"
+    assert not worktree.exists()
+    assert backend.exists()
+    assert not web.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+
+
 async def test_gc_reservation_release_failure_does_not_block_other_cleanup(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
@@ -650,14 +830,40 @@ async def test_single_workspace_gc_calls_worktree_remover(
 
 def test_worktree_remove_result_to_dict_with_error():
     result = WorkspaceGCWorktreeRemoveResult(
-        status="failed",
+        status="partial",
         reason_code="GIT_WORKTREE_REMOVE_FAILED",
         error="mirror not accessible",
+        target_results=(
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id="ws_primary",
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            ),
+            WorkspaceGCWorktreeRemoveTargetResult(
+                worktree_id="ws_companion",
+                status="failed",
+                reason_code="GIT_WORKTREE_REMOVE_FAILED",
+                error="mirror not accessible",
+            ),
+        ),
     )
     payload = result.to_dict()
-    assert payload["status"] == "failed"
+    assert payload["status"] == "partial"
     assert payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
     assert payload["error"] == "mirror not accessible"
+    assert payload["target_results"] == [
+        {
+            "worktree_id": "ws_primary",
+            "status": "succeeded",
+            "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+        },
+        {
+            "worktree_id": "ws_companion",
+            "status": "failed",
+            "reason_code": "GIT_WORKTREE_REMOVE_FAILED",
+            "error": "mirror not accessible",
+        },
+    ]
 
 
 async def test_run_worktree_remove_skips_when_callback_absent() -> None:
@@ -1010,208 +1216,6 @@ async def test_plan_reclassifies_old_failed_active_workspace_from_candidate_to_p
     preserved_for_ws = [p for p in plan.preserved if p.workspace_id == failed_id]
     assert len(preserved_for_ws) == 1
     assert preserved_for_ws[0].reason_code == TERMINAL_WORKSPACE_RETENTION_EXPIRED
-
-
-async def test_default_worktree_remover_succeeds(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        pr=True,
-        pr_merge_sha="p" * 40,
-    )
-    candidate = WorkspaceGCCandidate(
-        workspace_id=workspace_id,
-        status=WorkspaceStatus.completed.value,
-        updated_at=now,
-        age_hours=200,
-        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
-        worktree=WorkspaceGCPath(
-            kind="worktree",
-            path=work_dir / "git" / "worktrees" / workspace_id,
-            exists=True,
-            estimated_bytes=0,
-        ),
-        compose=WorkspaceGCPath(
-            kind="compose",
-            path=work_dir / "compose" / workspace_id,
-            exists=False,
-            estimated_bytes=0,
-        ),
-        auth=WorkspaceGCPath(
-            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
-        ),
-    )
-
-    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
-        mock_gm = mock_gm_cls.return_value
-        mock_gm.remove_worktree = AsyncMock()
-        result = await _default_worktree_remover(
-            candidate,
-            session_factory=session_factory,
-            work_dir=work_dir,
-        )
-        assert result.status == "succeeded"
-        assert result.reason_code == "WORKTREE_REMOVE_SUCCEEDED"
-        mock_gm.remove_worktree.assert_awaited_once_with(
-            workspace_id=workspace_id,
-            repo_url="git@github.com:example/repo.git",
-        )
-
-
-async def test_default_worktree_remover_skips_when_no_repo_url(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.failed,
-        updated_at=now - timedelta(hours=200),
-    )
-    async with session_factory() as session:
-        ws = await session.get(Workspace, workspace_id)
-        assert ws is not None
-        ws.repo_url = ""
-        await session.commit()
-
-    candidate = WorkspaceGCCandidate(
-        workspace_id=workspace_id,
-        status=WorkspaceStatus.failed.value,
-        updated_at=now,
-        age_hours=200,
-        reason_code="FAILED_WORKSPACE_NO_WORK",
-        worktree=WorkspaceGCPath(
-            kind="worktree",
-            path=work_dir / "git" / "worktrees" / workspace_id,
-            exists=True,
-            estimated_bytes=0,
-        ),
-        compose=WorkspaceGCPath(
-            kind="compose",
-            path=work_dir / "compose" / workspace_id,
-            exists=False,
-            estimated_bytes=0,
-        ),
-        auth=WorkspaceGCPath(
-            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
-        ),
-    )
-
-    result = await _default_worktree_remover(
-        candidate,
-        session_factory=session_factory,
-        work_dir=work_dir,
-    )
-    assert result.status == "skipped"
-    assert result.reason_code == "NO_REPO_URL"
-
-
-async def test_default_worktree_remover_skips_existing_plain_directory(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        pr=True,
-        pr_merge_sha="r" * 40,
-    )
-    worktree_path = work_dir / "git" / "worktrees" / workspace_id
-    worktree_path.mkdir(parents=True)
-    candidate = WorkspaceGCCandidate(
-        workspace_id=workspace_id,
-        status=WorkspaceStatus.completed.value,
-        updated_at=now,
-        age_hours=200,
-        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
-        worktree=WorkspaceGCPath(
-            kind="worktree",
-            path=worktree_path,
-            exists=True,
-            estimated_bytes=0,
-        ),
-        compose=WorkspaceGCPath(
-            kind="compose",
-            path=work_dir / "compose" / workspace_id,
-            exists=False,
-            estimated_bytes=0,
-        ),
-        auth=WorkspaceGCPath(
-            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
-        ),
-    )
-
-    result = await _default_worktree_remover(
-        candidate,
-        session_factory=session_factory,
-        work_dir=work_dir,
-    )
-
-    assert result.status == "skipped"
-    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
-
-
-async def test_default_worktree_remover_handles_git_error(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    work_dir = tmp_path / "service"
-    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
-    workspace_id = await _workspace(
-        session_factory,
-        status=WorkspaceStatus.completed,
-        updated_at=now - timedelta(hours=200),
-        pr=True,
-        pr_merge_sha="q" * 40,
-    )
-    candidate = WorkspaceGCCandidate(
-        workspace_id=workspace_id,
-        status=WorkspaceStatus.completed.value,
-        updated_at=now,
-        age_hours=200,
-        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
-        worktree=WorkspaceGCPath(
-            kind="worktree",
-            path=work_dir / "git" / "worktrees" / workspace_id,
-            exists=True,
-            estimated_bytes=0,
-        ),
-        compose=WorkspaceGCPath(
-            kind="compose",
-            path=work_dir / "compose" / workspace_id,
-            exists=False,
-            estimated_bytes=0,
-        ),
-        auth=WorkspaceGCPath(
-            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
-        ),
-    )
-
-    with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
-        mock_gm = mock_gm_cls.return_value
-        mock_gm.remove_worktree = AsyncMock(side_effect=RuntimeError("mirror missing"))
-        result = await _default_worktree_remover(
-            candidate,
-            session_factory=session_factory,
-            work_dir=work_dir,
-        )
-        assert result.status == "failed"
-        assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
-        assert "mirror missing" in result.error
 
 
 async def test_release_gc_reservations_rollback_on_db_exception(

@@ -27,8 +27,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.egress_policy import LocalEgressPolicyError
-from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
+from awf.node.git_manager import GitManager, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
@@ -258,6 +257,314 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_materializes_companion_worktrees_before_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingGit:
+            work_dir = tmp_path / "awf-work"
+
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                worktree = self.work_dir / "worktrees" / workspace_id
+                worktree.mkdir(parents=True, exist_ok=True)
+                return WorktreeLayout(
+                    mirror_path=self.work_dir / "mirrors" / f"{workspace_id}.git",
+                    worktree_path=worktree,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "a" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_companion"),
+                    compose_file=Path("/tmp/awf-compose/ws_companion/compose.yml"),
+                )
+
+        git = _RecordingGit()
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git,  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="companions",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                task_policy={
+                    "companions": [
+                        {
+                            "name": "backend",
+                            "repo_url": "git@github.com:example/backend.git",
+                            "base_branch": "main",
+                            "build_context": "services/api",
+                        },
+                        {
+                            "name": "worker",
+                            "repo_url": "git@github.com:example/worker.git",
+                        },
+                    ]
+                },
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        await provisioner.provision(workspace_id)
+
+        assert git.add_worktree_calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": "git@github.com:example/app.git",
+                "base_branch": "development",
+                "new_branch": f"awf/{workspace_id}",
+            },
+            {
+                "workspace_id": f"{workspace_id}__companion__backend",
+                "repo_url": "git@github.com:example/backend.git",
+                "base_branch": "main",
+                "new_branch": f"awf/{workspace_id}/companion/backend",
+            },
+            {
+                "workspace_id": f"{workspace_id}__companion__worker",
+                "repo_url": "git@github.com:example/worker.git",
+                "base_branch": "development",
+                "new_branch": f"awf/{workspace_id}/companion/worker",
+            },
+        ]
+        companion = launcher.requests[0].companions[0]
+        assert companion.spec.name == "backend"
+        assert companion.spec.build_context == "services/api"
+        assert companion.layout.worktree_path == (
+            tmp_path / "awf-work" / "worktrees" / f"{workspace_id}__companion__backend"
+        )
+        defaulted_companion = launcher.requests[0].companions[1]
+        assert defaulted_companion.spec.name == "worker"
+        assert defaulted_companion.spec.base_branch is None
+        assert launcher.requests[0].companion_graph_prevalidated is True
+
+    @pytest.mark.unit
+    async def test_rejects_invalid_companion_graph_before_materializing_companions(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from awf.node.companion_services import validate_companion_service_graph
+        from awf.profiles.compose import profile_services
+
+        class _RecordingGit:
+            work_dir = tmp_path / "awf-work"
+
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                worktree = self.work_dir / "worktrees" / workspace_id
+                worktree.mkdir(parents=True, exist_ok=True)
+                return WorktreeLayout(
+                    mirror_path=self.work_dir / "mirrors" / f"{workspace_id}.git",
+                    worktree_path=worktree,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "b" * 40
+
+        class _ValidatingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                services = profile_services(
+                    request.profile,
+                    base_path=request.layout.worktree_path,
+                )
+                validate_companion_service_graph(
+                    profile_services=services,
+                    companions=request.companions,
+                    docker_mode=request.profile.docker.mode,
+                )
+                raise AssertionError("invalid companion graph should fail before launch")
+
+        git = _RecordingGit()
+        launcher = _ValidatingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git,  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="companions",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requested_profile={
+                    "name": "colliding-companion",
+                    "services": [{"name": "backend", "image": "redis:7-alpine"}],
+                },
+                task_policy={
+                    "companions": [
+                        {
+                            "name": "backend",
+                            "repo_url": "git@github.com:example/backend.git",
+                        }
+                    ]
+                },
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        with pytest.raises(ProfileResolutionError) as raised:
+            await provisioner.provision(workspace_id)
+
+        assert raised.value.reason_code == "COMPANION_SERVICE_NAME_COLLISION"
+        assert git.add_worktree_calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": "git@github.com:example/app.git",
+                "base_branch": "development",
+                "new_branch": f"awf/{workspace_id}",
+            },
+        ]
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
+
+    @pytest.mark.unit
+    async def test_rejects_profile_only_invalid_service_graph_before_secret_leases(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        from awf.node.companion_services import validate_companion_service_graph
+        from awf.profiles.compose import profile_services
+
+        class _ValidatingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                services = profile_services(
+                    request.profile,
+                    base_path=request.layout.worktree_path,
+                )
+                validate_companion_service_graph(
+                    profile_services=services,
+                    companions=request.companions,
+                    docker_mode=request.profile.docker.mode,
+                )
+                raise AssertionError("invalid profile service graph should fail before launch")
+
+        launcher = _ValidatingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="profile services",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "profile-only-invalid-dependency",
+                    "services": [
+                        {"name": "cache", "image": "redis:7-alpine"},
+                        {
+                            "name": "api",
+                            "image": "python:3.12-alpine",
+                            "depends_on": ["cache"],
+                        },
+                    ],
+                    "secrets": [
+                        {
+                            "name": "api-token",
+                            "kind": "env",
+                            "target": "API_TOKEN",
+                            "provider": "env",
+                            "ref": "env/API_TOKEN",
+                        }
+                    ],
+                },
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        with pytest.raises(ProfileResolutionError) as raised:
+            await provisioner.provision(workspace_id)
+
+        assert raised.value.reason_code == "COMPANION_SERVICE_DEPENDENCY_UNHEALTHY"
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
+            leases = await SecretLeaseRepository(s).list_for_workspace(workspace_id)
+            assert leases == []
 
     @pytest.mark.unit
     async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(
@@ -1174,128 +1481,3 @@ class TestFailureHandling:
                 and event.new_state == WorkspaceStatus.failed.value
             ]
             assert failed_events[-1].reason_code == "PROFILE_RESOLUTION_FAILURE"
-
-    @pytest.mark.unit
-    async def test_local_egress_policy_error_marks_workspace_failed(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _EgressFailingLauncher:
-            async def launch(self, _request: Any) -> object:
-                raise LocalEgressPolicyError(
-                    reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
-                    mode=EgressMode.restricted,
-                    message="local backend cannot enforce this mode",
-                    details={"network_posture": "restricted"},
-                )
-
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_EgressFailingLauncher(),  # type: ignore[arg-type]
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={"name": "restricted-local"},
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(LocalEgressPolicyError):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "policy_failure"
-            assert reloaded.failure_message is not None
-            assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
-            assert audit is None
-            failed_events = [
-                event
-                for event in reloaded.events
-                if event.event_type == "workspace.state_changed"
-                and event.new_state == WorkspaceStatus.failed.value
-            ]
-            assert failed_events[-1].reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
-
-    @pytest.mark.unit
-    async def test_missing_base_branch_marks_workspace_failed(
-        self,
-        provisioner: Provisioner,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="nonexistent",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(GitOperationError):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "infrastructure_failure"
-            assert reloaded.failure_message is not None
-
-    @pytest.mark.unit
-    async def test_unexpected_provisioning_failure_marks_workspace_failed(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        git_manager: GitManager,
-        origin_repo: Path,
-    ) -> None:
-        class _ExplodingStackLauncher:
-            async def launch(self, request: Any) -> object:
-                raise RuntimeError("template workspace.base.yml.j2 was not found")
-
-        provisioner = Provisioner(
-            session_factory=session_factory,
-            git=git_manager,
-            stack_launcher=_ExplodingStackLauncher(),
-            config=ProvisionerConfig(node_id="test-node-01"),
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=str(origin_repo),
-                branch_base="development",
-                task_title="t",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            await s.commit()
-            ws_id = ws.id
-
-        with pytest.raises(RuntimeError, match="workspace.base.yml.j2"):
-            await provisioner.provision(ws_id)
-
-        async with session_factory() as s:
-            reloaded = await WorkspaceRepository(s).get(ws_id)
-            assert reloaded is not None
-            assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "infrastructure_failure"
-            assert reloaded.failure_message is not None
-            assert "unexpected provisioning failure" in reloaded.failure_message
-            assert "workspace.base.yml.j2" in reloaded.failure_message

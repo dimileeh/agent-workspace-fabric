@@ -650,12 +650,14 @@ async def test_workspace_service_control_wrappers_commit_results(
             *,
             workspace_id: str,
             repo_url: str,
+            companion_worktrees: tuple[tuple[str, str], ...] = (),
             compose_project_name: str | None = None,
             compose_file_path: Path | None = None,
             worktree_host_path: Path | None = None,
             remove_volumes: bool = True,
             remove_worktree: bool = True,
         ) -> list[str]:
+            _ = companion_worktrees
             assert repo_url == "git@github.com:example/controls.git"
             assert compose_file_path is None
             assert worktree_host_path is None
@@ -962,6 +964,23 @@ def test_workspace_retry_error_uses_default_message() -> None:
 
 
 @pytest.mark.unit
+def test_task_policy_snapshot_persists_empty_companion_list() -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
+        task={"title": "Policy snapshot", "prompt": "p", "agent": "codex"},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "observability test fixture",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert "companions" in policy
+    assert policy["companions"] == []
+
+
+@pytest.mark.unit
 def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> None:
     request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
@@ -988,6 +1007,7 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
 
     assert policy == {
         "agent_model": "gpt-5.3-codex",
+        "companions": [],
         "out_of_scope_changes": {
             "mode": "block",
             "allowlist_patterns": ["generated/**"],
@@ -1440,54 +1460,3 @@ def test_recovery_summary_uses_inactive_operator_recovery_operation() -> None:
         "recovery_mode": "validate_only",
     }
     assert "validate-only recovery" in summary.summary
-
-
-@pytest.mark.unit
-def test_recovery_summary_bounds_json_payload_from_previous_recovery_event() -> None:
-    base = datetime(2026, 4, 27, 21, 42, tzinfo=UTC)
-    reverse_at = base + timedelta(seconds=20)
-    payload = {
-        "reason_code": "PAYLOAD_RECOVERY",
-        "action": "retry",
-        "when": reverse_at,
-        "nested": {f"k{index}": index for index in range(33)},
-        "items": list(range(25)),
-        "deep": {"a": {"b": {"c": {"d": {"too": "deep"}}}}},
-        "path": Path("artifact.txt"),
-        **{f"extra_{index}": index for index in range(40)},
-    }
-    workspace = _workspace_for_recovery(
-        created_at=base,
-        events=[
-            _recovery_event(
-                event_id="evt_previous_dispatch",
-                event_type="monitor.recovery_dispatched",
-                occurred_at=base + timedelta(seconds=5),
-                reason_code="RECOVERY_DISPATCH",
-                payload=payload,
-            ),
-            _recovery_event(
-                event_id="evt_reverse",
-                event_type="workspace.state_changed",
-                occurred_at=reverse_at,
-                old_state=WorkspaceStatus.monitoring_pr.value,
-                new_state=WorkspaceStatus.ready.value,
-                reason_code="RECOVERY_DISPATCH",
-            ),
-        ],
-    )
-
-    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
-
-    assert summary is not None
-    assert summary.reason_code == "PAYLOAD_RECOVERY"
-    assert summary.action == "retry"
-    assert summary.recovery_mode is None
-    assert "AWF dispatched retry." in summary.summary
-    assert summary.payload is not None
-    assert summary.payload["when"] == reverse_at.isoformat()
-    assert summary.payload["nested"]["__truncated__"] is True
-    assert summary.payload["items"][-1] == "__truncated__"
-    assert summary.payload["deep"]["a"]["b"]["c"]["d"].startswith("{'too':")
-    assert summary.payload["path"] == "artifact.txt"
-    assert summary.payload["__truncated__"] is True

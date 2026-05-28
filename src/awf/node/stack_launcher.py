@@ -8,6 +8,11 @@ from typing import Protocol
 
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
+from awf.node.companion_services import (
+    MaterializedCompanionService,
+    companion_service_from_materialized,
+    validate_companion_service_graph,
+)
 from awf.node.compose_manager import (
     AuthMount,
     ComposeManager,
@@ -34,6 +39,8 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
+    companions: tuple[MaterializedCompanionService, ...] = ()
+    companion_graph_prevalidated: bool = False
 
 
 class WorkspaceStackLauncher(Protocol):
@@ -122,6 +129,21 @@ class ComposeStackLauncher:
             profile,
             base_path=layout.worktree_path,
         )
+        companion_graph_already_validated = (
+            bool(request.companions) and request.companion_graph_prevalidated
+        )
+        if not companion_graph_already_validated:
+            await asyncio.to_thread(
+                validate_companion_service_graph,
+                profile_services=services,
+                companions=request.companions,
+                docker_mode=profile.docker.mode,
+            )
+        companions = await asyncio.to_thread(
+            lambda: tuple(
+                companion_service_from_materialized(companion) for companion in request.companions
+            )
+        )
         agent_environment = profile_agent_environment(profile)
         if secret_lease_resolution is not None:
             agent_environment = agent_environment_with_declared_secret_leases(
@@ -136,6 +158,7 @@ class ComposeStackLauncher:
             agent_environment=agent_environment,
             docker_mode=profile.docker.mode.value,
             services=services,
+            companions=companions,
             auth_mounts=tuple(auth_mounts),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,

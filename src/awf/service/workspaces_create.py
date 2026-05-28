@@ -17,6 +17,7 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
     WorkspaceWarningResponse,
 )
+from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import DEFAULT_RELEASE_SYNC_SOURCE_BRANCH
@@ -218,6 +219,7 @@ def workspace_create_payload_matches(
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
         == _requested_task_provider_recovery_policy(payload)
+        and _stored_companions(existing) == _requested_companions(payload)
         and _stored_task_agent_effort(existing) == payload.task.effort
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
@@ -576,6 +578,22 @@ def _stored_task_provider_recovery_policy(
     """Return the provider recovery policy dict stored in the workspace's task policy."""
     provider_recovery = _stored_task_policy(existing).get("provider_recovery")
     return provider_recovery if isinstance(provider_recovery, dict) else None
+
+
+def _requested_companions(payload: WorkspaceCreateRequest) -> list[dict[str, object]]:
+    """Return normalized companion requests from a rich create payload."""
+    return [
+        cast(dict[str, object], companion.model_dump(mode="json"))
+        for companion in payload.companions
+    ]
+
+
+def _stored_companions(existing: Workspace) -> list[dict[str, object]]:
+    """Return normalized companion requests stored in task policy."""
+    companions = _stored_task_policy(existing).get(COMPANION_POLICY_KEY)
+    if not isinstance(companions, list):
+        return []
+    return [cast(dict[str, object], item) for item in companions if isinstance(item, dict)]
 
 
 def _requested_task_scheduler_policy(
@@ -1147,6 +1165,7 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
             exclude_none=True,
             exclude_unset=True,
         )
+    policy[COMPANION_POLICY_KEY] = _requested_companions(payload)
     return policy
 
 

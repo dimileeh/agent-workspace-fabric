@@ -24,11 +24,23 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
+from awf.service import gc_worktrees as _gc_worktrees
+from awf.service.gc_companions import companion_worktree_paths_for_gc
+from awf.service.gc_time import normalize_statuses as _normalize_statuses
+from awf.service.gc_time import to_utc as _to_utc
 from awf.service.secret_leases import (
     TERMINAL_GC_REVOKE_REASON,
     SecretLeaseService,
     secret_lease_revocation_summary,
 )
+
+WorkspaceGCWorktreeRemoveResult = _gc_worktrees.WorkspaceGCWorktreeRemoveResult
+WorkspaceGCWorktreeRemoveTargetResult = _gc_worktrees.WorkspaceGCWorktreeRemoveTargetResult
+_blocked_worktree_paths_after_remove = _gc_worktrees.blocked_worktree_paths_after_remove
+_default_worktree_remover = _gc_worktrees.default_worktree_remover
+_run_worktree_remove = _gc_worktrees.run_worktree_remove
+_worktree_id_for_gc_path = _gc_worktrees.worktree_id_for_gc_path
+_worktree_paths_by_id = _gc_worktrees.worktree_paths_by_id
 
 DEFAULT_MIN_AGE_HOURS = 168
 
@@ -158,28 +170,6 @@ class WorkspaceGCComposeTeardownResult:
 
 
 @dataclass(frozen=True)
-class WorkspaceGCWorktreeRemoveResult:
-    """Structured outcome for optional git worktree removal before filesystem deletion."""
-
-    status: Literal["succeeded", "failed", "skipped"]
-    reason_code: str
-    error: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status in {"succeeded", "skipped"}
-
-    def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "status": self.status,
-            "reason_code": self.reason_code,
-        }
-        if self.error:
-            payload["error"] = self.error
-        return payload
-
-
-@dataclass(frozen=True)
 class WorkspaceGCPathOutcome:
     """Structured execution outcome for one pressure-directory target."""
 
@@ -219,17 +209,22 @@ class WorkspaceGCCandidate:
     worktree: WorkspaceGCPath
     compose: WorkspaceGCPath
     auth: WorkspaceGCPath
+    companion_worktrees: tuple[WorkspaceGCPath, ...] = ()
     compose_project_name: str | None = None
     compose_file_path: str | None = None
 
     @property
     def total_estimated_bytes(self) -> int:
         return (
-            self.worktree.estimated_bytes + self.compose.estimated_bytes + self.auth.estimated_bytes
+            self.worktree.estimated_bytes
+            + self.compose.estimated_bytes
+            + self.auth.estimated_bytes
+            + sum(item.estimated_bytes for item in self.companion_worktrees)
         )
 
     def paths(self) -> Iterator[WorkspaceGCPath]:
         yield self.worktree
+        yield from self.companion_worktrees
         yield self.compose
         yield self.auth
 
@@ -262,6 +257,9 @@ class WorkspaceGCCandidate:
             "age_hours": self.age_hours,
             "estimated_bytes": {
                 "worktree": self.worktree.estimated_bytes,
+                "companion_worktrees": sum(
+                    item.estimated_bytes for item in self.companion_worktrees
+                ),
                 "compose": self.compose.estimated_bytes,
                 "auth": self.auth.estimated_bytes,
                 "total": self.total_estimated_bytes,
@@ -918,27 +916,38 @@ async def _delete_gc_plan_paths(
         if wt_remove is not None:
             worktree_removes[candidate.workspace_id] = wt_remove
             if not wt_remove.ok:
-                delete_errors.append(
-                    WorkspaceGCDeleteError(
-                        workspace_id=candidate.workspace_id,
-                        kind="worktree_remove",
-                        path=candidate.worktree.path,
-                        error=wt_remove.error or wt_remove.reason_code,
-                        reason_code=wt_remove.reason_code,
+                delete_errors.extend(_worktree_remove_delete_errors(candidate, wt_remove))
+                blocked_worktree_paths = _blocked_worktree_paths_after_remove(candidate, wt_remove)
+                target_results_by_id = {
+                    target.worktree_id: target for target in wt_remove.target_results
+                }
+                for skipped_target in (candidate.worktree, *candidate.companion_worktrees):
+                    if skipped_target.path not in blocked_worktree_paths:
+                        continue
+                    worktree_id = _worktree_id_for_gc_path(candidate, skipped_target)
+                    target_result = target_results_by_id.get(worktree_id)
+                    path_outcomes.append(
+                        WorkspaceGCPathOutcome(
+                            workspace_id=candidate.workspace_id,
+                            kind=skipped_target.kind,
+                            path=skipped_target.path,
+                            status="skipped",
+                            reason_code=(
+                                target_result.reason_code
+                                if target_result is not None
+                                else wt_remove.reason_code
+                            ),
+                            error=(
+                                target_result.error
+                                if target_result is not None
+                                else wt_remove.error
+                            ),
+                            estimated_bytes=skipped_target.estimated_bytes,
+                        )
                     )
-                )
-                path_outcomes.append(
-                    WorkspaceGCPathOutcome(
-                        workspace_id=candidate.workspace_id,
-                        kind=candidate.worktree.kind,
-                        path=candidate.worktree.path,
-                        status="skipped",
-                        reason_code=wt_remove.reason_code,
-                        error=wt_remove.error,
-                        estimated_bytes=candidate.worktree.estimated_bytes,
-                    )
-                )
-                for target in (candidate.compose, candidate.auth):
+                for target in candidate.paths():
+                    if target.path in blocked_worktree_paths:
+                        continue
                     outcome = await asyncio.to_thread(
                         _delete_gc_path_outcome,
                         candidate,
@@ -982,6 +991,40 @@ async def _delete_gc_plan_paths(
     return deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes
 
 
+def _worktree_remove_delete_errors(
+    candidate: WorkspaceGCCandidate,
+    worktree_remove: WorkspaceGCWorktreeRemoveResult,
+) -> list[WorkspaceGCDeleteError]:
+    worktree_paths_by_id = _worktree_paths_by_id(candidate)
+    delete_errors: list[WorkspaceGCDeleteError] = []
+    for target in worktree_remove.target_results:
+        if target.status != "failed":
+            continue
+        target_path = worktree_paths_by_id.get(target.worktree_id)
+        if target_path is None:
+            continue
+        delete_errors.append(
+            WorkspaceGCDeleteError(
+                workspace_id=candidate.workspace_id,
+                kind="worktree_remove",
+                path=target_path,
+                error=target.error or worktree_remove.error or target.reason_code,
+                reason_code=target.reason_code,
+            )
+        )
+    if delete_errors:
+        return delete_errors
+    return [
+        WorkspaceGCDeleteError(
+            workspace_id=candidate.workspace_id,
+            kind="worktree_remove",
+            path=candidate.worktree.path,
+            error=worktree_remove.error or worktree_remove.reason_code,
+            reason_code=worktree_remove.reason_code,
+        )
+    ]
+
+
 async def _run_compose_teardown(
     candidate: WorkspaceGCCandidate,
     compose_teardown: WorkspaceGCComposeTeardown | None,
@@ -989,56 +1032,6 @@ async def _run_compose_teardown(
     if compose_teardown is None:
         return None
     result = compose_teardown(candidate)
-    if isawaitable(result):
-        result = await result
-    return result
-
-
-async def _default_worktree_remover(
-    candidate: WorkspaceGCCandidate,
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-    work_dir: Path,
-) -> WorkspaceGCWorktreeRemoveResult:
-    from awf.node.git_manager import GitManager
-
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, candidate.workspace_id)
-    if workspace is None or not workspace.repo_url:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="NO_REPO_URL",
-        )
-    if candidate.worktree.path.exists() and not (candidate.worktree.path / ".git").exists():
-        return WorkspaceGCWorktreeRemoveResult(
-            status="skipped",
-            reason_code="WORKTREE_NOT_GIT_MANAGED",
-        )
-    git_manager = GitManager(work_dir / "git")
-    try:
-        await git_manager.remove_worktree(
-            workspace_id=candidate.workspace_id,
-            repo_url=workspace.repo_url,
-        )
-        return WorkspaceGCWorktreeRemoveResult(
-            status="succeeded",
-            reason_code="WORKTREE_REMOVE_SUCCEEDED",
-        )
-    except Exception as exc:
-        return WorkspaceGCWorktreeRemoveResult(
-            status="failed",
-            reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error=str(exc)[:1000],
-        )
-
-
-async def _run_worktree_remove(
-    candidate: WorkspaceGCCandidate,
-    worktree_remover: WorkspaceGCWorktreeRemove | None,
-) -> WorkspaceGCWorktreeRemoveResult | None:
-    if worktree_remover is None:
-        return None
-    result = worktree_remover(candidate)
     if isawaitable(result):
         result = await result
     return result
@@ -1169,6 +1162,10 @@ def _candidate_for_workspace(
     updated_at = _to_utc(workspace.updated_at)
     age_hours = max(0, int((now - updated_at).total_seconds() // 3600))
     worktree_path = work_dir / "git" / "worktrees" / workspace.id
+    companion_worktrees = tuple(
+        _gc_path(f"companion_worktree:{path.name}", path)
+        for path in companion_worktree_paths_for_gc(workspace, work_dir=work_dir)
+    )
     compose_path = (
         Path(workspace.compose_file_path).expanduser().parent
         if workspace.compose_file_path
@@ -1182,6 +1179,7 @@ def _candidate_for_workspace(
         age_hours=age_hours,
         reason_code=reason_code,
         worktree=_gc_path("worktree", worktree_path),
+        companion_worktrees=companion_worktrees,
         compose=_gc_path("compose", compose_path),
         auth=_gc_path("auth", auth_path),
         compose_project_name=workspace.compose_project_name,
@@ -1458,10 +1456,11 @@ def _delete_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> tuple[bool, s
 def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
     roots = {
         "worktree": work_dir / "git" / "worktrees",
+        "companion_worktree": work_dir / "git" / "worktrees",
         "compose": work_dir / "compose",
         "auth": work_dir / "auth",
     }
-    root = roots.get(target.kind)
+    root = roots.get(target.kind.split(":", maxsplit=1)[0])
     if root is None:
         return False
     try:
@@ -1469,19 +1468,3 @@ def _is_safe_gc_path(target: WorkspaceGCPath, *, work_dir: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _normalize_statuses(
-    statuses: Iterable[WorkspaceStatus | str] | None,
-) -> set[str] | None:
-    if statuses is None:
-        return None
-    return {
-        status.value if isinstance(status, WorkspaceStatus) else str(status) for status in statuses
-    }
-
-
-def _to_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)

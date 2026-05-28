@@ -10,13 +10,46 @@ def _agent_runtime_dockerfile() -> str:
 
 
 @pytest.mark.unit
-def test_agent_runtime_installs_github_cli_from_official_apt_repository() -> None:
+def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "cli.github.com/packages" in dockerfile
-    assert "githubcli-archive-keyring.gpg" in dockerfile
     assert "ARG GH_VERSION=2.92.0" in dockerfile
-    assert "gh=${GH_VERSION}" in dockerfile
+    assert (
+        "ARG GH_AMD64_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8"
+        in dockerfile
+    )
+    assert (
+        "ARG GH_ARM64_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b"
+        in dockerfile
+    )
+    assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
+    assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
+    assert "curl --fail --show-error --location" in dockerfile
+    assert "--retry 5" in dockerfile
+    assert "--retry-delay 2" in dockerfile
+    assert "--retry-all-errors" in dockerfile
+    assert "--connect-timeout 20" in dockerfile
+    assert "--max-time 300" in dockerfile
+    assert "gh_${GH_VERSION}_checksums.txt" not in dockerfile
+    assert 'expected_hash="${GH_AMD64_SHA256}"' in dockerfile
+    assert 'expected_hash="${GH_ARM64_SHA256}"' in dockerfile
+    assert 'awk -v asset="$gh_asset"' not in dockerfile
+    assert 'actual_hash="$(sha256sum "$gh_deb")"' in dockerfile
+    assert 'actual_hash="${actual_hash%% *}"' in dockerfile
+    assert "GitHub CLI checksum is not pinned for ${gh_asset}" in dockerfile
+    assert 'if [ "$actual_hash" != "$expected_hash" ]; then' in dockerfile
+    assert "GitHub CLI checksum mismatch for ${gh_asset}" in dockerfile
+    assert "grep -F" not in dockerfile
+    assert "sha256sum -c -" not in dockerfile
+    assert "amd64) expected_hash=" in dockerfile
+    assert "arm64) expected_hash=" in dockerfile
+    assert dockerfile.index('case "$gh_arch" in') < dockerfile.index(
+        'actual_hash="$(sha256sum "$gh_deb")"'
+    )
+    assert dockerfile.index('if [ "$actual_hash" != "$expected_hash" ]; then') < dockerfile.index(
+        'apt-get install -y --no-install-recommends "$gh_deb"'
+    )
+    assert 'apt-get install -y --no-install-recommends "$gh_deb"' in dockerfile
     assert "gh --version" in dockerfile
 
 

@@ -13,6 +13,7 @@ confidence plus instrumented line coverage."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -186,10 +187,68 @@ class TestCreateDirect:
         )
         assert isinstance(result, JSONResponse)
         assert result.status_code == 409
-        import json
 
         body = json.loads(result.body)
         assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_create_persists_companions_and_uses_them_for_idempotency(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        companion = {
+            "name": "backend",
+            "repo_url": "git@github.com:example/backend.git",
+            "build_context": ".",
+            "env_file": "config/dev.env",
+            "depends_on": ["docker"],
+        }
+        first = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="companion contract",
+                companions=[companion],
+            ),
+            idempotency_key="IDEM-COMPANION",
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(first, WorkspaceAcceptedResponse)
+
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(first.workspace_id)
+        assert workspace is not None
+        stored_companion = workspace.task_policy["companions"][0]
+        assert stored_companion["name"] == "backend"
+        assert stored_companion["base_branch"] == "development"
+        assert stored_companion["env_file"] == "config/dev.env"
+
+        replay = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="companion contract",
+                companions=[companion],
+            ),
+            idempotency_key="IDEM-COMPANION",
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(replay, WorkspaceAcceptedResponse)
+        assert replay.workspace_id == first.workspace_id
+
+        conflict = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="companion contract",
+                companions=[{**companion, "build_context": "service"}],
+            ),
+            idempotency_key="IDEM-COMPANION",
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(conflict, JSONResponse)
+        assert conflict.status_code == 409
+        assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
 class TestGetDirect:

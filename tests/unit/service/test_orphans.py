@@ -582,6 +582,22 @@ def test_worktree_scan_skips_unmanaged_entries_and_reports_scan_warning(
     assert warning_summary["warnings"][0]["suggested_action"].startswith("Fix permissions")
 
 
+def test_companion_worktree_scan_retains_active_parent_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "git" / "worktrees"
+    (root / "ws_live").mkdir(parents=True)
+    (root / "ws_live__companion__backend").mkdir()
+
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(_snapshot("ws_live", status=WorkspaceStatus.ready)),
+        run_subprocess=_run_with(),
+    ).to_check_payload()
+
+    assert summary["reason"] == "NO_ORPHANS"
+    assert summary["expected_counts_by_kind"] == {"worktree": 2}
+
+
 def test_unknown_workspace_status_and_naive_retention_timestamp(tmp_path: Path) -> None:
     now = datetime(2026, 4, 28, tzinfo=UTC)
     unknown = detect_orphan_resources(

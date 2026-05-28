@@ -75,6 +75,7 @@ class FailingStopper:
 class CleanupCall:
     workspace_id: str
     repo_url: str
+    companion_worktrees: tuple[tuple[str, str], ...]
     compose_project_name: str | None
     compose_file_path: Path | None
     worktree_host_path: Path | None
@@ -92,6 +93,7 @@ class RecordingCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -102,6 +104,7 @@ class RecordingCleaner:
             CleanupCall(
                 workspace_id=workspace_id,
                 repo_url=repo_url,
+                companion_worktrees=companion_worktrees,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
                 worktree_host_path=worktree_host_path,
@@ -122,6 +125,7 @@ class StaleCallbackCleaner(RecordingCleaner):
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
@@ -131,6 +135,7 @@ class StaleCallbackCleaner(RecordingCleaner):
         result = await super().cleanup(
             workspace_id=workspace_id,
             repo_url=repo_url,
+            companion_worktrees=companion_worktrees,
             compose_project_name=compose_project_name,
             compose_file_path=compose_file_path,
             worktree_host_path=worktree_host_path,
@@ -533,6 +538,15 @@ async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_dest
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    workspace.task_policy = {
+        "companions": [
+            {
+                "name": "backend",
+                "repo_url": "git@github.com:example/backend.git",
+            }
+        ]
+    }
+    await session.flush()
     cleaner = RecordingCleaner()
     service, _stopper, _cleaner = _service(session, cleaner=cleaner)
 
@@ -555,6 +569,12 @@ async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_dest
     assert cleaner.calls[0] == CleanupCall(
         workspace_id=workspace.id,
         repo_url=workspace.repo_url,
+        companion_worktrees=(
+            (
+                f"{workspace.id}__companion__backend",
+                "git@github.com:example/backend.git",
+            ),
+        ),
         compose_project_name=workspace.compose_project_name,
         compose_file_path=Path(workspace.compose_file_path),
         worktree_host_path=None,
@@ -629,6 +649,7 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
     assert cleaner.calls[0] == CleanupCall(
         workspace_id=workspace.id,
         repo_url=workspace.repo_url,
+        companion_worktrees=(),
         compose_project_name=workspace.compose_project_name,
         compose_file_path=Path(workspace.compose_file_path),
         worktree_host_path=None,
@@ -685,6 +706,7 @@ async def test_destroy_workspace_revokes_active_secret_leases_before_cleanup(
             *,
             workspace_id: str,
             repo_url: str,
+            companion_worktrees: tuple[tuple[str, str], ...] = (),
             compose_project_name: str | None = None,
             compose_file_path: Path | None = None,
             worktree_host_path: Path | None = None,
@@ -696,6 +718,7 @@ async def test_destroy_workspace_revokes_active_secret_leases_before_cleanup(
             return await super().cleanup(
                 workspace_id=workspace_id,
                 repo_url=repo_url,
+                companion_worktrees=companion_worktrees,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
                 worktree_host_path=worktree_host_path,

@@ -126,12 +126,14 @@ class _RecordingCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> list[str]:
+        _ = companion_worktrees
         self.calls.append(
             {
                 "workspace_id": workspace_id,
@@ -156,12 +158,14 @@ class _SequencedCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        companion_worktrees: tuple[tuple[str, str], ...] = (),
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
     ) -> Mapping[str, object]:
+        _ = companion_worktrees
         self.calls.append(
             {
                 "workspace_id": workspace_id,
