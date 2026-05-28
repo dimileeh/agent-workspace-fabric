@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +22,8 @@ from awf.profiles.resolver import ProfileResolutionError
 
 COMPANION_ENV_SECRET_SOURCE_MISSING = "COMPANION_ENV_SECRET_SOURCE_MISSING"
 COMPANION_ENV_SECRET_UNSUPPORTED = "COMPANION_ENV_SECRET_UNSUPPORTED"
+_ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -434,10 +438,14 @@ def _environment_secret_metadata(
 
 def _environment_secret_ref(target: object, value: object) -> CompanionEnvironmentSecretRef:
     """Parse one task-policy environment secret entry into a typed reference."""
+    if not isinstance(target, str) or not _ENVIRONMENT_KEY_PATTERN.fullmatch(target):
+        raise ValueError(
+            "companion environment secret keys must be Docker-compatible environment variable names"
+        )
     if not isinstance(value, Mapping):
         raise ValueError(f"companion environment_secrets entry for {target} must be a mapping")
     return CompanionEnvironmentSecretRef(
-        target=str(target),
+        target=target,
         provider=str(value.get("provider") or "env"),
         kind=str(value.get("kind") or "env"),
         value_from=str(value.get("value_from") or ""),
@@ -455,8 +463,22 @@ def _optional_int(value: object) -> int | None:
     """Coerce optional task-policy integer fields while preserving invalid omissions."""
     if value is None:
         return None
+    if isinstance(value, bool):
+        _LOGGER.warning(
+            "Ignoring boolean task-policy compose_up_timeout_seconds value: %r",
+            value,
+        )
+        return None
     if isinstance(value, int):
         return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        _LOGGER.warning(
+            "Ignoring fractional task-policy compose_up_timeout_seconds value: %r",
+            value,
+        )
+        return None
     if not isinstance(value, str):
         return None
     try:

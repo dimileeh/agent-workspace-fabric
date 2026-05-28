@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,32 @@ def test_companion_specs_from_task_policy_rejects_non_mapping_environment_secret
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_target() -> None:
+    with pytest.raises(
+        ValueError,
+        match="companion environment secret keys must be Docker-compatible",
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "BAD-NAME": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None:
     spec = companion_specs_from_task_policy(
         {
@@ -179,6 +206,72 @@ def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None
     )[0]
 
     assert spec.compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_coerces_integral_float_compose_up_timeout() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900.0,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_fractional_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900.5,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds is None
+    assert "compose_up_timeout_seconds" in caplog.text
+    assert "900.5" in caplog.text
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_boolean_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": True,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds is None
+    assert "compose_up_timeout_seconds" in caplog.text
+    assert "boolean" in caplog.text
 
 
 @pytest.mark.unit
