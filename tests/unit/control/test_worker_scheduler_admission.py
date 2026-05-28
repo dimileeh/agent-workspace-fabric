@@ -111,7 +111,7 @@ async def _create_requested(
 async def _create_active_slot(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    node_id: str,
+    node_id: str | None,
     status: WorkspaceStatus = WorkspaceStatus.running,
 ) -> str:
     async with session_factory() as session:
@@ -132,12 +132,13 @@ async def _create_active_slot(
             to=WorkspaceStatus.provisioning,
             reason_code="TEST_PROVISIONING",
         )
-        await repo.transition(
-            workspace,
-            to=WorkspaceStatus.ready,
-            reason_code="TEST_READY",
-        )
-        if status != WorkspaceStatus.ready:
+        if status != WorkspaceStatus.provisioning:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.ready,
+                reason_code="TEST_READY",
+            )
+        if status not in {WorkspaceStatus.provisioning, WorkspaceStatus.ready}:
             await repo.transition(workspace, to=status, reason_code="TEST_ACTIVE")
         await session.commit()
         return workspace.id
@@ -268,6 +269,39 @@ async def test_requested_workspace_stays_queued_when_node_active_rows_fill_slots
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _create_active_slot(session_factory, node_id="local")
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id="local",
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=5,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+    worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+
+    assert await worker.run_once() == 0
+
+    assert provisioner.calls == []
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.requested.value
+
+
+@pytest.mark.unit
+async def test_named_node_worker_counts_null_node_provisioning_rows_as_occupied(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _create_active_slot(
+        session_factory,
+        node_id=None,
+        status=WorkspaceStatus.provisioning,
+    )
     workspace_id = await _create_requested(
         session_factory,
         create_attempt=False,

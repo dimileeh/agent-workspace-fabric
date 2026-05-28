@@ -25,7 +25,7 @@ from datetime import (
 )
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker.config import WorkerConfig
@@ -130,8 +130,16 @@ class ControlWorker(WorkerDelegatesMixin):
                 select(func.count())
                 .select_from(Workspace)
                 .where(Workspace.status.in_(status_values))
-                .where(Workspace.node_id == self._config.node_id)
             )
+            if self._config.node_id is None:
+                stmt = stmt.where(Workspace.node_id.is_(None))
+            else:
+                stmt = stmt.where(
+                    or_(
+                        Workspace.node_id == self._config.node_id,
+                        Workspace.node_id.is_(None),
+                    )
+                )
             occupied = await session.scalar(stmt)
             return int(occupied or 0)
 
