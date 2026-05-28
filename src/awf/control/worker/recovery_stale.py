@@ -308,6 +308,8 @@ async def _recover_stale_active_execution(
 
     finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
     task_policy: dict[str, Any] = candidate.task_policy or {}
+    if candidate.status == WorkspaceStatus.ready and finding is None:
+        return
     monitor_recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
     is_retry_recovery = (
         isinstance(monitor_recovery_state, Mapping)

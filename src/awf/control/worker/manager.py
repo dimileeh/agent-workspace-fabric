@@ -25,10 +25,12 @@ from datetime import (
 )
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker.config import WorkerConfig
 from awf.control.worker.constants import (
+    _REQUESTED_ADMISSION_SLOT_STATUSES,
     ORDERED_MONITOR_RESUME_REASON,
     ORDERED_READY_EXECUTION_REASON,
     ORDERED_REQUESTED_PROVISIONING_REASON,
@@ -51,6 +53,7 @@ from awf.control.worker.types import (
     _RequestedCapacityQueueSignature,
 )
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.resilience import (
     DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
@@ -104,6 +107,42 @@ class ControlWorker(WorkerDelegatesMixin):
         """Signal ``run_forever`` to exit after the current batch."""
         self._stopped.set()
 
+    async def _requested_provision_slots(self: Any) -> int:
+        provision_limit = int(max(0, self._config.max_concurrent_provisions))
+        if provision_limit <= 0:
+            return 0
+        if self._executor is None:
+            return provision_limit
+        task_available = int(self._available_execution_slots())
+        if task_available <= 0:
+            return 0
+        row_available = await self._requested_admission_row_slots()
+        return int(min(provision_limit, task_available, row_available))
+
+    async def _requested_admission_row_slots(self: Any) -> int:
+        max_executions = int(max(0, self._config.max_concurrent_executions))
+        if max_executions <= 0:
+            return 0
+        status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
+
+        async def _operation(session: AsyncSession) -> int:
+            stmt = (
+                select(func.count())
+                .select_from(Workspace)
+                .where(Workspace.status.in_(status_values))
+            )
+            if self._config.node_id is not None:
+                stmt = stmt.where(Workspace.node_id == self._config.node_id)
+            occupied = await session.scalar(stmt)
+            return int(occupied or 0)
+
+        occupied = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
+        return max(0, max_executions - occupied)
+
     async def run_once(self: Any) -> int:
         """List + dispatch requested provisioning and workspace runtime tasks.
 
@@ -131,10 +170,13 @@ class ControlWorker(WorkerDelegatesMixin):
                 set(self._execution_tasks) - tracked_execution_ids_before_recovery
             )
 
-        if _local_capacity_configured(self._config):
-            requested_ids = await self._claim_requested_ids()
-        else:
+        requested_provision_slots = await self._requested_provision_slots()
+        requested_ids: list[str] = []
+        if requested_provision_slots > 0 and _local_capacity_configured(self._config):
+            requested_ids = await self._claim_requested_ids(limit=requested_provision_slots)
+        elif requested_provision_slots > 0:
             requested_ids = await self._list_requested()
+            requested_ids = requested_ids[:requested_provision_slots]
             requested_ids = await self._filter_current_status(
                 requested_ids,
                 expected=WorkspaceStatus.requested,

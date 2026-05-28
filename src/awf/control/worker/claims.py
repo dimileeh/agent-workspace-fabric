@@ -78,8 +78,18 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.service.scheduler import SchedulerOrderCursor
 
 
-async def _claim_requested_ids(self: Any, workspace_ids: list[str] | None = None) -> list[str]:
+async def _claim_requested_ids(
+    self: Any,
+    workspace_ids: list[str] | None = None,
+    *,
+    limit: int | None = None,
+) -> list[str]:
     if self._config.max_concurrent_provisions <= 0:
+        return []
+    claim_limit = self._config.max_concurrent_provisions
+    if limit is not None:
+        claim_limit = min(claim_limit, max(0, limit))
+    if claim_limit <= 0:
         return []
     if workspace_ids is not None and not workspace_ids:
         return []
@@ -88,7 +98,7 @@ async def _claim_requested_ids(self: Any, workspace_ids: list[str] | None = None
             return []
         claimed: list[str] = []
         for workspace_id in workspace_ids:
-            if len(claimed) >= self._config.max_concurrent_provisions:
+            if len(claimed) >= claim_limit:
                 break
             if await self._claim_requested_for_provisioning(workspace_id):
                 claimed.append(workspace_id)
@@ -109,6 +119,7 @@ async def _claim_requested_ids(self: Any, workspace_ids: list[str] | None = None
                 resume_provider_suppression_expires_at=(
                     self._requested_capacity_resume_provider_suppression_expires_at
                 ),
+                claim_limit=claim_limit,
             ),
         )
 
@@ -136,7 +147,19 @@ async def _claim_requested_ids_with_capacity(
     resume_allocated_signature: _AllocatedReservationSignature | None,
     resume_requested_queue_signature: _RequestedCapacityQueueSignature | None,
     resume_provider_suppression_expires_at: datetime | None,
+    claim_limit: int | None = None,
 ) -> _RequestedCapacityClaimResult:
+    effective_claim_limit = self._config.max_concurrent_provisions
+    if claim_limit is not None:
+        effective_claim_limit = min(effective_claim_limit, max(0, claim_limit))
+    if effective_claim_limit <= 0:
+        return _RequestedCapacityClaimResult(
+            workspace_ids=[],
+            resume_after=None,
+            allocated_signature=None,
+            requested_queue_signature=None,
+            provider_suppression_resume_expires_at=None,
+        )
     reservation_repo = ResourceReservationRepository(session)
     allocated = await _allocated_totals_for_capacity_gate(
         session,
@@ -160,7 +183,7 @@ async def _claim_requested_ids_with_capacity(
         resume_provider_suppression_expires_at is None
         or _utc_datetime(resume_provider_suppression_expires_at) > decided_at
     )
-    candidate_limit = _scheduler_candidate_fetch_limit(self._config.max_concurrent_provisions)
+    candidate_limit = _scheduler_candidate_fetch_limit(effective_claim_limit)
     candidate_after: SchedulerOrderCursor | None = None
     if (
         resume_after is not None
@@ -182,7 +205,7 @@ async def _claim_requested_ids_with_capacity(
     next_resume_queue_signature: _RequestedCapacityQueueSignature | None = None
     next_resume_provider_suppression_expires_at: datetime | None = None
 
-    while len(claimed) < self._config.max_concurrent_provisions:
+    while len(claimed) < effective_claim_limit:
         workspaces = await repo.list_schedulable_workspaces(
             status=WorkspaceStatus.requested,
             limit=candidate_limit,
@@ -199,7 +222,7 @@ async def _claim_requested_ids_with_capacity(
         )
 
         workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
-        claim_slots = self._config.max_concurrent_provisions - len(claimed)
+        claim_slots = effective_claim_limit - len(claimed)
         page_filter_result = await self._filter_scheduler_candidate_workspaces_with_result(
             session,
             workspaces,
@@ -228,7 +251,7 @@ async def _claim_requested_ids_with_capacity(
             decided_at=decided_at,
         )
         claimed.extend(page_claimed)
-        if len(claimed) >= self._config.max_concurrent_provisions:
+        if len(claimed) >= effective_claim_limit:
             break
         if len(workspaces) < candidate_limit:
             break
