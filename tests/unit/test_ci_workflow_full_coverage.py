@@ -192,7 +192,7 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
 
     exact_threshold_run = _step_run(job, "Enforce exact coverage threshold")
     assert exact_threshold_run == (
-        "uv run --python 3.12 python scripts/check_coverage_threshold.py "
+        "uv run --python 3.12 python scripts/ci/check_coverage_threshold.py "
         "coverage.xml --minimum-percent 99"
     )
 
