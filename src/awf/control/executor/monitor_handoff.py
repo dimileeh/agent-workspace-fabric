@@ -384,7 +384,15 @@ def _present_optional_companion_env_secret_refs(
 
 
 def _optional_companion_env_secret_compose_ref(value_from: str) -> str:
-    return f"${{{value_from}:-}}"
+    from awf.node.companion_services import (
+        CompanionEnvironmentSecretRef,
+        _environment_secret_compose_ref,
+    )
+
+    return _environment_secret_compose_ref(
+        "",
+        CompanionEnvironmentSecretRef(target="", value_from=value_from, required=False),
+    )
 
 
 def _remove_compose_environment_targets(

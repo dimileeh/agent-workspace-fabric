@@ -50,6 +50,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node import companion_services
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.models import ProfileDocker, ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
@@ -111,6 +112,40 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
         and entry["compose_file"] == str(compose_file)
         for entry in captured
     )
+
+
+@pytest.mark.unit
+def test_optional_companion_env_secret_compose_ref_uses_canonical_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_environment_secret_compose_ref(
+        companion_name: str,
+        secret: companion_services.CompanionEnvironmentSecretRef,
+    ) -> str:
+        captured["companion_name"] = companion_name
+        captured["target"] = secret.target
+        captured["value_from"] = secret.value_from
+        captured["required"] = secret.required
+        return "${CANONICAL:-sentinel}"
+
+    monkeypatch.setattr(
+        companion_services,
+        "_environment_secret_compose_ref",
+        _fake_environment_secret_compose_ref,
+    )
+
+    assert (
+        executor_monitor_handoff._optional_companion_env_secret_compose_ref("OPTIONAL_TOKEN_SOURCE")
+        == "${CANONICAL:-sentinel}"
+    )
+    assert captured == {
+        "companion_name": "",
+        "target": "",
+        "value_from": "OPTIONAL_TOKEN_SOURCE",
+        "required": False,
+    }
 
 
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
