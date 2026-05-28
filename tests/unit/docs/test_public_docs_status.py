@@ -131,6 +131,33 @@ def test_quickstart_uses_runnable_startup_path() -> None:
     assert "AWF_START_PLACEHOLDER" in startup_section
 
 
+def test_getting_started_uses_runnable_startup_path() -> None:
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+    configure_section = getting_started_text.split(
+        "### Configure Environment",
+        maxsplit=1,
+    )[1].split("### Run Locally", maxsplit=1)[0]
+
+    assert (
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty"
+    ) in startup_section
+    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert not re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" in startup_section
+    assert "AWF_START_PLACEHOLDER" in startup_section
+    assert "awf init <path> --write-profile --yes" in startup_section
+    assert re.search(r"`awf service bootstrap`\s+uses", configure_section)
+    assert "`awf start` uses" not in configure_section
+    assert "run `awf service bootstrap`" in configure_section
+    assert "run `awf start`" not in configure_section
+
+
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
