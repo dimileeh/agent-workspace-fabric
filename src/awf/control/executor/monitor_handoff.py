@@ -323,6 +323,9 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             compose_file_path=compose_file_path,
             error=exc,
         )
+        # Compose restart failure is not terminal for monitor recovery: the
+        # prior project may still be live, and the monitor loop can still
+        # reconcile PR state or surface a terminal runtime failure.
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
