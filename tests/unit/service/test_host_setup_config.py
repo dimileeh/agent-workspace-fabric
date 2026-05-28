@@ -535,6 +535,40 @@ def test_source_checkout_requires_workspace_compose_template(tmp_path: Path) -> 
     assert "details" not in error.to_dict()
 
 
+@pytest.mark.parametrize(
+    ("missing_marker", "kind"),
+    (
+        ("uv.lock", "file"),
+        ("alembic.ini", "file"),
+        (".env.example", "file"),
+        ("openapi.json", "file"),
+        ("migrations", "dir"),
+    ),
+)
+@pytest.mark.unit
+def test_source_checkout_requires_control_plane_docker_build_inputs(
+    tmp_path: Path,
+    missing_marker: str,
+    kind: str,
+) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    marker_path = checkout / missing_marker
+    if marker_path.exists():
+        if kind == "dir":
+            marker_path.rmdir()
+        else:
+            marker_path.unlink()
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.missing_markers == (missing_marker,)
+    assert error.to_dict()["missing_markers"] == [missing_marker]
+    assert "details" not in error.to_dict()
+
+
 @pytest.mark.unit
 def test_source_checkout_marker_probe_oserror_reports_unreadable_not_missing(
     monkeypatch: pytest.MonkeyPatch,

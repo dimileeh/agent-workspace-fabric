@@ -28,6 +28,10 @@ class SourceCheckoutMarker:
 
 SOURCE_CHECKOUT_MARKERS: tuple[SourceCheckoutMarker, ...] = (
     SourceCheckoutMarker("pyproject.toml", "file"),
+    SourceCheckoutMarker("uv.lock", "file"),
+    SourceCheckoutMarker("alembic.ini", "file"),
+    SourceCheckoutMarker(".env.example", "file"),
+    SourceCheckoutMarker("openapi.json", "file"),
     SourceCheckoutMarker("src/awf/__init__.py", "file"),
     SourceCheckoutMarker("docker/compose/local-service.yml", "file"),
     SourceCheckoutMarker("docker/compose/workspace.base.yml.j2", "file"),
@@ -35,6 +39,7 @@ SOURCE_CHECKOUT_MARKERS: tuple[SourceCheckoutMarker, ...] = (
     SourceCheckoutMarker("docker/control-plane.Dockerfile", "file"),
     SourceCheckoutMarker("README.md", "file"),
     SourceCheckoutMarker("docs", "dir"),
+    SourceCheckoutMarker("migrations", "dir"),
     SourceCheckoutMarker("RELEASING.md", "file"),
 )
 SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS: tuple[str, ...] = tuple(
