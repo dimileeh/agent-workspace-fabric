@@ -93,6 +93,17 @@ def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:
     )
 
 
+async def _requested_claim_admission_slots(
+    self: Any,
+    session: AsyncSession,
+    *,
+    claim_limit: int,
+) -> int:
+    if self._executor is None:
+        return max(0, claim_limit)
+    return await _requested_admission_row_slots(session, config=self._config)
+
+
 async def _claim_requested_ids(
     self: Any,
     workspace_ids: list[str] | None = None,
@@ -124,7 +135,11 @@ async def _claim_requested_ids(
             session,
             node_id=_requested_admission_lock_node_id(self._config.node_id),
         )
-        row_slots = await _requested_admission_row_slots(session, config=self._config)
+        row_slots = await _requested_claim_admission_slots(
+            self,
+            session,
+            claim_limit=claim_limit,
+        )
         if row_slots <= 0:
             return _empty_requested_capacity_claim_result()
         await _acquire_local_capacity_scheduler_lock(
@@ -404,7 +419,11 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
             session,
             node_id=_requested_admission_lock_node_id(self._config.node_id),
         )
-        row_slots = await _requested_admission_row_slots(session, config=self._config)
+        row_slots = await _requested_claim_admission_slots(
+            self,
+            session,
+            claim_limit=1,
+        )
         if row_slots <= 0:
             return False
         repo = WorkspaceRepository(session)

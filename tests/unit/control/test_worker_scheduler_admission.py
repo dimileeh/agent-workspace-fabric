@@ -255,6 +255,52 @@ async def test_requested_workspace_stays_queued_when_execution_slots_are_saturat
 
 
 @pytest.mark.unit
+async def test_provision_only_worker_claims_requested_without_execution_row_slots(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(session_factory, create_attempt=False)
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=None,
+        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=0),
+    )
+
+    assert await worker.run_once() == 1
+
+    assert provisioner.calls == [workspace_id]
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+
+
+@pytest.mark.unit
+async def test_provision_only_local_capacity_worker_claims_requested_without_execution_row_slots(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(session_factory, create_attempt=True)
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=None,
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=0,
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    assert await worker.run_once() == 1
+
+    assert provisioner.calls == [workspace_id]
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+
+
+@pytest.mark.unit
 async def test_concurrent_requested_claims_recheck_admission_slots_atomically(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
