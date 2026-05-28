@@ -259,6 +259,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             error=exc,
             event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
         )
+        return
     except ComposeOperationError as exc:
         _log.error(
             "executor.resume_compose_up_failed",

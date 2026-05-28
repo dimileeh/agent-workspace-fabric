@@ -32,7 +32,7 @@ class TestExecutorCoverageEdgesPart010:
             ("", companion_services.COMPANION_ENV_SECRET_SOURCE_EMPTY),
         ),
     )
-    async def test_resume_pr_monitor_preserves_required_companion_env_secret_reason_code(
+    async def test_resume_pr_monitor_stops_after_required_companion_env_secret_precheck_failure(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -110,7 +110,7 @@ class TestExecutorCoverageEdgesPart010:
             await executor.resume_pr_monitor(ws_id)
 
         assert compose_calls == []
-        assert monitor_calls == [ws_id]
+        assert monitor_calls == []
         assert any(
             entry["event"] == "executor.resume_companion_env_secret_precheck_failed"
             and entry["workspace_id"] == ws_id
