@@ -9,7 +9,7 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import ClassVar, cast
+from typing import ClassVar, Protocol, cast
 
 import yaml
 from pydantic import (
@@ -113,6 +113,13 @@ class _DuplicateKeyRejectingSafeLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects mapping keys PyYAML would collapse."""
 
 
+class _YamlObjectConstructor(Protocol):
+    """Typed protocol for the PyYAML object constructor used by the loader."""
+
+    def construct_object(self, node: Node, deep: bool = False) -> object:
+        """Construct a YAML node as a Python object."""
+
+
 def _construct_yaml_object(
     loader: _DuplicateKeyRejectingSafeLoader,
     node: Node,
@@ -120,7 +127,8 @@ def _construct_yaml_object(
     deep: bool,
 ) -> object:
     """Construct a YAML node while containing PyYAML's untyped API surface."""
-    return loader.construct_object(node, deep=deep)  # type: ignore[no-untyped-call]
+    constructor = cast(_YamlObjectConstructor, loader)
+    return constructor.construct_object(node, deep=deep)
 
 
 def _construct_mapping_without_duplicate_keys(
