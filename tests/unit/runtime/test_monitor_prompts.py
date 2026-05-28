@@ -556,6 +556,7 @@ class TestFixCiPrompt:
 
     @pytest.mark.unit
     def test_coverage_threshold_error_summary_is_highlighted_for_agent(self) -> None:
+        """Coverage threshold summaries are visible before the raw CI log."""
         failures = (
             CheckFailure(
                 name="python-full-coverage",

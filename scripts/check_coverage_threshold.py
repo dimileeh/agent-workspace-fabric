@@ -14,6 +14,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CoverageTotals:
+    """Line and branch coverage totals parsed from a coverage.py XML report."""
+
     lines_valid: int
     lines_covered: int
     branches_valid: int
@@ -21,34 +23,41 @@ class CoverageTotals:
 
     @property
     def valid_total(self) -> int:
+        """Return the total measurable line and branch opportunities."""
         return self.lines_valid + self.branches_valid
 
     @property
     def covered_total(self) -> int:
+        """Return the total covered line and branch opportunities."""
         return self.lines_covered + self.branches_covered
 
     @property
     def line_percent(self) -> float:
+        """Return line coverage as a percentage."""
         return _percent(self.lines_covered, self.lines_valid)
 
     @property
     def branch_percent(self) -> float | None:
+        """Return branch coverage as a percentage when branch data exists."""
         if self.branches_valid == 0:
             return None
         return _percent(self.branches_covered, self.branches_valid)
 
     @property
     def combined_percent(self) -> float:
+        """Return combined line and branch coverage as a percentage."""
         return _percent(self.covered_total, self.valid_total)
 
 
 def _percent(covered: int, valid: int) -> float:
+    """Calculate a percentage while rejecting empty measurable totals."""
     if valid <= 0:
         raise ValueError("coverage report has no measurable line or branch opportunities")
     return covered / valid * 100.0
 
 
 def _required_int(root: ET.Element, attr: str) -> int:
+    """Read a required non-negative integer attribute from the XML root."""
     raw = root.attrib.get(attr)
     if raw is None:
         raise ValueError(f"coverage XML is missing root attribute {attr!r}")
@@ -62,6 +71,7 @@ def _required_int(root: ET.Element, attr: str) -> int:
 
 
 def load_coverage_totals(path: Path) -> CoverageTotals:
+    """Load and validate aggregate line and branch totals from coverage XML."""
     root = ET.parse(path).getroot()
     totals = CoverageTotals(
         lines_valid=_required_int(root, "lines-valid"),
@@ -79,12 +89,14 @@ def load_coverage_totals(path: Path) -> CoverageTotals:
 
 
 def _format_optional_percent(value: float | None) -> str:
+    """Format an optional coverage percentage for CLI output."""
     if value is None:
         return "n/a"
     return f"{value:.2f}%"
 
 
 def _minimum_percent_arg(raw_value: str) -> float:
+    """Parse the minimum percentage CLI argument with explicit bounds."""
     try:
         value = float(raw_value)
     except ValueError as exc:
@@ -97,6 +109,7 @@ def _minimum_percent_arg(raw_value: str) -> float:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the coverage threshold checker CLI."""
     parser = argparse.ArgumentParser(description=__doc__, exit_on_error=False)
     parser.add_argument("coverage_xml", type=Path)
     parser.add_argument("--minimum-percent", type=_minimum_percent_arg, required=True)

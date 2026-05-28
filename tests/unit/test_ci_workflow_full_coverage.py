@@ -153,6 +153,7 @@ def test_ci_cancels_superseded_branch_and_pr_runs() -> None:
 
 @pytest.mark.unit
 def test_ci_has_authoritative_python_full_coverage_job() -> None:
+    """The coverage job produces XML and enforces the exact threshold."""
     workflow = _workflow()
     job = _job(workflow, "python-full-coverage")
 
@@ -288,6 +289,7 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
 
 @pytest.mark.unit
 def test_coverage_report_precision_exposes_below_threshold_decimals() -> None:
+    """Coverage report precision exposes values just below the 99% gate."""
     pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     coverage_report = pyproject["tool"]["coverage"]["report"]
 

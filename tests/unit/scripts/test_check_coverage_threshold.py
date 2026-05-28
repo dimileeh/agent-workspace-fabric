@@ -20,6 +20,7 @@ def _write_coverage_xml(
     branches_valid: int = 0,
     branches_covered: int = 0,
 ) -> None:
+    """Write a minimal coverage.py XML totals document for checker tests."""
     path.write_text(
         (
             '<?xml version="1.0" ?>\n'
@@ -35,6 +36,7 @@ def _write_coverage_xml(
 
 
 def _run_checker(path: Path, minimum: str = "99") -> subprocess.CompletedProcess[str]:
+    """Run the coverage threshold script in a subprocess."""
     return subprocess.run(
         [
             sys.executable,
@@ -55,6 +57,7 @@ def test_checker_rejects_invalid_minimum_percent_values(
     tmp_path: Path,
     minimum: str,
 ) -> None:
+    """Invalid threshold values fail before any coverage totals are loaded."""
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(coverage_xml, lines_valid=100, lines_covered=100)
 
@@ -71,6 +74,7 @@ def test_checker_rejects_invalid_minimum_percent_values(
 
 @pytest.mark.unit
 def test_checker_passes_when_combined_coverage_meets_threshold(tmp_path: Path) -> None:
+    """A report at the configured combined threshold exits successfully."""
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(
         coverage_xml,
@@ -91,6 +95,7 @@ def test_checker_passes_when_combined_coverage_meets_threshold(tmp_path: Path) -
 def test_checker_fails_when_combined_line_and_branch_coverage_is_below_threshold(
     tmp_path: Path,
 ) -> None:
+    """Combined line and branch coverage below the threshold emits an error."""
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(
         coverage_xml,
@@ -112,6 +117,7 @@ def test_checker_fails_when_combined_line_and_branch_coverage_is_below_threshold
 def test_checker_uses_branch_totals_when_line_rate_alone_is_above_threshold(
     tmp_path: Path,
 ) -> None:
+    """Branch totals contribute to the combined threshold decision."""
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(
         coverage_xml,
@@ -131,6 +137,7 @@ def test_checker_uses_branch_totals_when_line_rate_alone_is_above_threshold(
 
 @pytest.mark.unit
 def test_checker_reports_branch_only_coverage_without_traceback(tmp_path: Path) -> None:
+    """Reports with no line opportunities use branch-only coverage cleanly."""
     coverage_xml = tmp_path / "coverage.xml"
     _write_coverage_xml(
         coverage_xml,
@@ -151,6 +158,7 @@ def test_checker_reports_branch_only_coverage_without_traceback(tmp_path: Path) 
 
 @pytest.mark.unit
 def test_checker_reports_invalid_coverage_xml(tmp_path: Path) -> None:
+    """Malformed or incomplete XML produces a GitHub Actions error."""
     coverage_xml = tmp_path / "coverage.xml"
     coverage_xml.write_text("<coverage lines-valid='10' />", encoding="utf-8")
 

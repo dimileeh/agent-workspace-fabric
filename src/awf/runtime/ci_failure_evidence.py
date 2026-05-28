@@ -58,7 +58,6 @@ def extract_ci_failure_evidence(
     pytest_fallback_commands: Iterable[str] = (),
 ) -> CiFailureEvidence:
     """Return focused, redacted repair evidence from a failed CI log."""
-
     safe_log = redact_secrets(log_text or "")
     if not safe_log.strip():
         return CiFailureEvidence(
@@ -88,7 +87,6 @@ def extract_ci_failure_evidence(
 
 def redact_ci_log(log_text: str) -> str:
     """Redact a raw CI log before storage, tailing, or prompt rendering."""
-
     return redact_secrets(log_text or "")
 
 
@@ -115,7 +113,6 @@ def _pytest_node_candidates(line: str) -> list[str]:
     its decision. This scanner only looks around ``.py::`` anchors and walks
     each line forward once.
     """
-
     if ".py::" not in line:
         return []
 

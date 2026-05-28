@@ -77,6 +77,7 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 @pytest.mark.unit
 def test_compose_string_key_loader_rejects_non_mapping_node() -> None:
+    """The compose string-key loader rejects non-mapping YAML nodes."""
     loader = executor_monitor_handoff._ComposeStringKeySafeLoader("")
     node = yaml.nodes.ScalarNode("tag:yaml.org,2002:str", "not-a-mapping")
 
@@ -86,6 +87,7 @@ def test_compose_string_key_loader_rejects_non_mapping_node() -> None:
 
 @pytest.mark.unit
 def test_compose_string_key_loader_rejects_unhashable_constructed_key() -> None:
+    """Unhashable compose keys are rejected instead of crashing later."""
     with pytest.raises(ConstructorError, match="found unhashable key"):
         yaml.load(
             "? [backend]\n: value\n",
@@ -144,6 +146,7 @@ def test_required_companion_env_secret_precheck_reports_all_unavailable_sources(
 
 @pytest.mark.unit
 def test_required_companion_env_secret_precheck_allows_present_and_unsupported_refs() -> None:
+    """The resume precheck allows present env secrets and future providers."""
     companion_specs = (
         companion_services.WorkspaceCompanionSpec(
             name="backend",
@@ -217,6 +220,7 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
 
 @pytest.mark.unit
 def test_companion_env_secret_refresh_parse_failure_logs_warning(tmp_path: Path) -> None:
+    """Optional env-secret refresh logs malformed compose YAML and continues."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services: [", encoding="utf-8")
     companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
@@ -259,6 +263,7 @@ def test_companion_env_secret_refresh_noops_when_compose_has_no_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Refresh leaves compose files unchanged when no optional target exists."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         """
@@ -289,6 +294,7 @@ services:
     )
 
     def _unexpected_write(*_args: object, **_kwargs: object) -> None:
+        """Fail if the no-op refresh path attempts to write."""
         raise AssertionError("refresh should not write unchanged compose payload")
 
     monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _unexpected_write)
@@ -308,6 +314,7 @@ def test_companion_env_secret_refresh_write_failure_logs_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Refresh write failures are logged without corrupting compose content."""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text(
         """
@@ -338,6 +345,7 @@ services:
     )
 
     def _raise_write(*_args: object, **_kwargs: object) -> None:
+        """Simulate an atomic write failure."""
         raise OSError("disk full")
 
     monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _raise_write)
@@ -424,11 +432,13 @@ def test_atomic_write_text_removes_temporary_file_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Atomic compose writes clean up temporary files after replace errors."""
     target = tmp_path / "compose.yml"
     target.write_text("old", encoding="utf-8")
     original_replace = Path.replace
 
     def _raise_replace(path: Path, target_path: Path | str) -> Path:
+        """Raise only for the temporary file replace under test."""
         if path.parent == tmp_path and path.name.startswith(".compose.yml."):
             raise OSError("replace failed")
         return original_replace(path, target_path)
@@ -642,6 +652,7 @@ def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
 
 @pytest.mark.unit
 def test_remove_compose_environment_targets_handles_non_mapping_payloads() -> None:
+    """Environment target removal treats malformed compose payloads as no-ops."""
     assert (
         executor_monitor_handoff._remove_compose_environment_targets(
             None,
@@ -667,6 +678,7 @@ def test_remove_compose_environment_targets_handles_non_mapping_payloads() -> No
 
 @pytest.mark.unit
 def test_remove_compose_environment_targets_retains_non_matching_list_items() -> None:
+    """Removing one environment list target preserves unrelated entries."""
     payload: dict[str, object] = {
         "services": {
             "backend": {
@@ -699,6 +711,7 @@ def test_remove_compose_environment_targets_retains_non_matching_list_items() ->
 
 @pytest.mark.unit
 def test_restore_compose_environment_refs_handles_non_mapping_payloads() -> None:
+    """Environment ref restoration treats malformed compose payloads as no-ops."""
     assert (
         executor_monitor_handoff._restore_compose_environment_refs(
             None,
@@ -726,6 +739,7 @@ def test_restore_compose_environment_refs_handles_non_mapping_payloads() -> None
 def test_restore_compose_environment_refs_skips_empty_refs_and_creates_missing_environment() -> (
     None
 ):
+    """Restore skips empty service refs and creates missing environment maps."""
     payload: dict[str, object] = {
         "services": {
             "backend": {"image": "example/backend:latest"},
@@ -755,6 +769,7 @@ def test_restore_compose_environment_refs_skips_empty_refs_and_creates_missing_e
 
 @pytest.mark.unit
 def test_restore_compose_environment_list_refs_skips_non_string_items_and_appends_missing() -> None:
+    """List restoration preserves non-string entries and appends missing refs."""
     environment: list[object] = [
         {"APP_ENV": "test"},
         "EXISTING_TOKEN=${EXISTING_TOKEN_SOURCE:-}",
