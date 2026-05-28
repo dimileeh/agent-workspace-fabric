@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.admission import _acquire_requested_admission_lock
 from awf.control.worker.claims import _requested_claim_admission_slots
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import WorkspaceStatus
@@ -383,6 +384,50 @@ async def test_named_local_capacity_worker_stamps_node_id_when_claiming_requeste
         WorkspaceStatus.provisioning.value
     )
     assert await _workspace_node_id(session_factory, workspace_id) == "local"
+
+
+@pytest.mark.unit
+async def test_named_worker_admission_waits_for_null_node_lock_before_claiming(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id="worker-a",
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="worker-a",
+        ),
+    )
+
+    async with session_factory() as lock_session:
+        await _acquire_requested_admission_lock(lock_session, node_id="local")
+        claim_task = asyncio.create_task(
+            worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+        )
+        done, _ = await asyncio.wait({claim_task}, timeout=0.2)
+
+        assert done == set()
+        assert (
+            await _workspace_status(session_factory, workspace_id)
+            == WorkspaceStatus.requested.value
+        )
+        await lock_session.rollback()
+
+    assert await asyncio.wait_for(
+        claim_task,
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+    assert await _workspace_node_id(session_factory, workspace_id) == "worker-a"
 
 
 @pytest.mark.unit

@@ -11,8 +11,12 @@ from awf.control.worker.resource_broker import _postgres_advisory_lock_key
 from awf.db.models import Workspace
 
 
-def _requested_admission_lock_node_id(node_id: str | None) -> str:
-    return node_id or "local"
+def _requested_admission_lock_node_ids(node_id: str | None) -> tuple[str, ...]:
+    # Named workers count legacy null-node active rows, so they serialize with
+    # null-node claimers before taking their own per-node admission lock.
+    if node_id is None or node_id == "local":
+        return ("local",)
+    return ("local", node_id)
 
 
 async def _acquire_requested_admission_lock(
@@ -28,6 +32,15 @@ async def _acquire_requested_admission_lock(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": lock_key},
     )
+
+
+async def _acquire_requested_admission_locks(
+    session: AsyncSession,
+    *,
+    node_ids: tuple[str, ...],
+) -> None:
+    for node_id in dict.fromkeys(node_ids):
+        await _acquire_requested_admission_lock(session, node_id=node_id)
 
 
 async def _requested_admission_row_slots(

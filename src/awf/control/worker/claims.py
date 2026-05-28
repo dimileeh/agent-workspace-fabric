@@ -19,8 +19,8 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.worker.admission import (
-    _acquire_requested_admission_lock,
-    _requested_admission_lock_node_id,
+    _acquire_requested_admission_locks,
+    _requested_admission_lock_node_ids,
     _requested_admission_row_slots,
 )
 from awf.control.worker.constants import (
@@ -133,9 +133,9 @@ async def _claim_requested_ids(
         return claimed
 
     async def _operation(session: AsyncSession) -> _RequestedCapacityClaimResult:
-        await _acquire_requested_admission_lock(
+        await _acquire_requested_admission_locks(
             session,
-            node_id=_requested_admission_lock_node_id(self._config.node_id),
+            node_ids=_requested_admission_lock_node_ids(self._config.node_id),
         )
         row_slots = await _requested_claim_admission_slots(
             self,
@@ -421,9 +421,9 @@ async def _log_stale_requested_claims(
 
 async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> bool:
     async with self._session_factory() as session:
-        await _acquire_requested_admission_lock(
+        await _acquire_requested_admission_locks(
             session,
-            node_id=_requested_admission_lock_node_id(self._config.node_id),
+            node_ids=_requested_admission_lock_node_ids(self._config.node_id),
         )
         row_slots = await _requested_claim_admission_slots(
             self,
