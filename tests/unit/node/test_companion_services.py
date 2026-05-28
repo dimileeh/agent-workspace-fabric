@@ -553,7 +553,8 @@ def test_companion_service_from_materialized_resolves_environment_secret_placeho
         ("APP_ENV", "test"),
         (
             "AIRA_API_KEY",
-            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING: "
+            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_"
+            "COMPANION_ENV_SECRET_SOURCE_EMPTY: "
             "companion=backend, target=AIRA_API_KEY, provider=env, "
             "source=ANTHROPIC_API_KEY}",
         ),

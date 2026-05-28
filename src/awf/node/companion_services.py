@@ -434,7 +434,8 @@ def _environment_secret_compose_ref(
     if not secret.required:
         return f"${{{secret.value_from}:-}}"
     return (
-        f"${{{secret.value_from}:?{COMPANION_ENV_SECRET_SOURCE_MISSING}: "
+        f"${{{secret.value_from}:?{COMPANION_ENV_SECRET_SOURCE_MISSING}_OR_"
+        f"{COMPANION_ENV_SECRET_SOURCE_EMPTY}: "
         f"companion={companion_name}, target={secret.target}, provider={secret.provider}, "
         f"source={secret.value_from}}}"
     )

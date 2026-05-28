@@ -603,6 +603,10 @@ def _normalize_stored_companion(item: Mapping[str, object]) -> dict[str, object]
     try:
         companion = WorkspaceCompanionRequest.model_validate(item)
     except ValidationError:
+        _log.warning(
+            "normalize_stored_companion.validation_failed",
+            companion_name=item.get("name"),
+        )
         return dict(item)
     return cast(dict[str, object], companion.model_dump(mode="json"))
 

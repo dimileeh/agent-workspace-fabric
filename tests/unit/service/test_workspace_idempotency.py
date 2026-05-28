@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+import structlog.testing
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateRequest
@@ -858,6 +859,22 @@ async def test_create_replays_legacy_companion_without_environment_secrets(
     )
 
     assert replayed.id == created.id
+
+
+@pytest.mark.unit
+def test_normalize_stored_companion_warns_and_preserves_invalid_row() -> None:
+    companion = {"name": "backend", "build_context": "."}
+
+    with structlog.testing.capture_logs() as captured:
+        normalized = workspaces_create._normalize_stored_companion(companion)
+
+    assert normalized == companion
+    assert any(
+        event.get("event") == "normalize_stored_companion.validation_failed"
+        and event.get("log_level") == "warning"
+        and event.get("companion_name") == "backend"
+        for event in captured
+    )
 
 
 @pytest.mark.unit

@@ -123,7 +123,7 @@ def test_companion_env_secret_refresh_preserves_required_compose_interpolation(
 services:
   backend:
     environment:
-      REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?COMPANION_ENV_SECRET_SOURCE_MISSING: companion=backend, target=REQUIRED_TOKEN, provider=env, source=REQUIRED_TOKEN_SOURCE}"
+      REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_COMPANION_ENV_SECRET_SOURCE_EMPTY: companion=backend, target=REQUIRED_TOKEN, provider=env, source=REQUIRED_TOKEN_SOURCE}"
       OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
 """.lstrip(),
         encoding="utf-8",
