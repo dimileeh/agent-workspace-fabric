@@ -50,7 +50,11 @@ def _write_valid_source_checkout(root: Path) -> Path:
 
 
 @pytest.mark.unit
-def test_host_setup_config_round_trips_with_conservative_permissions(tmp_path: Path) -> None:
+def test_host_setup_config_round_trips_with_conservative_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     verified = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
     config = HostSetupConfig(
@@ -76,18 +80,36 @@ def test_host_setup_config_round_trips_with_conservative_permissions(tmp_path: P
         ),
         source_checkout=verified.to_metadata(),
     )
-    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path = default_host_setup_config_path()
 
-    write_host_setup_config(config, path=config_path)
+    write_host_setup_config(config)
 
     if os.name == "posix":
         assert stat.S_IMODE(config_path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
-    assert read_host_setup_config(path=config_path) == config
+    assert read_host_setup_config() == config
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert raw["providers"]["github"]["credential_ref"] == "keyring://awf/github/token"
     assert "token:" not in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_host_setup_config_write_preserves_explicit_parent_permissions(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "shared"
+    config_dir.mkdir()
+    if os.name == "posix":
+        config_dir.chmod(0o755)
+    config_path = config_dir / "config.yml"
+
+    write_host_setup_config(HostSetupConfig(api=ApiConfig(host_port=8124)), path=config_path)
+
+    if os.name == "posix":
+        assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert read_host_setup_config(path=config_path).api.host_port == 8124
 
 
 @pytest.mark.unit

@@ -307,6 +307,7 @@ def write_host_setup_config(
     path: str | Path | None = None,
 ) -> None:
     """Atomically write host setup config with conservative permissions."""
+    owns_parent_permissions = path is None
     config_path = _resolve_config_path(path)
     payload = cast(dict[str, object], config.model_dump(mode="json", exclude_none=True))
     try:
@@ -318,7 +319,8 @@ def write_host_setup_config(
     text = yaml.safe_dump(payload, sort_keys=False)
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        _chmod_best_effort(config_path.parent, 0o700)
+        if owns_parent_permissions:
+            _chmod_best_effort(config_path.parent, 0o700)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
