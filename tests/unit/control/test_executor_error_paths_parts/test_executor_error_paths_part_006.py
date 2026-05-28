@@ -50,7 +50,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError
-from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.profiles.models import ProfileDocker, ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import (
@@ -1169,6 +1169,66 @@ class TestExecutorCoverageEdgesPart002:
 
         assert captured["workspace_id"] == ws_id
         assert captured["compose_up_timeout_seconds"] == 900
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_preserves_profile_compose_timeout_when_companion_resolution_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        class _RecordingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
+            ) -> None:
+                captured.update(
+                    {
+                        "project_name": project_name,
+                        "compose_file": compose_file,
+                        "workspace_id": workspace_id,
+                        "wait": wait,
+                        "compose_up_timeout_seconds": compose_up_timeout_seconds,
+                    }
+                )
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            resolved_profile=WorkspaceProfile(
+                name="profile-timeout",
+                docker=ProfileDocker(startup_timeout_seconds=720),
+            ).model_dump(mode="json"),
+            task_policy={"companions": [{"name": "broken-companion"}]},
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_RecordingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert captured["workspace_id"] == ws_id
+        assert captured["compose_up_timeout_seconds"] == 720
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(

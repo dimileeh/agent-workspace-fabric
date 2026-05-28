@@ -152,6 +152,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             worktree_path=self._config.worktrees_root / workspace_id,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
+        compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=companion_specs_from_task_policy(ws.task_policy),
