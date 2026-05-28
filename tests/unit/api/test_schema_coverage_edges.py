@@ -169,6 +169,132 @@ def test_workspace_companion_environment_schema_documents_value_interpolation_re
 
 
 @pytest.mark.unit
+def test_workspace_companion_environment_secrets_schema_documents_key_pattern() -> None:
+    environment_secrets_schema = api_schemas.WorkspaceCompanionRequest.model_json_schema()[
+        "properties"
+    ]["environment_secrets"]
+
+    assert environment_secrets_schema["propertyNames"] == {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+    }
+    secret_value_schema = environment_secrets_schema["patternProperties"][
+        "^[A-Za-z_][A-Za-z0-9_]*$"
+    ]
+    secret_schema_name = secret_value_schema["$ref"].split("/")[-1]
+    assert secret_schema_name == "CompanionEnvironmentSecretRequest"
+
+
+@pytest.mark.unit
+def test_workspace_companion_accepts_environment_secrets() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:example/app.git", "base_branch": "development"},
+            "task": _task(),
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/api.git",
+                    "environment": {"APP_ENV": "test"},
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    secret = request.companions[0].environment_secrets["AIRA_API_KEY"]
+    assert secret.provider == "env"
+    assert secret.kind == "env"
+    assert secret.value_from == "ANTHROPIC_API_KEY"
+    assert secret.required is True
+
+
+@pytest.mark.unit
+def test_workspace_companion_accepts_compose_up_timeout_seconds() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:example/app.git", "base_branch": "development"},
+            "task": _task(),
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/api.git",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ],
+        }
+    )
+
+    assert request.companions[0].compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout", [0, -1, 1801])
+def test_workspace_companion_rejects_invalid_compose_up_timeout_seconds(
+    timeout: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "compose_up_timeout_seconds": timeout,
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "environment_secrets",
+    [
+        {"BAD-NAME": {"provider": "env", "kind": "env", "value_from": "ANTHROPIC_API_KEY"}},
+        {"AIRA_API_KEY": {"provider": "aws", "kind": "env", "value_from": "ANTHROPIC_API_KEY"}},
+        {"AIRA_API_KEY": {"provider": "env", "kind": "mount", "value_from": "ANTHROPIC_API_KEY"}},
+        {"AIRA_API_KEY": {"provider": "env", "kind": "env", "value_from": "BAD-NAME"}},
+    ],
+)
+def test_workspace_companion_environment_secrets_rejects_invalid_references(
+    environment_secrets: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment_secrets": environment_secrets,
+            }
+        )
+
+
+@pytest.mark.unit
+def test_workspace_companion_rejects_environment_secret_literal_env_overlap() -> None:
+    with pytest.raises(ValidationError) as exc:
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment": {"AIRA_API_KEY": "literal"},
+                "environment_secrets": {
+                    "AIRA_API_KEY": {
+                        "provider": "env",
+                        "kind": "env",
+                        "value_from": "ANTHROPIC_API_KEY",
+                    }
+                },
+            }
+        )
+
+    assert "must not overlap" in str(exc.value)
+
+
+@pytest.mark.unit
 def test_workspace_companion_accepts_non_default_repo_relative_paths() -> None:
     companion = api_schemas.WorkspaceCompanionRequest.model_validate(
         {

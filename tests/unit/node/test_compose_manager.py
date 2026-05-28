@@ -256,6 +256,53 @@ class TestRender:
         }
 
     @pytest.mark.unit
+    def test_dind_companion_environment_secret_placeholder_is_rendered_without_raw_value(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-secret-value")
+        spec = _spec(
+            tmp_path,
+            docker_mode="dind",
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    environment=(
+                        (
+                            "AIRA_API_KEY",
+                            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_"
+                            "COMPANION_ENV_SECRET_SOURCE_EMPTY: "
+                            "companion=backend, target=AIRA_API_KEY, provider=env, "
+                            "source=ANTHROPIC_API_KEY}",
+                        ),
+                    ),
+                    depends_on=("docker",),
+                    healthcheck_cmd="curl -fsS http://localhost:8000/healthz",
+                ),
+            ),
+        )
+
+        rendered = manager.render(spec).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
+
+        assert parsed["services"]["docker"]["image"] == "docker:27-dind"
+        assert parsed["services"]["backend"]["depends_on"] == {
+            "docker": {"condition": "service_healthy"}
+        }
+        assert parsed["services"]["backend"]["environment"] == {
+            "AIRA_API_KEY": (
+                "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_"
+                "COMPANION_ENV_SECRET_SOURCE_EMPTY: "
+                "companion=backend, target=AIRA_API_KEY, provider=env, "
+                "source=ANTHROPIC_API_KEY}"
+            )
+        }
+        assert "raw-secret-value" not in rendered
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
@@ -765,7 +812,6 @@ class TestRender:
         async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
             return process
 
-        monkeypatch.setattr(compose_module, "COMPOSE_CAPTURE_TIMEOUT_SECONDS", 0.01)
         monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
 
         with pytest.raises(ComposeOperationError) as exc:
@@ -774,12 +820,13 @@ class TestRender:
                 tmp_path / "compose.yml",
                 ["up", "-d", "--wait"],
                 operation="up",
+                capture_timeout_seconds=0.01,
             )
 
         assert process.kill_called is True
         assert exc.value.returncode == 124
         assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
-        assert "docker compose up exceeded" in exc.value.stderr
+        assert "docker compose up exceeded 0.01s timeout" in exc.value.stderr
 
     @pytest.mark.unit
     async def test_docker_capture_returns_stdout_on_success(

@@ -169,13 +169,15 @@ uv run --python 3.12 --extra dev awf workspace create \
   --agent codex \
   --title "Exercise web against backend" \
   --prompt "Update the web app and validate against the live backend companion." \
-  --companion-json '{"name":"backend","repo_url":"git@github.com:example/api.git","base_branch":"development","build_context":".","dockerfile":"Dockerfile","env_file":"config/dev.env","depends_on":["docker"],"healthcheck_cmd":"curl -fsS http://localhost:8000/health"}' \
+  --companion-json '{"name":"backend","repo_url":"git@github.com:example/api.git","base_branch":"development","build_context":".","dockerfile":"Dockerfile","env_file":"config/dev.env","compose_up_timeout_seconds":900,"depends_on":["docker"],"healthcheck_cmd":"curl -fsS http://localhost:8000/health"}' \
   --test "npm test"
 ```
 
 Companion JSON must be one object per flag. Paths are repo-relative to the
 companion checkout; absolute paths and `..` escapes are rejected. Companion env
-files are repo files, not generated local secret files.
+files are repo files, not generated local secret files. Use
+`compose_up_timeout_seconds` inside the companion JSON when a companion image
+needs a longer cold-cache build/start budget than the profile default.
 
 Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
 comment, and `--initial-review-grace-period-seconds 0` only for explicit

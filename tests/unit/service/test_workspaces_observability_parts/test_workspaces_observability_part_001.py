@@ -981,6 +981,29 @@ def test_task_policy_snapshot_persists_empty_companion_list() -> None:
 
 
 @pytest.mark.unit
+def test_task_policy_snapshot_persists_companion_compose_up_timeout() -> None:
+    request = WorkspaceCreateRequest(
+        repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},
+        task={"title": "Policy snapshot", "prompt": "p", "agent": "codex"},
+        companions=[
+            {
+                "name": "backend",
+                "repo_url": "git@github.com:example/backend.git",
+                "compose_up_timeout_seconds": 900,
+            }
+        ],
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "observability test fixture",
+        },
+    )
+
+    policy = workspace_create_task_policy_snapshot(request)
+
+    assert policy["companions"][0]["compose_up_timeout_seconds"] == 900
+
+
+@pytest.mark.unit
 def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> None:
     request = WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},

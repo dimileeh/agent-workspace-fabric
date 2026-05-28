@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+import structlog.testing
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateRequest
@@ -47,6 +48,7 @@ def _v2_request(
     profile_ref: str | None = "auto",
     priority: int = 0,
     human_boost: int = 0,
+    companions: list[dict[str, object]] | None = None,
 ) -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
@@ -66,6 +68,7 @@ def _v2_request(
             "provider_readiness_override": True,
             "provider_readiness_override_reason": "idempotency serialization test fixture",
         },
+        companions=companions or [],
     )
 
 
@@ -818,6 +821,60 @@ async def test_create_payload_match_treats_legacy_null_task_kind_as_feature_bran
         workspace.status = "running"
 
         assert workspaces.workspace_create_payload_matches(workspace, request)
+
+
+@pytest.mark.unit
+async def test_create_replays_legacy_companion_without_environment_secrets(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _v2_request(
+        companions=[
+            {
+                "name": "backend",
+                "repo_url": "git@github.com:example/backend.git",
+                "build_context": ".",
+                "env_file": "config/dev.env",
+            }
+        ]
+    )
+    service = WorkspaceService(factory)
+    created = await service.create(
+        request,
+        idempotency_key="service-create-v2-legacy-companion-env-secrets",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        policy = dict(workspace.task_policy)
+        stored_companion = dict(policy["companions"][0])
+        assert stored_companion.pop("environment_secrets") == {}
+        policy["companions"] = [stored_companion]
+        workspace.task_policy = policy
+        await session.commit()
+
+    replayed = await service.create(
+        request,
+        idempotency_key="service-create-v2-legacy-companion-env-secrets",
+    )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+def test_normalize_stored_companion_warns_and_preserves_invalid_row() -> None:
+    companion = {"name": "backend", "build_context": "."}
+
+    with structlog.testing.capture_logs() as captured:
+        normalized = workspaces_create._normalize_stored_companion(companion)
+
+    assert normalized == companion
+    assert any(
+        event.get("event") == "normalize_stored_companion.validation_failed"
+        and event.get("log_level") == "warning"
+        and event.get("companion_name") == "backend"
+        for event in captured
+    )
 
 
 @pytest.mark.unit

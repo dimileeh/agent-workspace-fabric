@@ -8,13 +8,20 @@ from __future__ import annotations
 import asyncio as asyncio
 import hashlib as hashlib
 import json as json
+import os as os
 import re as re
 import shlex as shlex
+import tempfile as tempfile
 import time as time
 import traceback as traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import yaml
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode, ScalarNode
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text
@@ -73,7 +80,15 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
+    COMPANION_ENV_SECRET_SOURCE_MISSING,
+    WorkspaceCompanionSpec,
+    companion_specs_from_task_policy,
+    optional_env_secret_compose_placeholder,
+)
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
@@ -87,6 +102,87 @@ from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationResult,
 )
+
+
+class _ComposeInterpolationPreservingDumper(yaml.SafeDumper):
+    """Safe YAML dumper that keeps Compose interpolation scalars active."""
+
+
+class _ComposeStringKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that keeps Compose scalar mapping keys as strings."""
+
+
+def _construct_compose_string_key_mapping(
+    loader: _ComposeStringKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    if not isinstance(node, MappingNode):
+        raise ConstructorError(
+            None,
+            None,
+            f"expected a mapping node, but found {node.id}",
+            node.start_mark,
+        )
+    loader.flatten_mapping(node)
+    construct_object = cast(Callable[..., Any], loader.construct_object)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key: Any
+        if isinstance(key_node, ScalarNode):
+            key = key_node.value
+        else:
+            key = construct_object(key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            ) from exc
+        mapping[key] = construct_object(
+            value_node,
+            deep=deep,
+        )
+    return mapping
+
+
+_ComposeStringKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_compose_string_key_mapping,
+)
+
+
+def _represent_compose_interpolation_string(
+    dumper: _ComposeInterpolationPreservingDumper,
+    value: str,
+) -> Any:
+    style = '"' if "${" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_ComposeInterpolationPreservingDumper.add_representer(
+    str,
+    _represent_compose_interpolation_string,
+)
+
+
+class CompanionEnvSecretPrecheckError(ComposeOperationError):
+    """Raised when monitor resume cannot satisfy required companion env secrets."""
+
+    def __init__(self, *, stderr: str, reason_code: str) -> None:
+        self.operation = "companion_env_secret_precheck"
+        self.returncode = 1
+        self.stdout = ""
+        self.stderr = stderr
+        self.reason_code = reason_code
+        Exception.__init__(
+            self,
+            "companion env secret precheck failed "
+            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
+        )
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
@@ -142,6 +238,38 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     compose_file_path = ws.compose_file_path
     assert compose_project is not None
     assert compose_file_path is not None
+    profile = None
+    companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
+    companion_specs_resolved = False
+    compose_up_timeout_seconds = 300
+    try:
+        companion_specs = companion_specs_from_task_policy(ws.task_policy)
+        companion_specs_resolved = True
+    except Exception:
+        _log.exception(
+            "executor.resume_companion_spec_resolution_failed",
+            workspace_id=workspace_id,
+        )
+
+    try:
+        profile = _profile_for_workspace(
+            ws,
+            worktree_path=self._config.worktrees_root / workspace_id,
+            planning_max_iterations_default=self._config.planning_max_iterations_default,
+        )
+        # Keep the profile timeout as the fallback if stored companion policy
+        # cannot be parsed during monitor recovery.
+        compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
+        if companion_specs_resolved:
+            compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
+                profile=profile,
+                companions=companion_specs,
+            )
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_timeout_resolution_failed",
+            workspace_id=workspace_id,
+        )
 
     if not await self._recheck_status(
         workspace_id,
@@ -151,12 +279,38 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         return
 
     try:
+        _precheck_required_companion_env_secrets_for_resume(
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
+        _refresh_optional_companion_env_secrets_for_resume(
+            workspace_id=workspace_id,
+            compose_file=Path(compose_file_path),
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
         await self._compose.ensure_project_up(
             project_name=compose_project,
             compose_file=Path(compose_file_path),
             workspace_id=workspace_id,
             wait=True,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
+    except CompanionEnvSecretPrecheckError as exc:
+        _log.error(
+            "executor.resume_companion_env_secret_precheck_failed",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            stderr=exc.stderr[:1000],
+        )
+        await self._record_monitor_runtime_restart_failed(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file_path=compose_file_path,
+            error=exc,
+            event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+        )
+        return
     except ComposeOperationError as exc:
         _log.error(
             "executor.resume_compose_up_failed",
@@ -170,6 +324,9 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             compose_file_path=compose_file_path,
             error=exc,
         )
+        # Compose restart failure is not terminal for monitor recovery: the
+        # prior project may still be live, and the monitor loop can still
+        # reconcile PR state or surface a terminal runtime failure.
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -186,11 +343,12 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
             )
-            profile = _profile_for_workspace(
-                ws,
-                worktree_path=self._config.worktrees_root / workspace_id,
-                planning_max_iterations_default=self._config.planning_max_iterations_default,
-            )
+            if profile is None:
+                profile = _profile_for_workspace(
+                    ws,
+                    worktree_path=self._config.worktrees_root / workspace_id,
+                    planning_max_iterations_default=self._config.planning_max_iterations_default,
+                )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,
@@ -236,6 +394,304 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         compose_project=compose_project,
         compose_file=Path(compose_file_path),
     )
+
+
+def _precheck_required_companion_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
+    failures: list[tuple[str, str]] = []
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if not secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            source_is_set = secret.value_from in environ
+            source_is_empty = source_is_set and environ[secret.value_from] == ""
+            if source_is_set and not source_is_empty:
+                continue
+            reason_code = (
+                COMPANION_ENV_SECRET_SOURCE_EMPTY
+                if source_is_empty
+                else COMPANION_ENV_SECRET_SOURCE_MISSING
+            )
+            failures.append(
+                (
+                    reason_code,
+                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
+                    f"provider={secret.provider}, source={secret.value_from}",
+                )
+            )
+    if failures:
+        raise CompanionEnvSecretPrecheckError(
+            stderr="\n".join(stderr for _reason_code, stderr in failures),
+            reason_code=failures[0][0],
+        )
+
+
+def _refresh_optional_companion_env_secrets_for_resume(
+    *,
+    workspace_id: str,
+    compose_file: Path,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Refresh optional companion env-secret targets before compose resume."""
+    missing_targets = _missing_optional_companion_env_secret_targets(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    present_refs = _present_optional_companion_env_secret_refs(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    if not missing_targets and not present_refs:
+        return
+
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_read_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return
+    except yaml.YAMLError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_parse_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return
+
+    # This best-effort resume repair uses PyYAML, which preserves Compose
+    # interpolation via the custom dumper but not comments or block-scalar style.
+    removed_count = _remove_compose_environment_targets(payload, missing_targets)
+    restored_count = _restore_compose_environment_refs(payload, present_refs)
+    if removed_count == 0 and restored_count == 0:
+        return
+
+    try:
+        _atomic_write_text(
+            compose_file,
+            _safe_dump_compose_payload_for_resume(payload),
+            encoding="utf-8",
+        )
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_write_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return
+    _log.warning(
+        "executor.resume_companion_env_secret_refresh_reformatted",
+        workspace_id=workspace_id,
+        compose_file=str(compose_file),
+        removed_count=removed_count,
+        restored_count=restored_count,
+        detail=(
+            "optional companion env-secret refresh rewrote the compose file; "
+            "comments, block-scalar style, and explicit null markers are not preserved"
+        ),
+    )
+    if removed_count:
+        _log.info(
+            "executor.resume_companion_optional_env_secrets_omitted",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+            omitted_count=removed_count,
+        )
+    if restored_count:
+        _log.info(
+            "executor.resume_companion_optional_env_secrets_restored",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+            restored_count=restored_count,
+        )
+
+
+def _safe_dump_compose_payload_for_resume(payload: object) -> str:
+    return yaml.dump(
+        payload,
+        Dumper=_ComposeInterpolationPreservingDumper,
+        sort_keys=False,
+    )
+
+
+def _safe_load_compose_payload_for_resume(text: str) -> object:
+    return yaml.load(text, Loader=_ComposeStringKeySafeLoader)
+
+
+def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding=encoding,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(text)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        assert tmp_path is not None
+        tmp_path.replace(path)
+    except OSError:
+        if tmp_path is not None:
+            with suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _missing_optional_companion_env_secret_targets(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> dict[str, set[str]]:
+    missing_targets: dict[str, set[str]] = {}
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            if secret.value_from in environ:
+                continue
+            missing_targets.setdefault(spec.name, set()).add(secret.target)
+    return missing_targets
+
+
+def _present_optional_companion_env_secret_refs(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
+    present_refs: dict[str, dict[str, str]] = {}
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            if secret.value_from not in environ:
+                continue
+            present_refs.setdefault(spec.name, {})[secret.target] = (
+                optional_env_secret_compose_placeholder(secret.value_from)
+            )
+    return present_refs
+
+
+def _remove_compose_environment_targets(
+    payload: object,
+    targets_by_service: Mapping[str, set[str]],
+) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return 0
+
+    removed_count = 0
+    for service_name, targets in targets_by_service.items():
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        environment = service.get("environment")
+        if isinstance(environment, dict):
+            for target in targets:
+                if target in environment:
+                    del environment[target]
+                    removed_count += 1
+            if not environment:
+                del service["environment"]
+            continue
+        if isinstance(environment, list):
+            retained_environment: list[object] = []
+            for item in environment:
+                if _compose_environment_list_item_targets(item, targets):
+                    removed_count += 1
+                    continue
+                retained_environment.append(item)
+            if len(retained_environment) != len(environment):
+                if retained_environment:
+                    service["environment"] = retained_environment
+                else:
+                    # Preserve list style so same-pass restores do not switch
+                    # the section to Compose mapping form.
+                    service["environment"] = []
+    return removed_count
+
+
+def _restore_compose_environment_refs(
+    payload: object,
+    refs_by_service: Mapping[str, Mapping[str, str]],
+) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return 0
+
+    restored_count = 0
+    for service_name, refs in refs_by_service.items():
+        if not refs:
+            continue
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        environment = service.get("environment")
+        if isinstance(environment, dict):
+            for target, ref in refs.items():
+                if environment.get(target) != ref:
+                    environment[target] = ref
+                    restored_count += 1
+            continue
+        if isinstance(environment, list):
+            restored_count += _restore_compose_environment_list_refs(environment, refs)
+            continue
+        if environment is None:
+            service["environment"] = dict(refs)
+            restored_count += len(refs)
+    return restored_count
+
+
+def _restore_compose_environment_list_refs(
+    environment: list[object],
+    refs: Mapping[str, str],
+) -> int:
+    restored_count = 0
+    seen_targets: set[str] = set()
+    restored_targets: set[str] = set()
+    for index, item in enumerate(environment):
+        if not isinstance(item, str):
+            continue
+        key = item.split("=", 1)[0]
+        ref = refs.get(key)
+        if ref is None:
+            continue
+        seen_targets.add(key)
+        replacement = f"{key}={ref}"
+        if item != replacement:
+            environment[index] = replacement
+            if key not in restored_targets:
+                restored_targets.add(key)
+                restored_count += 1
+
+    for target, ref in refs.items():
+        if target in seen_targets:
+            continue
+        environment.append(f"{target}={ref}")
+        restored_count += 1
+    return restored_count
+
+
+def _compose_environment_list_item_targets(item: object, targets: set[str]) -> bool:
+    if not isinstance(item, str):
+        return False
+    key = item.split("=", 1)[0]
+    return key in targets
 
 
 async def _record_executor_pr_audit_event(
@@ -944,6 +1400,7 @@ async def _record_monitor_runtime_restart_failed(
     compose_project: str,
     compose_file_path: str,
     error: ComposeOperationError,
+    event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
 ) -> None:
     try:
         async with self._session_factory() as session:
@@ -954,7 +1411,7 @@ async def _record_monitor_runtime_restart_failed(
             await repo.add_event(
                 ws,
                 event_type="workspace.monitor_runtime_restart_failed",
-                reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+                reason_code=event_reason_code,
                 payload={
                     "compose_project_name": compose_project,
                     "compose_file_path": compose_file_path,

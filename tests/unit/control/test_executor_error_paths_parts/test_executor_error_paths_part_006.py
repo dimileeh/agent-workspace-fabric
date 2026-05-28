@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 import structlog
+import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,10 +39,9 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Operation, WorkspaceEvent
 from awf.db.repositories import (
-    OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -49,6 +49,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node import companion_services
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
@@ -71,6 +72,431 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+@pytest.mark.unit
+def test_required_companion_env_secret_precheck_reports_all_unavailable_sources() -> None:
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:backend.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="BACKEND_REQUIRED_TOKEN",
+                    value_from="BACKEND_REQUIRED_SOURCE",
+                    required=True,
+                ),
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="BACKEND_OPTIONAL_TOKEN",
+                    value_from="BACKEND_OPTIONAL_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+        companion_services.WorkspaceCompanionSpec(
+            name="worker",
+            repo_url="git@example.com:worker.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="WORKER_REQUIRED_TOKEN",
+                    value_from="WORKER_REQUIRED_SOURCE",
+                    required=True,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(executor_monitor_handoff.CompanionEnvSecretPrecheckError) as exc_info:
+        executor_monitor_handoff._precheck_required_companion_env_secrets_for_resume(
+            companion_specs=companion_specs,
+            environ={"WORKER_REQUIRED_SOURCE": ""},
+        )
+
+    assert exc_info.value.reason_code == companion_services.COMPANION_ENV_SECRET_SOURCE_MISSING
+    stderr = exc_info.value.stderr
+    assert companion_services.COMPANION_ENV_SECRET_SOURCE_MISSING in stderr
+    assert companion_services.COMPANION_ENV_SECRET_SOURCE_EMPTY in stderr
+    assert "companion=backend, target=BACKEND_REQUIRED_TOKEN" in stderr
+    assert "source=BACKEND_REQUIRED_SOURCE" in stderr
+    assert "companion=worker, target=WORKER_REQUIRED_TOKEN" in stderr
+    assert "source=WORKER_REQUIRED_SOURCE" in stderr
+    assert "BACKEND_OPTIONAL_TOKEN" not in stderr
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.mkdir()
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_read_failed",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_read_failed"
+        and entry["workspace_id"] == "ws_read_failed"
+        and entry["compose_file"] == str(compose_file)
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_avoids_direct_target_file_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    original_write_text = Path.write_text
+    direct_target_writes: list[str] = []
+
+    def _reject_direct_target_write(
+        path: Path,
+        data: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        if path == compose_file:
+            direct_target_writes.append(str(path))
+            raise OSError("direct compose-file write should not be used")
+        return original_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _reject_direct_target_write)
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_atomic_refresh",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={},
+    )
+
+    assert direct_target_writes == []
+    assert "OPTIONAL_TOKEN" not in compose_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_required_compose_interpolation(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_COMPANION_ENV_SECRET_SOURCE_EMPTY: companion=backend, target=REQUIRED_TOKEN, provider=env, source=REQUIRED_TOKEN_SOURCE}"
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "REQUIRED_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "REQUIRED_TOKEN_SOURCE",
+                            "required": True,
+                        },
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_interpolation",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={"REQUIRED_TOKEN_SOURCE": "raw-required-secret"},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "'${REQUIRED_TOKEN_SOURCE:?" not in rendered
+    assert 'REQUIRED_TOKEN: "${REQUIRED_TOKEN_SOURCE:?' in rendered
+    assert "raw-required-secret" not in rendered
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_yaml_boolean_service_name_as_string(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  on:
+    image: ghcr.io/example/on:latest
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "on",
+                    "repo_url": "git@github.com:x/on.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_yaml_boolean_service",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(rendered)
+    services = parsed["services"]
+    assert "on" in services
+    assert True not in services
+    assert services["on"]["image"] == "ghcr.io/example/on:latest"
+    assert "environment" not in services["on"]
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "true:" not in rendered
+    assert "raw-optional-secret" not in rendered
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_logs_warning_when_reformatting_compose_file(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+# operator note
+services:
+  backend:
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_reformat_warning",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_reformatted"
+        and entry["workspace_id"] == "ws_reformat_warning"
+        and entry["compose_file"] == str(compose_file)
+        and entry["removed_count"] == 1
+        and entry["restored_count"] == 0
+        for entry in captured
+    )
+    rendered = compose_file.read_text(encoding="utf-8")
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "operator note" not in rendered
+
+
+@pytest.mark.unit
+def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    def _fake_optional_env_secret_compose_placeholder(value_from: str) -> str:
+        captured.append(value_from)
+        return "${CANONICAL:-sentinel}"
+
+    monkeypatch.setattr(
+        executor_monitor_handoff,
+        "optional_env_secret_compose_placeholder",
+        _fake_optional_env_secret_compose_placeholder,
+    )
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    value_from="OPTIONAL_TOKEN_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+    )
+
+    assert executor_monitor_handoff._present_optional_companion_env_secret_refs(
+        companion_specs=companion_specs,
+        environ={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
+    ) == {"backend": {"OPTIONAL_TOKEN": "${CANONICAL:-sentinel}"}}
+    assert captured == ["OPTIONAL_TOKEN_SOURCE"]
+
+
+@pytest.mark.unit
+def test_restore_compose_environment_list_refs_counts_duplicate_targets_once() -> None:
+    environment: list[object] = [
+        "OPTIONAL_TOKEN=stale-one",
+        "OPTIONAL_TOKEN=stale-two",
+        "APP_ENV=test",
+    ]
+
+    restored_count = executor_monitor_handoff._restore_compose_environment_list_refs(
+        environment,
+        {"OPTIONAL_TOKEN": "${OPTIONAL_TOKEN_SOURCE:-}"},
+    )
+
+    assert restored_count == 1
+    assert environment == [
+        "OPTIONAL_TOKEN=${OPTIONAL_TOKEN_SOURCE:-}",
+        "OPTIONAL_TOKEN=${OPTIONAL_TOKEN_SOURCE:-}",
+        "APP_ENV=test",
+    ]
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_list_environment_format_when_restoring_after_emptying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_TOKEN_SOURCE", raising=False)
+    monkeypatch.setenv("PRESENT_TOKEN_SOURCE", "raw-present-secret")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      - MISSING_TOKEN=${MISSING_TOKEN_SOURCE:-}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "MISSING_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "MISSING_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                        "PRESENT_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "PRESENT_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_list_restore",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={"PRESENT_TOKEN_SOURCE": "raw-present-secret"},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(rendered)
+    assert parsed["services"]["backend"]["environment"] == [
+        "PRESENT_TOKEN=${PRESENT_TOKEN_SOURCE:-}",
+    ]
+    assert "MISSING_TOKEN" not in rendered
+    assert "raw-present-secret" not in rendered
 
 
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
@@ -145,8 +571,9 @@ class _NoopResumeCompose:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
-        del project_name, compose_file, workspace_id, wait
+        del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
 
 
 class _RecordingValidation:
@@ -591,6 +1018,7 @@ async def _seed_monitoring_pr(
     compose_project_name: str | None = "awf_x",
     compose_file_path: str | None = "/tmp/awf/x/compose.yml",
     resolved_profile: dict[str, Any] | None = None,
+    task_policy: dict[str, Any] | None = None,
     auto_merge: bool = True,
     initial_review_grace_period_seconds: float | None = None,
 ) -> str:
@@ -605,6 +1033,7 @@ async def _seed_monitoring_pr(
             test_commands=["pytest -q"],
             requires_database=False,
             resolved_profile=resolved_profile,
+            task_policy=task_policy,
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
         )
@@ -930,8 +1359,9 @@ class TestExecutorCoverageEdgesPart002:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, workspace_id, wait
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1011,8 +1441,9 @@ class TestExecutorCoverageEdgesPart002:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, workspace_id, wait
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 session_factory.fail_next = True
                 raise ComposeOperationError(
                     operation="up",
@@ -1057,360 +1488,3 @@ class TestExecutorCoverageEdgesPart002:
                 for event in ws.events
                 if event.event_type == "workspace.monitor_runtime_restart_failed"
             ]
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_passes_timeouts_to_adapter(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(factory)
-        captured: dict[str, Any] = {}
-
-        def _get_adapter(_runtime: AgentRuntime, **kwargs: Any) -> object:
-            captured.update(kwargs)
-            return object()
-
-        monkeypatch.setattr(executor_monitor_handoff, "get_adapter", _get_adapter)
-
-        monitor_calls: list[str] = []
-
-        class _Monitor:
-            async def run(
-                self,
-                *,
-                workspace_id: str,
-                compose_project: str,
-                compose_file: Path,
-            ) -> None:
-                del compose_project, compose_file
-                monitor_calls.append(workspace_id)
-
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            pr_monitor_factory=lambda *_args: _Monitor(),
-        )
-        await executor.resume_pr_monitor(ws_id)
-
-        assert monitor_calls == [ws_id]
-        assert captured["agent_wall_timeout_seconds"] == executor._config.agent_wall_timeout_seconds
-        assert captured["agent_idle_timeout_seconds"] == executor._config.agent_idle_timeout_seconds
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        monitor_calls: list[str] = []
-        validation = _RecordingValidation()
-
-        class _UnexpectedPrCreator:
-            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
-                raise AssertionError("resume_pr_monitor must not push or create a PR")
-
-        class _Monitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                assert compose_project == "awf_x"
-                assert compose_file == Path("/tmp/awf/x/compose.yml")
-                monitor_calls.append(workspace_id)
-
-        ws_id = await _seed_monitoring_pr(factory)
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            validation=validation,
-            pr_creator=_UnexpectedPrCreator(),
-            pr_monitor_factory=lambda *_args: _Monitor(),
-        )
-
-        await executor.resume_pr_monitor(ws_id)
-
-        assert monitor_calls == [ws_id]
-        assert validation.calls == []
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.monitoring_pr.value
-            assert ws.pr_url == "https://github.com/x/y/pull/42"
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_factory_failure_marks_recovery_failed(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(factory)
-
-        def _factory(*_args: Any) -> object:
-            raise RuntimeError("factory broke")
-
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_factory)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert "failed to build PR monitor" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_FAILED"
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_without_configured_monitor_fails_cleanly(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(factory)
-        executor = _make_executor(fake, factory, tmp_path)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert ws.failure_message == "monitor recovery: no PR monitor configured"
-            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_FAILED"
-            assert not [
-                event
-                for event in ws.events
-                if event.event_type == "workspace.remote_push_branch_recovered"
-            ]
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "pr_number",
-            "pr_url",
-            "compose_project_name",
-            "compose_file_path",
-        ],
-    )
-    async def test_missing_monitor_recovery_metadata_fails_cleanly(
-        self,
-        field: str,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        kwargs: dict[str, Any] = {field: None}
-        ws_id = await _seed_monitoring_pr(factory, **kwargs)
-
-        def _monitor_factory(*_args: Any) -> object:
-            raise AssertionError("monitor factory must not run for invalid recovery rows")
-
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert field in (ws.failure_message or "")
-            assert "monitor recovery" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_METADATA_MISSING"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("task_kind", ["sync_release_pr", "sync_feature_pr"])
-    async def test_sync_and_release_resume_fail_when_remote_push_branch_is_unknown(
-        self,
-        task_kind: str,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(
-            factory,
-            task_kind=task_kind,
-            branch_name="release-sync/local-only",
-            remote_push_branch=None,
-        )
-
-        def _monitor_factory(*_args: Any) -> object:
-            raise AssertionError("monitor factory must not run without a safe remote branch")
-
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert "remote_push_branch" in (ws.failure_message or "")
-            assert task_kind in (ws.failure_message or "")
-            assert ws.remote_push_branch is None
-
-
-class TestTaskKindFailFast:
-    @pytest.mark.unit
-    async def test_legacy_monitor_release_pr_fails_fast_without_feature_work(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        validation = _RecordingValidation()
-
-        class _UnexpectedPrCreator:
-            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
-                raise AssertionError("deprecated kinds must not create a PR")
-
-        ws_id = await _seed_ready(factory, task_kind="monitor_release_pr")
-
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            validation=validation,
-            pr_creator=_UnexpectedPrCreator(),
-        )
-
-        await executor.execute(ws_id)
-
-        assert validation.calls == []
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert "deprecated" in (ws.failure_message or "")
-            assert "auto_merge=false" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "DEPRECATED_TASK_KIND"
-
-    @pytest.mark.unit
-    async def test_unknown_task_kind_fails_fast_without_feature_work(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        validation = _RecordingValidation()
-        ws_id = await _seed_ready(factory, task_kind="totally_made_up")
-
-        executor = _make_executor(fake, factory, tmp_path, validation=validation)
-
-        await executor.execute(ws_id)
-
-        assert validation.calls == []
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert "unsupported task kind" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "UNSUPPORTED_TASK_KIND"
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("task_kind", "message_fragment", "reason_code"),
-        [
-            ("monitor_release_pr", "deprecated", "DEPRECATED_TASK_KIND"),
-            ("totally_made_up", "unsupported task kind", "UNSUPPORTED_TASK_KIND"),
-        ],
-    )
-    async def test_resume_pr_monitor_fails_fast_on_unsupported_task_kind(
-        self,
-        task_kind: str,
-        message_fragment: str,
-        reason_code: str,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """A legacy deprecated/unsupported row already in ``monitoring_pr`` must
-        fail fast on the worker-restart resume path instead of being monitored
-        forever. The guard is shared with execute() but transitions from
-        ``monitoring_pr`` here, so the failure actually lands.
-        """
-        ws_id = await _seed_monitoring_pr(factory, task_kind=task_kind)
-
-        def _monitor_factory(*_args: Any) -> object:
-            raise AssertionError("resume must not build a monitor for unsupported kinds")
-
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert message_fragment in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == reason_code
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        ("task_kind", "reason_code"),
-        [
-            ("monitor_release_pr", "DEPRECATED_TASK_KIND"),
-            ("totally_made_up", "UNSUPPORTED_TASK_KIND"),
-        ],
-    )
-    async def test_reject_unsupported_task_kind_finalizes_active_recovery(
-        self,
-        task_kind: str,
-        reason_code: str,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """A reclaimed workspace whose deprecated/unsupported kind is rejected
-        must also finalize any active validate/rebase recovery operation. This is
-        the worker-restart salvage of a stale ``running`` claim: failing the
-        workspace without closing the recovery row would strand it pending/running
-        forever. The fail-fast guard runs before recovery dispatch, so it owns the
-        cleanup itself.
-        """
-        ws_id = await _seed_ready(factory, task_kind=task_kind)
-        async with factory() as s:
-            op = await OperationRepository(s).create(
-                workspace_id=ws_id,
-                operation_type=OperationType.validate,
-                status=OperationStatus.running,
-                payload={"source": "worker_restart", "recovery_mode": "validate_only"},
-                idempotency_key=f"worker_restart:validate_only:{ws_id}",
-            )
-            op_id = op.id
-            await s.commit()
-
-        executor = _make_executor(fake, factory, tmp_path)
-
-        await executor.execute(ws_id)
-
-        assert fake.calls == []
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert ws.events[-1].reason_code == reason_code
-            op = await OperationRepository(s).get(op_id)
-            assert op is not None
-            assert op.status == OperationStatus.failed.value
-            assert op.error_code == reason_code
-            assert op.result == {"reason_code": reason_code}
-            assert op.finished_at is not None

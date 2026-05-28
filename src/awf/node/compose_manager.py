@@ -34,6 +34,7 @@ _log = get_logger(__name__)
 
 DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
 COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
+COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS = 60.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
 _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
@@ -57,6 +58,7 @@ class ComposeOperationError(Exception):
         stderr: str,
         reason_code: str = "COMPOSE_COMMAND_FAILED",
     ) -> None:
+        """Capture the failed compose operation and its diagnostic streams."""
         self.operation = operation
         self.returncode = returncode
         self.stdout = stdout
@@ -128,6 +130,13 @@ class CompanionService:
     volumes: tuple[tuple[str, str], ...] = ()
     """Extra ``source:target`` bind mounts for the companion."""
 
+    secret_metadata: Mapping[str, Any] = field(default_factory=dict)
+    """Non-secret metadata about companion env secret resolution."""
+
+    def __post_init__(self) -> None:
+        """Freeze secret metadata so rendered stack records remain immutable."""
+        object.__setattr__(self, "secret_metadata", frozen_mapping(self.secret_metadata))
+
 
 @dataclass(frozen=True)
 class ComposeService:
@@ -171,18 +180,23 @@ class WorkspaceComposeSpec:
     companions: tuple[CompanionService, ...] = ()
     network_internal: bool = False
     host_gateway_enabled: bool = True
+    compose_up_timeout_seconds: int = 300
 
     def project_name(self) -> str:
+        """Return the deterministic Docker Compose project name for the workspace."""
         return f"awf_{self.workspace_id}"
 
 
 @dataclass(frozen=True)
 class ComposeProjectPaths:
+    """Rendered compose project locations and non-secret launch metadata."""
+
     project_dir: Path
     compose_file: Path
     secret_lease_mount_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Freeze metadata returned to control-plane records."""
         object.__setattr__(
             self,
             "secret_lease_mount_metadata",
@@ -199,14 +213,28 @@ def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
     same project/file pair and avoids failing workspaces on a malformed local
     CLI dispatch.
     """
-
     return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
+
+
+def _compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait: bool) -> float:
+    """Return AWF's outer timeout for ``docker compose up``.
+
+    Compose applies ``--wait-timeout`` to readiness after build/recreate/start
+    work. AWF's subprocess guard covers that launch phase separately so a cold
+    build cannot consume the readiness wait budget before Compose gets to use it.
+    """
+    launch_timeout_seconds = float(compose_up_timeout_seconds)
+    readiness_timeout_seconds = launch_timeout_seconds if wait else 0.0
+    return (
+        launch_timeout_seconds + readiness_timeout_seconds + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+    )
 
 
 class ComposeManager:
     """Renders, launches, and tears down per-workspace compose stacks."""
 
     def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+        """Prepare the compose project directory and Jinja template loader."""
         self._projects_dir = work_dir / "compose"
         template_dir = template_path.parent
         self._env = Environment(
@@ -304,8 +332,17 @@ class ComposeManager:
         paths = self.render(spec)
         args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.extend(["--wait", "--wait-timeout", "300"])
-        await self._compose(spec.project_name(), paths.compose_file, args, operation="up")
+            args.extend(["--wait", "--wait-timeout", str(spec.compose_up_timeout_seconds)])
+        await self._compose(
+            spec.project_name(),
+            paths.compose_file,
+            args,
+            operation="up",
+            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+                spec.compose_up_timeout_seconds,
+                wait=wait,
+            ),
+        )
         return paths
 
     async def ensure_project_up(
@@ -315,6 +352,7 @@ class ComposeManager:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
         """Start an already-rendered compose project without re-rendering.
 
@@ -325,7 +363,7 @@ class ComposeManager:
         """
         args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.extend(["--wait", "--wait-timeout", "300"])
+            args.extend(["--wait", "--wait-timeout", str(compose_up_timeout_seconds)])
         _log.info(
             "compose.ensure_project_up",
             workspace_id=workspace_id,
@@ -333,7 +371,16 @@ class ComposeManager:
             compose_file=str(compose_file),
             wait=wait,
         )
-        await self._compose(project_name, compose_file, args, operation="up")
+        await self._compose(
+            project_name,
+            compose_file,
+            args,
+            operation="up",
+            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+                compose_up_timeout_seconds,
+                wait=wait,
+            ),
+        )
 
     async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
         """Stop + remove the stack. Idempotent — absent projects are not errors."""
@@ -414,7 +461,13 @@ class ComposeManager:
         )
 
     async def _compose(
-        self, project_name: str, compose_file: Path, args: list[str], *, operation: str
+        self,
+        project_name: str,
+        compose_file: Path,
+        args: list[str],
+        *,
+        operation: str,
+        capture_timeout_seconds: float = COMPOSE_CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         cmd = [
             "docker",
@@ -437,7 +490,7 @@ class ComposeManager:
                 )
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+                    timeout=capture_timeout_seconds,
                 )
             except FileNotFoundError as e:
                 raise ComposeOperationError(
@@ -460,8 +513,7 @@ class ComposeManager:
                     returncode=124,
                     stdout="",
                     stderr=(
-                        f"docker compose {operation} exceeded "
-                        f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                        f"docker compose {operation} exceeded {capture_timeout_seconds:g}s timeout"
                     ),
                     reason_code="DOCKER_COMMAND_TIMEOUT",
                 ) from e

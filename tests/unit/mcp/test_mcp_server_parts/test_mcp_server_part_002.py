@@ -419,6 +419,35 @@ class TestCreateWorkspace:
         assert ws.test_commands == ["uv run pytest tests/unit/mcp -q"]
 
     @pytest.mark.unit
+    async def test_create_workspace_accepts_companion_compose_up_timeout(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        payload = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "task_title": "MCP companion timeout",
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@github.com:example/backend.git",
+                        "compose_up_timeout_seconds": 900,
+                    }
+                ],
+            },
+        )
+
+        assert isinstance(payload, dict)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+
+        assert ws is not None
+        assert ws.task_policy["companions"][0]["compose_up_timeout_seconds"] == 900
+
+    @pytest.mark.unit
     async def test_create_workspace_accepts_legacy_env_profile_alias(
         self,
         mcp,

@@ -10,6 +10,8 @@ from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_services import (
     MaterializedCompanionService,
+    WorkspaceCompanionSpec,
+    companion_env_secret_stack_metadata,
     companion_service_from_materialized,
     validate_companion_service_graph,
 )
@@ -46,7 +48,9 @@ class WorkspaceStackLaunchRequest:
 class WorkspaceStackLauncher(Protocol):
     """Small seam for provisioning tests to avoid requiring Docker."""
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None: ...
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Launch the workspace stack and return rendered compose paths when used."""
+        ...
 
 
 class WorkspaceSecretLeaseResolver(Protocol):
@@ -57,7 +61,9 @@ class WorkspaceSecretLeaseResolver(Protocol):
         profile: WorkspaceProfile,
         *,
         workspace_id: str,
-    ) -> LocalSecretLeaseResolution: ...
+    ) -> LocalSecretLeaseResolution:
+        """Resolve local secret lease mounts and environment for one workspace."""
+        ...
 
 
 class WorkspaceServiceExecutionError(Exception):
@@ -77,12 +83,14 @@ class ComposeStackLauncher:
         auth_mount_resolver: WorkspaceAuthMountResolver | None = None,
         secret_lease_resolver: WorkspaceSecretLeaseResolver | None = None,
     ) -> None:
+        """Wire stack launch dependencies and optional credential resolvers."""
         self._compose = compose
         self._agent_runtime_image = agent_runtime_image
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Render and start the profile stack, including companions and secret metadata."""
         layout = request.layout
         profile = request.profile
         egress_plan = local_egress_plan(profile.security.egress)
@@ -144,6 +152,11 @@ class ComposeStackLauncher:
                 companion_service_from_materialized(companion) for companion in request.companions
             )
         )
+        compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
+            profile=profile,
+            companions=request.companions,
+        )
+        companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
         if secret_lease_resolution is not None:
             agent_environment = agent_environment_with_declared_secret_leases(
@@ -164,6 +177,7 @@ class ComposeStackLauncher:
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,
             host_gateway_enabled=egress_plan.host_gateway_enabled,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
         try:
             paths = await self._compose.up(spec, wait=True)
@@ -180,10 +194,51 @@ class ComposeStackLauncher:
                     msg = f"{msg}: {detail}"
                 raise WorkspaceServiceExecutionError(msg) from e
             raise
-        if secret_lease_resolution is None:
+        secret_metadata = _stack_secret_metadata(
+            secret_lease_resolution=secret_lease_resolution,
+            companion_secret_metadata=companion_secret_metadata,
+        )
+        if not secret_metadata:
             return paths
         return ComposeProjectPaths(
             project_dir=paths.project_dir,
             compose_file=paths.compose_file,
-            secret_lease_mount_metadata=secret_lease_resolution.metadata,
+            secret_lease_mount_metadata=secret_metadata,
         )
+
+
+def _stack_secret_metadata(
+    *,
+    secret_lease_resolution: LocalSecretLeaseResolution | None,
+    companion_secret_metadata: dict[str, object],
+) -> dict[str, object]:
+    """Merge profile secret lease metadata with companion env secret metadata."""
+    metadata: dict[str, object] = {}
+    if secret_lease_resolution is not None:
+        metadata.update(dict(secret_lease_resolution.metadata))
+    metadata.update(companion_secret_metadata)
+    return metadata
+
+
+def effective_compose_up_timeout_seconds(
+    *,
+    profile: WorkspaceProfile,
+    companions: tuple[MaterializedCompanionService | WorkspaceCompanionSpec, ...],
+) -> int:
+    """Return the longest compose-up wait timeout requested for this stack."""
+    timeouts = [profile.docker.startup_timeout_seconds]
+    timeouts.extend(
+        timeout
+        for companion in companions
+        if (timeout := _companion_compose_up_timeout_seconds(companion)) is not None
+    )
+    return max(timeouts)
+
+
+def _companion_compose_up_timeout_seconds(
+    companion: MaterializedCompanionService | WorkspaceCompanionSpec,
+) -> int | None:
+    """Return a companion timeout from either materialized or parsed specs."""
+    if isinstance(companion, MaterializedCompanionService):
+        return companion.spec.compose_up_timeout_seconds
+    return companion.compose_up_timeout_seconds

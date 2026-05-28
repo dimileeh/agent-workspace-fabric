@@ -174,6 +174,28 @@ def test_workspace_companion_environment_keys_document_docker_names(
 
 
 @pytest.mark.unit
+def test_workspace_companion_environment_secret_keys_document_docker_names(
+    openapi_spec: dict,
+) -> None:
+    environment_secrets = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"][
+        "properties"
+    ]["environment_secrets"]
+
+    assert environment_secrets["propertyNames"]["pattern"] == "^[A-Za-z_][A-Za-z0-9_]*$"
+
+
+@pytest.mark.unit
+def test_workspace_companion_compose_timeout_documents_bounds(openapi_spec: dict) -> None:
+    timeout_schema = openapi_spec["components"]["schemas"]["WorkspaceCompanionRequest"][
+        "properties"
+    ]["compose_up_timeout_seconds"]
+    integer_schema = next(item for item in timeout_schema["anyOf"] if item.get("type") == "integer")
+
+    assert integer_schema["minimum"] == 1
+    assert integer_schema["maximum"] == 1800
+
+
+@pytest.mark.unit
 def test_workspace_validation_commands_are_non_empty_in_openapi(openapi_spec: dict) -> None:
     command_items = openapi_spec["components"]["schemas"]["WorkspaceValidation"]["properties"][
         "commands"
