@@ -277,6 +277,59 @@ services:
 
 
 @pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_yaml_boolean_service_name_as_string(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  on:
+    image: ghcr.io/example/on:latest
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "on",
+                    "repo_url": "git@github.com:x/on.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_yaml_boolean_service",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(rendered)
+    services = parsed["services"]
+    assert "on" in services
+    assert True not in services
+    assert services["on"]["image"] == "ghcr.io/example/on:latest"
+    assert "environment" not in services["on"]
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "true:" not in rendered
+    assert "raw-optional-secret" not in rendered
+
+
+@pytest.mark.unit
 def test_companion_env_secret_refresh_logs_warning_when_reformatting_compose_file(
     tmp_path: Path,
 ) -> None:

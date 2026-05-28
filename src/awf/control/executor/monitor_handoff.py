@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode, ScalarNode
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text
@@ -104,6 +106,52 @@ from awf.runtime.validation import (
 
 class _ComposeInterpolationPreservingDumper(yaml.SafeDumper):
     """Safe YAML dumper that keeps Compose interpolation scalars active."""
+
+
+class _ComposeStringKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that keeps Compose scalar mapping keys as strings."""
+
+
+def _construct_compose_string_key_mapping(
+    loader: _ComposeStringKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    if not isinstance(node, MappingNode):
+        raise ConstructorError(
+            None,
+            None,
+            f"expected a mapping node, but found {node.id}",
+            node.start_mark,
+        )
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key: Any
+        if isinstance(key_node, ScalarNode):
+            key = key_node.value
+        else:
+            key = loader.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            ) from exc
+        mapping[key] = loader.construct_object(  # type: ignore[no-untyped-call]
+            value_node,
+            deep=deep,
+        )
+    return mapping
+
+
+_ComposeStringKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_compose_string_key_mapping,
+)
 
 
 def _represent_compose_interpolation_string(
@@ -398,7 +446,7 @@ def _refresh_optional_companion_env_secrets_for_resume(
         return
 
     try:
-        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
     except OSError:
         _log.warning(
             "executor.resume_companion_env_secret_refresh_read_failed",
@@ -467,6 +515,10 @@ def _safe_dump_compose_payload_for_resume(payload: object) -> str:
         Dumper=_ComposeInterpolationPreservingDumper,
         sort_keys=False,
     )
+
+
+def _safe_load_compose_payload_for_resume(text: str) -> object:
+    return yaml.load(text, Loader=_ComposeStringKeySafeLoader)
 
 
 def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
