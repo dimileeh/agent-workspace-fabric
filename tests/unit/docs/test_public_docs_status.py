@@ -125,26 +125,29 @@ def test_project_onboarding_docs_make_awf_init_primary() -> None:
 
 
 def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None:
-    public_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (
-            README_PATH,
-            REPO_ROOT / "docs" / "QUICKSTART.md",
-            REPO_ROOT / "docs" / "GETTING_STARTED.md",
-            REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md",
-            REPO_ROOT / "docs" / "CLI_REFERENCE.md",
-        )
-    )
+    public_paths = [Path("README.md"), *map(Path, sorted(_public_docs()))]
     forbidden_patterns = [
         r"`awf init`\s+without a path",
         r"`awf init`\s+\(no path\)",
-        r"awf init\s+#\s+.*bootstrap",
+        r"(?m)^\s*awf init\s*(?:#\s*.*bootstrap.*)?$",
+        r"`awf init`\s+or\s+`awf service bootstrap`",
+        r"after `awf init` or `awf service bootstrap`",
+        r"`awf init`\s+writes the local service environment",
         r"run `awf init` to verify prerequisites and bootstrap",
         r"`awf init`\. With no arguments it bootstraps",
     ]
 
-    for pattern in forbidden_patterns:
-        assert not re.search(pattern, public_text, flags=re.IGNORECASE), pattern
+    offenders: list[str] = []
+    public_texts: list[str] = []
+    for rel_path in public_paths:
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        public_texts.append(text)
+        for pattern in forbidden_patterns:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                offenders.append(f"{rel_path}: {pattern}")
+
+    public_text = "\n".join(public_texts)
+    assert not offenders
     assert "awf setup" in public_text
     assert "awf start" in public_text
 

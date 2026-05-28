@@ -11,7 +11,8 @@ Install AWF and start the local Core service first:
 ```bash
 uv tool install agent-workspace-fabric
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf init
+awf setup
+awf start
 awf service status --format pretty
 ```
 
@@ -22,14 +23,21 @@ git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv tool install . --force
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf init
+awf setup
+awf start
 awf service status --format pretty
 ```
 
-In source checkouts, `awf init` writes the local service environment to
-`docker/compose/.env`. Package installs may use `.env` near the working
-directory instead. Pass the env file explicitly when configuring MCP so the MCP
-process sees the same database and token settings as the local service.
+If you need the lower-level source-checkout recovery command, run
+`awf service bootstrap` explicitly and then check `awf service status`. Source
+checkouts use `docker/compose/.env` as the local service environment; package
+installs may use `.env` near the working directory instead. Pass the env file
+explicitly when configuring MCP so the MCP process sees the same database and
+token settings as the local service.
+
+Project onboarding is separate from service startup. After local Core is
+running, use `awf init <path>` when you want AWF to create or validate a
+repository's `.awf/workspace.yml`.
 
 ## Claude Code
 

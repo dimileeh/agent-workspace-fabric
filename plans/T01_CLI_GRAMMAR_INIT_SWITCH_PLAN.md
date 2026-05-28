@@ -41,6 +41,23 @@ bootstrap wrapping belong to later backlog tasks.
 
 ## Implementation Steps
 
+### Iteration 1 Plan-Conformance Gap Closure
+
+This iteration follows the same T01 scope, with the additional conformance
+contract from `docs/awf-plans/ws_a829bac6193d48be8b2a4f14.md`:
+
+- Update the docs guard so no-path `awf init` service-bootstrap guidance fails
+  when it appears in any discovered public docs, including
+  `docs/MCP_SETUP.md` and `docs/TROUBLESHOOTING.md`.
+- Update `docs/MCP_SETUP.md` to use the locked grammar: `awf setup`, `awf start`,
+  and `awf init <path>` for project onboarding; keep explicit lower-level
+  `awf service bootstrap` guidance only where it is framed as service recovery.
+- Update `docs/TROUBLESHOOTING.md` service-bootstrap failure guidance so users
+  recover services with `awf service bootstrap` and run `awf init <path>` only
+  after bootstrap succeeds for project onboarding.
+- Run focused docs tests plus the existing setup/start/init command tests touched
+  by T01. Full AWF/GitHub validation remains owned by AWF after agent completion.
+
 1. Add failing TDD tests for:
    - `awf setup --help` and `awf setup` placeholder output.
    - `awf start --help` and `awf start` placeholder output.
