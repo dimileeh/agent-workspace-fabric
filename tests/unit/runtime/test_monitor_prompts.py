@@ -577,6 +577,9 @@ class TestFixCiPrompt:
 
         prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
 
+        summary_index = prompt.index("Error summaries:")
+        raw_log_index = prompt.index("source_kind: github_check_log")
+        assert summary_index < raw_log_index
         assert "Error summaries:" in prompt
         assert "Coverage below required threshold" in prompt
         assert "Combined line+branch coverage 98.87% is below required 99.00%" in prompt
