@@ -242,6 +242,7 @@ class Provisioner:
                 failure_reason=FailureReason.profile_resolution_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                reason_code=exc.reason_code,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -674,6 +675,10 @@ def _stack_secret_lease_mount_metadata(
         "omitted_optional_count",
         "omitted_optional",
         "skipped_unresolved_count",
+        "companion_env_secret_count",
+        "companion_env_secrets",
+        "companion_omitted_optional_env_secret_count",
+        "companion_omitted_optional_env_secrets",
     ):
         if key in plan_metadata:
             metadata[key] = plan_metadata[key]

@@ -10,6 +10,7 @@ from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_services import (
     MaterializedCompanionService,
+    companion_env_secret_stack_metadata,
     companion_service_from_materialized,
     validate_companion_service_graph,
 )
@@ -144,6 +145,7 @@ class ComposeStackLauncher:
                 companion_service_from_materialized(companion) for companion in request.companions
             )
         )
+        companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
         if secret_lease_resolution is not None:
             agent_environment = agent_environment_with_declared_secret_leases(
@@ -180,10 +182,26 @@ class ComposeStackLauncher:
                     msg = f"{msg}: {detail}"
                 raise WorkspaceServiceExecutionError(msg) from e
             raise
-        if secret_lease_resolution is None:
+        secret_metadata = _stack_secret_metadata(
+            secret_lease_resolution=secret_lease_resolution,
+            companion_secret_metadata=companion_secret_metadata,
+        )
+        if not secret_metadata:
             return paths
         return ComposeProjectPaths(
             project_dir=paths.project_dir,
             compose_file=paths.compose_file,
-            secret_lease_mount_metadata=secret_lease_resolution.metadata,
+            secret_lease_mount_metadata=secret_metadata,
         )
+
+
+def _stack_secret_metadata(
+    *,
+    secret_lease_resolution: LocalSecretLeaseResolution | None,
+    companion_secret_metadata: dict[str, object],
+) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    if secret_lease_resolution is not None:
+        metadata.update(dict(secret_lease_resolution.metadata))
+    metadata.update(companion_secret_metadata)
+    return metadata

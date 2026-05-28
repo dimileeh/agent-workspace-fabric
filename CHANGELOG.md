@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added companion `environment_secrets` for env-backed companion service
+  secrets, while clarifying that literal companion `environment` values reject
+  Docker Compose interpolation.
 - Canonicalized the first-run quickstart and added upgrade documentation.
 - Improved DX-oriented CLI pretty output for profile preview and Core release
   readiness.

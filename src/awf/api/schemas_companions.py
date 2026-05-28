@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awf.common.companions import (
     RESERVED_COMPANION_SERVICE_NAMES,
@@ -41,6 +41,17 @@ _ENVIRONMENT_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+class CompanionEnvironmentSecretRequest(BaseModel):
+    """Env-backed secret reference for a companion container environment key."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider: Literal["env"] = "env"
+    kind: Literal["env"] = "env"
+    value_from: EnvironmentKey
+    required: bool = True
 
 
 def _validate_companion_repo_relative_path(field_name: str, value: str) -> None:
@@ -142,6 +153,14 @@ class WorkspaceCompanionRequest(BaseModel):
             "interpolation syntax such as $VAR and ${VAR} is rejected."
         ),
     )
+    environment_secrets: dict[EnvironmentKey, CompanionEnvironmentSecretRequest] = Field(
+        default_factory=dict,
+        description=(
+            "Env-backed secret references for companion container environment variables. "
+            "Values are resolved by AWF from the worker environment and must not contain "
+            "raw secret values."
+        ),
+    )
     depends_on: list[ServiceName] = Field(default_factory=list, max_length=64)
     healthcheck_cmd: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = (
         None
@@ -195,6 +214,28 @@ class WorkspaceCompanionRequest(BaseModel):
                     "interpolation syntax"
                 )
         return value
+
+    @field_validator("environment_secrets", mode="before")
+    @classmethod
+    def _validate_environment_secret_keys(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            for key in value:
+                if not isinstance(key, str) or not _ENVIRONMENT_KEY_PATTERN.fullmatch(key):
+                    raise ValueError(
+                        "companion environment secret keys must be Docker-compatible "
+                        "environment variable names"
+                    )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_environment_secret_overlap(self) -> WorkspaceCompanionRequest:
+        overlap = sorted(set(self.environment) & set(self.environment_secrets))
+        if overlap:
+            raise ValueError(
+                "companion environment and environment_secrets keys must not overlap: "
+                f"{', '.join(overlap)}"
+            )
+        return self
 
     @field_validator("healthcheck_cmd")
     @classmethod

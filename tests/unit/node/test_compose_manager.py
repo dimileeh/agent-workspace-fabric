@@ -256,6 +256,40 @@ class TestRender:
         }
 
     @pytest.mark.unit
+    def test_dind_companion_environment_secret_placeholder_is_rendered_without_raw_value(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-secret-value")
+        spec = _spec(
+            tmp_path,
+            docker_mode="dind",
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    environment=(("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),),
+                    depends_on=("docker",),
+                    healthcheck_cmd="curl -fsS http://localhost:8000/healthz",
+                ),
+            ),
+        )
+
+        rendered = manager.render(spec).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
+
+        assert parsed["services"]["docker"]["image"] == "docker:27-dind"
+        assert parsed["services"]["backend"]["depends_on"] == {
+            "docker": {"condition": "service_healthy"}
+        }
+        assert parsed["services"]["backend"]["environment"] == {
+            "AIRA_API_KEY": "${ANTHROPIC_API_KEY}"
+        }
+        assert "raw-secret-value" not in rendered
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.

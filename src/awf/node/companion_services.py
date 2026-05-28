@@ -18,6 +18,20 @@ from awf.node.git_manager import WorktreeLayout
 from awf.profiles.models import DockerMode
 from awf.profiles.resolver import ProfileResolutionError
 
+COMPANION_ENV_SECRET_SOURCE_MISSING = "COMPANION_ENV_SECRET_SOURCE_MISSING"
+COMPANION_ENV_SECRET_UNSUPPORTED = "COMPANION_ENV_SECRET_UNSUPPORTED"
+
+
+@dataclass(frozen=True)
+class CompanionEnvironmentSecretRef:
+    """Env-backed secret reference for one companion environment target."""
+
+    target: str
+    provider: str = "env"
+    kind: str = "env"
+    value_from: str = ""
+    required: bool = True
+
 
 @dataclass(frozen=True)
 class WorkspaceCompanionSpec:
@@ -30,6 +44,7 @@ class WorkspaceCompanionSpec:
     dockerfile: str = "Dockerfile"
     env_file: str | None = None
     environment: tuple[tuple[str, str], ...] = ()
+    environment_secrets: tuple[CompanionEnvironmentSecretRef, ...] = ()
     depends_on: tuple[str, ...] = ()
     healthcheck_cmd: str | None = None
     ports: tuple[tuple[int, int], ...] = ()
@@ -59,11 +74,17 @@ def companion_specs_from_task_policy(
 
 def companion_service_from_materialized(
     companion: MaterializedCompanionService,
+    *,
+    host_env: Mapping[str, str] | None = None,
 ) -> CompanionService:
     """Convert a materialized companion checkout into a Compose service."""
     spec = companion.spec
     root = companion.layout.worktree_path
     build_context = _resolve_repo_path(spec.build_context, root=root)
+    secret_environment, secret_metadata = _resolve_environment_secrets(
+        spec,
+        host_env=os.environ if host_env is None else host_env,
+    )
     return CompanionService(
         name=spec.name,
         build_context=build_context,
@@ -75,7 +96,7 @@ def companion_service_from_materialized(
         env_file=(
             _resolve_repo_path(spec.env_file, root=root) if spec.env_file is not None else None
         ),
-        environment=spec.environment,
+        environment=(*spec.environment, *secret_environment),
         depends_on=spec.depends_on,
         healthcheck_cmd=spec.healthcheck_cmd,
         ports=spec.ports,
@@ -83,7 +104,38 @@ def companion_service_from_materialized(
         volumes=tuple(
             (_resolve_volume_source(source, root=root), target) for source, target in spec.volumes
         ),
+        secret_metadata=secret_metadata,
     )
+
+
+def companion_env_secret_stack_metadata(
+    companions: tuple[CompanionService, ...],
+) -> dict[str, object]:
+    """Aggregate non-secret companion env secret metadata for stack records."""
+    env_secrets: list[dict[str, object]] = []
+    omitted_optional: list[dict[str, object]] = []
+    for companion in companions:
+        metadata = companion.secret_metadata
+        env_secrets.extend(
+            dict(item) for item in metadata.get("env_secrets", ()) if isinstance(item, Mapping)
+        )
+        omitted_optional.extend(
+            dict(item)
+            for item in metadata.get("omitted_optional_env_secrets", ())
+            if isinstance(item, Mapping)
+        )
+
+    if not env_secrets and not omitted_optional:
+        return {}
+
+    payload: dict[str, object] = {
+        "companion_env_secret_count": len(env_secrets),
+        "companion_env_secrets": tuple(env_secrets),
+    }
+    if omitted_optional:
+        payload["companion_omitted_optional_env_secret_count"] = len(omitted_optional)
+        payload["companion_omitted_optional_env_secrets"] = tuple(omitted_optional)
+    return payload
 
 
 def validate_companion_service_graph(
@@ -280,6 +332,10 @@ def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionS
         environment=tuple(
             (str(key), str(value)) for key, value in _mapping_items(item.get("environment"))
         ),
+        environment_secrets=tuple(
+            _environment_secret_ref(target, value)
+            for target, value in _mapping_items(item.get("environment_secrets"))
+        ),
         depends_on=tuple(
             str(value)
             for value in _depends_on_items_or_empty(item.get("depends_on"))
@@ -293,6 +349,80 @@ def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionS
         volumes=tuple(
             _volume_pair(value) for value in _sequence_items_or_empty(item.get("volumes"))
         ),
+    )
+
+
+def _resolve_environment_secrets(
+    spec: WorkspaceCompanionSpec,
+    *,
+    host_env: Mapping[str, str],
+) -> tuple[tuple[tuple[str, str], ...], dict[str, object]]:
+    if not spec.environment_secrets:
+        return (), {}
+
+    environment: list[tuple[str, str]] = []
+    env_secret_metadata: list[dict[str, object]] = []
+    omitted_optional: list[dict[str, object]] = []
+    literal_targets = {key for key, _ in spec.environment}
+    for secret in spec.environment_secrets:
+        if secret.target in literal_targets:
+            raise ProfileResolutionError(
+                "companion environment and environment_secrets keys must not overlap: "
+                f"{secret.target}",
+                reason_code="COMPANION_ENV_SECRET_TARGET_OVERLAP",
+            )
+        if secret.provider != "env" or secret.kind != "env":
+            raise ProfileResolutionError(
+                "companion environment secret references currently support only "
+                f"provider=env and kind=env: companion={spec.name}, target={secret.target}",
+                reason_code=COMPANION_ENV_SECRET_UNSUPPORTED,
+            )
+        secret_metadata = _environment_secret_metadata(spec.name, secret)
+        if host_env.get(secret.value_from):
+            environment.append((secret.target, f"${{{secret.value_from}}}"))
+            env_secret_metadata.append(secret_metadata)
+            continue
+        if secret.required:
+            raise ProfileResolutionError(
+                f"{COMPANION_ENV_SECRET_SOURCE_MISSING}: companion={spec.name}, "
+                f"target={secret.target}, provider={secret.provider}, source={secret.value_from}",
+                reason_code=COMPANION_ENV_SECRET_SOURCE_MISSING,
+            )
+        omitted_optional.append(secret_metadata)
+
+    payload: dict[str, object] = {
+        "schema": "companion_env_secret_metadata.v1",
+        "env_secret_count": len(env_secret_metadata),
+        "env_secrets": tuple(env_secret_metadata),
+    }
+    if omitted_optional:
+        payload["omitted_optional_env_secret_count"] = len(omitted_optional)
+        payload["omitted_optional_env_secrets"] = tuple(omitted_optional)
+    return tuple(environment), payload
+
+
+def _environment_secret_metadata(
+    companion_name: str,
+    secret: CompanionEnvironmentSecretRef,
+) -> dict[str, object]:
+    return {
+        "companion": companion_name,
+        "target": secret.target,
+        "provider": secret.provider,
+        "source": secret.value_from,
+        "required": secret.required,
+    }
+
+
+def _environment_secret_ref(target: object, value: object) -> CompanionEnvironmentSecretRef:
+    if not isinstance(value, Mapping):
+        return CompanionEnvironmentSecretRef(target=str(target), value_from="")
+    return CompanionEnvironmentSecretRef(
+        target=str(target),
+        provider=str(value.get("provider") or "env"),
+        kind=str(value.get("kind") or "env"),
+        value_from=str(value.get("value_from") or ""),
+        required=bool(value.get("required", True)),
     )
 
 

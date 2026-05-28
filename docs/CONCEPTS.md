@@ -924,6 +924,13 @@ Example REST/MCP companion request:
   "dockerfile": "Dockerfile",
   "env_file": "config/dev.env",
   "environment": {"APP_ENV": "test"},
+  "environment_secrets": {
+    "AIRA_API_KEY": {
+      "provider": "env",
+      "kind": "env",
+      "value_from": "ANTHROPIC_API_KEY"
+    }
+  },
   "depends_on": ["docker"],
   "healthcheck_cmd": "curl -fsS http://localhost:8000/health",
   "ports": [[8000, 18000]],
@@ -937,6 +944,11 @@ Example REST/MCP companion request:
 managed companion checkout; absolute host paths and `..` escapes are rejected.
 Companion service names cannot collide with profile services or reserved
 services such as `agent` and `docker`.
+
+Companion `environment` values are literal and reject Docker Compose
+interpolation such as `$VAR` or `${VAR}`. To pass a host-managed env secret to a
+companion, use `environment_secrets`; AWF stores only the source env var name,
+then renders an AWF-generated Compose placeholder during stack launch.
 
 Companions share the parent workspace resource reservation and lifecycle. AWF
 keeps companion worktrees while the parent workspace is active, removes them

@@ -128,6 +128,12 @@ class CompanionService:
     volumes: tuple[tuple[str, str], ...] = ()
     """Extra ``source:target`` bind mounts for the companion."""
 
+    secret_metadata: Mapping[str, Any] = field(default_factory=dict)
+    """Non-secret metadata about companion env secret resolution."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "secret_metadata", frozen_mapping(self.secret_metadata))
+
 
 @dataclass(frozen=True)
 class ComposeService:
