@@ -359,6 +359,7 @@ def _resolve_environment_secrets(
     *,
     host_env: Mapping[str, str],
 ) -> tuple[tuple[tuple[str, str], ...], dict[str, object]]:
+    """Resolve declared host-env secret sources into Compose env placeholders."""
     if not spec.environment_secrets:
         return (), {}
 
@@ -407,6 +408,7 @@ def _environment_secret_compose_ref(
     companion_name: str,
     secret: CompanionEnvironmentSecretRef,
 ) -> str:
+    """Build the Compose interpolation expression for one env-backed secret."""
     if not secret.required:
         return f"${{{secret.value_from}}}"
     return (
@@ -420,6 +422,7 @@ def _environment_secret_metadata(
     companion_name: str,
     secret: CompanionEnvironmentSecretRef,
 ) -> dict[str, object]:
+    """Return non-secret provenance for one companion env secret reference."""
     return {
         "companion": companion_name,
         "target": secret.target,
@@ -430,6 +433,7 @@ def _environment_secret_metadata(
 
 
 def _environment_secret_ref(target: object, value: object) -> CompanionEnvironmentSecretRef:
+    """Parse one task-policy environment secret entry into a typed reference."""
     if not isinstance(value, Mapping):
         raise ValueError(f"companion environment_secrets entry for {target} must be a mapping")
     return CompanionEnvironmentSecretRef(
@@ -448,6 +452,7 @@ def _mapping_items(value: object) -> tuple[tuple[object, object], ...]:
 
 
 def _optional_int(value: object) -> int | None:
+    """Coerce optional task-policy integer fields while preserving invalid omissions."""
     if value is None:
         return None
     if isinstance(value, int):

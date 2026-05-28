@@ -82,6 +82,7 @@ class Provisioner:
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
     ) -> None:
+        """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
         self._git = git
         self._config = config

@@ -48,7 +48,9 @@ class WorkspaceStackLaunchRequest:
 class WorkspaceStackLauncher(Protocol):
     """Small seam for provisioning tests to avoid requiring Docker."""
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None: ...
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Launch the workspace stack and return rendered compose paths when used."""
+        ...
 
 
 class WorkspaceSecretLeaseResolver(Protocol):
@@ -59,7 +61,9 @@ class WorkspaceSecretLeaseResolver(Protocol):
         profile: WorkspaceProfile,
         *,
         workspace_id: str,
-    ) -> LocalSecretLeaseResolution: ...
+    ) -> LocalSecretLeaseResolution:
+        """Resolve local secret lease mounts and environment for one workspace."""
+        ...
 
 
 class WorkspaceServiceExecutionError(Exception):
@@ -79,12 +83,14 @@ class ComposeStackLauncher:
         auth_mount_resolver: WorkspaceAuthMountResolver | None = None,
         secret_lease_resolver: WorkspaceSecretLeaseResolver | None = None,
     ) -> None:
+        """Wire stack launch dependencies and optional credential resolvers."""
         self._compose = compose
         self._agent_runtime_image = agent_runtime_image
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
+        """Render and start the profile stack, including companions and secret metadata."""
         layout = request.layout
         profile = request.profile
         egress_plan = local_egress_plan(profile.security.egress)
@@ -206,6 +212,7 @@ def _stack_secret_metadata(
     secret_lease_resolution: LocalSecretLeaseResolution | None,
     companion_secret_metadata: dict[str, object],
 ) -> dict[str, object]:
+    """Merge profile secret lease metadata with companion env secret metadata."""
     metadata: dict[str, object] = {}
     if secret_lease_resolution is not None:
         metadata.update(dict(secret_lease_resolution.metadata))
@@ -232,6 +239,7 @@ def effective_compose_up_timeout_seconds(
 def _companion_compose_up_timeout_seconds(
     companion: MaterializedCompanionService | WorkspaceCompanionSpec,
 ) -> int | None:
+    """Return a companion timeout from either materialized or parsed specs."""
     if isinstance(companion, MaterializedCompanionService):
         return companion.spec.compose_up_timeout_seconds
     return companion.compose_up_timeout_seconds

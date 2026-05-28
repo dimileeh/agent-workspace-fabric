@@ -58,6 +58,7 @@ class ComposeOperationError(Exception):
         stderr: str,
         reason_code: str = "COMPOSE_COMMAND_FAILED",
     ) -> None:
+        """Capture the failed compose operation and its diagnostic streams."""
         self.operation = operation
         self.returncode = returncode
         self.stdout = stdout
@@ -133,6 +134,7 @@ class CompanionService:
     """Non-secret metadata about companion env secret resolution."""
 
     def __post_init__(self) -> None:
+        """Freeze secret metadata so rendered stack records remain immutable."""
         object.__setattr__(self, "secret_metadata", frozen_mapping(self.secret_metadata))
 
 
@@ -181,16 +183,20 @@ class WorkspaceComposeSpec:
     compose_up_timeout_seconds: int = 300
 
     def project_name(self) -> str:
+        """Return the deterministic Docker Compose project name for the workspace."""
         return f"awf_{self.workspace_id}"
 
 
 @dataclass(frozen=True)
 class ComposeProjectPaths:
+    """Rendered compose project locations and non-secret launch metadata."""
+
     project_dir: Path
     compose_file: Path
     secret_lease_mount_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Freeze metadata returned to control-plane records."""
         object.__setattr__(
             self,
             "secret_lease_mount_metadata",
@@ -207,7 +213,6 @@ def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
     same project/file pair and avoids failing workspaces on a malformed local
     CLI dispatch.
     """
-
     return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
@@ -215,6 +220,7 @@ class ComposeManager:
     """Renders, launches, and tears down per-workspace compose stacks."""
 
     def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+        """Prepare the compose project directory and Jinja template loader."""
         self._projects_dir = work_dir / "compose"
         template_dir = template_path.parent
         self._env = Environment(

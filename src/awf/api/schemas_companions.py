@@ -235,6 +235,7 @@ class WorkspaceCompanionRequest(BaseModel):
     @field_validator("environment_secrets", mode="before")
     @classmethod
     def _validate_environment_secret_keys(cls, value: Any) -> Any:
+        """Reject secret target keys that Docker Compose cannot export."""
         if isinstance(value, Mapping):
             for key in value:
                 if not isinstance(key, str) or not _ENVIRONMENT_KEY_PATTERN.fullmatch(key):
@@ -246,6 +247,7 @@ class WorkspaceCompanionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_environment_secret_overlap(self) -> WorkspaceCompanionRequest:
+        """Reject ambiguous keys supplied as both literals and env-backed secrets."""
         overlap = sorted(set(self.environment) & set(self.environment_secrets))
         if overlap:
             raise ValueError(
