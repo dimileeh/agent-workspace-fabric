@@ -14,10 +14,10 @@ import shlex as shlex
 import tempfile as tempfile
 import time as time
 import traceback as traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from yaml.constructor import ConstructorError
@@ -125,13 +125,14 @@ def _construct_compose_string_key_mapping(
             node.start_mark,
         )
     loader.flatten_mapping(node)
+    construct_object = cast(Callable[..., Any], loader.construct_object)
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key: Any
         if isinstance(key_node, ScalarNode):
             key = key_node.value
         else:
-            key = loader.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
+            key = construct_object(key_node, deep=deep)
         try:
             hash(key)
         except TypeError as exc:
@@ -141,7 +142,7 @@ def _construct_compose_string_key_mapping(
                 "found unhashable key",
                 key_node.start_mark,
             ) from exc
-        mapping[key] = loader.construct_object(  # type: ignore[no-untyped-call]
+        mapping[key] = construct_object(
             value_node,
             deep=deep,
         )
