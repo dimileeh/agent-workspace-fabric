@@ -168,6 +168,61 @@ services:
 
 
 @pytest.mark.unit
+def test_companion_env_secret_refresh_logs_warning_when_reformatting_compose_file(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+# operator note
+services:
+  backend:
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_reformat_warning",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_reformatted"
+        and entry["workspace_id"] == "ws_reformat_warning"
+        and entry["compose_file"] == str(compose_file)
+        and entry["removed_count"] == 1
+        and entry["restored_count"] == 0
+        for entry in captured
+    )
+    rendered = compose_file.read_text(encoding="utf-8")
+    assert "OPTIONAL_TOKEN" not in rendered
+    assert "operator note" not in rendered
+
+
+@pytest.mark.unit
 def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,6 +256,28 @@ def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
         environ={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
     ) == {"backend": {"OPTIONAL_TOKEN": "${CANONICAL:-sentinel}"}}
     assert captured == ["OPTIONAL_TOKEN_SOURCE"]
+
+
+@pytest.mark.unit
+def test_present_optional_companion_env_secret_refs_preserves_empty_source() -> None:
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:api.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    value_from="OPTIONAL_TOKEN_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+    )
+
+    assert executor_monitor_handoff._present_optional_companion_env_secret_refs(
+        companion_specs=companion_specs,
+        environ={"OPTIONAL_TOKEN_SOURCE": ""},
+    ) == {"backend": {"OPTIONAL_TOKEN": "${OPTIONAL_TOKEN_SOURCE:-}"}}
 
 
 @pytest.mark.unit

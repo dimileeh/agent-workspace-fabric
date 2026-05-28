@@ -426,6 +426,17 @@ def _refresh_optional_companion_env_secrets_for_resume(
             compose_file=str(compose_file),
         )
         return
+    _log.warning(
+        "executor.resume_companion_env_secret_refresh_reformatted",
+        workspace_id=workspace_id,
+        compose_file=str(compose_file),
+        removed_count=removed_count,
+        restored_count=restored_count,
+        detail=(
+            "optional companion env-secret refresh rewrote the compose file; "
+            "comments, block-scalar style, and explicit null markers are not preserved"
+        ),
+    )
     if removed_count:
         _log.info(
             "executor.resume_companion_optional_env_secrets_omitted",
