@@ -191,6 +191,35 @@ def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_tar
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_value_from() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "companion environment_secrets value_from for 'AIRA_API_KEY' "
+            "must be a Docker-compatible"
+        ),
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY}",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None:
     spec = companion_specs_from_task_policy(
         {

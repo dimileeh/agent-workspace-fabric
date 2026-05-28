@@ -444,11 +444,17 @@ def _environment_secret_ref(target: object, value: object) -> CompanionEnvironme
         )
     if not isinstance(value, Mapping):
         raise ValueError(f"companion environment_secrets entry for {target} must be a mapping")
+    value_from = str(value.get("value_from") or "")
+    if not _ENVIRONMENT_KEY_PATTERN.fullmatch(value_from):
+        raise ValueError(
+            f"companion environment_secrets value_from for {target!r} must be a "
+            "Docker-compatible environment variable name"
+        )
     return CompanionEnvironmentSecretRef(
         target=target,
         provider=str(value.get("provider") or "env"),
         kind=str(value.get("kind") or "env"),
-        value_from=str(value.get("value_from") or ""),
+        value_from=value_from,
         required=bool(value.get("required", True)),
     )
 
