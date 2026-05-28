@@ -162,7 +162,6 @@ def validate_source_checkout(
             root=resolved_root,
             missing_markers=tuple(missing_markers),
             details=_source_checkout_details(
-                missing_markers=tuple(missing_markers),
                 unreadable_paths=tuple(unreadable_paths),
             ),
         )
@@ -289,13 +288,10 @@ def _validate_root_readable(root: Path) -> None:
 
 def _source_checkout_details(
     *,
-    missing_markers: tuple[str, ...],
     unreadable_paths: tuple[str, ...],
 ) -> dict[str, object]:
     """Return compact details for missing or unreadable checkout assets."""
     details: dict[str, object] = {}
-    if missing_markers:
-        details["missing_markers"] = list(missing_markers)
     if unreadable_paths:
         details["unreadable_paths"] = list(unreadable_paths)
     return details

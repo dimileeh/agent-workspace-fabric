@@ -30,19 +30,22 @@ from awf.host_setup import (
     write_host_setup_config,
 )
 from awf.host_setup.config import _ensure_no_secret_payload, _SecretPayloadError
-from awf.host_setup.source_assets import SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS
+from awf.host_setup.source_assets import (
+    SOURCE_CHECKOUT_MARKERS,
+    SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS,
+)
 
 _FIXED_NOW = datetime(2026, 5, 28, 12, 0, tzinfo=UTC)
 
 
 def _write_valid_source_checkout(root: Path) -> Path:
-    for marker in SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS:
-        path = root / marker
-        if marker == "docs":
-            path.mkdir(parents=True)
+    for marker in SOURCE_CHECKOUT_MARKERS:
+        path = root / marker.path
+        if marker.kind == "dir":
+            path.mkdir(parents=True, exist_ok=True)
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{marker}\n", encoding="utf-8")
+        path.write_text(f"{marker.path}\n", encoding="utf-8")
     return root
 
 
@@ -490,6 +493,7 @@ def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) 
     assert error.root == checkout.resolve()
     assert error.missing_markers == ("RELEASING.md",)
     assert error.to_dict()["missing_markers"] == ["RELEASING.md"]
+    assert "details" not in error.to_dict()
 
 
 @pytest.mark.unit
@@ -506,6 +510,7 @@ def test_source_checkout_requires_workspace_compose_template(tmp_path: Path) -> 
     assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
     assert error.missing_markers == ("docker/compose/workspace.base.yml.j2",)
     assert error.to_dict()["missing_markers"] == ["docker/compose/workspace.base.yml.j2"]
+    assert "details" not in error.to_dict()
 
 
 @pytest.mark.unit
