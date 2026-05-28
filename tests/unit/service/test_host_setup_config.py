@@ -339,6 +339,92 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_host_setup_config_reads_missing_and_empty_yaml_as_defaults(tmp_path: Path) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+
+    assert read_host_setup_config(path=config_path) == HostSetupConfig()
+
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("", encoding="utf-8")
+
+    assert read_host_setup_config(path=config_path) == HostSetupConfig()
+
+
+@pytest.mark.unit
+def test_host_setup_config_rejects_non_mapping_yaml(tmp_path: Path) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("- not-a-mapping\n", encoding="utf-8")
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "non_mapping_yaml"}
+
+
+@pytest.mark.unit
+def test_provider_config_accepts_missing_ref_and_rejects_unsafe_ref() -> None:
+    assert ProviderConfig(credential_ref=None).credential_ref is None
+
+    with pytest.raises(ValidationError) as exc_info:
+        ProviderConfig(credential_ref="literal-token-file")
+
+    assert "literal-token-file" not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_host_setup_config_read_wraps_unsupported_version(tmp_path: Path) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("version: 2\n", encoding="utf-8")
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.details == {
+        "error_count": 1,
+        "error_types": ["value_error"],
+        "locations": ["version"],
+    }
+    assert "unsupported host setup config version" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_host_setup_config_read_wraps_validation_secret_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "version: 1\nproviders:\n  github:\n    credential_ref: ghp_raw_secret\n",
+        encoding="utf-8",
+    )
+
+    def _allow_secret_payload(value: object) -> None:
+        del value
+
+    monkeypatch.setattr(host_setup_config, "_ensure_no_secret_payload", _allow_secret_payload)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    assert error.details == {
+        "error_count": 1,
+        "error_types": ["value_error"],
+        "locations": ["providers.github.credential_ref"],
+    }
+    assert "ghp_raw_secret" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> None:
     raw_secret_key = "ghp_raw_secret"
     safe_provider = ProviderConfig(credential_ref="env://GITHUB_TOKEN")
@@ -492,6 +578,31 @@ def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> Non
 
 
 @pytest.mark.unit
+def test_secret_payload_scan_rejects_recursive_mappings() -> None:
+    payload: dict[str, object] = {}
+    payload["self"] = payload
+
+    with pytest.raises(host_setup_config._RecursivePayloadError) as exc_info:
+        _ensure_no_secret_payload(payload)
+
+    assert exc_info.value.details() == {
+        "error_type": "recursive_yaml_alias",
+        "path": "self",
+    }
+
+
+@pytest.mark.unit
+def test_secret_payload_scan_tracks_non_string_mapping_keys() -> None:
+    with pytest.raises(_SecretPayloadError) as exc_info:
+        _ensure_no_secret_payload({1: ["sk-raw-secret-value"]})
+
+    assert exc_info.value.details() == {
+        "issue": "secret-like value",
+        "path": "1.[0]",
+    }
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "raw_secret",
     [
@@ -550,6 +661,64 @@ def test_unreadable_config_exists_check_is_reason_coded(
     assert error.path == config_path
     assert error.details == {"error_type": "PermissionError"}
     assert "permission denied" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_host_setup_error_to_dict_omits_empty_details(tmp_path: Path) -> None:
+    error = HostSetupConfigError(
+        reason_code="HOST_SETUP_CONFIG_CORRUPT",
+        message="Host setup config is corrupt or unsupported.",
+        path=tmp_path / "config.yml",
+    )
+
+    assert error.to_dict() == {
+        "status": "failed",
+        "reason_code": "HOST_SETUP_CONFIG_CORRUPT",
+        "message": "Host setup config is corrupt or unsupported.",
+        "path": str(tmp_path / "config.yml"),
+    }
+
+
+@pytest.mark.unit
+def test_config_path_helpers_handle_resolution_and_platform_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yml"
+
+    def _default_path_unavailable() -> Path:
+        raise HostSetupConfigError(
+            reason_code="HOST_SETUP_CONFIG_CORRUPT",
+            message="Unable to resolve host setup config path.",
+            path=Path("~/.awf/config.yml"),
+        )
+
+    monkeypatch.setattr(
+        host_setup_config,
+        "default_host_setup_config_path",
+        _default_path_unavailable,
+    )
+    write_host_setup_config(HostSetupConfig(), path=config_path)
+    assert read_host_setup_config(path=config_path) == HostSetupConfig()
+
+    def _resolve_unavailable(self: Path, *args: object, **kwargs: object) -> Path:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "resolve", _resolve_unavailable)
+    assert host_setup_config._normalized_config_path(config_path) == config_path
+
+    monkeypatch.setattr(host_setup_config.os, "name", "nt")
+    host_setup_config._chmod_best_effort(tmp_path / "missing", 0o600)
+
+
+@pytest.mark.unit
+def test_validation_location_formatter_handles_non_tuple_and_root_locations() -> None:
+    assert host_setup_config._format_validation_location("version") == "version"
+    assert (
+        host_setup_config._format_validation_location(("providers", "github", "credential_ref"))
+        == "providers.github.credential_ref"
+    )
+    assert host_setup_config._format_validation_location(()) == "<root>"
 
 
 @pytest.mark.unit
@@ -674,6 +843,28 @@ def test_source_checkout_marker_probe_oserror_reports_unreadable_not_missing(
 
 
 @pytest.mark.unit
+def test_source_checkout_unreadable_marker_reports_unreadable_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    unreadable_marker = (checkout / "RELEASING.md").resolve()
+
+    def _path_readable(path: Path) -> bool:
+        return path.resolve() != unreadable_marker
+
+    monkeypatch.setattr(source_assets, "_path_readable", _path_readable)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.missing_markers == ()
+    assert error.details == {"unreadable_paths": [str(unreadable_marker)]}
+
+
+@pytest.mark.unit
 def test_source_checkout_resolve_failure_uses_expanded_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -721,6 +912,71 @@ def test_source_checkout_expanduser_failure_remains_reason_coded(
 
 
 @pytest.mark.unit
+def test_source_checkout_root_is_dir_oserror_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    resolved = checkout.resolve()
+    original_is_dir = Path.is_dir
+
+    def _is_dir(self: Path) -> bool:
+        if self == resolved:
+            raise OSError("permission denied")
+        return original_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _is_dir)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.root == resolved
+    assert error.details == {"path_status": "unreadable", "error_type": "OSError"}
+
+
+@pytest.mark.unit
+def test_source_checkout_root_exists_oserror_reports_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout_file = tmp_path / "checkout-file"
+    checkout_file.write_text("not a directory\n", encoding="utf-8")
+    resolved = checkout_file.resolve()
+    original_exists = Path.exists
+
+    def _exists(self: Path) -> bool:
+        if self == resolved:
+            raise OSError("permission denied")
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _exists)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout_file, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.root == resolved
+    assert error.details == {"path_status": "unreadable"}
+
+
+@pytest.mark.unit
+def test_source_checkout_file_root_reports_not_directory(tmp_path: Path) -> None:
+    checkout_file = tmp_path / "checkout-file"
+    checkout_file.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout_file, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.root == checkout_file.resolve()
+    assert error.details == {"path_status": "not_directory"}
+
+
+@pytest.mark.unit
 def test_unreadable_source_checkout_reports_source_checkout_invalid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -756,6 +1012,68 @@ def test_stale_source_checkout_metadata_fails_without_package_fallback(tmp_path:
     assert error.reason_code == "SOURCE_CHECKOUT_ASSETS_STALE"
     assert error.root == checkout.resolve()
     assert error.missing_markers == ("docker/control-plane.Dockerfile",)
+
+
+@pytest.mark.unit
+def test_stale_source_checkout_metadata_reports_contract_drift(tmp_path: Path) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
+    stale_metadata = metadata.model_copy(
+        update={
+            "markers": ("legacy-marker",),
+            "asset_paths": source_assets.SourceCheckoutAssetPaths(
+                compose_file="docker/compose/legacy.yml"
+            ),
+        }
+    )
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        verified_source_from_metadata(stale_metadata, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_ASSETS_STALE"
+    assert error.root == checkout.resolve()
+    assert error.details["fallback_used"] is False
+    assert error.details["expected_markers"] == list(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
+    assert error.details["recorded_markers"] == ["legacy-marker"]
+    assert error.details["expected_asset_paths"] == (
+        source_assets.SourceCheckoutAssetPaths().model_dump(mode="json")
+    )
+    assert error.details["recorded_asset_paths"] == (
+        stale_metadata.asset_paths.model_dump(mode="json")
+    )
+
+
+@pytest.mark.unit
+def test_path_readable_handles_missing_non_posix_and_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    missing_path = tmp_path / "missing"
+    readable_path = tmp_path / "readable.txt"
+    unreadable_path = tmp_path / "unreadable.txt"
+    readable_path.write_text("ok\n", encoding="utf-8")
+    unreadable_path.write_text("ok\n", encoding="utf-8")
+
+    assert source_assets._path_readable(missing_path) is False
+
+    monkeypatch.setattr(source_assets.os, "name", "nt")
+    assert source_assets._path_readable(readable_path) is True
+
+    original_exists = Path.exists
+
+    def _exists(self: Path) -> bool:
+        if self == unreadable_path:
+            raise OSError("permission denied")
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _exists)
+    assert source_assets._path_readable(unreadable_path) is False
+
+
+@pytest.mark.unit
+def test_now_utc_returns_timezone_aware_timestamp() -> None:
+    assert source_assets._now_utc().tzinfo is UTC
 
 
 @pytest.mark.unit
