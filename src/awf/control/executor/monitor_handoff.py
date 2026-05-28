@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio as asyncio
 import hashlib as hashlib
 import json as json
+import os as os
 import re as re
 import shlex as shlex
 import time as time
@@ -15,6 +16,8 @@ import traceback as traceback
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text
@@ -73,7 +76,7 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.node.companion_services import companion_specs_from_task_policy
+from awf.node.companion_services import WorkspaceCompanionSpec, companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
@@ -145,7 +148,18 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     assert compose_project is not None
     assert compose_file_path is not None
     profile = None
+    companion_specs: tuple[WorkspaceCompanionSpec, ...] = ()
+    companion_specs_resolved = False
     compose_up_timeout_seconds = 300
+    try:
+        companion_specs = companion_specs_from_task_policy(ws.task_policy)
+        companion_specs_resolved = True
+    except Exception:
+        _log.exception(
+            "executor.resume_companion_spec_resolution_failed",
+            workspace_id=workspace_id,
+        )
+
     try:
         profile = _profile_for_workspace(
             ws,
@@ -155,10 +169,11 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         # Keep the profile timeout as the fallback if stored companion policy
         # cannot be parsed during monitor recovery.
         compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
-        compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
-            profile=profile,
-            companions=companion_specs_from_task_policy(ws.task_policy),
-        )
+        if companion_specs_resolved:
+            compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
+                profile=profile,
+                companions=companion_specs,
+            )
     except Exception:
         _log.exception(
             "executor.resume_compose_timeout_resolution_failed",
@@ -173,6 +188,12 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         return
 
     try:
+        _refresh_optional_companion_env_secrets_for_resume(
+            workspace_id=workspace_id,
+            compose_file=Path(compose_file_path),
+            companion_specs=companion_specs,
+            environ=os.environ,
+        )
         await self._compose.ensure_project_up(
             project_name=compose_project,
             compose_file=Path(compose_file_path),
@@ -260,6 +281,116 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         compose_project=compose_project,
         compose_file=Path(compose_file_path),
     )
+
+
+def _refresh_optional_companion_env_secrets_for_resume(
+    *,
+    workspace_id: str,
+    compose_file: Path,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Remove missing optional companion env-secret targets before compose resume."""
+    missing_targets = _missing_optional_companion_env_secret_targets(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    if not missing_targets:
+        return
+
+    try:
+        payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except OSError:
+        return
+    except yaml.YAMLError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_parse_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return
+
+    removed_count = _remove_compose_environment_targets(payload, missing_targets)
+    if removed_count == 0:
+        return
+
+    try:
+        compose_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_write_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return
+    _log.info(
+        "executor.resume_companion_optional_env_secrets_omitted",
+        workspace_id=workspace_id,
+        compose_file=str(compose_file),
+        omitted_count=removed_count,
+    )
+
+
+def _missing_optional_companion_env_secret_targets(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> dict[str, set[str]]:
+    missing_targets: dict[str, set[str]] = {}
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            if secret.value_from in environ:
+                continue
+            missing_targets.setdefault(spec.name, set()).add(secret.target)
+    return missing_targets
+
+
+def _remove_compose_environment_targets(
+    payload: object,
+    targets_by_service: Mapping[str, set[str]],
+) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return 0
+
+    removed_count = 0
+    for service_name, targets in targets_by_service.items():
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        environment = service.get("environment")
+        if isinstance(environment, dict):
+            for target in targets:
+                if target in environment:
+                    del environment[target]
+                    removed_count += 1
+            if not environment:
+                del service["environment"]
+            continue
+        if isinstance(environment, list):
+            retained_environment: list[object] = []
+            for item in environment:
+                if _compose_environment_list_item_targets(item, targets):
+                    removed_count += 1
+                    continue
+                retained_environment.append(item)
+            if len(retained_environment) != len(environment):
+                if retained_environment:
+                    service["environment"] = retained_environment
+                else:
+                    del service["environment"]
+    return removed_count
+
+
+def _compose_environment_list_item_targets(item: object, targets: set[str]) -> bool:
+    if not isinstance(item, str):
+        return False
+    key = item.split("=", 1)[0]
+    return key in targets
 
 
 async def _record_executor_pr_audit_event(
