@@ -860,13 +860,13 @@ T05* start wrapper
 T08* client config helpers
   +--> T09* MCP setup tools
 
-T07* provider orchestration
-T09* MCP setup tools
-T14* E2E first-run lanes
-T16* release workflow checks
-T17* setup secret redaction
-T18* docs drift tests
-  +--> T19 final integration and coverage
+T07* provider orchestration    +--> T19 final integration and coverage
+T09* MCP setup tools           +--> T19 final integration and coverage
+T14* E2E first-run lanes       +--> T19 final integration and coverage
+T15* docs lanes                +--> T19 final integration and coverage
+T16* release workflow checks   +--> T19 final integration and coverage
+T17* setup secret redaction    +--> T19 final integration and coverage
+T18* docs drift tests          +--> T19 final integration and coverage
 ```
 
 ## Eight-Workspace Execution Schedule
