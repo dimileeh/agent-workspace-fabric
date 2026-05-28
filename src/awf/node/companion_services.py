@@ -22,6 +22,8 @@ from awf.profiles.resolver import ProfileResolutionError
 
 COMPANION_ENV_SECRET_SOURCE_MISSING = "COMPANION_ENV_SECRET_SOURCE_MISSING"
 COMPANION_ENV_SECRET_UNSUPPORTED = "COMPANION_ENV_SECRET_UNSUPPORTED"
+MIN_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS = 1
+MAX_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS = 1800
 _ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOGGER = logging.getLogger(__name__)
 
@@ -414,7 +416,7 @@ def _environment_secret_compose_ref(
 ) -> str:
     """Build the Compose interpolation expression for one env-backed secret."""
     if not secret.required:
-        return f"${{{secret.value_from}}}"
+        return f"${{{secret.value_from}:-}}"
     return (
         f"${{{secret.value_from}?{COMPANION_ENV_SECRET_SOURCE_MISSING}: "
         f"companion={companion_name}, target={secret.target}, provider={secret.provider}, "
@@ -476,10 +478,10 @@ def _optional_int(value: object) -> int | None:
         )
         return None
     if isinstance(value, int):
-        return value
+        return _clamp_companion_compose_up_timeout_seconds(value)
     if isinstance(value, float):
         if value.is_integer():
-            return int(value)
+            return _clamp_companion_compose_up_timeout_seconds(int(value))
         _LOGGER.warning(
             "Ignoring fractional task-policy compose_up_timeout_seconds value: %r",
             value,
@@ -488,9 +490,16 @@ def _optional_int(value: object) -> int | None:
     if not isinstance(value, str):
         return None
     try:
-        return int(value)
+        return _clamp_companion_compose_up_timeout_seconds(int(value))
     except ValueError:
         return None
+
+
+def _clamp_companion_compose_up_timeout_seconds(value: int) -> int:
+    return max(
+        MIN_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS,
+        min(value, MAX_COMPANION_COMPOSE_UP_TIMEOUT_SECONDS),
+    )
 
 
 def _sequence_items_or_empty(value: Any) -> Any:

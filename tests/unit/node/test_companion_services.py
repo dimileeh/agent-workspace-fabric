@@ -238,6 +238,39 @@ def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("timeout", "expected"),
+    [
+        (-12, 1),
+        (0, 1),
+        (1801, 1800),
+        (86400, 1800),
+        (0.0, 1),
+        (1801.0, 1800),
+        ("86400", 1800),
+    ],
+)
+def test_companion_specs_from_task_policy_clamps_compose_up_timeout(
+    timeout: object,
+    expected: int,
+) -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": timeout,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == expected
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_coerces_integral_float_compose_up_timeout() -> None:
     spec = companion_specs_from_task_policy(
         {
@@ -428,7 +461,7 @@ def test_companion_service_from_materialized_preserves_optional_present_secret_r
         host_env={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
     )
 
-    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE}"),)
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE:-}"),)
     assert service.secret_metadata["env_secret_count"] == 1
     assert "raw-optional-secret" not in repr(service)
 
@@ -464,7 +497,7 @@ def test_companion_service_from_materialized_preserves_optional_empty_secret_ref
         host_env={"OPTIONAL_TOKEN_SOURCE": ""},
     )
 
-    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE}"),)
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE:-}"),)
     assert service.secret_metadata["env_secret_count"] == 1
     assert "omitted_optional_env_secret_count" not in service.secret_metadata
 
