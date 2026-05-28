@@ -324,12 +324,13 @@ def test_init_without_path_returns_migration_error() -> None:
     result = _runner.invoke(app, ["init"])
 
     assert result.exit_code == 2
-    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.output
-    assert "`awf init` no longer bootstraps the local service stack" in result.output
-    assert "awf setup" in result.output
-    assert "awf start" in result.output
-    assert "awf init <path>" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
+    assert "`awf init` no longer bootstraps the local service stack" in result.stderr
+    assert "awf setup" in result.stderr
+    assert "awf start" in result.stderr
+    assert "awf init <path>" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit
@@ -374,12 +375,13 @@ def test_init_without_path_rejects_legacy_bootstrap_flags_with_migration(
     result = _runner.invoke(app, ["init", *extra_args])
 
     assert result.exit_code == 2
-    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.output
-    assert expected_flag in result.output
-    assert "awf setup" in result.output
-    assert "awf start" in result.output
-    assert "awf init <path>" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
+    assert expected_flag in result.stderr
+    assert "awf setup" in result.stderr
+    assert "awf start" in result.stderr
+    assert "awf init <path>" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit
