@@ -314,6 +314,8 @@ def write_host_setup_config(
         _ensure_no_secret_payload(payload)
     except _SecretPayloadError as exc:
         raise _config_secret_error(config_path, details=exc.details()) from exc
+    except _RecursivePayloadError as exc:
+        raise _config_corrupt_error(config_path, details=exc.details()) from exc
 
     tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
     text = yaml.safe_dump(payload, sort_keys=False)

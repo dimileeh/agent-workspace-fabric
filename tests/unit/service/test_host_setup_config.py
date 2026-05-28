@@ -13,6 +13,7 @@ import yaml
 from pydantic import ValidationError
 
 import awf.host_setup as host_setup
+import awf.host_setup.config as host_setup_config
 import awf.host_setup.source_assets as source_assets
 from awf.host_setup import (
     ApiConfig,
@@ -317,6 +318,34 @@ def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> N
     assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
     assert error.details == {"issue": "secret-like key", "path": "providers.<secret-key>"}
     assert raw_secret_key not in str(error.to_dict())
+    assert not config_path.exists()
+
+
+@pytest.mark.unit
+def test_host_setup_config_write_wraps_recursive_payload_scan_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config = HostSetupConfig()
+
+    def _raise_recursive_payload_error(value: object) -> None:
+        raise host_setup_config._RecursivePayloadError(path=("providers",))
+
+    monkeypatch.setattr(
+        host_setup_config, "_ensure_no_secret_payload", _raise_recursive_payload_error
+    )
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(config, path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {
+        "error_type": "recursive_yaml_alias",
+        "path": "providers",
+    }
     assert not config_path.exists()
 
 
