@@ -171,7 +171,12 @@ async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     assert candidate.merged_at is None
     assert candidate.head_sha == workspace.monitor_last_commit_sha
     assert candidate.base_sha == workspace.base_commit
-    assert events[0].payload["state_reset"] == {
+    reset_event = next(
+        event
+        for event in events
+        if isinstance(event.payload, dict) and "state_reset" in event.payload
+    )
+    assert reset_event.payload["state_reset"] == {
         "from": WorkspaceStatus.failed.value,
         "to": WorkspaceStatus.monitoring_pr.value,
         "monitor_iter_count_reset_from": 5,
