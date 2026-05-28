@@ -652,6 +652,33 @@ def test_source_checkout_marker_probe_oserror_reports_unreadable_not_missing(
 
 
 @pytest.mark.unit
+def test_source_checkout_resolve_failure_uses_expanded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    candidate = Path("~/missing-awf-source-checkout")
+    expanded = home / "missing-awf-source-checkout"
+    original_resolve = Path.resolve
+
+    def _resolve_unavailable(self: Path, *args: object, **kwargs: object) -> Path:
+        if self == expanded:
+            raise OSError("permission denied")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve_unavailable)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(candidate, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.root == expanded.absolute()
+    assert error.details == {"path_status": "missing"}
+
+
+@pytest.mark.unit
 def test_source_checkout_expanduser_failure_remains_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -251,9 +251,13 @@ def _resolve_candidate(root: str | Path) -> Path:
     base = Path(root)
     try:
         expanded = base.expanduser()
-        return expanded.resolve()
     except (OSError, RuntimeError):
         return base.absolute()
+
+    try:
+        return expanded.resolve()
+    except (OSError, RuntimeError):
+        return expanded.absolute()
 
 
 def _validate_root_readable(root: Path) -> None:
