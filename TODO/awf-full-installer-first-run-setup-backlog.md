@@ -276,8 +276,8 @@ Depends on: T01, T02, T03
 What:
 
 - Implement `awf setup` as the one-time machine setup wizard shell.
-- Support `--dry-run`, `--non-interactive`, `--source-checkout PATH`, and
-  `--format json|pretty`.
+- Support repeatable `--provider PROVIDER`, `--dry-run`, `--non-interactive`,
+  `--source-checkout PATH`, and `--format json|pretty`.
 - Check Docker, Compose, Git, `gh`, Python/runtime, ports, disk, shell/PATH,
   and local capacity without starting Core.
 - Write safe config updates only when not in dry-run mode.
@@ -285,6 +285,10 @@ What:
 Acceptance criteria:
 
 - `awf setup --dry-run` never writes secrets and never starts Core.
+- `awf setup --provider github --dry-run` accepts and forwards the provider
+  selector so later provider setup can recheck a single provider.
+- Unknown provider names fail with a reason-coded setup diagnostic instead of
+  silently falling back to all-provider setup.
 - Missing Docker or stopped daemon returns a setup readiness failure with next
   actions.
 - Source-checkout dry-run works from a cloned AWF checkout and from
@@ -295,6 +299,8 @@ Acceptance criteria:
 Required tests:
 
 - `tests/unit/cli/test_setup_commands.py`
+- CLI parser tests for no selector, single-provider selector, repeated
+  selectors, and unknown provider rejection.
 - Unit tests for pass/fail system-check fixtures.
 - Non-interactive secret-needed path returns `INTERACTIVE_INPUT_REQUIRED`.
 
@@ -394,6 +400,8 @@ What:
   depend on it.
 - Convert captured or discovered credentials into refs consumed by provider
   readiness checks.
+- Honor the setup CLI provider selector by configuring and rechecking only the
+  requested provider or providers when `--provider` is supplied.
 - Keep failed provider auth non-blocking for other providers.
 
 Acceptance criteria:
@@ -402,11 +410,15 @@ Acceptance criteria:
 - One failed provider marks only that provider unavailable.
 - Provider readiness summary can be rendered by setup and start.
 - Provider setup network probes are bounded.
+- Selected-provider setup leaves unselected providers unchanged and labels the
+  summary as a targeted recheck rather than an all-provider run.
 
 Required tests:
 
 - Provider success, missing credential, invalid credential, and mixed-provider
   partial readiness.
+- Selected-provider tests proving one provider can be configured or rechecked
+  without probing or mutating unrelated providers.
 - GitHub-specific setup through `gh` and env ref.
 - No raw secret values in provider summaries.
 
