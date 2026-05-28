@@ -822,7 +822,10 @@ H01 ! installer hosting/trust
                  +--> T15* docs lanes
           +--> T13* package assets
                  +--> T14* E2E first-run lanes
-          +--> T16* release workflow checks
+
+T12* install.sh
+T13* package assets
+  +--> T16* release workflow checks (after T12 + T13)
 
 H02 ! credential consent wording
   +--> T06* credential ref backends
@@ -1022,8 +1025,9 @@ Lane B - Config/start/source assets
          +-> T08 -> T09 -> T19
 
 Lane C - Installer/release
-  H01 -> T11 -> T12 -> T16 -> T19
-              \-> T13 -> T14 (requires T12)
+  H01 -> T11 -> T12 ----\
+              \-> T13 ---+-> T16 -> T19
+                    \-> T14 (requires T12)
 
 Lane D - Docs/DX
   T01 -> T04 -> T10 -> T15 -> T18 -> T19
