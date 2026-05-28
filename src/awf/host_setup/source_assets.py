@@ -146,8 +146,8 @@ def validate_source_checkout(
         try:
             marker_exists = marker_path.is_dir() if marker.kind == "dir" else marker_path.is_file()
         except OSError:
-            marker_exists = False
             unreadable_paths.append(str(marker_path))
+            continue
         if not marker_exists:
             missing_markers.append(marker.path)
             continue

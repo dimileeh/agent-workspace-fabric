@@ -229,6 +229,32 @@ def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_source_checkout_marker_probe_oserror_reports_unreadable_not_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    releasing_path = (checkout / "RELEASING.md").resolve()
+    original_is_file = Path.is_file
+
+    def _is_file(self: Path) -> bool:
+        if self.resolve() == releasing_path:
+            raise OSError("permission denied")
+        return original_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", _is_file)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.missing_markers == ()
+    assert error.details["unreadable_paths"] == [str(releasing_path)]
+    assert "missing_markers" not in error.to_dict()
+
+
+@pytest.mark.unit
 def test_source_checkout_expanduser_failure_remains_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
