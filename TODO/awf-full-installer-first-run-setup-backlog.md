@@ -38,7 +38,7 @@ respects an eight-workspace local capacity cap.
 - H04 launch preflight: before launching implementation workspaces, clean
   expired AWF resources, rebuild local service images, and rerun AWF bootstrap.
 
-H01 through H04 are complete for scheduling purposes. Later H01/H02 dependency
+H01 through H04 are complete for scheduling purposes. Later H01-H04 dependency
 references keep the graph traceable, but they are not additional human approval
 holds unless a human operator explicitly reopens one of the decisions above.
 
@@ -82,8 +82,10 @@ These are reuse targets, not work to rebuild:
 | --- | --- | --- | --- | --- | --- | --- |
 | H01 | Decide public installer hosting and release trust contract | human | done - locked | P0 | - | human |
 | H02 | Decide first-run provider copy and plain-secret consent wording | human | done - locked | P1 | - | human |
-| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | planned | P0 | - | foundation |
-| T02 | Add host setup config schema and source-checkout asset model | workspace | planned | P0 | - | foundation |
+| H03 | Decide AWF implementation workspace execution model | human | done - locked | P0 | - | human |
+| H04 | Complete launch preflight for implementation workspaces | human | done - locked | P0 | - | human |
+| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | planned | P0 | H03, H04 | foundation |
+| T02 | Add host setup config schema and source-checkout asset model | workspace | planned | P0 | H03, H04 | foundation |
 | T03 | Add first-run error contract and rendering helpers | workspace | planned | P0 | T02 | foundation |
 | T04 | Add `awf setup --dry-run` system checks and readiness payload | workspace | planned | P0 | T01, T02, T03 | setup |
 | T05 | Add `awf start` wrapper over existing service bootstrap | workspace | planned | P0 | T01, T02, T03 | start |
@@ -155,6 +157,56 @@ Acceptance criteria:
   without relying on prose.
 - Tests can assert stable prompt fragments without encoding accidental wording.
 
+### H03 - Decide AWF Implementation Workspace Execution Model
+
+Owner type: human
+
+Status: done - locked in [Locked Human Decisions](#locked-human-decisions)
+
+Depends on: none
+
+Blocks: T01, T02, and all downstream implementation workspaces
+
+What:
+
+- Approve the agent runner, model, and reasoning effort for this backlog.
+- Ensure implementation workspace prompts use the approved execution model.
+- Keep execution-model changes out of individual workspace task scopes unless a
+  human operator explicitly reopens the decision.
+
+Acceptance criteria:
+
+- The execution model is recorded in
+  [Locked Human Decisions](#locked-human-decisions).
+- Operators can audit H03 through both the Task Backlog table and the Wave 1
+  human gate.
+- T01/T02 launch prompts can proceed without additional model-selection
+  approval.
+
+### H04 - Complete Launch Preflight For Implementation Workspaces
+
+Owner type: human
+
+Status: done - locked in [Locked Human Decisions](#locked-human-decisions)
+
+Depends on: none
+
+Blocks: T01, T02, and all downstream implementation workspaces
+
+What:
+
+- Clean expired AWF resources before launching implementation workspaces.
+- Rebuild local service images that implementation tasks depend on.
+- Rerun AWF bootstrap so Wave 1 starts from a current control-plane baseline.
+
+Acceptance criteria:
+
+- The preflight is complete before T01/T02 consume Wave 1 workspace capacity.
+- Operators can audit H04 through both the Task Backlog table and the Wave 1
+  human gate.
+- If H04 becomes stale or is reopened, no implementation workspace launches
+  until the preflight is rerun.
+
 ### T01 - Lock Public CLI Grammar And Hard-Switch No-Path `awf init`
 
 Owner type: workspace
@@ -165,7 +217,7 @@ Modules touched:
 - `tests/unit/cli`
 - docs tests that reference command grammar
 
-Depends on: none
+Depends on: H03, H04
 
 What:
 
@@ -199,7 +251,7 @@ Modules touched:
 - `tests/unit/service`
 - packaging tests if source asset metadata needs fixtures
 
-Depends on: none
+Depends on: H03, H04
 
 What:
 
@@ -843,8 +895,9 @@ Legend:
 - `Hxx` means human dependency.
 - `Txx` means implementation workspace or coordination task.
 - `*` means task can run in a workspace.
-- `!` means a human dependency is tracked in the graph. In this backlog, H01 and
-  H02 are already satisfied by [Locked Human Decisions](#locked-human-decisions).
+- `!` means a human dependency is tracked in the graph. In this backlog, H01
+  through H04 are already satisfied by
+  [Locked Human Decisions](#locked-human-decisions).
 
 ```text
 H01 ! installer hosting/trust (done)
@@ -865,6 +918,14 @@ H02 ! credential consent wording (done)
   +--> T06* credential ref backends
           +--> T07* provider orchestration
                   +--> T17* setup secret redaction
+
+H03 ! implementation execution model (done)
+  +--> T01* CLI grammar/init switch
+  +--> T02* config/source asset model
+
+H04 ! launch preflight (done)
+  +--> T01* CLI grammar/init switch
+  +--> T02* config/source asset model
 
 T01* CLI grammar/init switch
   +--> T04* setup dry-run
@@ -911,18 +972,24 @@ likely to collide or wait idle.
 
 ### Human Gate Before Wave 1
 
-Status: H01 and H02 are already satisfied by
+Status: H01 through H04 are already satisfied by
 [Locked Human Decisions](#locked-human-decisions). Run this gate again outside
-AWF capacity only if a human operator reopens one of those decisions:
+AWF capacity if a human operator reopens one of those decisions or if the H04
+preflight becomes stale before Wave 1 launch:
 
 | Item | Status | Required before | Notes |
 | --- | --- | --- | --- |
 | H01 | done - locked | T11, T12, T16 | Installer hosting and trust-chain decision. |
 | H02 | done - locked | T06 | Plain-secret consent and provider prompt wording. |
+| H03 | done - locked | T01, T02, downstream implementation workspaces | Execution model: `codex`, `gpt-5.5`, `xhigh`. |
+| H04 | done - locked | T01, T02, downstream implementation workspaces | Launch preflight: clean expired AWF resources, rebuild local service images, rerun AWF bootstrap. |
 
 Do not hold T06/T11/T12/T16 for additional H01/H02 approval. If a future
 operator reopens H01, skip T11/T12/T16 and fill capacity with only CLI/setup
-work. If H02 is reopened, do not launch credential storage.
+work. If H02 is reopened, do not launch credential storage. If H03 is reopened,
+pause implementation launches until the workspace execution model is decided.
+If H04 is reopened or stale, rerun the launch preflight before starting T01/T02
+or any downstream implementation workspace.
 
 ### Wave 1 - Foundation
 
@@ -936,7 +1003,7 @@ gate is complete.
 
 Recommended launch:
 
-- Launch T01 and T02 first.
+- Launch T01 and T02 first after the Human Gate Before Wave 1 table is clean.
 - Do not launch T11 in this wave; queue it behind the release manifest gate
   below.
 
