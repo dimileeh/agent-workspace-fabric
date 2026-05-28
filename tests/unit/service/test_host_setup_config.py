@@ -273,6 +273,31 @@ def test_corrupt_config_has_reason_code_and_path_details(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_unreadable_config_exists_check_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    original_exists = Path.exists
+
+    def _permission_denied_for_config(self: Path) -> bool:
+        if self == config_path:
+            raise PermissionError("permission denied")
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _permission_denied_for_config)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "PermissionError"}
+    assert "permission denied" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_valid_source_checkout_returns_verified_asset_paths(tmp_path: Path) -> None:
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
 

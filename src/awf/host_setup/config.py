@@ -241,10 +241,10 @@ def default_host_setup_config_path(*, home: str | Path | None = None) -> Path:
 def read_host_setup_config(*, path: str | Path | None = None) -> HostSetupConfig:
     """Read host setup config, returning defaults when the config is absent."""
     config_path = _resolve_config_path(path)
-    if not config_path.exists():
-        return HostSetupConfig()
 
     try:
+        if not config_path.exists():
+            return HostSetupConfig()
         raw_text = config_path.read_text(encoding="utf-8")
         raw: object = yaml.safe_load(raw_text)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
