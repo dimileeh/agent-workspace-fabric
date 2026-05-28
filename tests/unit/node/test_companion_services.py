@@ -208,6 +208,40 @@ def test_companion_service_from_materialized_resolves_environment_secret_placeho
 
 
 @pytest.mark.unit
+def test_companion_service_from_materialized_accepts_empty_environment_secret_value(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"ANTHROPIC_API_KEY": ""},
+    )
+
+    assert service.environment == (("AIRA_API_KEY", "${ANTHROPIC_API_KEY}"),)
+    assert service.secret_metadata["env_secret_count"] == 1
+
+
+@pytest.mark.unit
 def test_companion_service_from_materialized_omits_optional_missing_environment_secret(
     tmp_path: Path,
 ) -> None:
