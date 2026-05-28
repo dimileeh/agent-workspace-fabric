@@ -158,6 +158,21 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "run `awf start`" not in configure_section
 
 
+def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
+    mcp_setup_text = (REPO_ROOT / "docs" / "MCP_SETUP.md").read_text(encoding="utf-8")
+    prerequisites_section = mcp_setup_text.split("## Prerequisites", maxsplit=1)[1].split(
+        "## Claude Code",
+        maxsplit=1,
+    )[0]
+
+    assert len(re.findall(r"(?m)^awf service bootstrap\s*$", prerequisites_section)) == 2
+    assert (
+        len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
+    )
+    assert not re.search(r"(?m)^awf setup\s*$", prerequisites_section)
+    assert not re.search(r"(?m)^awf start\s*$", prerequisites_section)
+
+
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
