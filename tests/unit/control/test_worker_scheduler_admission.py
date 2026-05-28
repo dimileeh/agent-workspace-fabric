@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.claims import _requested_claim_admission_slots
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -46,6 +47,17 @@ class _UnusedExecutor:
 
     async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
         raise AssertionError("saturated worker must not resume monitors")
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(self, workspace_id: str, *_args: object, **_kwargs: object) -> None:
+        self.calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("ready redispatch must not resume monitors")
 
 
 class _RecordingRuntimeInspector:
@@ -672,3 +684,73 @@ async def test_healthy_ready_workspace_waiting_for_slot_is_not_stale_execution(
     assert inspector.calls == [compose_project_name]
     assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.ready.value
     assert await _stale_events(session_factory, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_run_once_redispatches_healthy_ready_workspace_after_recovery_scan(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_ready_with_runtime_metadata(session_factory)
+    compose_project_name = f"awf_{workspace_id}"
+    inspector = _RecordingRuntimeInspector(
+        {
+            compose_project_name: RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent-1",
+                        image="awf-agent-runtime:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+    executor = _RecordingExecutor()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        runtime_inspector=inspector,
+        config=WorkerConfig(
+            max_concurrent_provisions=0,
+            max_concurrent_executions=1,
+        ),
+    )
+
+    assert await worker.run_once() == 1
+    await asyncio.wait_for(
+        worker.wait_for_execution_tasks(),
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert inspector.calls == [compose_project_name]
+    assert executor.calls == [workspace_id]
+    assert await _workspace_status(session_factory, workspace_id) == WorkspaceStatus.ready.value
+    assert await _stale_events(session_factory, workspace_id) == []
+
+
+@pytest.mark.unit
+async def test_requested_claim_admission_slots_honor_claim_limit_for_executor_worker(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=5,
+            max_concurrent_executions=5,
+        ),
+    )
+
+    async with session_factory() as session:
+        assert (
+            await _requested_claim_admission_slots(
+                worker,
+                session,
+                claim_limit=1,
+            )
+            == 1
+        )

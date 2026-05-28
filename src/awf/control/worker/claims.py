@@ -99,9 +99,11 @@ async def _requested_claim_admission_slots(
     *,
     claim_limit: int,
 ) -> int:
+    claim_limit = max(0, claim_limit)
     if self._executor is None:
-        return max(0, claim_limit)
-    return await _requested_admission_row_slots(session, config=self._config)
+        return claim_limit
+    row_slots = await _requested_admission_row_slots(session, config=self._config)
+    return min(claim_limit, row_slots)
 
 
 async def _claim_requested_ids(
