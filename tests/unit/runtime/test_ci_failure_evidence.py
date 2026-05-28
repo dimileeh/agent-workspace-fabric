@@ -70,6 +70,57 @@ def test_ci_failure_evidence_suggests_generic_repro_when_pytest_command_is_unava
 
 
 @pytest.mark.unit
+def test_ci_failure_evidence_preserves_github_error_annotations() -> None:
+    """Coverage threshold annotations are retained as error summaries."""
+    timestamped_annotation = (
+        "2026-05-15T00:00:00Z ::error title=Coverage below required threshold::"
+        "Combined line+branch coverage 98.87% is below required 99.00%."
+    )
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "Coverage totals: combined=98.87% line=99.40% branch=97.15%",
+                "::error title=Coverage below required threshold::"
+                "Combined line+branch coverage 98.87% is below required 99.00%.",
+                timestamped_annotation,
+                "Error: Process completed with exit code 1.",
+            ]
+        ),
+        check_name="python-full-coverage",
+    )
+
+    assert (
+        "::error title=Coverage below required threshold::"
+        "Combined line+branch coverage 98.87% is below required 99.00%."
+    ) in evidence.error_summaries
+    assert timestamped_annotation in evidence.error_summaries
+    assert "Error: Process completed with exit code 1." in evidence.error_summaries
+
+
+@pytest.mark.unit
+def test_ci_failure_evidence_preserves_prefixed_github_error_annotations() -> None:
+    """Timestamped check-name prefixes do not hide coverage annotations."""
+    prefixed_annotation = (
+        "2026-05-15T00:00:00Z python-full-coverage "
+        "::error title=Coverage below required threshold::"
+        "Combined line+branch coverage 98.87% is below required 99.00%."
+    )
+
+    evidence = ci_failure_evidence.extract_ci_failure_evidence(
+        "\n".join(
+            [
+                "Coverage totals: combined=98.87% line=99.40% branch=97.15%",
+                prefixed_annotation,
+            ]
+        ),
+        check_name="python-full-coverage",
+    )
+
+    assert prefixed_annotation in evidence.error_summaries
+
+
+@pytest.mark.unit
 def test_ci_failure_evidence_rejects_glued_prefix_before_pytest_node() -> None:
     valid_node_id = "tests/unit/test_example.py::test_valid_failure"
 

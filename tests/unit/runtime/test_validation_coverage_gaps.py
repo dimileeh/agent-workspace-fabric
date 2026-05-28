@@ -461,5 +461,30 @@ def test_inject_pytest_parallel_workers_keeps_unparseable_or_non_pytest_commands
 
 
 @pytest.mark.unit
+def test_inject_pytest_parallel_workers_keeps_command_when_parse_or_pytest_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pytest worker injection preserves commands when parsing cannot proceed."""
+    monkeypatch.setattr(coverage_helpers, "_is_pytest_coverage_command", lambda _command: True)
+
+    assert (
+        coverage_helpers._inject_pytest_parallel_workers(
+            "pytest --cov=awf 'unterminated",
+            workers=3,
+            distribution="loadscope",
+        )
+        == "pytest --cov=awf 'unterminated"
+    )
+    assert (
+        coverage_helpers._inject_pytest_parallel_workers(
+            "coverage run -m unittest --cov=awf",
+            workers=3,
+            distribution="loadscope",
+        )
+        == "coverage run -m unittest --cov=awf"
+    )
+
+
+@pytest.mark.unit
 def test_read_text_if_present_handles_missing_paths(tmp_path: Path) -> None:
     assert coverage_helpers._read_text_if_present(tmp_path / "missing.txt") is None

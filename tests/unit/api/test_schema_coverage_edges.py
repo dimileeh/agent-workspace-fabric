@@ -312,7 +312,21 @@ def test_workspace_companion_accepts_non_default_repo_relative_paths() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("value", ["literal$", "$$TOKEN", "$-literal", "cost $5"])
+def test_workspace_companion_accepts_explicit_null_optional_repo_path() -> None:
+    """Explicit null repo-relative optional paths remain valid."""
+    companion = api_schemas.WorkspaceCompanionRequest.model_validate(
+        {
+            "name": "api",
+            "repo_url": "git@example.com:api.git",
+            "env_file": None,
+        }
+    )
+
+    assert companion.env_file is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["literal$", "$$TOKEN", "$$", "$-literal", "cost $5"])
 def test_workspace_companion_environment_accepts_literal_dollar_values(value: str) -> None:
     companion = api_schemas.WorkspaceCompanionRequest.model_validate(
         {
@@ -357,6 +371,32 @@ def test_workspace_companion_environment_rejects_invalid_raw_keys(
         )
 
     assert "environment variable names" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_workspace_companion_environment_rejects_non_mapping_payload() -> None:
+    """Non-mapping companion environment payloads fail validation."""
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment": ["APP_ENV=test"],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_workspace_companion_environment_secrets_rejects_non_mapping_payload() -> None:
+    """Non-mapping companion environment secret payloads fail validation."""
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "environment_secrets": ["AIRA_API_KEY"],
+            }
+        )
 
 
 @pytest.mark.unit
