@@ -1256,9 +1256,9 @@ class TestRunOnceExecutionPart005:
         origin_repo: Path,
     ) -> None:
         # A worker whose only execution slot is wedged by a still-monitoring task is
-        # execution-saturated. Provisioning a fresh workspace in the same cycle is
-        # worker activity but not execution progress, so it must not reset the
-        # saturation counter nor silence the warning.
+        # execution-saturated. New requested work stays queued until execution
+        # capacity opens, and the idle saturated cycle still increments the
+        # saturation counter.
         requested_id = await _create_requested(
             session_factory, origin_repo, "provisioning-while-saturated"
         )
@@ -1296,10 +1296,13 @@ class TestRunOnceExecutionPart005:
             dispatched = await asyncio.wait_for(
                 worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
             )
-            # The provision dispatch is real worker activity (non-zero return) ...
-            assert dispatched == 1
-            assert requested_id in provisioner.calls
-            # ... but the execution slot was never freed, so saturation still ticks.
+            assert dispatched == 0
+            assert provisioner.calls == []
+            async with session_factory() as session:
+                requested = await WorkspaceRepository(session).get(requested_id)
+                assert requested is not None
+                assert requested.status == WorkspaceStatus.requested.value
+            # The execution slot was never freed, so saturation still ticks.
             assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
         finally:
             worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
