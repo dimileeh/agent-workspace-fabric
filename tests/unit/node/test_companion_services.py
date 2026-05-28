@@ -143,6 +143,32 @@ def test_companion_specs_from_task_policy_preserves_environment_secret_reference
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_required_string_false_is_optional() -> (
+    None
+):
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": "false",
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].required is False
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_rejects_non_mapping_environment_secret_ref() -> None:
     with pytest.raises(
         ValueError,

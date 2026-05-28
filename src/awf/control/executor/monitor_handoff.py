@@ -305,6 +305,11 @@ def _refresh_optional_companion_env_secrets_for_resume(
     try:
         payload = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     except OSError:
+        _log.warning(
+            "executor.resume_companion_env_secret_refresh_read_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
         return
     except yaml.YAMLError:
         _log.warning(

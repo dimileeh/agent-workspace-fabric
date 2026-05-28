@@ -457,8 +457,14 @@ def _environment_secret_ref(target: object, value: object) -> CompanionEnvironme
         provider=str(value.get("provider") or "env"),
         kind=str(value.get("kind") or "env"),
         value_from=value_from,
-        required=bool(value.get("required", True)),
+        required=_environment_secret_required(value.get("required", True)),
     )
+
+
+def _environment_secret_required(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().casefold() not in {"false", "0", "no", "off"}
+    return bool(value)
 
 
 def _mapping_items(value: object) -> tuple[tuple[object, object], ...]:

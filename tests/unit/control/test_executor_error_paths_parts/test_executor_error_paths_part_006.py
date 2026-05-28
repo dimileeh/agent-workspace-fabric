@@ -74,6 +74,45 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
+@pytest.mark.unit
+def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.mkdir()
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_read_failed",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_read_failed"
+        and entry["workspace_id"] == "ws_read_failed"
+        and entry["compose_file"] == str(compose_file)
+        for entry in captured
+    )
+
+
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
