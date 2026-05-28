@@ -71,12 +71,18 @@ def test_ci_failure_evidence_suggests_generic_repro_when_pytest_command_is_unava
 
 @pytest.mark.unit
 def test_ci_failure_evidence_preserves_github_error_annotations() -> None:
+    timestamped_annotation = (
+        "2026-05-15T00:00:00Z ::error title=Coverage below required threshold::"
+        "Combined line+branch coverage 98.87% is below required 99.00%."
+    )
+
     evidence = ci_failure_evidence.extract_ci_failure_evidence(
         "\n".join(
             [
                 "Coverage totals: combined=98.87% line=99.40% branch=97.15%",
                 "::error title=Coverage below required threshold::"
                 "Combined line+branch coverage 98.87% is below required 99.00%.",
+                timestamped_annotation,
                 "Error: Process completed with exit code 1.",
             ]
         ),
@@ -87,6 +93,7 @@ def test_ci_failure_evidence_preserves_github_error_annotations() -> None:
         "::error title=Coverage below required threshold::"
         "Combined line+branch coverage 98.87% is below required 99.00%."
     ) in evidence.error_summaries
+    assert timestamped_annotation in evidence.error_summaries
     assert "Error: Process completed with exit code 1." in evidence.error_summaries
 
 
