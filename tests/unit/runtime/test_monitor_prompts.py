@@ -439,6 +439,8 @@ class TestSyncBaseConflictPrompt:
 
 
 class TestFixCiPrompt:
+    """Tests for fix-ci prompt rendering from structured check failure evidence."""
+
     @pytest.mark.unit
     def test_includes_focused_ci_evidence_before_raw_log_excerpt(self) -> None:
         failures = (
@@ -552,6 +554,36 @@ class TestFixCiPrompt:
         prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
 
         assert "source_kind: github_check_failure_summary" not in prompt
+        assert "source_kind: github_check_log" in prompt
+
+    @pytest.mark.unit
+    def test_coverage_threshold_error_summary_is_highlighted_for_agent(self) -> None:
+        """Coverage threshold summaries are visible before the raw CI log."""
+        failures = (
+            CheckFailure(
+                name="python-full-coverage",
+                conclusion="FAILURE",
+                log_excerpt=(
+                    "Coverage totals: combined=98.87% line=99.40% branch=97.15%\n"
+                    "::error title=Coverage below required threshold::"
+                    "Combined line+branch coverage 98.87% is below required 99.00%."
+                ),
+                error_summaries=(
+                    "::error title=Coverage below required threshold::"
+                    "Combined line+branch coverage 98.87% is below required 99.00%.",
+                ),
+            ),
+        )
+
+        prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
+
+        summary_index = prompt.index("Error summaries:")
+        raw_log_index = prompt.index("source_kind: github_check_log")
+        assert summary_index < raw_log_index
+        assert "Error summaries:" in prompt
+        assert "Coverage below required threshold" in prompt
+        assert "Combined line+branch coverage 98.87% is below required 99.00%" in prompt
+        assert "source_kind: github_check_failure_summary" in prompt
         assert "source_kind: github_check_log" in prompt
 
     @pytest.mark.unit

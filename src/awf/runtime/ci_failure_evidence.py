@@ -47,6 +47,8 @@ class CiFailureEvidence:
 
 @dataclass(frozen=True)
 class _ShellToken:
+    """Shell token plus the source index where that token ends."""
+
     value: str
     end_index: int
 
@@ -58,7 +60,6 @@ def extract_ci_failure_evidence(
     pytest_fallback_commands: Iterable[str] = (),
 ) -> CiFailureEvidence:
     """Return focused, redacted repair evidence from a failed CI log."""
-
     safe_log = redact_secrets(log_text or "")
     if not safe_log.strip():
         return CiFailureEvidence(
@@ -88,19 +89,21 @@ def extract_ci_failure_evidence(
 
 def redact_ci_log(log_text: str) -> str:
     """Redact a raw CI log before storage, tailing, or prompt rendering."""
-
     return redact_secrets(log_text or "")
 
 
 def _clean_line(line: str) -> str:
+    """Strip ANSI control sequences, carriage returns, and edge whitespace."""
     return _ANSI_RE.sub("", line).replace("\r", "").strip()
 
 
 def _truncate_line(line: str) -> str:
+    """Limit a display line to the prompt-safe evidence length."""
     return line[:_MAX_LINE_CHARS]
 
 
 def _extract_test_nodes(lines: Iterable[str]) -> list[str]:
+    """Collect pytest node id candidates from non-empty CI log lines."""
     nodes: list[str] = []
     for line in lines:
         nodes.extend(_pytest_node_candidates(line))
@@ -115,7 +118,6 @@ def _pytest_node_candidates(line: str) -> list[str]:
     its decision. This scanner only looks around ``.py::`` anchors and walks
     each line forward once.
     """
-
     if ".py::" not in line:
         return []
 
@@ -155,6 +157,7 @@ def _pytest_node_candidates(line: str) -> list[str]:
 
 
 def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
+    """Return whether the candidate node id is delimited by log text."""
     if start > 0:
         char = line[start - 1]
         if char in _PYTEST_NODE_PREFIX_DELIMITERS:
@@ -175,10 +178,12 @@ def _has_pytest_node_boundary(line: str, start: int, end: int) -> bool:
 
 
 def _is_pytest_path_char(char: str) -> bool:
+    """Return whether a character can be part of a pytest file path."""
     return char.isalnum() or char in "/._-"
 
 
 def _looks_like_pytest_node(candidate: str) -> bool:
+    """Return whether a scanned candidate has pytest node-id shape."""
     path, separator, test_part = candidate.partition(".py::")
     if not separator or not path or not test_part:
         return False
@@ -190,10 +195,12 @@ def _looks_like_pytest_node(candidate: str) -> bool:
 
 
 def _strip_node_suffix(node: str) -> str:
+    """Remove trailing punctuation commonly attached to failed node ids."""
     return node.rstrip(",:;)")
 
 
 def _extract_commands(lines: Iterable[str]) -> list[str]:
+    """Extract supported failing commands from GitHub run-step log lines."""
     commands: list[str] = []
     for line in lines:
         command = _extract_command_from_line(line)
@@ -203,6 +210,7 @@ def _extract_commands(lines: Iterable[str]) -> list[str]:
 
 
 def _extract_command_from_line(line: str) -> str | None:
+    """Return the supported command segment from one run-step log line."""
     if not _is_github_run_step_line(line):
         return None
     for marker in _COMMAND_MARKERS:
@@ -213,11 +221,13 @@ def _extract_command_from_line(line: str) -> str | None:
 
 
 def _is_github_run_step_line(line: str) -> bool:
+    """Return whether a log line has GitHub Actions run-step structure."""
     parts = [part.strip() for part in line.split("\t") if part.strip()]
     return len(parts) >= 3 and any(part.startswith("Run ") for part in parts[:-1])
 
 
 def _extract_assertion_snippets(lines: Iterable[str]) -> list[str]:
+    """Collect assertion-oriented lines that help repair pytest failures."""
     snippets: list[str] = []
     for line in lines:
         if "AssertionError" in line or line.startswith(("E   ", ">   ")):
@@ -226,12 +236,14 @@ def _extract_assertion_snippets(lines: Iterable[str]) -> list[str]:
 
 
 def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
+    """Collect concise error summary lines from displayed CI log output."""
     summaries: list[str] = []
     for line in lines:
         if (
             line.startswith("FAILED ")
             or "AssertionError" in line
             or line.startswith("Error:")
+            or "::error" in line
             or "Process completed with exit code" in line
             or _RUFF_DIAGNOSTIC_RE.search(line)
             or line.lower().startswith(("error ", "error:", "fatal:"))
@@ -246,6 +258,7 @@ def _suggest_repro_commands(
     failing_commands: list[str],
     pytest_fallback_commands: Iterable[str] = (),
 ) -> list[str]:
+    """Build focused pytest reproduction commands from extracted node ids."""
     if test_node_ids:
         command = _pytest_repro_command(failing_commands)
         if command is None:
@@ -259,6 +272,7 @@ def _suggest_repro_commands(
 
 
 def _pytest_repro_command(failing_commands: Iterable[str]) -> str | None:
+    """Find a pytest command prefix suitable for appending node ids."""
     for command in failing_commands:
         try:
             tokens = _shell_tokens(command)
@@ -277,6 +291,7 @@ def _pytest_repro_command(failing_commands: Iterable[str]) -> str | None:
 
 
 def _shell_tokens(command: str) -> list[_ShellToken]:
+    """Tokenize enough shell syntax to locate pytest without executing it."""
     tokens: list[_ShellToken] = []
     value: list[str] = []
     token_started = False
@@ -321,6 +336,7 @@ def _shell_tokens(command: str) -> list[_ShellToken]:
 
 
 def _dedupe(items: Iterable[str]) -> list[str]:
+    """Normalize whitespace while preserving first occurrence order."""
     seen: set[str] = set()
     deduped: list[str] = []
     for item in items:
@@ -333,6 +349,7 @@ def _dedupe(items: Iterable[str]) -> list[str]:
 
 
 def _dedupe_preserving_values(items: Iterable[str]) -> list[str]:
+    """Deduplicate stripped values without collapsing internal whitespace."""
     seen: set[str] = set()
     deduped: list[str] = []
     for item in items:

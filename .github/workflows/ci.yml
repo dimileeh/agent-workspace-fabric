@@ -88,6 +88,9 @@ jobs:
           AWF_TEST_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
         run: uv run --python 3.12 pytest -n 8 --dist=loadscope --timeout=300 --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=99
 
+      - name: Enforce exact coverage threshold
+        run: uv run --python 3.12 python scripts/ci/check_coverage_threshold.py coverage.xml --minimum-percent 99
+
       - name: Upload full coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
