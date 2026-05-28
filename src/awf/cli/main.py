@@ -258,7 +258,7 @@ def init(
     if path is None:
         path_required_flags: list[str] = []
         legacy_flags: list[str] = []
-        if include_smoke_request:
+        if _explicit("include_smoke_request"):
             path_required_flags.append("--include-smoke-request")
         if _explicit("guided"):
             path_required_flags.append("--guided" if guided else "--no-guided")
