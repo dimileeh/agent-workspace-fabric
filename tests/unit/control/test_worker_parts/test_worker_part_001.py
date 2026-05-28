@@ -991,7 +991,7 @@ class TestRunOncePart001:
             *,
             limit: int | None = None,
         ) -> list[str]:
-            assert limit is None
+            assert limit == 2
             assert workspace_ids == ["ws-fresh-a", "ws-fresh-b"]
             claimed_ids.extend(workspace_ids)
             return list(workspace_ids)

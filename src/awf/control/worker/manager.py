@@ -170,7 +170,10 @@ class ControlWorker(WorkerDelegatesMixin):
             )
             requested_ids = requested_ids[:requested_provision_slots]
             if requested_ids:
-                requested_ids = await self._claim_requested_ids(requested_ids)
+                requested_ids = await self._claim_requested_ids(
+                    requested_ids,
+                    limit=requested_provision_slots,
+                )
         if requested_ids:
             await self._record_ordered_decisions(
                 requested_ids,
