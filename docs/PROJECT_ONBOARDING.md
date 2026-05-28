@@ -7,7 +7,9 @@ then edit the draft and decide when to submit a real workspace request.
 
 ## First-run operator command
 
-Use the current runnable first-run commands in order:
+Use the current runnable first-run commands in order. Export the required local
+service values before starting Core so Compose can interpolate the API, worker,
+and Postgres service environment:
 
 - `awf service bootstrap` — start local AWF Core with the current service
   bootstrap path.
@@ -24,12 +26,19 @@ Today they exit with `AWF_SETUP_PLACEHOLDER` and `AWF_START_PLACEHOLDER`, so do
 not include them in onboarding copy-paste flows until those slices land.
 
 ```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf service bootstrap
 awf service status --format pretty
 awf init .                        # guided project onboarding for ./.
 awf init . --write-profile --yes  # silent profile write with detected defaults
 awf init . --include-smoke-request
 ```
+
+For persistent values across shells in source checkouts, copy `.env.example` to
+`docker/compose/.env` and set `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
+`AWF_GITHUB_TOKEN` there before bootstrapping.
 
 ## One-message prompt
 

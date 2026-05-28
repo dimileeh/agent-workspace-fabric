@@ -184,7 +184,12 @@ def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
     )[1].split("## One-message prompt", maxsplit=1)[0]
 
     assert (
-        "awf service bootstrap\nawf service status --format pretty\nawf init ."
+        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty\n"
+        "awf init ."
     ) in first_run_section
     assert not re.search(r"(?m)^awf setup\s*$", first_run_section)
     assert not re.search(r"(?m)^awf start\s*$", first_run_section)
