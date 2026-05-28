@@ -290,12 +290,16 @@ def _refresh_optional_companion_env_secrets_for_resume(
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
     environ: Mapping[str, str],
 ) -> None:
-    """Remove missing optional companion env-secret targets before compose resume."""
+    """Refresh optional companion env-secret targets before compose resume."""
     missing_targets = _missing_optional_companion_env_secret_targets(
         companion_specs=companion_specs,
         environ=environ,
     )
-    if not missing_targets:
+    present_refs = _present_optional_companion_env_secret_refs(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    if not missing_targets and not present_refs:
         return
 
     try:
@@ -311,7 +315,8 @@ def _refresh_optional_companion_env_secrets_for_resume(
         return
 
     removed_count = _remove_compose_environment_targets(payload, missing_targets)
-    if removed_count == 0:
+    restored_count = _restore_compose_environment_refs(payload, present_refs)
+    if removed_count == 0 and restored_count == 0:
         return
 
     try:
@@ -323,12 +328,20 @@ def _refresh_optional_companion_env_secrets_for_resume(
             compose_file=str(compose_file),
         )
         return
-    _log.info(
-        "executor.resume_companion_optional_env_secrets_omitted",
-        workspace_id=workspace_id,
-        compose_file=str(compose_file),
-        omitted_count=removed_count,
-    )
+    if removed_count:
+        _log.info(
+            "executor.resume_companion_optional_env_secrets_omitted",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+            omitted_count=removed_count,
+        )
+    if restored_count:
+        _log.info(
+            "executor.resume_companion_optional_env_secrets_restored",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+            restored_count=restored_count,
+        )
 
 
 def _missing_optional_companion_env_secret_targets(
@@ -345,6 +358,28 @@ def _missing_optional_companion_env_secret_targets(
                 continue
             missing_targets.setdefault(spec.name, set()).add(secret.target)
     return missing_targets
+
+
+def _present_optional_companion_env_secret_refs(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
+    present_refs: dict[str, dict[str, str]] = {}
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            if secret.value_from not in environ:
+                continue
+            present_refs.setdefault(spec.name, {})[secret.target] = (
+                _optional_companion_env_secret_compose_ref(secret.value_from)
+            )
+    return present_refs
+
+
+def _optional_companion_env_secret_compose_ref(value_from: str) -> str:
+    return f"${{{value_from}:-}}"
 
 
 def _remove_compose_environment_targets(
@@ -384,6 +419,66 @@ def _remove_compose_environment_targets(
                 else:
                     del service["environment"]
     return removed_count
+
+
+def _restore_compose_environment_refs(
+    payload: object,
+    refs_by_service: Mapping[str, Mapping[str, str]],
+) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return 0
+
+    restored_count = 0
+    for service_name, refs in refs_by_service.items():
+        if not refs:
+            continue
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        environment = service.get("environment")
+        if isinstance(environment, dict):
+            for target, ref in refs.items():
+                if environment.get(target) != ref:
+                    environment[target] = ref
+                    restored_count += 1
+            continue
+        if isinstance(environment, list):
+            restored_count += _restore_compose_environment_list_refs(environment, refs)
+            continue
+        if environment is None:
+            service["environment"] = dict(refs)
+            restored_count += len(refs)
+    return restored_count
+
+
+def _restore_compose_environment_list_refs(
+    environment: list[object],
+    refs: Mapping[str, str],
+) -> int:
+    restored_count = 0
+    seen_targets: set[str] = set()
+    for index, item in enumerate(environment):
+        if not isinstance(item, str):
+            continue
+        key = item.split("=", 1)[0]
+        ref = refs.get(key)
+        if ref is None:
+            continue
+        seen_targets.add(key)
+        replacement = f"{key}={ref}"
+        if item != replacement:
+            environment[index] = replacement
+            restored_count += 1
+
+    for target, ref in refs.items():
+        if target in seen_targets:
+            continue
+        environment.append(f"{target}={ref}")
+        restored_count += 1
+    return restored_count
 
 
 def _compose_environment_list_item_targets(item: object, targets: set[str]) -> bool:

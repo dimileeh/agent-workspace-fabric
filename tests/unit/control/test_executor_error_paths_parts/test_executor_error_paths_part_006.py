@@ -1262,6 +1262,91 @@ services:
         await executor.resume_pr_monitor(ws_id)
 
     @pytest.mark.unit
+    async def test_resume_pr_monitor_restores_present_optional_companion_env_secret_placeholder(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("OPTIONAL_TOKEN_SOURCE", "raw-restored-secret")
+        compose_file = tmp_path / "persisted-compose" / "compose.yml"
+        compose_file.parent.mkdir(parents=True)
+        compose_file.write_text(
+            """
+services:
+  backend:
+    environment:
+      APP_ENV: "test"
+  agent:
+    image: "awf-agent-runtime:latest"
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        class _RecordingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
+            ) -> None:
+                del project_name, workspace_id, wait, compose_up_timeout_seconds
+                parsed = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+                assert parsed["services"]["backend"]["environment"] == {
+                    "APP_ENV": "test",
+                    "OPTIONAL_TOKEN": "${OPTIONAL_TOKEN_SOURCE:-}",
+                }
+                assert "raw-restored-secret" not in compose_file.read_text(encoding="utf-8")
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            compose_file_path=str(compose_file),
+            task_policy={
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@github.com:x/backend.git",
+                        "environment_secrets": {
+                            "OPTIONAL_TOKEN": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "OPTIONAL_TOKEN_SOURCE",
+                                "required": False,
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_RecordingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        rendered = compose_file.read_text(encoding="utf-8")
+        assert "${OPTIONAL_TOKEN_SOURCE:-}" in rendered
+        assert "raw-restored-secret" not in rendered
+
+    @pytest.mark.unit
     async def test_resume_pr_monitor_preserves_profile_compose_timeout_when_companion_resolution_fails(
         self,
         fake: FakeCommandRunner,
