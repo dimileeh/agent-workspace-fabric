@@ -96,7 +96,7 @@ These are reuse targets, not work to rebuild:
 | T12 | Add checked-in `install.sh` with checksum verification | workspace | planned | P0 | T11, H01 | installer |
 | T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | planned | P0 | T02, T11 | packaging |
 | T14 | Add clean-install and source-lane E2E smoke harness | workspace | planned | P0 | T05, T10, T12, T13 | e2e |
-| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | planned | P0 | T01, T04, T05, T10, T12 | docs |
+| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | planned | P0 | T01, T04, T05, T10, T12, T13 | docs |
 | T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | planned | P0 | T11, T12, T13, H01 | release |
 | T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | planned | P0 | T06, T07 | security |
 | T18 | Add docs drift tests for setup/start/init command grammar | workspace | planned | P1 | T01, T15 | docs |
@@ -658,12 +658,12 @@ Modules touched:
 - `docs/MCP_SETUP.md`
 - docs tests
 
-Depends on: T01, T04, T05, T10, T12
+Depends on: T01, T04, T05, T10, T12, T13
 
 Execution model:
 
 - Single-phase final docs task, not a split skeleton/final task.
-- Do not launch T15 until T01, T04, T05, T10, and T12 are merged or
+- Do not launch T15 until T01, T04, T05, T10, T12, and T13 are merged or
   explicitly satisfied; all deliverables and acceptance criteria below apply
   to the completed T15 task.
 - T18 depends on completed and merged T15, not on an early docs skeleton.
@@ -839,6 +839,7 @@ H01 ! installer hosting/trust (done)
                  +--> T15* docs lanes
           +--> T13* package assets
                  +--> T14* E2E first-run lanes
+                 +--> T15* docs lanes
 
 T12* install.sh
 T13* package assets
@@ -1003,7 +1004,7 @@ Capacity used: 2 workspaces.
 | Slot | Task | Depends on |
 | --- | --- | --- |
 | 1 | T14 clean-install/source-lane E2E smoke | T05, T10, T12, T13 |
-| 2 | T15 README, Quickstart, upgrade, uninstall, and source lanes | T01, T04, T05, T10, T12 |
+| 2 | T15 README, Quickstart, upgrade, uninstall, and source lanes | T01, T04, T05, T10, T12, T13 |
 
 Recommended launch:
 
@@ -1015,7 +1016,7 @@ Conflict flags:
 
 - T14 may expose bugs in earlier tasks. Fixes should usually go back to the
   owning task PR if it is still open; otherwise make a narrow follow-up.
-- T15 consumes behavior from T04/T05/T10/T12. Do not launch a docs skeleton
+- T15 consumes behavior from T04/T05/T10/T12/T13. Do not launch a docs skeleton
   before those dependencies are merged unless it is split into a separate task.
 
 ### Wave 5 - Docs Drift
@@ -1069,6 +1070,7 @@ Lane D - Docs/DX
    |      |
    +-> T05 ----^
   H01(done) -> T11 -> T12 -^
+                 \-> T13 -^
 
 Lane E - Human credential consent
   H02(done) -> T06
