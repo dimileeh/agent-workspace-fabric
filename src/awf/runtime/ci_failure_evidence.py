@@ -232,6 +232,7 @@ def _extract_error_summaries(lines: Iterable[str]) -> list[str]:
             line.startswith("FAILED ")
             or "AssertionError" in line
             or line.startswith("Error:")
+            or line.startswith("::error")
             or "Process completed with exit code" in line
             or _RUFF_DIAGNOSTIC_RE.search(line)
             or line.lower().startswith(("error ", "error:", "fatal:"))

@@ -29,6 +29,7 @@ import structlog
 import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from yaml.constructor import ConstructorError
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
@@ -72,6 +73,24 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+@pytest.mark.unit
+def test_compose_string_key_loader_rejects_non_mapping_node() -> None:
+    loader = executor_monitor_handoff._ComposeStringKeySafeLoader("")
+    node = yaml.nodes.ScalarNode("tag:yaml.org,2002:str", "not-a-mapping")
+
+    with pytest.raises(ConstructorError, match="expected a mapping node"):
+        executor_monitor_handoff._construct_compose_string_key_mapping(loader, node)
+
+
+@pytest.mark.unit
+def test_compose_string_key_loader_rejects_unhashable_constructed_key() -> None:
+    with pytest.raises(ConstructorError, match="found unhashable key"):
+        yaml.load(
+            "? [backend]\n: value\n",
+            Loader=executor_monitor_handoff._ComposeStringKeySafeLoader,
+        )
 
 
 @pytest.mark.unit
@@ -124,6 +143,40 @@ def test_required_companion_env_secret_precheck_reports_all_unavailable_sources(
 
 
 @pytest.mark.unit
+def test_required_companion_env_secret_precheck_allows_present_and_unsupported_refs() -> None:
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:backend.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="PRESENT_TOKEN",
+                    value_from="PRESENT_SOURCE",
+                    required=True,
+                ),
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    value_from="MISSING_OPTIONAL_SOURCE",
+                    required=False,
+                ),
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="FUTURE_TOKEN",
+                    value_from="MISSING_FUTURE_SOURCE",
+                    provider="future",
+                    kind="env",
+                    required=True,
+                ),
+            ),
+        ),
+    )
+
+    executor_monitor_handoff._precheck_required_companion_env_secrets_for_resume(
+        companion_specs=companion_specs,
+        environ={"PRESENT_SOURCE": "raw-secret"},
+    )
+
+
+@pytest.mark.unit
 def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) -> None:
     compose_file = tmp_path / "compose.yml"
     compose_file.mkdir()
@@ -160,6 +213,150 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
         and entry["compose_file"] == str(compose_file)
         for entry in captured
     )
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_parse_failure_logs_warning(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: [", encoding="utf-8")
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_parse_failed",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_parse_failed"
+        and entry["workspace_id"] == "ws_parse_failed"
+        and entry["compose_file"] == str(compose_file)
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_noops_when_compose_has_no_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      APP_ENV: test
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    def _unexpected_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("refresh should not write unchanged compose payload")
+
+    monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _unexpected_write)
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_noop_refresh",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={},
+    )
+
+    assert "APP_ENV: test" in compose_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_write_failure_logs_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    def _raise_write(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(executor_monitor_handoff, "_atomic_write_text", _raise_write)
+
+    with structlog.testing.capture_logs() as captured:
+        executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+            workspace_id="ws_write_failed",
+            compose_file=compose_file,
+            companion_specs=companion_specs,
+            environ={},
+        )
+
+    assert any(
+        entry["event"] == "executor.resume_companion_env_secret_refresh_write_failed"
+        and entry["workspace_id"] == "ws_write_failed"
+        and entry["compose_file"] == str(compose_file)
+        for entry in captured
+    )
+    assert "OPTIONAL_TOKEN" in compose_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
@@ -220,6 +417,29 @@ services:
 
     assert direct_target_writes == []
     assert "OPTIONAL_TOKEN" not in compose_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_atomic_write_text_removes_temporary_file_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "compose.yml"
+    target.write_text("old", encoding="utf-8")
+    original_replace = Path.replace
+
+    def _raise_replace(path: Path, target_path: Path | str) -> Path:
+        if path.parent == tmp_path and path.name.startswith(".compose.yml."):
+            raise OSError("replace failed")
+        return original_replace(path, target_path)
+
+    monkeypatch.setattr(Path, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        executor_monitor_handoff._atomic_write_text(target, "new", encoding="utf-8")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert list(tmp_path.glob(".compose.yml.*.tmp")) == []
 
 
 @pytest.mark.unit
@@ -418,6 +638,142 @@ def test_present_optional_companion_env_secret_refs_uses_public_placeholder(
         environ={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
     ) == {"backend": {"OPTIONAL_TOKEN": "${CANONICAL:-sentinel}"}}
     assert captured == ["OPTIONAL_TOKEN_SOURCE"]
+
+
+@pytest.mark.unit
+def test_remove_compose_environment_targets_handles_non_mapping_payloads() -> None:
+    assert (
+        executor_monitor_handoff._remove_compose_environment_targets(
+            None,
+            {"backend": {"TOKEN"}},
+        )
+        == 0
+    )
+    assert (
+        executor_monitor_handoff._remove_compose_environment_targets(
+            {"services": []},
+            {"backend": {"TOKEN"}},
+        )
+        == 0
+    )
+    assert (
+        executor_monitor_handoff._remove_compose_environment_targets(
+            {"services": {"backend": "not-a-mapping"}},
+            {"backend": {"TOKEN"}},
+        )
+        == 0
+    )
+
+
+@pytest.mark.unit
+def test_remove_compose_environment_targets_retains_non_matching_list_items() -> None:
+    payload: dict[str, object] = {
+        "services": {
+            "backend": {
+                "environment": [
+                    "TOKEN=${TOKEN_SOURCE:-}",
+                    "APP_ENV=test",
+                    {"OTHER": "mapping item"},
+                ],
+            }
+        }
+    }
+
+    removed = executor_monitor_handoff._remove_compose_environment_targets(
+        payload,
+        {"backend": {"TOKEN"}},
+    )
+
+    assert removed == 1
+    assert payload == {
+        "services": {
+            "backend": {
+                "environment": [
+                    "APP_ENV=test",
+                    {"OTHER": "mapping item"},
+                ],
+            }
+        }
+    }
+
+
+@pytest.mark.unit
+def test_restore_compose_environment_refs_handles_non_mapping_payloads() -> None:
+    assert (
+        executor_monitor_handoff._restore_compose_environment_refs(
+            None,
+            {"backend": {"TOKEN": "${TOKEN_SOURCE:-}"}},
+        )
+        == 0
+    )
+    assert (
+        executor_monitor_handoff._restore_compose_environment_refs(
+            {"services": []},
+            {"backend": {"TOKEN": "${TOKEN_SOURCE:-}"}},
+        )
+        == 0
+    )
+    assert (
+        executor_monitor_handoff._restore_compose_environment_refs(
+            {"services": {"backend": "not-a-mapping"}},
+            {"backend": {"TOKEN": "${TOKEN_SOURCE:-}"}},
+        )
+        == 0
+    )
+
+
+@pytest.mark.unit
+def test_restore_compose_environment_refs_skips_empty_refs_and_creates_missing_environment() -> (
+    None
+):
+    payload: dict[str, object] = {
+        "services": {
+            "backend": {"image": "example/backend:latest"},
+            "worker": {"environment": {"APP_ENV": "test"}},
+        }
+    }
+
+    restored = executor_monitor_handoff._restore_compose_environment_refs(
+        payload,
+        {
+            "backend": {"TOKEN": "${TOKEN_SOURCE:-}"},
+            "worker": {},
+        },
+    )
+
+    assert restored == 1
+    assert payload == {
+        "services": {
+            "backend": {
+                "image": "example/backend:latest",
+                "environment": {"TOKEN": "${TOKEN_SOURCE:-}"},
+            },
+            "worker": {"environment": {"APP_ENV": "test"}},
+        }
+    }
+
+
+@pytest.mark.unit
+def test_restore_compose_environment_list_refs_skips_non_string_items_and_appends_missing() -> None:
+    environment: list[object] = [
+        {"APP_ENV": "test"},
+        "EXISTING_TOKEN=${EXISTING_TOKEN_SOURCE:-}",
+    ]
+
+    restored = executor_monitor_handoff._restore_compose_environment_list_refs(
+        environment,
+        {
+            "EXISTING_TOKEN": "${EXISTING_TOKEN_SOURCE:-}",
+            "NEW_TOKEN": "${NEW_TOKEN_SOURCE:-}",
+        },
+    )
+
+    assert restored == 1
+    assert environment == [
+        {"APP_ENV": "test"},
+        "EXISTING_TOKEN=${EXISTING_TOKEN_SOURCE:-}",
+        "NEW_TOKEN=${NEW_TOKEN_SOURCE:-}",
+    ]
 
 
 @pytest.mark.unit

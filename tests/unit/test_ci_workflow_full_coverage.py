@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PUBLISH_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 CONTRIBUTING_PATH = REPO_ROOT / "CONTRIBUTING.md"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -187,6 +189,20 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert "--cov-fail-under=0" not in full_coverage_run
     assert "pytest tests/unit" not in full_coverage_run
 
+    exact_threshold_run = _step_run(job, "Enforce exact coverage threshold")
+    assert exact_threshold_run == (
+        "uv run --python 3.12 python scripts/check_coverage_threshold.py "
+        "coverage.xml --minimum-percent 99"
+    )
+
+    step_names = [str(step.get("name")) for step in _steps(job)]
+    assert step_names.index("Enforce exact coverage threshold") == (
+        step_names.index("Full coverage") + 1
+    )
+    assert step_names.index("Upload full coverage artifact") > step_names.index(
+        "Enforce exact coverage threshold"
+    )
+
     coverage_step = _named_step(job, "Full coverage")
     env = _effective_env(workflow, job, coverage_step)
     assert env.get("CI") == "true"
@@ -268,6 +284,15 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
         name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
     ]
     assert python_test_jobs == ["python-full-coverage"]
+
+
+@pytest.mark.unit
+def test_coverage_report_precision_exposes_below_threshold_decimals() -> None:
+    pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    coverage_report = pyproject["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 99
 
 
 @pytest.mark.unit

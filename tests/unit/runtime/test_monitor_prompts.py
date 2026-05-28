@@ -555,6 +555,32 @@ class TestFixCiPrompt:
         assert "source_kind: github_check_log" in prompt
 
     @pytest.mark.unit
+    def test_coverage_threshold_error_summary_is_highlighted_for_agent(self) -> None:
+        failures = (
+            CheckFailure(
+                name="python-full-coverage",
+                conclusion="FAILURE",
+                log_excerpt=(
+                    "Coverage totals: combined=98.87% line=99.40% branch=97.15%\n"
+                    "::error title=Coverage below required threshold::"
+                    "Combined line+branch coverage 98.87% is below required 99.00%."
+                ),
+                error_summaries=(
+                    "::error title=Coverage below required threshold::"
+                    "Combined line+branch coverage 98.87% is below required 99.00%.",
+                ),
+            ),
+        )
+
+        prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
+
+        assert "Error summaries:" in prompt
+        assert "Coverage below required threshold" in prompt
+        assert "Combined line+branch coverage 98.87% is below required 99.00%" in prompt
+        assert "source_kind: github_check_failure_summary" in prompt
+        assert "source_kind: github_check_log" in prompt
+
+    @pytest.mark.unit
     def test_command_only_ci_evidence_is_not_labeled_as_focused_repro(self) -> None:
         failures = (
             CheckFailure(
