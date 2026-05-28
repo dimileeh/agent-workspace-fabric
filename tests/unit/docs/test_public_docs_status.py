@@ -20,6 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 README_PATH = REPO_ROOT / "README.md"
 DOCS_INDEX_CANDIDATES = (README_PATH, REPO_ROOT / "docs" / "README.md")
 
+ROOT_PUBLIC_DOC_NAMES = {
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "RELEASING.md",
+}
 INTERNAL_DOC_PREFIXES = ("docs/awf-plans/",)
 PLANNING_DOC_NAMES = {
     "docs/awf_prd_v2.2.md",
@@ -312,6 +317,25 @@ def test_public_docs_are_discovered_from_docs_tree(
     assert _public_docs() == {"docs/NEW_GUIDE.md"}
 
 
+def test_root_public_docs_linked_from_readme_are_discovered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (tmp_path / "README.md").write_text(
+        "See [release checklist](RELEASING.md).\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "RELEASING.md").write_text("# Release Checklist\n", encoding="utf-8")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
+
+    assert _public_docs() == {"RELEASING.md"}
+
+
 def test_copy_paste_docs_ignore_missing_readme_linked_docs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -407,6 +431,8 @@ def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
 
 
 def _is_public_doc_path(rel_path: str) -> bool:
+    if rel_path in ROOT_PUBLIC_DOC_NAMES:
+        return True
     if not rel_path.startswith("docs/"):
         return False
     if any(rel_path.startswith(prefix) for prefix in INTERNAL_DOC_PREFIXES):

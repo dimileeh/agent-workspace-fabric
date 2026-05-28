@@ -58,6 +58,24 @@ contract from `docs/awf-plans/ws_a829bac6193d48be8b2a4f14.md`:
 - Run focused docs tests plus the existing setup/start/init command tests touched
   by T01. Full AWF/GitHub validation remains owned by AWF after agent completion.
 
+### Iteration 2 Plan-Conformance Gap Closure
+
+This iteration closes the remaining conformance gaps reported by
+`docs/awf-plans/ws_a829bac6193d48be8b2a4f14.conformance.json`:
+
+- Update `RELEASING.md` Local Service Readiness so it no longer shows bare
+  no-path `awf init` as part of service setup/readiness.
+- Keep the readiness flow either on the locked grammar (`awf setup`,
+  `awf start`, then `awf init <path>` for project onboarding) or on explicitly
+  framed lower-level `awf service bootstrap` readiness commands.
+- Expand public-doc discovery so root public docs linked from README or the docs
+  index, such as `RELEASING.md`, are scanned by the no-path init bootstrap
+  guard.
+- Use a focused TDD loop: update the docs test first, confirm it fails on the
+  stale `RELEASING.md` snippet, then update `RELEASING.md` and rerun only the
+  focused docs checks.
+- Full AWF/GitHub validation remains owned by AWF after agent completion.
+
 1. Add failing TDD tests for:
    - `awf setup --help` and `awf setup` placeholder output.
    - `awf start --help` and `awf start` placeholder output.

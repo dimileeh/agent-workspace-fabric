@@ -89,11 +89,15 @@ finds a concrete attribution notice that must be preserved.
 From a clean checkout with Docker running:
 
 ```bash
-awf init
 awf service bootstrap --timeout-seconds 300
 awf service readiness --format json
 awf service release-readiness --format pretty
 ```
+
+Release readiness uses the lower-level service bootstrap command because it is
+validating local service gates directly. Do not use no-path `awf init` for
+service setup; project onboarding is the separate `awf init <path>` flow after
+the local service is available.
 
 If `awf service readiness` fails only because historical SLO evidence reflects
 known dogfood failures, document the exception in the release notes and rerun
