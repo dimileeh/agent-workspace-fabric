@@ -896,22 +896,31 @@ work. If H02 is not ready, do not launch credential storage.
 
 ### Wave 1 - Foundation
 
-Capacity used: 2 to 3 workspaces, depending on human readiness.
+Capacity used: 2 workspaces. T11 is intentionally held until the T01 dependency
+gate is complete.
 
 | Slot | Task | Why now |
 | --- | --- | --- |
 | 1 | T01 CLI grammar/init switch | Locks public command names for every downstream task. |
 | 2 | T02 config/source asset model | Locks shared setup/start/provider/client contract. |
-| 3 | T11 install manifest | Can start if H01 is decided and T01 command names are accepted. |
 
 Recommended launch:
 
 - Launch T01 and T02 first.
-- Launch T11 only after H01 is clear.
+- Do not launch T11 in this wave; queue it behind the release manifest gate
+  below.
 
 Conflict flags:
 
 - T02 and T11 should not conflict unless both edit package metadata.
+
+### Release Manifest Gate
+
+Capacity used: 1 workspace when both prerequisites are satisfied.
+
+| Slot | Task | Why now |
+| --- | --- | --- |
+| 1 | T11 install manifest | Can start only after H01 is decided and T01 is merged or explicitly satisfied by the human operator. |
 
 ### Wave 2 - Setup, Start, Credentials, Clients, Packaging
 
