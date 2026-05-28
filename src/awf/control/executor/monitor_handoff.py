@@ -11,9 +11,11 @@ import json as json
 import os as os
 import re as re
 import shlex as shlex
+import tempfile as tempfile
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +350,7 @@ def _precheck_required_companion_env_secrets_for_resume(
     environ: Mapping[str, str],
 ) -> None:
     """Fail monitor resume early when a required env-backed companion secret is unavailable."""
+    failures: list[tuple[str, str]] = []
     for spec in companion_specs:
         for secret in spec.environment_secrets:
             if not secret.required or secret.provider != "env" or secret.kind != "env":
@@ -361,14 +364,18 @@ def _precheck_required_companion_env_secrets_for_resume(
                 if source_is_empty
                 else COMPANION_ENV_SECRET_SOURCE_MISSING
             )
-            stderr = (
-                f"{reason_code}: companion={spec.name}, target={secret.target}, "
-                f"provider={secret.provider}, source={secret.value_from}"
+            failures.append(
+                (
+                    reason_code,
+                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
+                    f"provider={secret.provider}, source={secret.value_from}",
+                )
             )
-            raise CompanionEnvSecretPrecheckError(
-                stderr=stderr,
-                reason_code=reason_code,
-            )
+    if failures:
+        raise CompanionEnvSecretPrecheckError(
+            stderr="\n".join(stderr for _reason_code, stderr in failures),
+            reason_code=failures[0][0],
+        )
 
 
 def _refresh_optional_companion_env_secrets_for_resume(
@@ -415,7 +422,8 @@ def _refresh_optional_companion_env_secrets_for_resume(
         return
 
     try:
-        compose_file.write_text(
+        _atomic_write_text(
+            compose_file,
             _safe_dump_compose_payload_for_resume(payload),
             encoding="utf-8",
         )
@@ -459,6 +467,30 @@ def _safe_dump_compose_payload_for_resume(payload: object) -> str:
         Dumper=_ComposeInterpolationPreservingDumper,
         sort_keys=False,
     )
+
+
+def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding=encoding,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(text)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        assert tmp_path is not None
+        tmp_path.replace(path)
+    except OSError:
+        if tmp_path is not None:
+            with suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _missing_optional_companion_env_secret_targets(

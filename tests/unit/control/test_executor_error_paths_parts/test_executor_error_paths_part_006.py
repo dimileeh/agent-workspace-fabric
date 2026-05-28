@@ -75,6 +75,55 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 
 @pytest.mark.unit
+def test_required_companion_env_secret_precheck_reports_all_unavailable_sources() -> None:
+    companion_specs = (
+        companion_services.WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@example.com:backend.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="BACKEND_REQUIRED_TOKEN",
+                    value_from="BACKEND_REQUIRED_SOURCE",
+                    required=True,
+                ),
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="BACKEND_OPTIONAL_TOKEN",
+                    value_from="BACKEND_OPTIONAL_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+        companion_services.WorkspaceCompanionSpec(
+            name="worker",
+            repo_url="git@example.com:worker.git",
+            environment_secrets=(
+                companion_services.CompanionEnvironmentSecretRef(
+                    target="WORKER_REQUIRED_TOKEN",
+                    value_from="WORKER_REQUIRED_SOURCE",
+                    required=True,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(executor_monitor_handoff.CompanionEnvSecretPrecheckError) as exc_info:
+        executor_monitor_handoff._precheck_required_companion_env_secrets_for_resume(
+            companion_specs=companion_specs,
+            environ={"WORKER_REQUIRED_SOURCE": ""},
+        )
+
+    assert exc_info.value.reason_code == companion_services.COMPANION_ENV_SECRET_SOURCE_MISSING
+    stderr = exc_info.value.stderr
+    assert companion_services.COMPANION_ENV_SECRET_SOURCE_MISSING in stderr
+    assert companion_services.COMPANION_ENV_SECRET_SOURCE_EMPTY in stderr
+    assert "companion=backend, target=BACKEND_REQUIRED_TOKEN" in stderr
+    assert "source=BACKEND_REQUIRED_SOURCE" in stderr
+    assert "companion=worker, target=WORKER_REQUIRED_TOKEN" in stderr
+    assert "source=WORKER_REQUIRED_SOURCE" in stderr
+    assert "BACKEND_OPTIONAL_TOKEN" not in stderr
+
+
+@pytest.mark.unit
 def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) -> None:
     compose_file = tmp_path / "compose.yml"
     compose_file.mkdir()
@@ -111,6 +160,66 @@ def test_companion_env_secret_refresh_read_failure_logs_warning(tmp_path: Path) 
         and entry["compose_file"] == str(compose_file)
         for entry in captured
     )
+
+
+@pytest.mark.unit
+def test_companion_env_secret_refresh_avoids_direct_target_file_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    original_write_text = Path.write_text
+    direct_target_writes: list[str] = []
+
+    def _reject_direct_target_write(
+        path: Path,
+        data: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        if path == compose_file:
+            direct_target_writes.append(str(path))
+            raise OSError("direct compose-file write should not be used")
+        return original_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _reject_direct_target_write)
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_atomic_refresh",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={},
+    )
+
+    assert direct_target_writes == []
+    assert "OPTIONAL_TOKEN" not in compose_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
