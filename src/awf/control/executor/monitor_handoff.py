@@ -73,7 +73,9 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
@@ -142,6 +144,23 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     compose_file_path = ws.compose_file_path
     assert compose_project is not None
     assert compose_file_path is not None
+    profile = None
+    compose_up_timeout_seconds = 300
+    try:
+        profile = _profile_for_workspace(
+            ws,
+            worktree_path=self._config.worktrees_root / workspace_id,
+            planning_max_iterations_default=self._config.planning_max_iterations_default,
+        )
+        compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
+            profile=profile,
+            companions=companion_specs_from_task_policy(ws.task_policy),
+        )
+    except Exception:
+        _log.exception(
+            "executor.resume_compose_timeout_resolution_failed",
+            workspace_id=workspace_id,
+        )
 
     if not await self._recheck_status(
         workspace_id,
@@ -156,6 +175,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             compose_file=Path(compose_file_path),
             workspace_id=workspace_id,
             wait=True,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
     except ComposeOperationError as exc:
         _log.error(
@@ -186,11 +206,12 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
             )
-            profile = _profile_for_workspace(
-                ws,
-                worktree_path=self._config.worktrees_root / workspace_id,
-                planning_max_iterations_default=self._config.planning_max_iterations_default,
-            )
+            if profile is None:
+                profile = _profile_for_workspace(
+                    ws,
+                    worktree_path=self._config.worktrees_root / workspace_id,
+                    planning_max_iterations_default=self._config.planning_max_iterations_default,
+                )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,

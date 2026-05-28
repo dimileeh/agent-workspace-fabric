@@ -132,8 +132,9 @@ class _NoopResumeCompose:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
-        del project_name, compose_file, workspace_id, wait
+        del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
 
 
 class _RecordingValidation:
@@ -1282,8 +1283,9 @@ class TestOperatorControlRaces:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, wait
+                del project_name, compose_file, wait, compose_up_timeout_seconds
                 compose_calls.append(workspace_id)
 
         class _Monitor:

@@ -136,8 +136,9 @@ class _NoopResumeCompose:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
-        del project_name, compose_file, workspace_id, wait
+        del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
 
 
 class _RecordingValidation:
@@ -1225,12 +1226,14 @@ class TestPrMonitorResume:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
                 call_order.append("compose")
                 assert project_name == "persisted_project"
                 assert compose_file == compose_file_path
                 assert workspace_id == ws_id
                 assert wait is True
+                assert compose_up_timeout_seconds == 300
 
         class _Monitor:
             async def run(
@@ -1372,8 +1375,9 @@ class TestPrMonitorResume:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, workspace_id, wait
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 raise AssertionError("compose must not restart after recovery skips")
 
         ws_id = await _seed_monitoring_pr(

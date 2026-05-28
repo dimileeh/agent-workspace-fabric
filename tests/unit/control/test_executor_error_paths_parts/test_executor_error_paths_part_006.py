@@ -145,8 +145,9 @@ class _NoopResumeCompose:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
-        del project_name, compose_file, workspace_id, wait
+        del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
 
 
 class _RecordingValidation:
@@ -591,6 +592,7 @@ async def _seed_monitoring_pr(
     compose_project_name: str | None = "awf_x",
     compose_file_path: str | None = "/tmp/awf/x/compose.yml",
     resolved_profile: dict[str, Any] | None = None,
+    task_policy: dict[str, Any] | None = None,
     auto_merge: bool = True,
     initial_review_grace_period_seconds: float | None = None,
 ) -> str:
@@ -605,6 +607,7 @@ async def _seed_monitoring_pr(
             test_commands=["pytest -q"],
             requires_database=False,
             resolved_profile=resolved_profile,
+            task_policy=task_policy,
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
         )
@@ -930,8 +933,9 @@ class TestExecutorCoverageEdgesPart002:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, workspace_id, wait
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1011,8 +1015,9 @@ class TestExecutorCoverageEdgesPart002:
                 compose_file: Path,
                 workspace_id: str,
                 wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
             ) -> None:
-                del project_name, compose_file, workspace_id, wait
+                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
                 session_factory.fail_next = True
                 raise ComposeOperationError(
                     operation="up",
@@ -1099,6 +1104,71 @@ class TestExecutorCoverageEdgesPart002:
         assert monitor_calls == [ws_id]
         assert captured["agent_wall_timeout_seconds"] == executor._config.agent_wall_timeout_seconds
         assert captured["agent_idle_timeout_seconds"] == executor._config.agent_idle_timeout_seconds
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_preserves_companion_compose_timeout(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        class _RecordingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+                compose_up_timeout_seconds: int = 300,
+            ) -> None:
+                captured.update(
+                    {
+                        "project_name": project_name,
+                        "compose_file": compose_file,
+                        "workspace_id": workspace_id,
+                        "wait": wait,
+                        "compose_up_timeout_seconds": compose_up_timeout_seconds,
+                    }
+                )
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            resolved_profile=WorkspaceProfile(name="monitor-timeout").model_dump(mode="json"),
+            task_policy={
+                "companions": [
+                    {
+                        "name": "slow-api",
+                        "repo_url": "git@github.com:x/slow-api.git",
+                        "compose_up_timeout_seconds": 900,
+                    }
+                ],
+            },
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_RecordingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert captured["workspace_id"] == ws_id
+        assert captured["compose_up_timeout_seconds"] == 900
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(

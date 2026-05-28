@@ -10,6 +10,7 @@ from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_services import (
     MaterializedCompanionService,
+    WorkspaceCompanionSpec,
     companion_env_secret_stack_metadata,
     companion_service_from_materialized,
     validate_companion_service_graph,
@@ -145,7 +146,7 @@ class ComposeStackLauncher:
                 companion_service_from_materialized(companion) for companion in request.companions
             )
         )
-        compose_up_timeout_seconds = _effective_compose_up_timeout_seconds(
+        compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=request.companions,
         )
@@ -212,17 +213,25 @@ def _stack_secret_metadata(
     return metadata
 
 
-def _effective_compose_up_timeout_seconds(
+def effective_compose_up_timeout_seconds(
     *,
     profile: WorkspaceProfile,
-    companions: tuple[MaterializedCompanionService, ...],
+    companions: tuple[MaterializedCompanionService | WorkspaceCompanionSpec, ...],
 ) -> int:
     """Return the longest compose-up wait timeout requested for this stack."""
     timeouts = [profile.docker.startup_timeout_seconds]
     timeouts.extend(
         timeout
         for companion in companions
-        for timeout in (companion.spec.compose_up_timeout_seconds,)
+        for timeout in (_companion_compose_up_timeout_seconds(companion),)
         if timeout is not None
     )
     return max(timeouts)
+
+
+def _companion_compose_up_timeout_seconds(
+    companion: MaterializedCompanionService | WorkspaceCompanionSpec,
+) -> int | None:
+    if isinstance(companion, MaterializedCompanionService):
+        return companion.spec.compose_up_timeout_seconds
+    return companion.compose_up_timeout_seconds
