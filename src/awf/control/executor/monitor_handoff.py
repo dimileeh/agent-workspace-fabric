@@ -518,7 +518,9 @@ def _remove_compose_environment_targets(
                 if retained_environment:
                     service["environment"] = retained_environment
                 else:
-                    del service["environment"]
+                    # Preserve list style so same-pass restores do not switch
+                    # the section to Compose mapping form.
+                    service["environment"] = []
     return removed_count
 
 

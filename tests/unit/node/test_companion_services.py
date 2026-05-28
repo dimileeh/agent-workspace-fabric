@@ -198,6 +198,28 @@ def test_companion_specs_from_task_policy_environment_secret_required_null_defau
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_scope_fields_default_to_env() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "value_from": "ANTHROPIC_API_KEY",
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].provider == "env"
+    assert spec.environment_secrets[0].kind == "env"
+
+
+@pytest.mark.unit
 def test_companion_environment_secret_ref_requires_value_from() -> None:
     with pytest.raises(TypeError, match="value_from"):
         CompanionEnvironmentSecretRef(target="AIRA_API_KEY")
@@ -273,6 +295,51 @@ def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_val
                                 "kind": "env",
                                 "value_from": "ANTHROPIC_API_KEY}",
                             },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "secret_patch",
+    (
+        {"provider": None},
+        {"provider": False},
+        {"provider": 0},
+        {"provider": "vault"},
+        {"kind": None},
+        {"kind": False},
+        {"kind": 0},
+        {"kind": "secret"},
+    ),
+)
+def test_companion_specs_from_task_policy_rejects_unsupported_environment_secret_scope_fields(
+    secret_patch: dict[str, object],
+) -> None:
+    secret_ref = {
+        "value_from": "ANTHROPIC_API_KEY",
+        **secret_patch,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "companion environment_secrets entry for 'AIRA_API_KEY' only supports "
+            "provider=env and kind=env"
+        ),
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": secret_ref,
                         },
                     }
                 ]

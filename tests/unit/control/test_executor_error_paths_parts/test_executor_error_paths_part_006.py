@@ -224,6 +224,64 @@ def test_restore_compose_environment_list_refs_counts_duplicate_targets_once() -
     ]
 
 
+@pytest.mark.unit
+def test_companion_env_secret_refresh_preserves_list_environment_format_when_restoring_after_emptying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_TOKEN_SOURCE", raising=False)
+    monkeypatch.setenv("PRESENT_TOKEN_SOURCE", "raw-present-secret")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  backend:
+    environment:
+      - MISSING_TOKEN=${MISSING_TOKEN_SOURCE:-}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    companion_specs = executor_monitor_handoff.companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "MISSING_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "MISSING_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                        "PRESENT_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "PRESENT_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    executor_monitor_handoff._refresh_optional_companion_env_secrets_for_resume(
+        workspace_id="ws_list_restore",
+        compose_file=compose_file,
+        companion_specs=companion_specs,
+        environ={"PRESENT_TOKEN_SOURCE": "raw-present-secret"},
+    )
+
+    rendered = compose_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(rendered)
+    assert parsed["services"]["backend"]["environment"] == [
+        "PRESENT_TOKEN=${PRESENT_TOKEN_SOURCE:-}",
+    ]
+    assert "MISSING_TOKEN" not in rendered
+    assert "raw-present-secret" not in rendered
+
+
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 

@@ -468,13 +468,24 @@ def _environment_secret_ref(target: object, value: object) -> CompanionEnvironme
             f"companion environment_secrets value_from for {target!r} must be a "
             "Docker-compatible environment variable name"
         )
+    provider = _environment_secret_scope_value(value, "provider")
+    kind = _environment_secret_scope_value(value, "kind")
+    if provider != "env" or kind != "env":
+        raise ValueError(
+            f"companion environment_secrets entry for {target!r} only supports "
+            f"provider=env and kind=env, got provider={provider!r}, kind={kind!r}"
+        )
     return CompanionEnvironmentSecretRef(
         target=target,
-        provider=str(value.get("provider") or "env"),
-        kind=str(value.get("kind") or "env"),
+        provider=provider,
+        kind=kind,
         value_from=value_from,
         required=_environment_secret_required(value.get("required", True)),
     )
+
+
+def _environment_secret_scope_value(value: Mapping[object, object], field: str) -> str:
+    return str(value.get(field, "env"))
 
 
 def _environment_secret_required(value: object) -> bool:
