@@ -301,8 +301,8 @@ def test_init_help_documents_project_onboarding_and_new_first_run_flow() -> None
     result = _runner.invoke(app, ["init", "--help"], env={"COLUMNS": "240"})
 
     assert result.exit_code == 0, result.output
-    assert "awf setup" in result.output
-    assert "awf start" in result.output
+    assert "current runnable first path" in result.output
+    assert "awf service bootstrap" in result.output
     assert "awf init <path>" in result.output
     assert "Path to a checked-out repository" in result.output
     assert "docker/compose/.env" not in result.output
@@ -327,8 +327,7 @@ def test_init_without_path_returns_migration_error() -> None:
     assert result.stdout == ""
     assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
     assert "`awf init` no longer bootstraps the local service stack" in result.stderr
-    assert "awf setup" in result.stderr
-    assert "awf start" in result.stderr
+    assert "awf service bootstrap" in result.stderr
     assert "awf init <path>" in result.stderr
     assert "Traceback" not in result.stderr
 
@@ -345,8 +344,7 @@ def test_init_without_path_json_returns_migration_payload() -> None:
         "command": "awf init",
         "message": "`awf init` requires a project path.",
         "next_steps": [
-            "Run awf setup to prepare this machine.",
-            "Run awf start to start local AWF Core.",
+            "Run awf service bootstrap to start local AWF Core.",
             "Run awf init <path> to onboard a project repository.",
         ],
     }
@@ -378,8 +376,7 @@ def test_init_without_path_rejects_legacy_bootstrap_flags_with_migration(
     assert result.stdout == ""
     assert "AWF_INIT_REQUIRES_PROJECT_PATH" in result.stderr
     assert expected_flag in result.stderr
-    assert "awf setup" in result.stderr
-    assert "awf start" in result.stderr
+    assert "awf service bootstrap" in result.stderr
     assert "awf init <path>" in result.stderr
     assert "Traceback" not in result.stderr
 

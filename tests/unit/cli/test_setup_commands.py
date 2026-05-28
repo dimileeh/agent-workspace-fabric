@@ -18,7 +18,7 @@ def test_setup_help_describes_first_run_surface() -> None:
 
     assert result.exit_code == 0, result.output
     assert "Prepare this machine for AWF" in result.output
-    assert "awf start" in result.output
+    assert "awf service bootstrap" in result.output
     assert "awf init <path>" in result.output
     assert "Traceback" not in result.output
 
@@ -31,7 +31,7 @@ def test_setup_placeholder_pretty_has_stable_reason_code() -> None:
     assert result.stdout == ""
     assert "AWF_SETUP_PLACEHOLDER" in result.stderr
     assert "awf setup" in result.stderr
-    assert "awf start" in result.stderr
+    assert "awf service bootstrap" in result.stderr
     assert "awf init <path>" in result.stderr
     assert "Traceback" not in result.stderr
 
@@ -48,7 +48,7 @@ def test_setup_placeholder_json_has_stable_shape() -> None:
         "command": "awf setup",
         "message": "awf setup is reserved; host setup checks land in a later setup slice.",
         "next_steps": [
-            "Run awf start after setup is implemented.",
+            "Run awf service bootstrap for current local Core startup.",
             "Run awf init <path> to onboard a project repository.",
         ],
     }

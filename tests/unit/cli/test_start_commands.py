@@ -18,7 +18,7 @@ def test_start_help_describes_local_core_surface() -> None:
 
     assert result.exit_code == 0, result.output
     assert "Start local AWF Core" in result.output
-    assert "awf setup" in result.output
+    assert "awf service bootstrap" in result.output
     assert "awf init <path>" in result.output
     assert "Traceback" not in result.output
 
@@ -31,7 +31,7 @@ def test_start_placeholder_pretty_has_stable_reason_code() -> None:
     assert result.stdout == ""
     assert "AWF_START_PLACEHOLDER" in result.stderr
     assert "awf start" in result.stderr
-    assert "awf setup" in result.stderr
+    assert "awf service bootstrap" in result.stderr
     assert "awf init <path>" in result.stderr
     assert "Traceback" not in result.stderr
 
@@ -48,7 +48,7 @@ def test_start_placeholder_json_has_stable_shape() -> None:
         "command": "awf start",
         "message": "awf start is reserved; local Core startup lands in a later start slice.",
         "next_steps": [
-            "Run awf setup first once setup is implemented.",
+            "Run awf service bootstrap for current local Core startup.",
             "Run awf init <path> to onboard a project repository.",
         ],
     }

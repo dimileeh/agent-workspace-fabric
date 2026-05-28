@@ -14,7 +14,7 @@ _SETUP_PLACEHOLDER_PAYLOAD = {
     "command": "awf setup",
     "message": "awf setup is reserved; host setup checks land in a later setup slice.",
     "next_steps": [
-        "Run awf start after setup is implemented.",
+        "Run awf service bootstrap for current local Core startup.",
         "Run awf init <path> to onboard a project repository.",
     ],
 }
@@ -39,6 +39,9 @@ def setup_command(
             err=True,
         )
         typer.echo("Next:", err=True)
-        typer.echo("  - Run `awf start` after setup is implemented.", err=True)
+        typer.echo(
+            "  - Run `awf service bootstrap` for current local Core startup.",
+            err=True,
+        )
         typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
     raise typer.Exit(code=1)

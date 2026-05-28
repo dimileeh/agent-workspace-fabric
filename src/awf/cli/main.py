@@ -58,8 +58,9 @@ __all__ = [
 ]
 
 _DX_FIRST_PATH_HELP = """
-For first-time users: the recommended first path is `awf setup`, then
-`awf start`, then `awf init <path>` to prepare your project repository.
+For first-time users: the current runnable first path is
+`awf service bootstrap`, then `awf init <path>` to prepare your project
+repository. `awf setup` and `awf start` are reserved future command surfaces.
 """
 
 _MUTATES_GLOBAL_HELP = """
@@ -69,7 +70,7 @@ via the async worker.
 
 _PROVIDER_HELP_PASSTHROUGH = (
     "Legacy no-path init bootstrap provider flag. Hidden from help and rejected "
-    "with migration guidance; use `awf setup` and `awf start`."
+    "with migration guidance; use `awf service bootstrap`."
 )
 
 
@@ -92,7 +93,7 @@ app.command(
     help=(
         "Prepare this machine for AWF first-run use. "
         "Reserved before full setup checks land. "
-        "Next: awf start, then awf init <path>."
+        "Current runnable path: awf service bootstrap, then awf init <path>."
     ),
 )(setup_command)
 app.command(
@@ -100,7 +101,7 @@ app.command(
     help=(
         "Start local AWF Core after setup. "
         "Reserved before service startup lands. "
-        "Run awf setup first, then awf init <path>."
+        "Current runnable path: awf service bootstrap, then awf init <path>."
     ),
 )(start_command)
 
@@ -120,8 +121,7 @@ def _init_migration_payload(legacy_flags: list[str]) -> dict[str, object]:
         "command": "awf init",
         "message": "`awf init` requires a project path.",
         "next_steps": [
-            "Run awf setup to prepare this machine.",
-            "Run awf start to start local AWF Core.",
+            "Run awf service bootstrap to start local AWF Core.",
             "Run awf init <path> to onboard a project repository.",
         ],
     }
@@ -147,8 +147,7 @@ def _emit_init_migration_error(fmt: OutputFormat, legacy_flags: list[str]) -> No
                 err=True,
             )
         typer.echo("Next:", err=True)
-        typer.echo("  - Run `awf setup` to prepare this machine.", err=True)
-        typer.echo("  - Run `awf start` to start local AWF Core.", err=True)
+        typer.echo("  - Run `awf service bootstrap` to start local AWF Core.", err=True)
         typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
     raise typer.Exit(code=2)
 
@@ -162,7 +161,7 @@ def init(
         None,
         help=(
             "Path to a checked-out repository. Required for project onboarding; "
-            "run `awf setup` and `awf start` for machine setup and local Core."
+            "run `awf service bootstrap` first when local Core is not running."
         ),
     ),
     include_smoke_request: bool = typer.Option(
@@ -201,25 +200,25 @@ def init(
     write_env: bool = typer.Option(
         True,
         "--write-env/--no-write-env",
-        help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
         hidden=True,
     ),
     timeout_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS,
         "--timeout-seconds",
-        help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
         hidden=True,
     ),
     poll_interval_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS,
         "--poll-interval-seconds",
-        help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
         hidden=True,
     ),
     skip_agent_runtime_build: bool = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         False,
         "--skip-agent-runtime-build",
-        help="Legacy no-path init bootstrap flag; use `awf setup` and `awf start`.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
         hidden=True,
     ),
     provider: list[str] = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
@@ -282,7 +281,7 @@ def init(
         typer.echo(
             "error: legacy bootstrap-only flag(s) "
             f"{', '.join(bootstrap_only_flags)} are not valid for project onboarding; "
-            "run `awf setup` and `awf start` for local service setup.",
+            "run `awf service bootstrap` for local service setup.",
             err=True,
         )
         raise typer.Exit(code=2)

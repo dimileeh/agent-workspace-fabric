@@ -420,8 +420,7 @@ def test_init_with_path_rejects_bootstrap_only_flags_with_clear_error(
     assert result.exit_code == 2
     assert "--skip-agent-runtime-build" in output
     assert "not valid for project onboarding" in output
-    assert "awf setup" in output
-    assert "awf start" in output
+    assert "awf service bootstrap" in output
     assert "Traceback" not in output
 
 
@@ -440,8 +439,7 @@ def test_init_with_path_rejects_no_write_env_flag(
     assert result.exit_code == 2
     assert "--no-write-env" in output
     assert "not valid for project onboarding" in output
-    assert "awf setup" in output
-    assert "awf start" in output
+    assert "awf service bootstrap" in output
     assert "Traceback" not in output
 
 
