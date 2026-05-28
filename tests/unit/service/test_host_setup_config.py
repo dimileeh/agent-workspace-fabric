@@ -254,6 +254,9 @@ def test_valid_source_checkout_returns_verified_asset_paths(tmp_path: Path) -> N
     assert verified.control_plane_dockerfile == (
         checkout.resolve() / "docker/control-plane.Dockerfile"
     )
+    assert verified.workspace_base_template == (
+        checkout.resolve() / "docker/compose/workspace.base.yml.j2"
+    )
     assert verified.docs_dir == checkout.resolve() / "docs"
     assert verified.releasing_path == checkout.resolve() / "RELEASING.md"
     assert verified.markers == tuple(SOURCE_CHECKOUT_REQUIRED_MARKER_PATHS)
@@ -278,6 +281,22 @@ def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) 
     assert error.root == checkout.resolve()
     assert error.missing_markers == ("RELEASING.md",)
     assert error.to_dict()["missing_markers"] == ["RELEASING.md"]
+
+
+@pytest.mark.unit
+def test_source_checkout_requires_workspace_compose_template(tmp_path: Path) -> None:
+    checkout = _write_valid_source_checkout(tmp_path / "checkout")
+    template = checkout / "docker/compose/workspace.base.yml.j2"
+    if template.exists():
+        template.unlink()
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.missing_markers == ("docker/compose/workspace.base.yml.j2",)
+    assert error.to_dict()["missing_markers"] == ["docker/compose/workspace.base.yml.j2"]
 
 
 @pytest.mark.unit

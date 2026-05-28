@@ -30,6 +30,7 @@ SOURCE_CHECKOUT_MARKERS: tuple[SourceCheckoutMarker, ...] = (
     SourceCheckoutMarker("pyproject.toml", "file"),
     SourceCheckoutMarker("src/awf/__init__.py", "file"),
     SourceCheckoutMarker("docker/compose/local-service.yml", "file"),
+    SourceCheckoutMarker("docker/compose/workspace.base.yml.j2", "file"),
     SourceCheckoutMarker("docker/agent-runtime.Dockerfile", "file"),
     SourceCheckoutMarker("docker/control-plane.Dockerfile", "file"),
     SourceCheckoutMarker("README.md", "file"),
@@ -47,6 +48,7 @@ class SourceCheckoutAssetPaths(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     compose_file: str = "docker/compose/local-service.yml"
+    workspace_base_template: str = "docker/compose/workspace.base.yml.j2"
     agent_runtime_dockerfile: str = "docker/agent-runtime.Dockerfile"
     control_plane_dockerfile: str = "docker/control-plane.Dockerfile"
     docs_dir: str = "docs"
@@ -73,6 +75,7 @@ class VerifiedSourceCheckout(BaseModel):
 
     root: Path
     compose_file: Path
+    workspace_base_template: Path
     agent_runtime_dockerfile: Path
     control_plane_dockerfile: Path
     docs_dir: Path
@@ -169,6 +172,7 @@ def validate_source_checkout(
     return VerifiedSourceCheckout(
         root=resolved_root,
         compose_file=resolved_root / asset_paths.compose_file,
+        workspace_base_template=resolved_root / asset_paths.workspace_base_template,
         agent_runtime_dockerfile=resolved_root / asset_paths.agent_runtime_dockerfile,
         control_plane_dockerfile=resolved_root / asset_paths.control_plane_dockerfile,
         docs_dir=resolved_root / asset_paths.docs_dir,
