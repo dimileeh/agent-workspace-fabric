@@ -126,6 +126,26 @@ def test_checker_uses_branch_totals_when_line_rate_alone_is_above_threshold(
 
 
 @pytest.mark.unit
+def test_checker_reports_branch_only_coverage_without_traceback(tmp_path: Path) -> None:
+    coverage_xml = tmp_path / "coverage.xml"
+    _write_coverage_xml(
+        coverage_xml,
+        lines_valid=0,
+        lines_covered=0,
+        branches_valid=100,
+        branches_covered=99,
+    )
+
+    result = _run_checker(coverage_xml)
+
+    assert result.returncode == 0
+    assert "combined=99.00%" in result.stdout
+    assert "line=n/a" in result.stdout
+    assert "branch=99.00%" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.unit
 def test_checker_reports_invalid_coverage_xml(tmp_path: Path) -> None:
     coverage_xml = tmp_path / "coverage.xml"
     coverage_xml.write_text("<coverage lines-valid='10' />", encoding="utf-8")

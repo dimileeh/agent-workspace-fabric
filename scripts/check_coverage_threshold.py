@@ -114,10 +114,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     combined_percent = totals.combined_percent
     branch_percent = totals.branch_percent
+    line_percent: float | None = None if totals.lines_valid == 0 else totals.line_percent
     print(
         "Coverage totals: "
         f"combined={combined_percent:.2f}% "
-        f"line={totals.line_percent:.2f}% "
+        f"line={_format_optional_percent(line_percent)} "
         f"branch={_format_optional_percent(branch_percent)} "
         f"covered={totals.covered_total}/{totals.valid_total}"
     )
