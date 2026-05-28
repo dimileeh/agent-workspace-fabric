@@ -182,13 +182,13 @@ class ControlWorker(WorkerDelegatesMixin):
         if requested_provision_slots > 0 and _local_capacity_configured(self._config):
             requested_ids = await self._claim_requested_ids(limit=requested_provision_slots)
         elif requested_provision_slots > 0:
-            requested_ids = await self._list_requested()
-            requested_ids = requested_ids[:requested_provision_slots]
+            listed_ids = await self._list_requested()
             requested_ids = await self._filter_current_status(
-                requested_ids,
+                listed_ids,
                 expected=WorkspaceStatus.requested,
                 action="provision",
             )
+            requested_ids = requested_ids[:requested_provision_slots]
             if requested_ids:
                 requested_ids = await self._claim_requested_ids(requested_ids)
         if requested_ids:
