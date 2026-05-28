@@ -33,14 +33,14 @@ respects an eight-workspace local capacity cap.
 - H02 plain-secret policy: allow `chmod 600` plain-file provider secrets only
   for Linux/headless setups after explicit warning and consent. Keyring and env
   refs remain preferred.
-- Execution model: use `codex` with `gpt-5.5` and `xhigh` reasoning effort for
-  all AWF implementation workspaces in this backlog.
-- Launch preflight: before launching implementation workspaces, clean expired
-  AWF resources, rebuild local service images, and rerun AWF bootstrap.
+- H03 execution model: use `codex` with `gpt-5.5` and `xhigh` reasoning effort
+  for all AWF implementation workspaces in this backlog.
+- H04 launch preflight: before launching implementation workspaces, clean
+  expired AWF resources, rebuild local service images, and rerun AWF bootstrap.
 
-H01 and H02 are complete for scheduling purposes. Later dependency references
-keep the graph traceable, but they are not additional human approval holds unless
-a human operator explicitly reopens one of the decisions above.
+H01 through H04 are complete for scheduling purposes. Later H01/H02 dependency
+references keep the graph traceable, but they are not additional human approval
+holds unless a human operator explicitly reopens one of the decisions above.
 
 ## What Already Exists
 
@@ -845,8 +845,9 @@ H01 ! installer hosting/trust (done)
                  +--> T15* docs lanes
 
 T12* install.sh
+  +--> T16* release workflow checks
 T13* package assets
-  +--> T16* release workflow checks (after T12 + T13)
+  +--> T16* release workflow checks
 
 H02 ! credential consent wording (done)
   +--> T06* credential ref backends
