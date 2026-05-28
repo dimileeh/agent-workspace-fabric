@@ -1024,7 +1024,7 @@ Lane B - Config/start/source assets
 
 Lane C - Installer/release
   H01 -> T11 -> T12 -> T16 -> T19
-              \-> T13 -> T14
+              \-> T13 -> T14 (requires T12)
 
 Lane D - Docs/DX
   T01 -> T04 -> T10 -> T15 -> T18 -> T19
