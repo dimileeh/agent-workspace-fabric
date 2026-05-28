@@ -216,6 +216,20 @@ def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
     return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
+def _compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait: bool) -> float:
+    """Return AWF's outer timeout for ``docker compose up``.
+
+    Compose applies ``--wait-timeout`` to readiness after build/recreate/start
+    work. AWF's subprocess guard covers that launch phase separately so a cold
+    build cannot consume the readiness wait budget before Compose gets to use it.
+    """
+    launch_timeout_seconds = float(compose_up_timeout_seconds)
+    readiness_timeout_seconds = launch_timeout_seconds if wait else 0.0
+    return (
+        launch_timeout_seconds + readiness_timeout_seconds + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+    )
+
+
 class ComposeManager:
     """Renders, launches, and tears down per-workspace compose stacks."""
 
@@ -324,8 +338,9 @@ class ComposeManager:
             paths.compose_file,
             args,
             operation="up",
-            capture_timeout_seconds=(
-                float(spec.compose_up_timeout_seconds) + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+                spec.compose_up_timeout_seconds,
+                wait=wait,
             ),
         )
         return paths
@@ -361,8 +376,9 @@ class ComposeManager:
             compose_file,
             args,
             operation="up",
-            capture_timeout_seconds=(
-                float(compose_up_timeout_seconds) + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+                compose_up_timeout_seconds,
+                wait=wait,
             ),
         )
 
