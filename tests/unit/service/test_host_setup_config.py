@@ -229,6 +229,26 @@ def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_source_checkout_expanduser_failure_remains_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = Path("~/missing-awf-source-checkout")
+
+    def _expanduser_unavailable(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
+
+    with pytest.raises(SourceCheckoutError) as exc_info:
+        validate_source_checkout(candidate, clock=lambda: _FIXED_NOW)
+
+    error = exc_info.value
+    assert error.reason_code == "SOURCE_CHECKOUT_INVALID"
+    assert error.root == candidate.absolute()
+    assert error.details == {"path_status": "missing"}
+
+
+@pytest.mark.unit
 def test_unreadable_source_checkout_reports_source_checkout_invalid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -226,11 +226,12 @@ def verified_source_from_metadata(
 
 
 def _resolve_candidate(root: str | Path) -> Path:
-    expanded = Path(root).expanduser()
+    base = Path(root)
     try:
+        expanded = base.expanduser()
         return expanded.resolve()
-    except OSError:
-        return expanded.absolute()
+    except (OSError, RuntimeError):
+        return base.absolute()
 
 
 def _validate_root_readable(root: Path) -> None:
