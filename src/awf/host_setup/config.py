@@ -21,6 +21,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode, Node
 
 from awf.host_setup.source_assets import SourceCheckoutAssetMetadata
 
@@ -93,6 +95,76 @@ class _RecursivePayloadError(ValueError):
             "error_type": "recursive_yaml_alias",
             "path": _format_path(self.path),
         }
+
+
+class _DuplicateYamlKeyError(yaml.YAMLError):
+    """Internal sanitized error for duplicate YAML mapping keys."""
+
+    def __init__(self) -> None:
+        """Build a sanitized duplicate-key diagnostic."""
+        super().__init__("duplicate YAML mapping key")
+
+    def details(self) -> dict[str, object]:
+        """Return secret-free diagnostic details for duplicate YAML keys."""
+        return {"error_type": "duplicate_mapping_key"}
+
+
+class _DuplicateKeyRejectingSafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects mapping keys PyYAML would collapse."""
+
+
+def _construct_yaml_object(
+    loader: _DuplicateKeyRejectingSafeLoader,
+    node: Node,
+    *,
+    deep: bool,
+) -> object:
+    """Construct a YAML node while containing PyYAML's untyped API surface."""
+    return loader.construct_object(node, deep=deep)  # type: ignore[no-untyped-call]
+
+
+def _construct_mapping_without_duplicate_keys(
+    loader: _DuplicateKeyRejectingSafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    """Construct YAML mappings only after duplicate keys are rejected."""
+    if not isinstance(node, MappingNode):
+        raise ConstructorError(
+            None,
+            None,
+            f"expected a mapping node, but found {node.id}",
+            node.start_mark,
+        )
+
+    loader.flatten_mapping(node)
+    seen_keys: set[object] = set()
+    for key_node, _value_node in node.value:
+        key = _construct_yaml_object(loader, key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            ) from exc
+        if key in seen_keys:
+            raise _DuplicateYamlKeyError()
+        seen_keys.add(key)
+
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = _construct_yaml_object(loader, key_node, deep=deep)
+        mapping[key] = _construct_yaml_object(loader, value_node, deep=deep)
+    return mapping
+
+
+_DuplicateKeyRejectingSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping_without_duplicate_keys,
+)
 
 
 class HostSetupConfigError(RuntimeError):
@@ -268,7 +340,9 @@ def read_host_setup_config(*, path: str | Path | None = None) -> HostSetupConfig
         if not config_path.exists():
             return HostSetupConfig()
         raw_text = config_path.read_text(encoding="utf-8")
-        raw: object = yaml.safe_load(raw_text)
+        raw: object = yaml.load(raw_text, Loader=_DuplicateKeyRejectingSafeLoader)
+    except _DuplicateYamlKeyError as exc:
+        raise _config_corrupt_error(config_path, details=exc.details()) from exc
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise _config_corrupt_error(
             config_path,

@@ -339,6 +339,36 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_host_setup_config_rejects_duplicate_yaml_keys_before_secret_scan(
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "providers:",
+                "  github:",
+                "    credential_ref: ghp_raw_secret",
+                "    credential_ref: env://GITHUB_TOKEN",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "duplicate_mapping_key"}
+    assert "ghp_raw_secret" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 def test_host_setup_config_reads_missing_and_empty_yaml_as_defaults(tmp_path: Path) -> None:
     config_path = default_host_setup_config_path(home=tmp_path / "home")
 
