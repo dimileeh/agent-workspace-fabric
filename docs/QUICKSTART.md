@@ -47,11 +47,13 @@ formula audit.
 ## Set Up And Start AWF
 
 The current runnable first-run sequence is local Core startup, health check,
-then project onboarding. For PR creation and monitoring, export a GitHub token
-before starting Core so the API and worker containers receive it when they are
-created:
+then project onboarding. Export the required local service values before
+starting Core so Compose can interpolate the API, worker, and Postgres service
+environment:
 
 ```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf service bootstrap
 awf service status --format pretty
@@ -66,8 +68,11 @@ present in help for the future grammar, but today `awf setup` exits with
 `AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
 `awf service bootstrap` until those setup and start slices land.
 
-In source checkouts with local Compose assets, `awf service bootstrap` persists
-Compose-interpolated service values in `docker/compose/.env`.
+In source checkouts with local Compose assets, `awf service bootstrap` reads
+`docker/compose/.env` when that file already exists. If you prefer persistent
+values across shells, copy `.env.example` to `docker/compose/.env` and set
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_GITHUB_TOKEN` there before
+bootstrapping.
 
 If you set or refresh the GitHub token after starting Core, rerun the service
 bootstrap so Compose recreates the service containers with the updated

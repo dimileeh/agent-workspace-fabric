@@ -121,10 +121,13 @@ def test_quickstart_uses_runnable_startup_path() -> None:
     )[0]
 
     assert (
+        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
         'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
         "awf service bootstrap\n"
         "awf service status --format pretty"
     ) in startup_section
+    assert "persists\nCompose-interpolated service values" not in startup_section
     assert not re.search(r"(?m)^awf setup\s*$", startup_section)
     assert not re.search(r"(?m)^awf start\s*$", startup_section)
     assert "AWF_SETUP_PLACEHOLDER" in startup_section
