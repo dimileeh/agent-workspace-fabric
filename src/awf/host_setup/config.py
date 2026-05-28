@@ -79,6 +79,22 @@ class _SecretPayloadError(ValueError):
         }
 
 
+class _RecursivePayloadError(ValueError):
+    """Internal sanitized error for recursive YAML payloads."""
+
+    def __init__(self, *, path: tuple[str, ...]) -> None:
+        """Build a sanitized recursive-payload diagnostic."""
+        self.path = path
+        super().__init__(f"recursive YAML alias at {_format_path(path)}")
+
+    def details(self) -> dict[str, object]:
+        """Return secret-free diagnostic details for config errors."""
+        return {
+            "error_type": "recursive_yaml_alias",
+            "path": _format_path(self.path),
+        }
+
+
 class HostSetupConfigError(RuntimeError):
     """Reason-coded host setup config failure."""
 
@@ -268,6 +284,8 @@ def read_host_setup_config(*, path: str | Path | None = None) -> HostSetupConfig
         _ensure_no_secret_payload(raw)
     except _SecretPayloadError as exc:
         raise _config_secret_error(config_path, details=exc.details()) from exc
+    except _RecursivePayloadError as exc:
+        raise _config_corrupt_error(config_path, details=exc.details()) from exc
 
     try:
         return HostSetupConfig.model_validate(raw)
@@ -336,30 +354,62 @@ def _config_path_resolution_error(path: Path, exc: OSError | RuntimeError) -> Ho
     )
 
 
-def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> None:
+def _ensure_no_secret_payload(
+    value: object,
+    *,
+    path: tuple[str, ...] = (),
+    _active_container_ids: set[int] | None = None,
+) -> None:
     """Recursively reject secret-looking keys and values in config payloads."""
+    active_container_ids = set() if _active_container_ids is None else _active_container_ids
     if isinstance(value, BaseModel):
-        _ensure_no_secret_payload(value.model_dump(mode="json"), path=path)
+        _ensure_no_secret_payload(
+            value.model_dump(mode="json"),
+            path=path,
+            _active_container_ids=active_container_ids,
+        )
         return
     if isinstance(value, Mapping):
-        for raw_key, raw_value in value.items():
-            if isinstance(raw_key, str):
-                if _is_secret_key(raw_key):
-                    raise _SecretPayloadError(
-                        path=(*path, raw_key),
-                        issue="secret-bearing key",
-                    )
-                if _looks_like_secret_value(raw_key):
-                    raise _SecretPayloadError(
-                        path=(*path, "<secret-key>"),
-                        issue="secret-like key",
-                    )
-            child_path = (*path, str(raw_key))
-            _ensure_no_secret_payload(raw_value, path=child_path)
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise _RecursivePayloadError(path=path)
+        active_container_ids.add(container_id)
+        try:
+            for raw_key, raw_value in value.items():
+                if isinstance(raw_key, str):
+                    if _is_secret_key(raw_key):
+                        raise _SecretPayloadError(
+                            path=(*path, raw_key),
+                            issue="secret-bearing key",
+                        )
+                    if _looks_like_secret_value(raw_key):
+                        raise _SecretPayloadError(
+                            path=(*path, "<secret-key>"),
+                            issue="secret-like key",
+                        )
+                child_path = (*path, str(raw_key))
+                _ensure_no_secret_payload(
+                    raw_value,
+                    path=child_path,
+                    _active_container_ids=active_container_ids,
+                )
+        finally:
+            active_container_ids.remove(container_id)
         return
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for index, item in enumerate(value):
-            _ensure_no_secret_payload(item, path=(*path, f"[{index}]"))
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise _RecursivePayloadError(path=path)
+        active_container_ids.add(container_id)
+        try:
+            for index, item in enumerate(value):
+                _ensure_no_secret_payload(
+                    item,
+                    path=(*path, f"[{index}]"),
+                    _active_container_ids=active_container_ids,
+                )
+        finally:
+            active_container_ids.remove(container_id)
         return
     if isinstance(value, str) and _looks_like_secret_value(value):
         raise _SecretPayloadError(path=path, issue="secret-like value")

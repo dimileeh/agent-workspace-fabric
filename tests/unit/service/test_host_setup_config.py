@@ -352,6 +352,21 @@ def test_host_setup_config_rejects_secret_payloads_inside_lists(
 
 
 @pytest.mark.unit
+def test_host_setup_config_treats_recursive_yaml_alias_as_corrupt(tmp_path: Path) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("version: 1\naudit: &a [*a]\n", encoding="utf-8")
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        read_host_setup_config(path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {"error_type": "recursive_yaml_alias", "path": "audit.[0]"}
+
+
+@pytest.mark.unit
 def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
     with pytest.raises(_SecretPayloadError) as exc_info:
         _ensure_no_secret_payload({"audit": ({"token": "ghp_raw_secret"},)})
