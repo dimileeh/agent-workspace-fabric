@@ -380,7 +380,7 @@ def _resolve_environment_secrets(
                 reason_code=COMPANION_ENV_SECRET_UNSUPPORTED,
             )
         secret_metadata = _environment_secret_metadata(spec.name, secret)
-        if host_env.get(secret.value_from) is not None:
+        if secret.value_from in host_env:
             environment.append((secret.target, _environment_secret_compose_ref(spec.name, secret)))
             env_secret_metadata.append(secret_metadata)
             continue

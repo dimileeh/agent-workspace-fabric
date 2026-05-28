@@ -290,6 +290,42 @@ def test_companion_service_from_materialized_preserves_optional_present_secret_r
 
 
 @pytest.mark.unit
+def test_companion_service_from_materialized_preserves_optional_empty_secret_ref(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"OPTIONAL_TOKEN_SOURCE": ""},
+    )
+
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE}"),)
+    assert service.secret_metadata["env_secret_count"] == 1
+    assert "omitted_optional_env_secret_count" not in service.secret_metadata
+
+
+@pytest.mark.unit
 def test_companion_service_from_materialized_omits_optional_missing_environment_secret(
     tmp_path: Path,
 ) -> None:
