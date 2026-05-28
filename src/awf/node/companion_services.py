@@ -513,7 +513,14 @@ def _optional_int(value: object) -> int | None:
         )
         return None
     if isinstance(value, int):
-        return _clamp_companion_compose_up_timeout_seconds(value)
+        clamped = _clamp_companion_compose_up_timeout_seconds(value)
+        if clamped != value:
+            _LOGGER.warning(
+                "Clamping task-policy compose_up_timeout_seconds from %r to %r",
+                value,
+                clamped,
+            )
+        return clamped
     if isinstance(value, float):
         if value.is_integer():
             return _clamp_companion_compose_up_timeout_seconds(int(value))

@@ -399,6 +399,31 @@ def test_companion_specs_from_task_policy_clamps_compose_up_timeout(
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_clamped_integer_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 9999,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 1800
+    assert "Clamping task-policy compose_up_timeout_seconds" in caplog.text
+    assert "9999" in caplog.text
+    assert "1800" in caplog.text
+
+
+@pytest.mark.unit
 def test_companion_specs_from_task_policy_coerces_integral_float_compose_up_timeout() -> None:
     spec = companion_specs_from_task_policy(
         {
