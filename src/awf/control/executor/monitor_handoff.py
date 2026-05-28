@@ -123,7 +123,7 @@ class CompanionEnvSecretPrecheckError(ComposeOperationError):
 
     def __init__(self, *, stderr: str, reason_code: str) -> None:
         self.operation = "companion_env_secret_precheck"
-        self.returncode = 0
+        self.returncode = 1
         self.stdout = ""
         self.stderr = stderr
         self.reason_code = reason_code

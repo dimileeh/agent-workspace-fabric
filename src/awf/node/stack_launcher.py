@@ -230,8 +230,7 @@ def effective_compose_up_timeout_seconds(
     timeouts.extend(
         timeout
         for companion in companions
-        for timeout in (_companion_compose_up_timeout_seconds(companion),)
-        if timeout is not None
+        if (timeout := _companion_compose_up_timeout_seconds(companion)) is not None
     )
     return max(timeouts)
 

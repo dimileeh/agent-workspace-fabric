@@ -1484,6 +1484,7 @@ class TestExecutorCoverageEdgesPart002:
         assert len(compose_events) == 1
         assert compose_events[0].reason_code == "MONITOR_RECOVERY_PRECHECK_FAILED"
         assert compose_events[0].payload["operation"] == "companion_env_secret_precheck"
+        assert compose_events[0].payload["returncode"] == 1
         assert compose_events[0].payload["reason_code"] == expected_reason_code
         assert expected_reason_code in compose_events[0].payload["stderr"]
         assert "REQUIRED_TOKEN_SOURCE" in compose_events[0].payload["stderr"]
