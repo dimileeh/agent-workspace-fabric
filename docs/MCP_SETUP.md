@@ -6,10 +6,14 @@ shelling out to `awf` or `curl`.
 
 ## Prerequisites
 
-Install AWF and start the local Core service first:
+Install AWF and start the local Core service first. Export the required local
+service values before bootstrapping so Compose can interpolate the API, worker,
+and Postgres service environment:
 
 ```bash
 uv tool install agent-workspace-fabric
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf service bootstrap
 awf service status --format pretty
@@ -21,6 +25,8 @@ For contributor checkouts, install from source instead:
 git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
 cd aira-agent-workspace-fabric
 uv tool install . --force
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf service bootstrap
 awf service status --format pretty
