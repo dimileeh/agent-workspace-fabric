@@ -92,7 +92,24 @@ def _format_optional_percent(value: float | None) -> str:
     """Format an optional coverage percentage for CLI output."""
     if value is None:
         return "n/a"
-    return f"{value:.2f}%"
+    return _format_percent(value)
+
+
+def _format_percent(value: float, *, precision: int = 2) -> str:
+    """Format a coverage percentage with a configurable decimal precision."""
+    return f"{value:.{precision}f}%"
+
+
+def _format_failing_percent(value: float, minimum: float) -> str:
+    """Show extra precision when two-decimal failure evidence is ambiguous."""
+    default = _format_percent(value)
+    if default != _format_percent(minimum):
+        return default
+    for precision in range(3, 13):
+        candidate = _format_percent(value, precision=precision)
+        if candidate != _format_percent(minimum, precision=precision):
+            return candidate
+    return f"{value:.17g}%"
 
 
 def _minimum_percent_arg(raw_value: str) -> float:
@@ -133,20 +150,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     combined_percent = totals.combined_percent
     branch_percent = totals.branch_percent
     line_percent: float | None = None if totals.lines_valid == 0 else totals.line_percent
+    coverage_failed = combined_percent + 1e-9 < minimum_percent
+    combined_percent_display = (
+        _format_failing_percent(combined_percent, minimum_percent)
+        if coverage_failed
+        else _format_percent(combined_percent)
+    )
     print(
         "Coverage totals: "
-        f"combined={combined_percent:.2f}% "
+        f"combined={combined_percent_display} "
         f"line={_format_optional_percent(line_percent)} "
         f"branch={_format_optional_percent(branch_percent)} "
         f"covered={totals.covered_total}/{totals.valid_total}"
     )
     print(f"Required minimum: {minimum_percent:.2f}%")
 
-    if combined_percent + 1e-9 < minimum_percent:
+    if coverage_failed:
         sys.stdout.flush()
         print(
             "::error title=Coverage below required threshold::"
-            f"Combined line+branch coverage {combined_percent:.2f}% is below "
+            f"Combined line+branch coverage {combined_percent_display} is below "
             f"required {minimum_percent:.2f}%. Add meaningful tests without "
             "lowering coverage thresholds.",
             file=sys.stderr,

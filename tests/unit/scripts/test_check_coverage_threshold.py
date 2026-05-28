@@ -114,6 +114,25 @@ def test_checker_fails_when_combined_line_and_branch_coverage_is_below_threshold
 
 
 @pytest.mark.unit
+def test_checker_failure_reports_detailed_combined_coverage_near_threshold(
+    tmp_path: Path,
+) -> None:
+    """Failing near-threshold coverage evidence shows the raw failing value."""
+    coverage_xml = tmp_path / "coverage.xml"
+    _write_coverage_xml(
+        coverage_xml,
+        lines_valid=20000,
+        lines_covered=19799,
+    )
+
+    result = _run_checker(coverage_xml)
+
+    assert result.returncode == 1
+    assert "combined=98.995%" in result.stdout
+    assert "Combined line+branch coverage 98.995% is below required 99.00%" in (result.stderr)
+
+
+@pytest.mark.unit
 def test_checker_uses_branch_totals_when_line_rate_alone_is_above_threshold(
     tmp_path: Path,
 ) -> None:
