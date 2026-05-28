@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
 from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
+    COMPANION_ENV_SECRET_SOURCE_MISSING,
+    CompanionEnvironmentSecretRef,
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
     companion_service_from_materialized,
     companion_specs_from_task_policy,
+    optional_env_secret_compose_placeholder,
     validate_companion_service_graph,
 )
 from awf.node.compose_manager import ComposeService
@@ -102,6 +107,669 @@ def test_companion_specs_from_task_policy_stringifies_environment_values() -> No
     )[0]
 
     assert spec.environment == (("DEBUG", "True"), ("PORT", "8000"))
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_preserves_environment_secret_references() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        },
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert [item.target for item in spec.environment_secrets] == [
+        "AIRA_API_KEY",
+        "OPTIONAL_TOKEN",
+    ]
+    assert spec.environment_secrets[0].value_from == "ANTHROPIC_API_KEY"
+    assert spec.environment_secrets[0].required is True
+    assert spec.environment_secrets[1].required is False
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_required_string_false_is_optional() -> (
+    None
+):
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": "false",
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].required is False
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_required_null_defaults_required() -> (
+    None
+):
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                            "required": None,
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].required is True
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_environment_secret_scope_fields_default_to_env() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "value_from": "ANTHROPIC_API_KEY",
+                        },
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.environment_secrets[0].provider == "env"
+    assert spec.environment_secrets[0].kind == "env"
+
+
+@pytest.mark.unit
+def test_companion_environment_secret_ref_requires_value_from() -> None:
+    with pytest.raises(TypeError, match="value_from"):
+        CompanionEnvironmentSecretRef(target="AIRA_API_KEY")
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_rejects_non_mapping_environment_secret_ref() -> None:
+    with pytest.raises(
+        ValueError,
+        match="companion environment_secrets entry for AIRA_API_KEY must be a mapping",
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": "ANTHROPIC_API_KEY",
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_target() -> None:
+    with pytest.raises(
+        ValueError,
+        match="companion environment secret keys must be Docker-compatible",
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "BAD-NAME": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_rejects_invalid_environment_secret_value_from() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "companion environment_secrets value_from for 'AIRA_API_KEY' "
+            "must be a Docker-compatible"
+        ),
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY}",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "secret_patch",
+    (
+        {"provider": None},
+        {"provider": False},
+        {"provider": 0},
+        {"provider": "vault"},
+        {"kind": None},
+        {"kind": False},
+        {"kind": 0},
+        {"kind": "secret"},
+    ),
+)
+def test_companion_specs_from_task_policy_rejects_unsupported_environment_secret_scope_fields(
+    secret_patch: dict[str, object],
+) -> None:
+    secret_ref = {
+        "value_from": "ANTHROPIC_API_KEY",
+        **secret_patch,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "companion environment_secrets entry for 'AIRA_API_KEY' only supports "
+            "provider=env and kind=env"
+        ),
+    ):
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": secret_ref,
+                        },
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_reports_null_environment_secret_scope_field_without_stringifying_none() -> (
+    None
+):
+    with pytest.raises(ValueError) as exc_info:
+        companion_specs_from_task_policy(
+            {
+                "companions": [
+                    {
+                        "name": "backend",
+                        "repo_url": "git@example.com:api.git",
+                        "base_branch": "main",
+                        "environment_secrets": {
+                            "AIRA_API_KEY": {
+                                "provider": None,
+                                "kind": "env",
+                                "value_from": "ANTHROPIC_API_KEY",
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "provider=None" in message
+    assert "provider='None'" not in message
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("timeout", "expected"),
+    [
+        (-12, 1),
+        (0, 1),
+        (1801, 1800),
+        (86400, 1800),
+        (0.0, 1),
+        (1801.0, 1800),
+        ("86400", 1800),
+    ],
+)
+def test_companion_specs_from_task_policy_clamps_compose_up_timeout(
+    timeout: object,
+    expected: int,
+) -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": timeout,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == expected
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_clamped_integer_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 9999,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 1800
+    assert "Clamping task-policy compose_up_timeout_seconds" in caplog.text
+    assert "9999" in caplog.text
+    assert "1800" in caplog.text
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_coerces_integral_float_compose_up_timeout() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900.0,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_fractional_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900.5,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds is None
+    assert "compose_up_timeout_seconds" in caplog.text
+    assert "900.5" in caplog.text
+
+
+@pytest.mark.unit
+def test_companion_specs_from_task_policy_warns_on_boolean_compose_up_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="awf.node.companion_services")
+
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": True,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds is None
+    assert "compose_up_timeout_seconds" in caplog.text
+    assert "boolean" in caplog.text
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_resolves_environment_secret_placeholders(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment": {"APP_ENV": "test"},
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"ANTHROPIC_API_KEY": "raw-secret-value"},
+    )
+
+    assert service.environment == (
+        ("APP_ENV", "test"),
+        (
+            "AIRA_API_KEY",
+            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_"
+            "COMPANION_ENV_SECRET_SOURCE_EMPTY: "
+            "companion=backend, target=AIRA_API_KEY, provider=env, "
+            "source=ANTHROPIC_API_KEY}",
+        ),
+    )
+    assert service.secret_metadata["env_secret_count"] == 1
+    assert service.secret_metadata["env_secrets"] == (
+        {
+            "companion": "backend",
+            "target": "AIRA_API_KEY",
+            "provider": "env",
+            "source": "ANTHROPIC_API_KEY",
+            "required": True,
+        },
+    )
+    assert "raw-secret-value" not in repr(service)
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_fails_required_empty_environment_secret_value(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        companion_service_from_materialized(
+            MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+            host_env={"ANTHROPIC_API_KEY": ""},
+        )
+
+    assert exc.value.reason_code == COMPANION_ENV_SECRET_SOURCE_EMPTY
+    assert COMPANION_ENV_SECRET_SOURCE_EMPTY in str(exc.value)
+    assert "backend" in str(exc.value)
+    assert "AIRA_API_KEY" in str(exc.value)
+    assert "ANTHROPIC_API_KEY" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_preserves_optional_present_secret_ref(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"OPTIONAL_TOKEN_SOURCE": "raw-optional-secret"},
+    )
+
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE:-}"),)
+    assert service.secret_metadata["env_secret_count"] == 1
+    assert "raw-optional-secret" not in repr(service)
+
+
+@pytest.mark.unit
+def test_optional_env_secret_compose_placeholder_uses_optional_default() -> None:
+    assert (
+        optional_env_secret_compose_placeholder("OPTIONAL_TOKEN_SOURCE")
+        == "${OPTIONAL_TOKEN_SOURCE:-}"
+    )
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_preserves_optional_empty_secret_ref(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={"OPTIONAL_TOKEN_SOURCE": ""},
+    )
+
+    assert service.environment == (("OPTIONAL_TOKEN", "${OPTIONAL_TOKEN_SOURCE:-}"),)
+    assert service.secret_metadata["env_secret_count"] == 1
+    assert "omitted_optional_env_secret_count" not in service.secret_metadata
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_omits_optional_missing_environment_secret(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    service = companion_service_from_materialized(
+        MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+        host_env={},
+    )
+
+    assert service.environment == ()
+    assert service.secret_metadata["env_secret_count"] == 0
+    assert service.secret_metadata["omitted_optional_env_secret_count"] == 1
+    assert service.secret_metadata["omitted_optional_env_secrets"] == (
+        {
+            "companion": "backend",
+            "target": "OPTIONAL_TOKEN",
+            "provider": "env",
+            "source": "OPTIONAL_TOKEN_SOURCE",
+            "required": False,
+        },
+    )
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_fails_required_missing_environment_secret(
+    tmp_path: Path,
+) -> None:
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "environment_secrets": {
+                        "AIRA_API_KEY": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "ANTHROPIC_API_KEY",
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        companion_service_from_materialized(
+            MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+            host_env={},
+        )
+
+    assert exc.value.reason_code == COMPANION_ENV_SECRET_SOURCE_MISSING
+    assert "backend" in str(exc.value)
+    assert "AIRA_API_KEY" in str(exc.value)
+    assert "ANTHROPIC_API_KEY" in str(exc.value)
 
 
 @pytest.mark.unit

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from awf.node.compose_manager import (
+    COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS,
     ComposeManager,
     ComposeOperationError,
     WorkspaceComposeSpec,
@@ -63,6 +64,37 @@ class TestUp:
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
         assert "--remove-orphans" in cmd
         assert "--wait-timeout" in cmd and "300" in cmd
+
+    @pytest.mark.unit
+    async def test_up_budgets_build_separately_from_compose_timeout(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spec = WorkspaceComposeSpec(
+            workspace_id="ws_unit_mock",
+            worktree_host_path=tmp_path / "worktree",
+            postgres_password="pw",
+            compose_up_timeout_seconds=900,
+        )
+        wait_for_timeouts: list[float] = []
+
+        async def _wait_for(awaitable, timeout: float):  # type: ignore[no-untyped-def]
+            wait_for_timeouts.append(timeout)
+            return await awaitable
+
+        monkeypatch.setattr("awf.node.compose_manager.asyncio.wait_for", _wait_for)
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.up(spec, wait=True)
+
+        cmd = mock_exec.call_args[0]
+        wait_timeout_index = cmd.index("--wait-timeout")
+        assert cmd[wait_timeout_index + 1] == "900"
+        assert wait_for_timeouts == [900.0 + 900.0 + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS]
 
     @pytest.mark.unit
     async def test_up_without_wait_omits_wait_flag(
@@ -167,6 +199,38 @@ class TestEnsureProjectUp:
         assert env["COMPOSE_PROJECT_NAME"] == "awf_persisted_ws"
         assert env["COMPOSE_FILE"] == str(compose_file)
         assert not (tmp_path / "work" / "compose" / "ws_persisted").exists()
+
+    @pytest.mark.unit
+    async def test_ensure_project_up_budgets_build_separately_from_compose_timeout(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_file = tmp_path / "persisted-compose.yml"
+        wait_for_timeouts: list[float] = []
+
+        async def _wait_for(awaitable, timeout: float):  # type: ignore[no-untyped-def]
+            wait_for_timeouts.append(timeout)
+            return await awaitable
+
+        monkeypatch.setattr("awf.node.compose_manager.asyncio.wait_for", _wait_for)
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.ensure_project_up(
+                project_name="awf_persisted_ws",
+                compose_file=compose_file,
+                workspace_id="ws_persisted",
+                wait=True,
+                compose_up_timeout_seconds=900,
+            )
+
+        cmd = mock_exec.call_args[0]
+        wait_timeout_index = cmd.index("--wait-timeout")
+        assert cmd[wait_timeout_index + 1] == "900"
+        assert wait_for_timeouts == [900.0 + 900.0 + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS]
 
 
 class TestDown:

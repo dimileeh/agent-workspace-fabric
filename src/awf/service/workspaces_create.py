@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from pydantic import ValidationError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,7 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
     WorkspaceWarningResponse,
 )
+from awf.api.schemas_companions import WorkspaceCompanionRequest
 from awf.common.companions import COMPANION_POLICY_KEY
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
@@ -593,7 +595,20 @@ def _stored_companions(existing: Workspace) -> list[dict[str, object]]:
     companions = _stored_task_policy(existing).get(COMPANION_POLICY_KEY)
     if not isinstance(companions, list):
         return []
-    return [cast(dict[str, object], item) for item in companions if isinstance(item, dict)]
+    return [_normalize_stored_companion(item) for item in companions if isinstance(item, Mapping)]
+
+
+def _normalize_stored_companion(item: Mapping[str, object]) -> dict[str, object]:
+    """Return a current companion snapshot for stored data, preserving invalid rows."""
+    try:
+        companion = WorkspaceCompanionRequest.model_validate(item)
+    except ValidationError:
+        _log.warning(
+            "normalize_stored_companion.validation_failed",
+            companion_name=item.get("name"),
+        )
+        return dict(item)
+    return cast(dict[str, object], companion.model_dump(mode="json"))
 
 
 def _requested_task_scheduler_policy(

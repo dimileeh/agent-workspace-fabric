@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_value
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import release_sync_source_branch
@@ -82,6 +83,7 @@ class Provisioner:
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
     ) -> None:
+        """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
         self._git = git
         self._config = config
@@ -242,6 +244,7 @@ class Provisioner:
                 failure_reason=FailureReason.profile_resolution_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                reason_code=exc.reason_code,
             )
             raise
         except LocalEgressPolicyError as exc:
@@ -343,6 +346,17 @@ class Provisioner:
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
+                companion_secret_metadata = _stack_companion_env_secret_event_payload(
+                    workspace_id=workspace_id,
+                    stack_paths=stack_paths,
+                )
+                if companion_secret_metadata is not None:
+                    await repo.add_event(
+                        persisted,
+                        event_type="workspace.companion_env_secret_metadata",
+                        reason_code="COMPANION_ENV_SECRET_METADATA_RECORDED",
+                        payload=companion_secret_metadata,
+                    )
                 await SecretLeaseService(session).record_secret_lease_mounts(
                     persisted,
                     mount_metadata=_stack_secret_lease_mount_metadata(
@@ -674,9 +688,39 @@ def _stack_secret_lease_mount_metadata(
         "omitted_optional_count",
         "omitted_optional",
         "skipped_unresolved_count",
+        "companion_env_secret_count",
+        "companion_env_secrets",
+        "companion_omitted_optional_env_secret_count",
+        "companion_omitted_optional_env_secrets",
     ):
         if key in plan_metadata:
             metadata[key] = plan_metadata[key]
+    return metadata
+
+
+def _stack_companion_env_secret_event_payload(
+    *,
+    workspace_id: str,
+    stack_paths: ComposeProjectPaths,
+) -> dict[str, Any] | None:
+    plan_metadata = stack_paths.secret_lease_mount_metadata
+    companion_keys = (
+        "companion_env_secret_count",
+        "companion_env_secrets",
+        "companion_omitted_optional_env_secret_count",
+        "companion_omitted_optional_env_secrets",
+    )
+    if not any(key in plan_metadata for key in companion_keys):
+        return None
+
+    metadata: dict[str, Any] = {
+        "schema": "companion_env_secret_stack_metadata.v1",
+        "compose_project": f"awf_{workspace_id}",
+        "compose_file": str(stack_paths.compose_file),
+    }
+    for key in companion_keys:
+        if key in plan_metadata:
+            metadata[key] = redact_audit_value(plan_metadata[key])
     return metadata
 
 

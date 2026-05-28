@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
-from awf.node.companion_services import MaterializedCompanionService, WorkspaceCompanionSpec
+from awf.node.companion_services import (
+    CompanionEnvironmentSecretRef,
+    MaterializedCompanionService,
+    WorkspaceCompanionSpec,
+)
 from awf.node.compose_manager import (
     AuthMount,
     ComposeOperationError,
@@ -241,6 +245,83 @@ def _layout() -> WorktreeLayout:
         worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
         branch_name="awf/ws_launcher",
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_uses_profile_compose_timeout() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(startup_timeout_seconds=720),
+            ),
+        )
+    )
+
+    assert compose.specs[0].compose_up_timeout_seconds == 720
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("profile_timeout", "companion_timeouts", "expected"),
+    [
+        (300, [900], 900),
+        (1200, [900], 1200),
+        (300, [600, 1200], 1200),
+    ],
+)
+async def test_compose_stack_launcher_uses_effective_companion_compose_timeout(
+    tmp_path: Path,
+    profile_timeout: int,
+    companion_timeouts: list[int],
+    expected: int,
+) -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companions: list[MaterializedCompanionService] = []
+    for index, timeout in enumerate(companion_timeouts):
+        companion_root = tmp_path / f"backend-{index}"
+        companion_root.mkdir()
+        companions.append(
+            MaterializedCompanionService(
+                spec=WorkspaceCompanionSpec(
+                    name=f"backend{index}",
+                    repo_url=f"git@github.com:example/backend-{index}.git",
+                    compose_up_timeout_seconds=timeout,
+                ),
+                layout=WorktreeLayout(
+                    mirror_path=tmp_path / f"backend-{index}.git",
+                    worktree_path=companion_root,
+                    branch_name=f"awf/ws_launcher/companion/backend{index}",
+                ),
+            )
+        )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(startup_timeout_seconds=profile_timeout),
+            ),
+            companions=tuple(companions),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert compose.specs[0].compose_up_timeout_seconds == expected
 
 
 @pytest.mark.unit
@@ -606,6 +687,174 @@ async def test_compose_stack_launcher_passes_materialized_companions_to_compose(
     assert rendered.ports == ((8000, 18000),)
     assert rendered.command == "python -m backend"
     assert rendered.volumes == ((str(companion_root / "fixtures"), "/fixtures"),)
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_resolves_companion_environment_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-secret-value")
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            base_branch="development",
+            environment_secrets=(
+                CompanionEnvironmentSecretRef(
+                    target="AIRA_API_KEY",
+                    provider="env",
+                    kind="env",
+                    value_from="ANTHROPIC_API_KEY",
+                ),
+            ),
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+    )
+
+    paths = await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(mode=DockerMode.dind),
+            ),
+            companions=(companion,),
+        )
+    )
+
+    rendered = compose.specs[0].companions[0]
+    assert rendered.environment == (
+        (
+            "AIRA_API_KEY",
+            "${ANTHROPIC_API_KEY:?COMPANION_ENV_SECRET_SOURCE_MISSING_OR_"
+            "COMPANION_ENV_SECRET_SOURCE_EMPTY: "
+            "companion=backend, target=AIRA_API_KEY, provider=env, "
+            "source=ANTHROPIC_API_KEY}",
+        ),
+    )
+    assert "raw-secret-value" not in repr(rendered)
+    assert paths.secret_lease_mount_metadata["companion_env_secret_count"] == 1
+    assert paths.secret_lease_mount_metadata["companion_env_secrets"] == (
+        {
+            "companion": "backend",
+            "target": "AIRA_API_KEY",
+            "provider": "env",
+            "source": "ANTHROPIC_API_KEY",
+            "required": True,
+        },
+    )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_omits_optional_missing_companion_environment_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("OPTIONAL_TOKEN_SOURCE", raising=False)
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            base_branch="development",
+            environment_secrets=(
+                CompanionEnvironmentSecretRef(
+                    target="OPTIONAL_TOKEN",
+                    provider="env",
+                    kind="env",
+                    value_from="OPTIONAL_TOKEN_SOURCE",
+                    required=False,
+                ),
+            ),
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+    )
+
+    paths = await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="serviceful"),
+            companions=(companion,),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert compose.specs[0].companions[0].environment == ()
+    assert paths.secret_lease_mount_metadata["companion_env_secret_count"] == 0
+    assert paths.secret_lease_mount_metadata["companion_omitted_optional_env_secret_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_fails_required_missing_companion_environment_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            base_branch="development",
+            environment_secrets=(
+                CompanionEnvironmentSecretRef(
+                    target="AIRA_API_KEY",
+                    provider="env",
+                    kind="env",
+                    value_from="ANTHROPIC_API_KEY",
+                ),
+            ),
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile(name="serviceful"),
+                companions=(companion,),
+                companion_graph_prevalidated=True,
+            )
+        )
+
+    assert exc.value.reason_code == "COMPANION_ENV_SECRET_SOURCE_MISSING"
+    assert compose.specs == []
 
 
 @pytest.mark.unit

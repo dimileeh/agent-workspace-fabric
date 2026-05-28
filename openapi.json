@@ -621,6 +621,41 @@
         "title": "CleanupReadinessResponse",
         "type": "object"
       },
+      "CompanionEnvironmentSecretRequest": {
+        "additionalProperties": false,
+        "description": "Env-backed secret reference for a companion container environment key.",
+        "properties": {
+          "kind": {
+            "const": "env",
+            "default": "env",
+            "title": "Kind",
+            "type": "string"
+          },
+          "provider": {
+            "const": "env",
+            "default": "env",
+            "title": "Provider",
+            "type": "string"
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "value_from": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "title": "Value From",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value_from"
+        ],
+        "title": "CompanionEnvironmentSecretRequest",
+        "type": "object"
+      },
       "ConcurrencyLaneResponse": {
         "properties": {
           "available": {
@@ -7096,6 +7131,20 @@
             ],
             "title": "Command"
           },
+          "compose_up_timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 1800.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-companion docker compose up wait timeout in seconds. When omitted, AWF uses the workspace profile docker startup timeout.",
+            "title": "Compose Up Timeout Seconds"
+          },
           "depends_on": {
             "items": {
               "maxLength": 64,
@@ -7143,6 +7192,21 @@
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
             },
             "title": "Environment",
+            "type": "object"
+          },
+          "environment_secrets": {
+            "description": "Env-backed secret references for companion container environment variables. Values are resolved by AWF from the worker environment and must not contain raw secret values.",
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_]*$": {
+                "$ref": "#/components/schemas/CompanionEnvironmentSecretRequest"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "title": "Environment Secrets",
             "type": "object"
           },
           "healthcheck_cmd": {
