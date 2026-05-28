@@ -173,6 +173,22 @@ def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
     assert not re.search(r"(?m)^awf start\s*$", prerequisites_section)
 
 
+def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
+    onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
+    first_run_section = onboarding_text.split(
+        "## First-run operator command",
+        maxsplit=1,
+    )[1].split("## One-message prompt", maxsplit=1)[0]
+
+    assert (
+        "awf service bootstrap\nawf service status --format pretty\nawf init ."
+    ) in first_run_section
+    assert not re.search(r"(?m)^awf setup\s*$", first_run_section)
+    assert not re.search(r"(?m)^awf start\s*$", first_run_section)
+    assert "AWF_SETUP_PLACEHOLDER" in first_run_section
+    assert "AWF_START_PLACEHOLDER" in first_run_section
+
+
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")

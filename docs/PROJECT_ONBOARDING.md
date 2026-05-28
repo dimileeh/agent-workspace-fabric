@@ -7,19 +7,25 @@ then edit the draft and decide when to submit a real workspace request.
 
 ## First-run operator command
 
-Use the first-run commands in order:
+Use the current runnable first-run commands in order:
 
-- `awf setup` — prepare this machine for AWF.
-- `awf start` — start or validate local AWF Core.
+- `awf service bootstrap` — start local AWF Core with the current service
+  bootstrap path.
+- `awf service status --format pretty` — confirm API, database, Docker, image,
+  disk, provider, and cleanup health.
 - `awf init <path>` — the project-onboarding pass described on this page. It
   inspects a checked-out repository, runs local readiness checks without
   calling the AWF API, and creates or previews `.awf/workspace.yml`. Interactive
   terminals get a short guided setup when no profile exists; automation can use
   `--write-profile --yes` to write detected defaults.
 
+`awf setup` and `awf start` are reserved future first-run command surfaces.
+Today they exit with `AWF_SETUP_PLACEHOLDER` and `AWF_START_PLACEHOLDER`, so do
+not include them in onboarding copy-paste flows until those slices land.
+
 ```bash
-awf setup
-awf start
+awf service bootstrap
+awf service status --format pretty
 awf init .                        # guided project onboarding for ./.
 awf init . --write-profile --yes  # silent profile write with detected defaults
 awf init . --include-smoke-request
