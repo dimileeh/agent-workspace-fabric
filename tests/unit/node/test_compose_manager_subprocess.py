@@ -65,6 +65,37 @@ class TestUp:
         assert "--wait-timeout" in cmd and "300" in cmd
 
     @pytest.mark.unit
+    async def test_up_uses_spec_compose_timeout_for_wait_and_capture(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spec = WorkspaceComposeSpec(
+            workspace_id="ws_unit_mock",
+            worktree_host_path=tmp_path / "worktree",
+            postgres_password="pw",
+            compose_up_timeout_seconds=900,
+        )
+        wait_for_timeouts: list[float] = []
+
+        async def _wait_for(awaitable, timeout: float):  # type: ignore[no-untyped-def]
+            wait_for_timeouts.append(timeout)
+            return await awaitable
+
+        monkeypatch.setattr("awf.node.compose_manager.asyncio.wait_for", _wait_for)
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.up(spec, wait=True)
+
+        cmd = mock_exec.call_args[0]
+        wait_timeout_index = cmd.index("--wait-timeout")
+        assert cmd[wait_timeout_index + 1] == "900"
+        assert wait_for_timeouts == [960.0]
+
+    @pytest.mark.unit
     async def test_up_without_wait_omits_wait_flag(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

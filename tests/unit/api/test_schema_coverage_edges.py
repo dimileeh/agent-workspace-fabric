@@ -199,6 +199,40 @@ def test_workspace_companion_accepts_environment_secrets() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_companion_accepts_compose_up_timeout_seconds() -> None:
+    request = api_schemas.WorkspaceCreateRequest.model_validate(
+        {
+            "repo": {"url": "git@github.com:example/app.git", "base_branch": "development"},
+            "task": _task(),
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:example/api.git",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ],
+        }
+    )
+
+    assert request.companions[0].compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout", [0, -1, 1801])
+def test_workspace_companion_rejects_invalid_compose_up_timeout_seconds(
+    timeout: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        api_schemas.WorkspaceCompanionRequest.model_validate(
+            {
+                "name": "api",
+                "repo_url": "git@example.com:api.git",
+                "compose_up_timeout_seconds": timeout,
+            }
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "environment_secrets",
     [

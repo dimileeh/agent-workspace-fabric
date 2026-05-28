@@ -7131,6 +7131,20 @@
             ],
             "title": "Command"
           },
+          "compose_up_timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 1800.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-companion docker compose up wait timeout in seconds. When omitted, AWF uses the workspace profile docker startup timeout.",
+            "title": "Compose Up Timeout Seconds"
+          },
           "depends_on": {
             "items": {
               "maxLength": 64,

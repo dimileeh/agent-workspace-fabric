@@ -45,6 +45,7 @@ class WorkspaceCompanionSpec:
     env_file: str | None = None
     environment: tuple[tuple[str, str], ...] = ()
     environment_secrets: tuple[CompanionEnvironmentSecretRef, ...] = ()
+    compose_up_timeout_seconds: int | None = None
     depends_on: tuple[str, ...] = ()
     healthcheck_cmd: str | None = None
     ports: tuple[tuple[int, int], ...] = ()
@@ -336,6 +337,7 @@ def _companion_spec_from_mapping(item: Mapping[str, Any]) -> WorkspaceCompanionS
             _environment_secret_ref(target, value)
             for target, value in _mapping_items(item.get("environment_secrets"))
         ),
+        compose_up_timeout_seconds=_optional_int(item.get("compose_up_timeout_seconds")),
         depends_on=tuple(
             str(value)
             for value in _depends_on_items_or_empty(item.get("depends_on"))
@@ -430,6 +432,19 @@ def _mapping_items(value: object) -> tuple[tuple[object, object], ...]:
     if not isinstance(value, Mapping):
         return ()
     return tuple(value.items())
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _sequence_items_or_empty(value: Any) -> Any:

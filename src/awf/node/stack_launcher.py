@@ -145,6 +145,10 @@ class ComposeStackLauncher:
                 companion_service_from_materialized(companion) for companion in request.companions
             )
         )
+        compose_up_timeout_seconds = _effective_compose_up_timeout_seconds(
+            profile=profile,
+            companions=request.companions,
+        )
         companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
         if secret_lease_resolution is not None:
@@ -166,6 +170,7 @@ class ComposeStackLauncher:
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
             network_internal=egress_plan.network_internal,
             host_gateway_enabled=egress_plan.host_gateway_enabled,
+            compose_up_timeout_seconds=compose_up_timeout_seconds,
         )
         try:
             paths = await self._compose.up(spec, wait=True)
@@ -205,3 +210,19 @@ def _stack_secret_metadata(
         metadata.update(dict(secret_lease_resolution.metadata))
     metadata.update(companion_secret_metadata)
     return metadata
+
+
+def _effective_compose_up_timeout_seconds(
+    *,
+    profile: WorkspaceProfile,
+    companions: tuple[MaterializedCompanionService, ...],
+) -> int:
+    """Return the longest compose-up wait timeout requested for this stack."""
+    timeouts = [profile.docker.startup_timeout_seconds]
+    timeouts.extend(
+        timeout
+        for companion in companions
+        for timeout in (companion.spec.compose_up_timeout_seconds,)
+        if timeout is not None
+    )
+    return max(timeouts)

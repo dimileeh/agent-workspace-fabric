@@ -161,6 +161,15 @@ class WorkspaceCompanionRequest(BaseModel):
             "raw secret values."
         ),
     )
+    compose_up_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=1800,
+        description=(
+            "Optional per-companion docker compose up wait timeout in seconds. "
+            "When omitted, AWF uses the workspace profile docker startup timeout."
+        ),
+    )
     depends_on: list[ServiceName] = Field(default_factory=list, max_length=64)
     healthcheck_cmd: Annotated[str | None, Field(default=None, min_length=1, max_length=4096)] = (
         None

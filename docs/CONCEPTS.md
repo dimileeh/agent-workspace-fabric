@@ -931,6 +931,7 @@ Example REST/MCP companion request:
       "value_from": "ANTHROPIC_API_KEY"
     }
   },
+  "compose_up_timeout_seconds": 900,
   "depends_on": ["docker"],
   "healthcheck_cmd": "curl -fsS http://localhost:8000/health",
   "ports": [[8000, 18000]],
@@ -949,6 +950,12 @@ Companion `environment` values are literal and reject Docker Compose
 interpolation such as `$VAR` or `${VAR}`. To pass a host-managed env secret to a
 companion, use `environment_secrets`; AWF stores only the source env var name,
 then renders an AWF-generated Compose placeholder during stack launch.
+
+By default, `docker.startup_timeout_seconds` from the resolved workspace profile
+controls the stack `docker compose up --wait-timeout` value. A companion can
+raise that stack-level startup budget with `compose_up_timeout_seconds` when its
+Dockerfile needs extra cold-cache build time; AWF uses the maximum companion
+override and adds a small subprocess capture buffer.
 
 Companions share the parent workspace resource reservation and lifecycle. AWF
 keeps companion worktrees while the parent workspace is active, removes them

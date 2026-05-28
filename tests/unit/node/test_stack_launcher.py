@@ -248,6 +248,83 @@ def _layout() -> WorktreeLayout:
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_uses_profile_compose_timeout() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(startup_timeout_seconds=720),
+            ),
+        )
+    )
+
+    assert compose.specs[0].compose_up_timeout_seconds == 720
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("profile_timeout", "companion_timeouts", "expected"),
+    [
+        (300, [900], 900),
+        (1200, [900], 1200),
+        (300, [600, 1200], 1200),
+    ],
+)
+async def test_compose_stack_launcher_uses_effective_companion_compose_timeout(
+    tmp_path: Path,
+    profile_timeout: int,
+    companion_timeouts: list[int],
+    expected: int,
+) -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    companions: list[MaterializedCompanionService] = []
+    for index, timeout in enumerate(companion_timeouts):
+        companion_root = tmp_path / f"backend-{index}"
+        companion_root.mkdir()
+        companions.append(
+            MaterializedCompanionService(
+                spec=WorkspaceCompanionSpec(
+                    name=f"backend{index}",
+                    repo_url=f"git@github.com:example/backend-{index}.git",
+                    compose_up_timeout_seconds=timeout,
+                ),
+                layout=WorktreeLayout(
+                    mirror_path=tmp_path / f"backend-{index}.git",
+                    worktree_path=companion_root,
+                    branch_name=f"awf/ws_launcher/companion/backend{index}",
+                ),
+            )
+        )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(startup_timeout_seconds=profile_timeout),
+            ),
+            companions=tuple(companions),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    assert compose.specs[0].compose_up_timeout_seconds == expected
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_fails_when_docker_missing_without_required_services() -> None:
     compose = _DockerUnavailableCompose()
     launcher = ComposeStackLauncher(

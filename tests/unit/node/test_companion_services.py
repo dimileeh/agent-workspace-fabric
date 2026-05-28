@@ -142,6 +142,24 @@ def test_companion_specs_from_task_policy_preserves_environment_secret_reference
 
 
 @pytest.mark.unit
+def test_companion_specs_from_task_policy_preserves_compose_up_timeout() -> None:
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": 900,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds == 900
+
+
+@pytest.mark.unit
 def test_companion_service_from_materialized_resolves_environment_secret_placeholders(
     tmp_path: Path,
 ) -> None:

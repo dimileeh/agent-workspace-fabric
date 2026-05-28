@@ -107,6 +107,39 @@ class TestWorkspaceCreate:
         assert body["repo"]["base_branch"] == "development"
 
     @pytest.mark.unit
+    def test_companion_json_can_include_compose_up_timeout(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_companion"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Companion timeout",
+                    "--prompt",
+                    "Exercise a slow companion build.",
+                    "--companion-json",
+                    (
+                        '{"name":"backend","repo_url":"git@github.com:example/api.git",'
+                        '"compose_up_timeout_seconds":900}'
+                    ),
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["companions"] == [
+            {
+                "name": "backend",
+                "repo_url": "git@github.com:example/api.git",
+                "compose_up_timeout_seconds": 900,
+            }
+        ]
+
+    @pytest.mark.unit
     def test_sync_release_pr_defaults_base_to_main(self) -> None:
         """Without --base, a sync_release_pr targets main so it syncs development → main."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_rel"})

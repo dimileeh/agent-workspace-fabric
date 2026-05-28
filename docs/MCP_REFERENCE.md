@@ -109,6 +109,7 @@ Example `awf_create_workspace` arguments:
       "build_context": ".",
       "dockerfile": "Dockerfile",
       "env_file": "config/dev.env",
+      "compose_up_timeout_seconds": 900,
       "depends_on": ["docker"],
       "healthcheck_cmd": "curl -fsS http://localhost:8000/health"
     }
@@ -120,7 +121,9 @@ Example `awf_create_workspace` arguments:
 `companions` is optional. Each item is the same object accepted by
 `POST /v1/workspaces`: AWF clones the repo into a managed companion worktree,
 resolves declared paths inside that checkout, and adds the service to the
-workspace Compose stack. Do not pass raw host paths or local secret files.
+workspace Compose stack. Set `compose_up_timeout_seconds` on a companion when
+its build/start path needs a longer timeout than the profile default. Do not
+pass raw host paths or local secret files.
 
 Example adoption and observability calls:
 

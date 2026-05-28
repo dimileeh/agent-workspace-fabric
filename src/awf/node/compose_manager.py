@@ -34,6 +34,7 @@ _log = get_logger(__name__)
 
 DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
 COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
+COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS = 60.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
 _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
@@ -177,6 +178,7 @@ class WorkspaceComposeSpec:
     companions: tuple[CompanionService, ...] = ()
     network_internal: bool = False
     host_gateway_enabled: bool = True
+    compose_up_timeout_seconds: int = 300
 
     def project_name(self) -> str:
         return f"awf_{self.workspace_id}"
@@ -310,8 +312,16 @@ class ComposeManager:
         paths = self.render(spec)
         args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.extend(["--wait", "--wait-timeout", "300"])
-        await self._compose(spec.project_name(), paths.compose_file, args, operation="up")
+            args.extend(["--wait", "--wait-timeout", str(spec.compose_up_timeout_seconds)])
+        await self._compose(
+            spec.project_name(),
+            paths.compose_file,
+            args,
+            operation="up",
+            capture_timeout_seconds=(
+                float(spec.compose_up_timeout_seconds) + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+            ),
+        )
         return paths
 
     async def ensure_project_up(
@@ -321,6 +331,7 @@ class ComposeManager:
         compose_file: Path,
         workspace_id: str,
         wait: bool = True,
+        compose_up_timeout_seconds: int = 300,
     ) -> None:
         """Start an already-rendered compose project without re-rendering.
 
@@ -331,7 +342,7 @@ class ComposeManager:
         """
         args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.extend(["--wait", "--wait-timeout", "300"])
+            args.extend(["--wait", "--wait-timeout", str(compose_up_timeout_seconds)])
         _log.info(
             "compose.ensure_project_up",
             workspace_id=workspace_id,
@@ -339,7 +350,15 @@ class ComposeManager:
             compose_file=str(compose_file),
             wait=wait,
         )
-        await self._compose(project_name, compose_file, args, operation="up")
+        await self._compose(
+            project_name,
+            compose_file,
+            args,
+            operation="up",
+            capture_timeout_seconds=(
+                float(compose_up_timeout_seconds) + COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS
+            ),
+        )
 
     async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
         """Stop + remove the stack. Idempotent — absent projects are not errors."""
@@ -420,7 +439,13 @@ class ComposeManager:
         )
 
     async def _compose(
-        self, project_name: str, compose_file: Path, args: list[str], *, operation: str
+        self,
+        project_name: str,
+        compose_file: Path,
+        args: list[str],
+        *,
+        operation: str,
+        capture_timeout_seconds: float = COMPOSE_CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         cmd = [
             "docker",
@@ -443,7 +468,7 @@ class ComposeManager:
                 )
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+                    timeout=capture_timeout_seconds,
                 )
             except FileNotFoundError as e:
                 raise ComposeOperationError(
@@ -466,8 +491,7 @@ class ComposeManager:
                     returncode=124,
                     stdout="",
                     stderr=(
-                        f"docker compose {operation} exceeded "
-                        f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                        f"docker compose {operation} exceeded {capture_timeout_seconds:g}s timeout"
                     ),
                     reason_code="DOCKER_COMMAND_TIMEOUT",
                 ) from e
