@@ -968,7 +968,9 @@ Capacity used: up to 6 workspaces.
 Recommended launch:
 
 - Launch T07, T09, T10, and T12 together once their dependencies are merged.
-- Launch T16 after T12 has a PR because it needs the actual installer shape.
+- Launch T16 only after T11, T12, T13, and H01 are merged or explicitly
+  satisfied. Keep T16 queued while T12 or T13 is still only in PR monitor so
+  release checks smoke the final installer and package artifact set.
 - Launch T17 after T07 defines provider setup payloads.
 
 Conflict flags:
