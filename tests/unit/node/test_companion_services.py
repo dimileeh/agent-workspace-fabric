@@ -9,6 +9,7 @@ import pytest
 
 from awf.node.companion_services import (
     COMPANION_ENV_SECRET_SOURCE_MISSING,
+    CompanionEnvironmentSecretRef,
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
     companion_service_from_materialized,
@@ -166,6 +167,12 @@ def test_companion_specs_from_task_policy_environment_secret_required_string_fal
     )[0]
 
     assert spec.environment_secrets[0].required is False
+
+
+@pytest.mark.unit
+def test_companion_environment_secret_ref_requires_value_from() -> None:
+    with pytest.raises(TypeError, match="value_from"):
+        CompanionEnvironmentSecretRef(target="AIRA_API_KEY")
 
 
 @pytest.mark.unit

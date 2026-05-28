@@ -33,9 +33,9 @@ class CompanionEnvironmentSecretRef:
     """Env-backed secret reference for one companion environment target."""
 
     target: str
+    value_from: str
     provider: str = "env"
     kind: str = "env"
-    value_from: str = ""
     required: bool = True
 
 
