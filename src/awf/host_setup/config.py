@@ -56,11 +56,13 @@ class _SecretPayloadError(ValueError):
     """Internal sanitized error for secret-bearing config payloads."""
 
     def __init__(self, *, path: tuple[str, ...], issue: str) -> None:
+        """Build a sanitized secret-payload diagnostic."""
         self.path = path
         self.issue = issue
         super().__init__(f"{issue} at {_format_path(path)}")
 
     def details(self) -> dict[str, object]:
+        """Return secret-free diagnostic details for config errors."""
         return {
             "issue": self.issue,
             "path": _format_path(self.path),
@@ -78,6 +80,7 @@ class HostSetupConfigError(RuntimeError):
         path: Path,
         details: Mapping[str, object] | None = None,
     ) -> None:
+        """Build a reason-coded config error without embedding secret values."""
         super().__init__(message)
         self.reason_code = reason_code
         self.message = message
@@ -86,7 +89,6 @@ class HostSetupConfigError(RuntimeError):
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable diagnostic payload."""
-
         payload: dict[str, object] = {
             "status": "failed",
             "reason_code": self.reason_code,
@@ -99,6 +101,8 @@ class HostSetupConfigError(RuntimeError):
 
 
 class _HostSetupBaseModel(BaseModel):
+    """Shared strict, immutable Pydantic base for host setup config models."""
+
     model_config: ClassVar[ConfigDict] = ConfigDict(
         extra="forbid",
         str_strip_whitespace=True,
@@ -128,6 +132,7 @@ class ProviderConfig(_HostSetupBaseModel):
     @field_validator("credential_ref")
     @classmethod
     def _validate_credential_ref(cls, value: str | None) -> str | None:
+        """Require provider credentials to be safe references, never raw secrets."""
         if value is None:
             return None
         if _looks_like_secret_value(value):
@@ -168,12 +173,14 @@ class HostSetupConfig(_HostSetupBaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_secret_payload(cls, value: object) -> object:
+        """Reject secret-bearing keys or values before schema validation."""
         _ensure_no_secret_payload(value)
         return value
 
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: int) -> int:
+        """Reject host setup config versions this code cannot interpret."""
         if value != HOST_SETUP_CONFIG_VERSION:
             raise ValueError(f"unsupported host setup config version: {value}")
         return value
@@ -181,14 +188,12 @@ class HostSetupConfig(_HostSetupBaseModel):
 
 def default_host_setup_config_path(*, home: str | Path | None = None) -> Path:
     """Return the default host setup config path."""
-
     base = Path.home() if home is None else Path(home).expanduser()
     return base / ".awf" / "config.yml"
 
 
 def read_host_setup_config(*, path: str | Path | None = None) -> HostSetupConfig:
     """Read host setup config, returning defaults when the config is absent."""
-
     config_path = _resolve_config_path(path)
     if not config_path.exists():
         return HostSetupConfig()
@@ -232,7 +237,6 @@ def write_host_setup_config(
     path: str | Path | None = None,
 ) -> None:
     """Atomically write host setup config with conservative permissions."""
-
     config_path = _resolve_config_path(path)
     payload = cast(dict[str, object], config.model_dump(mode="json", exclude_none=True))
     try:
@@ -263,12 +267,14 @@ def write_host_setup_config(
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:
+    """Return the explicit config path or the default host setup path."""
     if path is None:
         return default_host_setup_config_path()
     return Path(path).expanduser()
 
 
 def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> None:
+    """Recursively reject secret-looking keys and values in config payloads."""
     if isinstance(value, BaseModel):
         _ensure_no_secret_payload(value.model_dump(mode="json"), path=path)
         return
@@ -289,21 +295,25 @@ def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> N
 
 
 def _is_secret_key(key: str) -> bool:
+    """Return whether a normalized config key is reserved for secret values."""
     normalized = key.strip().lower().replace("-", "_")
     return normalized in _SECRET_KEY_NAMES
 
 
 def _looks_like_secret_value(value: str) -> bool:
+    """Return whether a string resembles a raw credential value."""
     stripped = value.strip()
     lower = stripped.lower()
     return lower.startswith("bearer ") or stripped.startswith(_SECRET_VALUE_PREFIXES)
 
 
 def _format_path(path: tuple[str, ...]) -> str:
+    """Format a nested config path for secret-free diagnostics."""
     return ".".join(path) if path else "<root>"
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
+    """Apply POSIX file permissions when supported by the host platform."""
     if os.name != "posix":
         return
     with suppress(OSError):
@@ -316,6 +326,7 @@ def _config_corrupt_error(
     message: str = "Host setup config is corrupt or unsupported.",
     details: Mapping[str, object],
 ) -> HostSetupConfigError:
+    """Build a reason-coded corrupt-config error."""
     return HostSetupConfigError(
         reason_code=HOST_SETUP_CONFIG_CORRUPT,
         message=message,
@@ -329,6 +340,7 @@ def _config_secret_error(
     *,
     details: Mapping[str, object],
 ) -> HostSetupConfigError:
+    """Build a reason-coded secret-bearing-config error."""
     return HostSetupConfigError(
         reason_code=HOST_SETUP_CONFIG_SECRET_VALUE,
         message="Host setup config contains a secret value or secret-bearing key.",
@@ -338,6 +350,7 @@ def _config_secret_error(
 
 
 def _validation_error_details(exc: ValidationError) -> dict[str, object]:
+    """Return sanitized Pydantic validation details for config diagnostics."""
     errors = exc.errors(include_url=False, include_context=False, include_input=False)
     return {
         "error_count": exc.error_count(),
@@ -347,6 +360,7 @@ def _validation_error_details(exc: ValidationError) -> dict[str, object]:
 
 
 def _validation_contains_secret_error(exc: ValidationError) -> bool:
+    """Return whether validation failed because a secret reached the boundary."""
     errors = exc.errors(include_url=False, include_context=False, include_input=False)
     return any(
         "secret" in str(error.get("msg", "")).lower()
@@ -356,6 +370,7 @@ def _validation_contains_secret_error(exc: ValidationError) -> bool:
 
 
 def _format_validation_location(location: object) -> str:
+    """Format a Pydantic validation location for diagnostics."""
     if not isinstance(location, tuple):
         return str(location)
     return ".".join(str(item) for item in location) if location else "<root>"

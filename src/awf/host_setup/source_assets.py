@@ -85,7 +85,6 @@ class VerifiedSourceCheckout(BaseModel):
 
     def to_metadata(self) -> SourceCheckoutAssetMetadata:
         """Return the non-secret config metadata for this verified checkout."""
-
         return SourceCheckoutAssetMetadata(
             root=self.root,
             verified_at=self.verified_at,
@@ -106,6 +105,7 @@ class SourceCheckoutError(RuntimeError):
         missing_markers: tuple[str, ...] = (),
         details: Mapping[str, object] | None = None,
     ) -> None:
+        """Build a reason-coded source-checkout validation error."""
         super().__init__(message)
         self.reason_code = reason_code
         self.message = message
@@ -115,7 +115,6 @@ class SourceCheckoutError(RuntimeError):
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable diagnostic payload."""
-
         payload: dict[str, object] = {
             "status": "failed",
             "reason_code": self.reason_code,
@@ -135,7 +134,6 @@ def validate_source_checkout(
     clock: Clock | None = None,
 ) -> VerifiedSourceCheckout:
     """Validate an AWF source checkout and return resolved setup asset paths."""
-
     resolved_root = _resolve_candidate(root)
     _validate_root_readable(resolved_root)
 
@@ -189,7 +187,6 @@ def verified_source_from_metadata(
     clock: Clock | None = None,
 ) -> VerifiedSourceCheckout:
     """Revalidate persisted source metadata before returning a runtime handoff."""
-
     try:
         verified = validate_source_checkout(metadata.root, clock=clock)
     except SourceCheckoutError as exc:
@@ -226,6 +223,7 @@ def verified_source_from_metadata(
 
 
 def _resolve_candidate(root: str | Path) -> Path:
+    """Resolve a candidate source checkout path for stable diagnostics."""
     base = Path(root)
     try:
         expanded = base.expanduser()
@@ -235,6 +233,7 @@ def _resolve_candidate(root: str | Path) -> Path:
 
 
 def _validate_root_readable(root: Path) -> None:
+    """Raise a reason-coded error when the checkout root is unusable."""
     try:
         is_dir = root.is_dir()
     except OSError as exc:
@@ -273,6 +272,7 @@ def _source_checkout_details(
     missing_markers: tuple[str, ...],
     unreadable_paths: tuple[str, ...],
 ) -> dict[str, object]:
+    """Return compact details for missing or unreadable checkout assets."""
     details: dict[str, object] = {}
     if missing_markers:
         details["missing_markers"] = list(missing_markers)
@@ -282,6 +282,7 @@ def _source_checkout_details(
 
 
 def _path_readable(path: Path) -> bool:
+    """Return whether a file or directory is readable for setup use."""
     try:
         exists = path.exists()
         if not exists:
@@ -297,6 +298,7 @@ def _path_readable(path: Path) -> bool:
 
 
 def _now_utc() -> datetime:
+    """Return the current UTC timestamp."""
     return datetime.now(UTC)
 
 
