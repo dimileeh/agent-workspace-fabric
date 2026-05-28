@@ -96,7 +96,7 @@ These are reuse targets, not work to rebuild:
 | T10 | Add no-token local proof and mocked smoke path | workspace | planned | P0 | T04, T05 | smoke |
 | T11 | Add install manifest generator and release metadata contract | workspace | planned | P0 | T01, H01 | release |
 | T12 | Add checked-in `install.sh` with checksum verification | workspace | planned | P0 | T11, H01 | installer |
-| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | planned | P0 | T02, T11 | packaging |
+| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | planned | P0 | T02, T11, T12 | packaging |
 | T14 | Add clean-install and source-lane E2E smoke harness | workspace | planned | P0 | T05, T10, T12, T13 | e2e |
 | T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | planned | P0 | T01, T04, T05, T10, T12, T13 | docs |
 | T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | planned | P0 | T11, T12, T13, H01 | release |
@@ -660,7 +660,7 @@ Modules touched:
 - `src/awf/host_setup`
 - package tests
 
-Depends on: T02, T11
+Depends on: T02, T11, T12
 
 What:
 
@@ -907,16 +907,10 @@ Legend:
 H01 ! installer hosting/trust (done)
   +--> T11* install manifest
           +--> T12* install.sh
-                 +--> T14* E2E first-run lanes
-                 +--> T15* docs lanes
-          +--> T13* package assets
-                 +--> T14* E2E first-run lanes
-                 +--> T15* docs lanes
-
-T12* install.sh
-  +--> T16* release workflow checks
-T13* package assets
-  +--> T16* release workflow checks
+                 +--> T13* package assets
+                         +--> T14* E2E first-run lanes
+                         +--> T15* docs lanes
+                         +--> T16* release workflow checks
 
 H02 ! credential consent wording (done)
   +--> T06* credential ref backends
@@ -983,13 +977,13 @@ preflight becomes stale before Wave 1 launch:
 
 | Item | Status | Required before | Notes |
 | --- | --- | --- | --- |
-| H01 | done - locked | T11, T12, T16 | Installer hosting and trust-chain decision. |
+| H01 | done - locked | T11, T12, T13, T16 | Installer hosting and trust-chain decision. |
 | H02 | done - locked | T06 | Plain-secret consent and provider prompt wording. |
 | H03 | done - locked | T01, T02, downstream implementation workspaces | Execution model: `codex`, `gpt-5.5`, `xhigh`. |
 | H04 | done - locked | T01, T02, downstream implementation workspaces | Launch preflight: clean expired AWF resources, rebuild local service images, rerun AWF bootstrap. |
 
-Do not hold T06/T11/T12/T16 for additional H01/H02 approval. If a future
-operator reopens H01, skip T11/T12/T16 and fill capacity with only CLI/setup
+Do not hold T06/T11/T12/T13/T16 for additional H01/H02 approval. If a future
+operator reopens H01, skip T11/T12/T13/T16 and fill capacity with only CLI/setup
 work. If H02 is reopened, do not launch credential storage. If H03 is reopened,
 pause implementation launches until the workspace execution model is decided.
 If H04 is reopened or stale, rerun the launch preflight before starting T01/T02
@@ -1024,9 +1018,9 @@ already locked.
 | --- | --- | --- |
 | 1 | T11 install manifest | H01 is done; can start after T01 is merged or explicitly satisfied by the human operator. |
 
-### Wave 2 - Setup, Start, Credentials, Clients, Packaging
+### Wave 2 - Setup, Start, Credentials, Clients
 
-Capacity used: up to 6 workspaces over the wave; T08 is queued behind T04.
+Capacity used: up to 5 workspaces over the wave; T08 is queued behind T04.
 
 Start when T01 and T02 are merged. Launch T03 first because T04/T05/T06/T08
 need the shared error contract before they start. T08 also waits for T04 so
@@ -1039,7 +1033,6 @@ the setup CLI and dry-run surface exist before client dispatch is added.
 | 3 | T05 start wrapper | T01, T02, T03 |
 | 4 | T06 credential backends | T02, T03, H02 (done) |
 | 5 | T08 client config helpers | T02, T03, T04 |
-| 6 | T13 package/source assets | T02, T11 |
 
 Recommended launch:
 
@@ -1048,22 +1041,16 @@ Recommended launch:
   human operator.
 - Launch T08 only after T04 is merged or explicitly satisfied by the human
   operator.
-- Launch T13 only after T11 is merged or explicitly satisfied by the human
-  operator; it can run alongside post-T03 wave-2 work only when both dependency
-  gates are clean.
-
 Conflict flags:
 
 - T04, T06, and T08 all touch `src/awf/host_setup`. Keep each task scoped to
   its own module plus shared models only.
 - T04 and T08 share the setup CLI surface. T08 consumes T04's command shell and
   owns only client selector dispatch plus client helper wiring.
-- T05 and T13 both care about package/source assets. T13 owns asset inclusion;
-  T05 owns startup selection and diagnostics.
-
 ### Wave 3 - Integrations And Release Surface
 
-Capacity used: up to 6 workspaces.
+Capacity used: up to 7 workspace assignments over the wave; T13 queues behind
+T12, and T16 queues behind T13.
 
 | Slot | Task | Depends on |
 | --- | --- | --- |
@@ -1071,12 +1058,15 @@ Capacity used: up to 6 workspaces.
 | 2 | T09 MCP setup tools | T04, T05, T08 |
 | 3 | T10 no-token smoke proof | T04, T05 |
 | 4 | T12 install.sh | T11, H01 (done) |
-| 5 | T16 release workflow checks | T11, T12, T13, H01 (done) |
-| 6 | T17 setup secret redaction | T06, T07 |
+| 5 | T13 package/source assets | T02, T11, T12 |
+| 6 | T16 release workflow checks | T11, T12, T13, H01 (done) |
+| 7 | T17 setup secret redaction | T06, T07 |
 
 Recommended launch:
 
 - Launch T07, T09, T10, and T12 together once their dependencies are merged.
+- Launch T13 only after T02, T11, and T12 are merged or explicitly satisfied so
+  package asset configuration and tests include the checked-in installer script.
 - Launch T16 only after T11, T12, and T13 are merged or explicitly satisfied.
   H01 is already locked. Keep T16 queued while T12 or T13 is still only in PR
   monitor so release checks smoke the final installer and package artifact set.
@@ -1088,6 +1078,8 @@ Conflict flags:
   to define payloads and T17 to harden leakage tests.
 - T09 and T08 should not overlap after T08 lands; T09 consumes the client helper
   contract.
+- T05 and T13 both care about package/source assets. T13 owns asset inclusion;
+  T05 owns startup selection and diagnostics.
 
 ### Wave 4 - Documentation And End-To-End Proof
 
@@ -1154,17 +1146,15 @@ Lane B - Config/start/source assets
         +-------> T08 -> T09 -> T19
 
 Lane C - Installer/release
-  H01(done) -> T11 -> T12 -> T14 -> T19
-                     \       \-> T16 -> T19
-                      +-> T13 -> T14
-                             \-> T16
+  H01(done) -> T11 -> T12 -> T13 -> T14 -> T19
+                              \
+                               +-> T16 -> T19
 
 Lane D - Docs/DX
   T01 -> T04 -> T10 -> T15 -> T18 -> T19
    |      |
    +-> T05 ----^
-  H01(done) -> T11 -> T12 -^
-                 \-> T13 -^
+  H01(done) -> T11 -> T12 -> T13 -^
 
 Lane E - Human credential consent
   H02(done) -> T06
