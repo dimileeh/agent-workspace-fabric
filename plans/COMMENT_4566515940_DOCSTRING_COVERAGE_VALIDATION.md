@@ -14,6 +14,9 @@ Plan reference: `plans/COMMENT_4566515940_DOCSTRING_COVERAGE_PLAN.md`
   annotation handling: `Complete`.
 - Newly added executor error-path tests describe the edge case being protected:
   `Complete`.
+- Remaining PR-added Python test helpers and regression tests describe the
+  edge case they protect: `Complete`.
+- Diff-touched test classes describe the prompt surface they group: `Complete`.
 - Focused local verification is recorded; full AWF/GitHub validation remains
   post-agent owned: `Complete`.
 
@@ -87,5 +90,28 @@ Evidence:
     passed.
   - `uv run --python 3.12 --extra dev pytest tests/unit/api/test_schema_coverage_edges.py::test_workspace_companion_accepts_explicit_null_optional_repo_path tests/unit/api/test_schema_coverage_edges.py::test_workspace_companion_environment_rejects_non_mapping_payload tests/unit/api/test_schema_coverage_edges.py::test_workspace_companion_environment_secrets_rejects_non_mapping_payload tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_012.py::test_companion_env_secret_refresh_noops_when_compose_has_no_target tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_012.py::test_companion_env_secret_refresh_write_failure_logs_warning tests/unit/control/test_executor_error_paths_parts/test_executor_error_paths_part_012.py::test_companion_env_secret_refresh_avoids_direct_target_file_write tests/unit/node/test_companion_services.py::test_companion_specs_from_task_policy_ignores_invalid_compose_up_timeout_types tests/unit/node/test_companion_services.py::test_companion_service_from_materialized_rejects_literal_secret_target_overlap tests/unit/node/test_companion_services.py::test_companion_service_from_materialized_rejects_unsupported_secret_scope tests/unit/runtime/test_validation_coverage_gaps.py::test_inject_pytest_parallel_workers_keeps_command_when_parse_or_pytest_lookup_fails tests/unit/service/test_controls_lifecycle_parts/test_controls_lifecycle_part_003.py::test_remonitor_failed_workspace_reopens_existing_merge_candidate -q`
     passed with 13 tests.
+
+Full AWF/GitHub validation remains owned by AWF after agent completion.
+
+## Iteration 4
+
+A stricter current-branch diff-scoped AST audit included class definitions whose
+changed method ranges were touched and found one remaining missing class
+docstring in the monitor-prompt tests. This iteration added a concise
+class-level docstring to that test grouping without changing runtime behavior.
+
+Evidence:
+
+- Additional changed files:
+  - `tests/unit/runtime/test_monitor_prompts.py`
+  - `plans/COMMENT_4566515940_DOCSTRING_COVERAGE_PLAN.md`
+  - `plans/COMMENT_4566515940_DOCSTRING_COVERAGE_VALIDATION.md`
+- Verification:
+  - Diff-scoped AST audit for PR-added/touched Python callables passed with
+    `changed_python_files=11 touched_callables=68 missing_docstrings=0`.
+  - `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_monitor_prompts.py`
+    passed.
+  - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_monitor_prompts.py::TestFixCiPrompt -q`
+    passed with 15 tests.
 
 Full AWF/GitHub validation remains owned by AWF after agent completion.

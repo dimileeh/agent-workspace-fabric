@@ -439,6 +439,8 @@ class TestSyncBaseConflictPrompt:
 
 
 class TestFixCiPrompt:
+    """Tests for fix-ci prompt rendering from structured check failure evidence."""
+
     @pytest.mark.unit
     def test_includes_focused_ci_evidence_before_raw_log_excerpt(self) -> None:
         failures = (

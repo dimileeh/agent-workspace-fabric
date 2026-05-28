@@ -25,6 +25,8 @@ warning after the exact coverage threshold gate was added.
   callables added or directly touched by this PR. A diff-scoped AST audit found
   undocumented API-schema, companion-service, executor edge, validation helper,
   and remonitor lifecycle test callables.
+- Iteration 4 covers one remaining touched class-level test grouping surfaced by
+  a stricter diff-scoped AST audit of the current branch state.
 
 ## Requirements Checklist
 
@@ -38,6 +40,7 @@ warning after the exact coverage threshold gate was added.
       protected.
 - [x] Remaining PR-added Python test helpers and regression tests describe the
       edge case they protect.
+- [x] Diff-touched test classes describe the prompt surface they group.
 - [x] Focused local verification is recorded; full AWF/GitHub validation remains
       post-agent owned.
 
@@ -53,7 +56,9 @@ warning after the exact coverage threshold gate was added.
    PR's expanded coverage.
 6. Add one-line docstrings to the remaining diff-added callables found by the
    focused AST audit.
-7. Run targeted checks for the changed files and document the evidence.
+7. Add a class-level docstring to the remaining touched monitor-prompt test
+   grouping found by the stricter current-branch audit.
+8. Run targeted checks for the changed files and document the evidence.
 
 ## Verification Commands
 
