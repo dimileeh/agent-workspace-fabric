@@ -652,6 +652,14 @@ Modules touched:
 
 Depends on: T01, T04, T05, T10, T12
 
+Execution model:
+
+- Single-phase final docs task, not a split skeleton/final task.
+- Do not launch T15 until T01, T04, T05, T10, and T12 are merged or
+  explicitly satisfied; all deliverables and acceptance criteria below apply
+  to the completed T15 task.
+- T18 depends on completed and merged T15, not on an early docs skeleton.
+
 What:
 
 - Present four first-run lanes:
