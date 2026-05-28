@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -279,7 +279,7 @@ def _ensure_no_secret_payload(value: object, *, path: tuple[str, ...] = ()) -> N
                 raise _SecretPayloadError(path=child_path, issue="secret-bearing key")
             _ensure_no_secret_payload(raw_value, path=child_path)
         return
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for index, item in enumerate(value):
             _ensure_no_secret_payload(item, path=(*path, f"[{index}]"))
         return

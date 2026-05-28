@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections import UserList
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -157,6 +158,17 @@ def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
     assert exc_info.value.details() == {
         "issue": "secret-bearing key",
         "path": "audit.[0].token",
+    }
+
+
+@pytest.mark.unit
+def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> None:
+    with pytest.raises(_SecretPayloadError) as exc_info:
+        _ensure_no_secret_payload({"audit": UserList(["sk-raw-secret-value"])})
+
+    assert exc_info.value.details() == {
+        "issue": "secret-like value",
+        "path": "audit.[0]",
     }
 
 
