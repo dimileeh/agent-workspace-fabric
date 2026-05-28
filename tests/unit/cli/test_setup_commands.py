@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -15,12 +16,13 @@ _runner = CliRunner()
 @pytest.mark.unit
 def test_setup_help_describes_first_run_surface() -> None:
     result = _runner.invoke(app, ["setup", "--help"], env={"COLUMNS": "180"})
+    visible_help = click.unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "Prepare this machine for AWF" in result.output
-    assert "awf service bootstrap" in result.output
-    assert "awf init <path>" in result.output
-    assert "Traceback" not in result.output
+    assert "Prepare this machine for AWF" in visible_help
+    assert "awf service bootstrap" in visible_help
+    assert "awf init <path>" in visible_help
+    assert "Traceback" not in visible_help
 
 
 @pytest.mark.unit

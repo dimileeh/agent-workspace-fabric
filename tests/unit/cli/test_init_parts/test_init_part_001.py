@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import click
 import pytest
 import typer
 import yaml
@@ -299,18 +300,19 @@ def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_init_help_documents_project_onboarding_and_new_first_run_flow() -> None:
     """Document that public init is now only project onboarding."""
     result = _runner.invoke(app, ["init", "--help"], env={"COLUMNS": "240"})
+    visible_help = click.unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "current runnable first path" in result.output
-    assert "awf service bootstrap" in result.output
-    assert "awf init <path>" in result.output
-    assert "Path to a checked-out repository" in result.output
-    assert "docker/compose/.env" not in result.output
-    assert "--write-env" not in result.output
-    assert "--timeout-seconds" not in result.output
-    assert "--poll-interval-seconds" not in result.output
-    assert "--skip-agent-runtime-build" not in result.output
-    assert "--provider" not in result.output
+    assert "current runnable first path" in visible_help
+    assert "awf service bootstrap" in visible_help
+    assert "awf init <path>" in visible_help
+    assert "Path to a checked-out repository" in visible_help
+    assert "docker/compose/.env" not in visible_help
+    assert "--write-env" not in visible_help
+    assert "--timeout-seconds" not in visible_help
+    assert "--poll-interval-seconds" not in visible_help
+    assert "--skip-agent-runtime-build" not in visible_help
+    assert "--provider" not in visible_help
 
 
 @pytest.mark.unit
