@@ -351,7 +351,19 @@ def _resolve_config_path(path: str | Path | None) -> Path:
 
 def _is_standard_awf_config_path(path: Path) -> bool:
     """Return whether a path names the standard AWF host setup config file."""
-    return path.name == "config.yml" and path.parent.name == ".awf"
+    try:
+        default_path = default_host_setup_config_path()
+    except HostSetupConfigError:
+        return False
+    return _normalized_config_path(path) == _normalized_config_path(default_path)
+
+
+def _normalized_config_path(path: Path) -> Path:
+    """Return a stable path value for config path identity checks."""
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return path
 
 
 def _config_path_resolution_error(path: Path, exc: OSError | RuntimeError) -> HostSetupConfigError:

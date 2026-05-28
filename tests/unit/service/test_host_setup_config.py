@@ -114,10 +114,32 @@ def test_host_setup_config_write_preserves_explicit_parent_permissions(
 
 
 @pytest.mark.unit
-def test_host_setup_config_write_secures_explicit_default_parent_permissions(
+def test_host_setup_config_write_preserves_explicit_awf_parent_permissions(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_dir = tmp_path / "repo" / ".awf"
+    config_dir.mkdir(parents=True)
+    if os.name == "posix":
+        config_dir.chmod(0o755)
+    config_path = config_dir / "config.yml"
+
+    write_host_setup_config(HostSetupConfig(api=ApiConfig(host_port=8124)), path=config_path)
+
+    if os.name == "posix":
+        assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert read_host_setup_config(path=config_path).api.host_port == 8124
+
+
+@pytest.mark.unit
+def test_host_setup_config_write_secures_explicit_default_parent_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = default_host_setup_config_path()
 
     if os.name == "posix":
         original_umask = os.umask(0o022)
