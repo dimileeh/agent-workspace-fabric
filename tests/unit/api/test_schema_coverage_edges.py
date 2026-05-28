@@ -169,6 +169,24 @@ def test_workspace_companion_environment_schema_documents_value_interpolation_re
 
 
 @pytest.mark.unit
+def test_workspace_companion_environment_secrets_schema_documents_key_pattern() -> None:
+    environment_secrets_schema = api_schemas.WorkspaceCompanionRequest.model_json_schema()[
+        "properties"
+    ]["environment_secrets"]
+
+    assert environment_secrets_schema["propertyNames"] == {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+    }
+    secret_value_schema = environment_secrets_schema["patternProperties"][
+        "^[A-Za-z_][A-Za-z0-9_]*$"
+    ]
+    secret_schema_name = secret_value_schema["$ref"].split("/")[-1]
+    assert secret_schema_name == "CompanionEnvironmentSecretRequest"
+
+
+@pytest.mark.unit
 def test_workspace_companion_accepts_environment_secrets() -> None:
     request = api_schemas.WorkspaceCreateRequest.model_validate(
         {

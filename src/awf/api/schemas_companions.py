@@ -41,6 +41,13 @@ _ENVIRONMENT_SCHEMA: dict[str, Any] = {
         },
     },
 }
+_ENVIRONMENT_SECRETS_SCHEMA: dict[str, Any] = {
+    "propertyNames": {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": _ENVIRONMENT_KEY_PATTERN_TEXT,
+    },
+}
 
 
 class CompanionEnvironmentSecretRequest(BaseModel):
@@ -155,6 +162,7 @@ class WorkspaceCompanionRequest(BaseModel):
     )
     environment_secrets: dict[EnvironmentKey, CompanionEnvironmentSecretRequest] = Field(
         default_factory=dict,
+        json_schema_extra=_ENVIRONMENT_SECRETS_SCHEMA,
         description=(
             "Env-backed secret references for companion container environment variables. "
             "Values are resolved by AWF from the worker environment and must not contain "
