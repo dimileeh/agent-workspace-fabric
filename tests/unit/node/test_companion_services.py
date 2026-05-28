@@ -10,6 +10,7 @@ import pytest
 from awf.node.companion_services import (
     COMPANION_ENV_SECRET_SOURCE_EMPTY,
     COMPANION_ENV_SECRET_SOURCE_MISSING,
+    COMPANION_ENV_SECRET_UNSUPPORTED,
     CompanionEnvironmentSecretRef,
     MaterializedCompanionService,
     WorkspaceCompanionSpec,
@@ -519,6 +520,28 @@ def test_companion_specs_from_task_policy_warns_on_boolean_compose_up_timeout(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout", [{"seconds": 900}, [900], "slow"])
+def test_companion_specs_from_task_policy_ignores_invalid_compose_up_timeout_types(
+    timeout: object,
+) -> None:
+    """Invalid compose-up timeout payload types are ignored."""
+    spec = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@example.com:api.git",
+                    "base_branch": "main",
+                    "compose_up_timeout_seconds": timeout,
+                }
+            ]
+        }
+    )[0]
+
+    assert spec.compose_up_timeout_seconds is None
+
+
+@pytest.mark.unit
 def test_companion_service_from_materialized_resolves_environment_secret_placeholders(
     tmp_path: Path,
 ) -> None:
@@ -770,6 +793,64 @@ def test_companion_service_from_materialized_fails_required_missing_environment_
     assert "backend" in str(exc.value)
     assert "AIRA_API_KEY" in str(exc.value)
     assert "ANTHROPIC_API_KEY" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_rejects_literal_secret_target_overlap(
+    tmp_path: Path,
+) -> None:
+    """Companion materialization rejects literal and secret target overlaps."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = WorkspaceCompanionSpec(
+        name="backend",
+        repo_url="git@example.com:api.git",
+        environment=(("AIRA_API_KEY", "literal"),),
+        environment_secrets=(
+            CompanionEnvironmentSecretRef(
+                target="AIRA_API_KEY",
+                value_from="ANTHROPIC_API_KEY",
+            ),
+        ),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        companion_service_from_materialized(
+            MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+            host_env={"ANTHROPIC_API_KEY": "raw-secret"},
+        )
+
+    assert exc.value.reason_code == "COMPANION_ENV_SECRET_TARGET_OVERLAP"
+    assert "AIRA_API_KEY" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_companion_service_from_materialized_rejects_unsupported_secret_scope(
+    tmp_path: Path,
+) -> None:
+    """Companion materialization rejects unsupported env-secret scopes."""
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    spec = WorkspaceCompanionSpec(
+        name="backend",
+        repo_url="git@example.com:api.git",
+        environment_secrets=(
+            CompanionEnvironmentSecretRef(
+                target="AIRA_API_KEY",
+                value_from="ANTHROPIC_API_KEY",
+                provider="vault",
+            ),
+        ),
+    )
+
+    with pytest.raises(ProfileResolutionError) as exc:
+        companion_service_from_materialized(
+            MaterializedCompanionService(spec=spec, layout=_layout(companion_root)),
+            host_env={"ANTHROPIC_API_KEY": "raw-secret"},
+        )
+
+    assert exc.value.reason_code == COMPANION_ENV_SECRET_UNSUPPORTED
+    assert "provider=env and kind=env" in str(exc.value)
 
 
 @pytest.mark.unit
