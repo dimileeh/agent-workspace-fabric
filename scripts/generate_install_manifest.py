@@ -19,6 +19,7 @@ DEFAULT_PYTHON_REQUIREMENT = ">=3.12"
 SCHEMA_VERSION = 1
 CHANNELS = {"auto", "stable", "prerelease"}
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+CHECKSUM_READ_SIZE = 64 * 1024
 FINAL_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.post\d+)?$")
 PRERELEASE_VERSION_RE = re.compile(
     r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+|\.dev\d+)(?:\.post\d+)?$",
@@ -254,7 +255,11 @@ def _validate_checksum_coverage(files: list[Path], checksums: dict[str, str]) ->
 
 def _validate_checksum_content(files: list[Path], checksums: dict[str, str]) -> None:
     for file in files:
-        actual = hashlib.sha256(file.read_bytes()).hexdigest()
+        sha256 = hashlib.sha256()
+        with file.open("rb") as artifact:
+            while chunk := artifact.read(CHECKSUM_READ_SIZE):
+                sha256.update(chunk)
+        actual = sha256.hexdigest()
         expected = checksums[file.name]
         if actual != expected:
             raise ManifestError(f"checksum does not match distribution artifact: {file.name}")

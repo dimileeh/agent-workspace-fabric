@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.generate_install_manifest import resolve_channel
+from scripts.generate_install_manifest import _validate_checksum_content, resolve_channel
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "generate_install_manifest.py"
@@ -223,6 +223,54 @@ def test_manifest_rejects_checksum_that_does_not_match_distribution_content(
     assert result.returncode == 2
     assert "checksum does not match distribution artifact" in result.stderr
     assert not (tmp_path / "awf-install-manifest.json").exists()
+
+
+@pytest.mark.unit
+def test_manifest_hashes_distribution_artifacts_with_bounded_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
+    content = b"wheel fixture\n" * 10_000
+    artifact.write_bytes(content)
+    expected_digest = hashlib.sha256(content).hexdigest()
+    read_sizes: list[int] = []
+    original_open = Path.open
+    original_read_bytes = Path.read_bytes
+
+    class TrackingReader:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> TrackingReader:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            self._handle.close()
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            if size <= 0:
+                raise AssertionError("checksum validation must use bounded reads")
+            return self._handle.read(size)
+
+    def tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        handle = original_open(self, *args, **kwargs)
+        if self == artifact:
+            return TrackingReader(handle)
+        return handle
+
+    def forbidden_read_bytes(self: Path) -> bytes:
+        if self == artifact:
+            raise AssertionError("checksum validation must not load the full artifact")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+
+    _validate_checksum_content([artifact], {artifact.name: expected_digest})
+
+    assert read_sizes
 
 
 @pytest.mark.unit
