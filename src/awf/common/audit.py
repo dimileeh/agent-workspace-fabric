@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 
-from awf.common.token_patterns import compile_known_token_re
+from awf.common.token_patterns import compile_known_token_re, compile_token_assignment_re
 
 AUDIT_SCHEMA = "control_audit.v1"
 REDACTION_MARKER = "[redacted]"
@@ -32,19 +32,7 @@ _AUTHORIZATION_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.IGNORECASE)
-_TOKEN_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<key>"
-    r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
-    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY)"
-    r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
-    r"|PASSWORD|PASSWD|SECRET"
-    r")\b"
-    r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
-    r"(?P=quote)",
-    re.IGNORECASE,
-)
+_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
 _KNOWN_TOKEN_RE = compile_known_token_re()
 
 

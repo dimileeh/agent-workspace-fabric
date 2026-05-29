@@ -111,6 +111,7 @@ _PROVIDER_REF_KEY_SUFFIX_RE = re.compile(
     r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)",
     re.IGNORECASE,
 )
+_NUMERIC_SUFFIX_KEY_RE = re.compile(r"(?P<base>.*?)#(?P<suffix>\d+)$")
 _FIRST_RUN_KNOWN_TOKEN_RE = compile_known_token_re(ignorecase=True)
 
 
@@ -526,7 +527,7 @@ def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:
 def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> list[str]:
     """Render mapping details as sorted, nested pretty output lines."""
     lines: list[str] = []
-    for key in sorted(mapping):
+    for key in sorted(mapping, key=_render_mapping_sort_key):
         value = mapping[key]
         if isinstance(value, Mapping) and value:
             lines.append(f"{prefix}{key}:")
@@ -538,6 +539,14 @@ def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> 
             continue
         lines.append(f"{prefix}{key}: {_format_pretty_value(value)}")
     return lines
+
+
+def _render_mapping_sort_key(key: str) -> tuple[str, int, str]:
+    """Sort generated ``#N`` suffixes by number while preserving stable labels."""
+    match = _NUMERIC_SUFFIX_KEY_RE.fullmatch(key)
+    if match is None:
+        return (key, 0, key)
+    return (match.group("base"), int(match.group("suffix")), key)
 
 
 def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str) -> list[str]:

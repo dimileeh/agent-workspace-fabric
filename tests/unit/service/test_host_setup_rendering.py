@@ -788,6 +788,27 @@ def test_first_run_rendering_preserves_colliding_redacted_mapping_keys() -> None
 
 
 @pytest.mark.unit
+def test_first_run_pretty_sorts_redacted_collision_suffixes_numerically() -> None:
+    """Verify pretty output keeps generated redacted suffixes in numeric order."""
+    raw_token_keys = [f"ghp_firstRunMapKeyValue{index}" for index in range(11)]
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary="Credential reference is invalid.",
+        details={key: f"provider {index}" for index, key in enumerate(raw_token_keys)},
+    )
+
+    lines = render_first_run_pretty(payload).splitlines()
+
+    expected_lines = ["  [redacted]: provider 0"]
+    expected_lines.extend(
+        f"  [redacted]#{suffix}: provider {suffix - 1}" for suffix in range(2, 12)
+    )
+    expected_indices = [lines.index(line) for line in expected_lines]
+    assert expected_indices == sorted(expected_indices)
+
+
+@pytest.mark.unit
 def test_first_run_rendering_skips_occupied_redacted_mapping_key_suffixes() -> None:
     """Verify redacted key suffixes skip literal occupied slots."""
     raw_github_key = "ghp_firstRunMapKeyValue"
