@@ -11,9 +11,11 @@ from awf.host_setup.rendering import (
     FIRST_RUN_FAILURE_REASON_CODES,
     FirstRunPayload,
     _format_pretty_value,
+    _json_safe_first_run_value,
     _redact_provider_refs,
     first_run_failure_payload,
     first_run_issue_from_reason_code,
+    first_run_remediation_from_reason_code,
     first_run_success_payload,
     first_run_warning_payload,
     redact_first_run_value,
@@ -51,6 +53,13 @@ def test_first_run_success_payload_renders_pretty_and_json() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_remediation_rejects_unknown_reason_codes() -> None:
+    """Verify unknown first-run reason codes fail before rendering."""
+    with pytest.raises(ValueError, match="Unknown first-run reason code"):
+        first_run_remediation_from_reason_code("FIRST_RUN_UNKNOWN")
+
+
+@pytest.mark.unit
 def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> None:
     """Verify direct payloads can show top-level reasons without issues."""
     payload = FirstRunPayload(
@@ -64,6 +73,140 @@ def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> No
 
     assert "Reason: EXTERNAL_PREFLIGHT_FAILED" in rendered_pretty
     assert "Problem:" not in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_json_tolerates_missing_issues_dump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify rendering tolerates a dump shape without an issues field."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_without_issues(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Simulate a dump shape missing optional issue data."""
+        raw_payload = dict(original_model_dump(self, **kwargs))
+        raw_payload.pop("issues", None)
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_without_issues)
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert rendered_json == {
+        "status": "success",
+        "command": "awf setup",
+        "summary": "AWF first-run checks passed.",
+    }
+    assert "Status: success" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_pretty_ignores_non_mapping_issue_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify non-mapping issue dump entries do not break pretty rendering."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_with_scalar_issue(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Simulate a dump shape with an unexpected scalar issue item."""
+        raw_payload = dict(original_model_dump(self, **kwargs))
+        raw_payload["issues"] = ("unexpected issue text",)
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_scalar_issue)
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert rendered_json["issues"] == ["unexpected issue text"]
+    assert "Problem:" not in rendered_pretty
+    assert "Reason:" not in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_pretty_renders_issue_with_missing_optional_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify malformed-but-mapping issue dumps omit absent optional fields."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_with_sparse_issue(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Simulate a mapping issue with details but no reason/remediation."""
+        raw_payload = dict(original_model_dump(self, **kwargs))
+        raw_payload["issues"] = ({"details": {"config_path": "/tmp/config.yml"}},)
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_sparse_issue)
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert "Reason:" not in rendered_pretty
+    assert "Severity:" not in rendered_pretty
+    assert "Problem:" not in rendered_pretty
+    assert "Details:" in rendered_pretty
+    assert "  config_path: /tmp/config.yml" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_pretty_renders_empty_remediation_without_optional_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify empty remediation mappings do not emit optional pretty lines."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_with_empty_remediation(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Simulate a mapping issue with no remediation subfields."""
+        raw_payload = dict(original_model_dump(self, **kwargs))
+        raw_payload["issues"] = (
+            {
+                "reason_code": "SETUP_PROVIDER_UNKNOWN",
+                "severity": "failed",
+                "remediation": {},
+            },
+        )
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_empty_remediation)
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="SETUP_PROVIDER_UNKNOWN",
+        summary="Provider selection failed.",
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert "Reason: SETUP_PROVIDER_UNKNOWN" in rendered_pretty
+    assert "Severity: failed" in rendered_pretty
+    assert "Problem:" not in rendered_pretty
+    assert "Cause:" not in rendered_pretty
+    assert "Fix:" not in rendered_pretty
+    assert "Docs:" not in rendered_pretty
+    assert "Related Command:" not in rendered_pretty
 
 
 @pytest.mark.unit
@@ -340,6 +483,14 @@ def test_first_run_json_requires_tuple_issues_from_python_dump(
 
 
 @pytest.mark.unit
+def test_first_run_json_coerces_sets_to_sorted_lists() -> None:
+    """Verify JSON rendering coerces set values deterministically."""
+    rendered_value = _json_safe_first_run_value({"providers": {"zeta", "alpha"}})
+
+    assert rendered_value == {"providers": ["alpha", "zeta"]}
+
+
+@pytest.mark.unit
 def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
     """Verify pretty output expands sequence details into nested lines."""
     payload = first_run_failure_payload(
@@ -377,6 +528,24 @@ def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
         )
         in rendered_pretty
     )
+
+
+@pytest.mark.unit
+def test_first_run_pretty_renders_empty_nested_sequence_items() -> None:
+    """Verify pretty output renders empty mappings and lists inside sequences."""
+    payload = first_run_failure_payload(
+        command="awf start",
+        reason_code="START_HEALTH_TIMEOUT",
+        summary="AWF service ports are unavailable.",
+        details={"items": [{}, []]},
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+    lines = rendered_pretty.splitlines()
+
+    assert "  items:" in lines
+    assert "    - {}" in lines
+    assert "    - []" in lines
 
 
 @pytest.mark.unit

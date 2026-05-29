@@ -458,6 +458,27 @@ def test_duplicate_key_loader_constructs_each_key_node_once(
 
 
 @pytest.mark.unit
+def test_duplicate_key_loader_rejects_non_mapping_nodes() -> None:
+    """Verify the mapping constructor rejects non-mapping YAML nodes."""
+    loader = host_setup_config._DuplicateKeyRejectingSafeLoader("version\n")
+    node = loader.get_single_node()
+    assert node is not None
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="expected a mapping node"):
+        host_setup_config._construct_mapping_without_duplicate_keys(loader, node)
+
+
+@pytest.mark.unit
+def test_duplicate_key_loader_rejects_unhashable_constructed_keys() -> None:
+    """Verify YAML keys that construct to lists are rejected safely."""
+    with pytest.raises(yaml.constructor.ConstructorError, match="found unhashable key"):
+        yaml.load(
+            "? [github, openai]\n: configured\n",
+            Loader=host_setup_config._DuplicateKeyRejectingSafeLoader,
+        )
+
+
+@pytest.mark.unit
 def test_host_setup_work_dir_documents_expanduser_contract() -> None:
     description = HostSetupConfig.model_fields["work_dir"].description
 
@@ -603,6 +624,37 @@ def test_host_setup_config_write_revalidates_model_copy_updates(tmp_path: Path) 
         "locations": ["providers.github.credential_ref"],
     }
     assert "literal-token-file" not in str(error.to_dict())
+    assert not config_path.exists()
+
+
+@pytest.mark.unit
+def test_host_setup_config_write_wraps_validation_secret_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify write-time validation classifies raw credential refs as secrets."""
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    copied_config = HostSetupConfig().model_copy(
+        update={"providers": {"github": {"credential_ref": "ghp_raw_secret"}}}
+    )
+
+    def _allow_secret_payload(value: object) -> None:
+        del value
+
+    monkeypatch.setattr(host_setup_config, "_ensure_no_secret_payload", _allow_secret_payload)
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(copied_config, path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
+    assert error.path == config_path
+    assert error.details == {
+        "error_count": 1,
+        "error_types": ["value_error"],
+        "locations": ["providers.github.credential_ref"],
+    }
+    assert "ghp_raw_secret" not in str(error.to_dict())
     assert not config_path.exists()
 
 
