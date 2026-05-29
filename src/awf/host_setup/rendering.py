@@ -172,11 +172,31 @@ def first_run_remediation_from_reason_code(
     reason = reason_text_for_code(reason_code)
     if reason is None:
         raise ValueError(f"Unknown first-run reason code: {reason_code}")
+    resolved_problem = problem or reason.message
+    resolved_cause = cause or reason.likely_cause
+    resolved_fix = fix or reason.action
+    resolved_docs_link = docs_link or reason.docs_link
+    missing_catalog_fields = [
+        field_name
+        for field_name, value in (
+            ("message", resolved_problem),
+            ("likely_cause", resolved_cause),
+            ("action", resolved_fix),
+            ("docs_link", resolved_docs_link),
+        )
+        if not value.strip()
+    ]
+    if missing_catalog_fields:
+        missing_fields = ", ".join(missing_catalog_fields)
+        raise ValueError(
+            f"First-run reason code {reason_code} has incomplete remediation guidance: "
+            f"{missing_fields}"
+        )
     return FirstRunRemediation(
-        problem=problem or reason.message,
-        cause=cause or reason.likely_cause,
-        fix=fix or reason.action,
-        docs_link=docs_link or reason.docs_link,
+        problem=resolved_problem,
+        cause=resolved_cause,
+        fix=resolved_fix,
+        docs_link=resolved_docs_link,
         related_command=related_command if related_command is not None else reason.related_command,
         next_steps=next_steps,
     )
@@ -573,6 +593,8 @@ def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str
 
 def _format_pretty_value(value: Any) -> str:
     """Return a stable scalar representation for pretty output."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     if isinstance(value, (bool, int, float, list, tuple, dict)) or value is None:
         return json.dumps(value, sort_keys=True)
     return str(value)

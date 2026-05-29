@@ -61,6 +61,13 @@ def test_first_run_remediation_rejects_unknown_reason_codes() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_remediation_rejects_catalog_entries_without_guidance() -> None:
+    """Verify doctor-only success codes fail with a first-run-specific error."""
+    with pytest.raises(ValueError, match="DOCKER_OK.*likely_cause.*docs_link"):
+        first_run_remediation_from_reason_code("DOCKER_OK")
+
+
+@pytest.mark.unit
 def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> None:
     """Verify direct payloads can show top-level reasons without issues."""
     payload = FirstRunPayload(
@@ -623,6 +630,14 @@ def test_first_run_pretty_renders_json_style_scalar_details() -> None:
 def test_first_run_pretty_formats_dict_values_as_json() -> None:
     """Verify fallback pretty formatting keeps dict values JSON-style."""
     assert _format_pretty_value({"z": "last", "a": "first"}) == '{"a": "first", "z": "last"}'
+
+
+@pytest.mark.unit
+def test_format_pretty_value_formats_non_finite_floats_as_strings() -> None:
+    """Verify direct pretty scalar formatting handles non-finite floats."""
+    assert _format_pretty_value(math.nan) == "nan"
+    assert _format_pretty_value(math.inf) == "inf"
+    assert _format_pretty_value(-math.inf) == "-inf"
 
 
 @pytest.mark.unit
