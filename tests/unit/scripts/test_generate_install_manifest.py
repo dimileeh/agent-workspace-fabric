@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,8 +60,13 @@ def _run_generator(
     tag: str = "v0.1.0",
     generated_at: str = "2026-05-29T00:00:00Z",
     repository_url: str = REPOSITORY_URL,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     output = tmp_path / "awf-install-manifest.json"
+    env = None
+    if env_overrides is not None:
+        env = os.environ.copy()
+        env.update(env_overrides)
     return subprocess.run(
         [
             sys.executable,
@@ -84,6 +90,7 @@ def _run_generator(
         ],
         check=False,
         capture_output=True,
+        env=env,
         text=True,
     )
 
@@ -145,6 +152,58 @@ def test_manifest_artifact_urls_are_pinned_to_release_tag(tmp_path: Path) -> Non
         assert "/raw/main/" not in url
         assert "/raw/development/" not in url
         assert "pypi.org" not in url
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env_overrides",
+    [
+        {"GITHUB_ACTIONS": "true", "GITHUB_REF_NAME": "development"},
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REF_NAME": "vnext",
+            "GITHUB_REF_TYPE": "branch",
+        },
+    ],
+)
+def test_manifest_generator_skips_github_actions_branch_ref_without_writing_manifest(
+    tmp_path: Path,
+    env_overrides: dict[str, str],
+) -> None:
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    output = tmp_path / "awf-install-manifest.json"
+    output.write_text("stale manifest\n", encoding="utf-8")
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides=env_overrides,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" in result.stdout
+    assert "not a release tag" in result.stdout
+    assert not output.exists()
+
+
+@pytest.mark.unit
+def test_manifest_generator_allows_github_actions_tag_ref(tmp_path: Path) -> None:
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REF_NAME": "v0.1.0",
+            "GITHUB_REF_TYPE": "tag",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "awf-install-manifest.json").is_file()
 
 
 @pytest.mark.unit

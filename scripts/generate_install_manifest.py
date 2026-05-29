@@ -114,6 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint."""
     parser = _parser()
     args = parser.parse_args(argv)
+    skip_reason = _github_actions_skip_reason(args.tag)
+    if skip_reason is not None:
+        try:
+            _remove_skipped_output(args.output)
+        except OSError as exc:
+            parser.error(f"could not remove skipped manifest output: {exc}")
+        print(f"SKIP: {skip_reason}")
+        return 0
+
     try:
         manifest = build_manifest(
             dist_dir=args.dist_dir,
@@ -147,6 +156,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--package", default=DEFAULT_PACKAGE)
     parser.add_argument("--commit")
     return parser
+
+
+def _github_actions_skip_reason(tag: str) -> str | None:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return None
+
+    ref_name = os.environ.get("GITHUB_REF_NAME", "")
+    ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+    if ref_type:
+        if ref_type == "tag" and ref_name == tag:
+            return None
+        return f"GitHub Actions ref {ref_name or '<unknown>'} ({ref_type}) is not a release tag"
+
+    if ref_name and ref_name != tag:
+        return f"GitHub Actions ref {ref_name} is not a release tag"
+    return None
+
+
+def _remove_skipped_output(output: Path) -> None:
+    try:
+        output.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _is_final_version(version: str) -> bool:
