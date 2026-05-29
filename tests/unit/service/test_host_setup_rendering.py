@@ -9,6 +9,7 @@ import pytest
 from awf.host_setup.rendering import (
     FIRST_RUN_FAILURE_REASON_CODES,
     FirstRunPayload,
+    _format_pretty_value,
     _redact_provider_refs,
     first_run_failure_payload,
     first_run_issue_from_reason_code,
@@ -334,6 +335,12 @@ def test_first_run_pretty_renders_json_style_scalar_details() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_pretty_formats_dict_values_as_json() -> None:
+    """Verify fallback pretty formatting keeps dict values JSON-style."""
+    assert _format_pretty_value({"z": "last", "a": "first"}) == '{"a": "first", "z": "last"}'
+
+
+@pytest.mark.unit
 def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
     """Verify every first-run failure reason renders a complete pretty panel."""
     for reason_code in FIRST_RUN_FAILURE_REASON_CODES:
@@ -463,6 +470,29 @@ def test_first_run_rendering_preserves_colliding_redacted_mapping_keys() -> None
         assert raw_key not in rendered_pretty
     assert "  [redacted]: github auth failed" in rendered_pretty
     assert "  [redacted]#2: gitlab auth failed" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_rendering_skips_occupied_redacted_mapping_key_suffixes() -> None:
+    """Verify redacted key suffixes skip literal occupied slots."""
+    raw_github_key = "ghp_firstRunMapKeyValue"
+    raw_gitlab_key = "glpat-firstRunMapKeyValue"
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary="Credential reference is invalid.",
+        details={
+            raw_github_key: "github auth failed",
+            "[redacted]#2": "literal diagnostic detail",
+            raw_gitlab_key: "gitlab auth failed",
+        },
+    )
+
+    issue_details = render_first_run_json(payload)["issues"][0]["details"]
+
+    assert issue_details["[redacted]"] == "github auth failed"
+    assert issue_details["[redacted]#2"] == "literal diagnostic detail"
+    assert issue_details["[redacted]#3"] == "gitlab auth failed"
 
 
 @pytest.mark.unit

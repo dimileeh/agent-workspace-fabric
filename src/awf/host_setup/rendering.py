@@ -366,7 +366,11 @@ def _redact_first_run_mapping_key(key: Any) -> str:
 
 
 def _deduplicate_redacted_mapping_key(mapping: Mapping[str, Any], key: str) -> str:
-    """Return a rendered mapping key that preserves redacted-key collisions."""
+    """Return a rendered mapping key that preserves redacted-key collisions.
+
+    Suffixes colliding keys as ``key#2``, ``key#3``, skipping any slot already
+    occupied by a non-collision entry in the mapping.
+    """
     if key not in mapping:
         return key
     suffix = 2
@@ -455,7 +459,7 @@ def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str
 
 def _format_pretty_value(value: Any) -> str:
     """Return a stable scalar representation for pretty output."""
-    if isinstance(value, (bool, int, float, list, tuple)) or value is None:
+    if isinstance(value, (bool, int, float, list, tuple, dict)) or value is None:
         return json.dumps(value, sort_keys=True)
     return str(value)
 
