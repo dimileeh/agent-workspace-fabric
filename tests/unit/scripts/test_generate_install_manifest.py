@@ -134,6 +134,33 @@ def test_manifest_generator_emits_deterministic_manifest_from_dist_and_checksums
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "generated_at",
+    [
+        "2026-05-29",
+        "2026-05-29T00:00:00+00:00",
+        "not-a-timestamp",
+    ],
+)
+def test_manifest_rejects_malformed_explicit_generated_at(
+    tmp_path: Path,
+    generated_at: str,
+) -> None:
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        generated_at=generated_at,
+    )
+
+    assert result.returncode == 2
+    assert "generated_at must be UTC RFC3339 format" in result.stderr
+    assert not (tmp_path / "awf-install-manifest.json").exists()
+
+
+@pytest.mark.unit
 def test_manifest_artifact_urls_are_pinned_to_release_tag(tmp_path: Path) -> None:
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 

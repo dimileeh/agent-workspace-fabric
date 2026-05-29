@@ -19,6 +19,7 @@ DEFAULT_PYTHON_REQUIREMENT = ">=3.12"
 SCHEMA_VERSION = 1
 CHANNELS = {"auto", "stable", "prerelease"}
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+GENERATED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 CHECKSUM_READ_SIZE = 64 * 1024
 FINAL_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.post\d+)?$")
 PRERELEASE_VERSION_RE = re.compile(
@@ -71,7 +72,11 @@ def build_manifest(
 ) -> dict[str, Any]:
     """Build an AWF install manifest from release artifacts."""
     resolved_channel = resolve_channel(version, channel)
-    generated_timestamp = generated_at or _default_generated_at()
+    generated_timestamp = (
+        _validate_generated_at(generated_at)
+        if generated_at is not None
+        else _default_generated_at()
+    )
     normalized_repository_url = _normalize_repository_url(repository_url)
     _validate_tag(tag, version)
 
@@ -201,6 +206,18 @@ def _default_generated_at() -> str:
         except (OSError, OverflowError) as exc:
             raise ManifestError(f"Invalid SOURCE_DATE_EPOCH timestamp: {exc}") from exc
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _validate_generated_at(value: str) -> str:
+    if not GENERATED_AT_RE.match(value):
+        raise ManifestError("generated_at must be UTC RFC3339 format: YYYY-MM-DDTHH:MM:SSZ")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ManifestError(
+            "generated_at must be UTC RFC3339 format: YYYY-MM-DDTHH:MM:SSZ"
+        ) from exc
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _normalize_repository_url(repository_url: str) -> str:
