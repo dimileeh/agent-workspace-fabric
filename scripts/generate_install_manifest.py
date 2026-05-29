@@ -176,6 +176,8 @@ def _default_generated_at() -> str:
 
 def _normalize_repository_url(repository_url: str) -> str:
     normalized = repository_url.rstrip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
     parsed = urlparse(normalized)
     if parsed.scheme != "https" or parsed.netloc != "github.com":
         raise ManifestError("repository URL must be a pinned GitHub repository HTTPS URL")

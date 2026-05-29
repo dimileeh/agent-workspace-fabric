@@ -53,6 +53,7 @@ def _run_generator(
     channel: str = "stable",
     tag: str = "v0.1.0",
     generated_at: str = "2026-05-29T00:00:00Z",
+    repository_url: str = REPOSITORY_URL,
 ) -> subprocess.CompletedProcess[str]:
     output = tmp_path / "awf-install-manifest.json"
     return subprocess.run(
@@ -70,7 +71,7 @@ def _run_generator(
             "--tag",
             tag,
             "--repository-url",
-            REPOSITORY_URL,
+            repository_url,
             "--channel",
             channel,
             "--generated-at",
@@ -139,6 +140,30 @@ def test_manifest_artifact_urls_are_pinned_to_release_tag(tmp_path: Path) -> Non
         assert "/raw/main/" not in url
         assert "/raw/development/" not in url
         assert "pypi.org" not in url
+
+
+@pytest.mark.unit
+def test_manifest_normalizes_git_suffix_from_repository_clone_url(tmp_path: Path) -> None:
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        repository_url=f"{REPOSITORY_URL}.git",
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["repository"] == REPOSITORY_URL
+
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    for artifact in artifacts:
+        assert artifact["url"].startswith(f"{REPOSITORY_URL}/releases/download/")
+        assert ".git/releases/download/" not in artifact["url"]
 
 
 @pytest.mark.unit
