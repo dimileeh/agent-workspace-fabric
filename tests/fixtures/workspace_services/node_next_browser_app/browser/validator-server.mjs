@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { chromium } from "playwright-core";
+import { chromium } from "playwright";
 
 const FIXTURE_ID = "awf-node-profile-fixture";
 let browserPromise;

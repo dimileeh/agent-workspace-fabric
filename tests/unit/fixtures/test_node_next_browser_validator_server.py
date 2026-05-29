@@ -99,7 +99,7 @@ def _start_validator_server(
 
 
 def _write_playwright_stub(node_modules: Path) -> Path:
-    package_dir = node_modules / "playwright-core"
+    package_dir = node_modules / "playwright"
     package_dir.mkdir(parents=True)
     (package_dir / "package.json").write_text(
         '{"type":"module","main":"index.js"}',
@@ -166,15 +166,17 @@ def _write_playwright_stub(node_modules: Path) -> Path:
     return package_dir
 
 
-def test_browser_sidecar_dockerfile_uses_distro_chromium_contract() -> None:
-    """The Docker smoke fixture should not depend on MCR Playwright image pulls."""
+def test_browser_sidecar_dockerfile_uses_bundled_playwright_browser_contract() -> None:
+    """The Docker smoke fixture should install a matching browser without MCR images."""
     dockerfile = _BROWSER_DOCKERFILE.read_text(encoding="utf-8")
 
     assert "mcr.microsoft.com/playwright" not in dockerfile
     assert "FROM node:22-bookworm-slim" in dockerfile
-    assert "apt-get install" in dockerfile
-    assert "chromium" in dockerfile
-    assert "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" in dockerfile
+    assert "playwright@1.49.1" in dockerfile
+    assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install" in dockerfile
+    assert "npm --prefix /app/browser exec -- playwright install --with-deps chromium" in dockerfile
+    assert "ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
+    assert "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" not in dockerfile
 
 
 def test_browser_sidecar_dockerfile_runs_validator_as_non_root_user() -> None:
@@ -183,7 +185,7 @@ def test_browser_sidecar_dockerfile_runs_validator_as_non_root_user() -> None:
 
     assert "useradd --create-home --uid 10001 awf" in dockerfile
     assert "mkdir -p /home/awf/.cache /home/awf/.config" in dockerfile
-    assert "chown -R awf:awf /app /home/awf" in dockerfile
+    assert "chown -R awf:awf /app /home/awf /ms-playwright" in dockerfile
     assert "chown -R awf:awf /app" in dockerfile
     assert "COPY --chown=awf:awf browser/validator-server.mjs" in dockerfile
     assert "COPY --chown=awf:awf scripts/container-healthcheck.mjs" in dockerfile
@@ -340,7 +342,7 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
 def test_validator_server_uses_configured_chromium_executable_path(
     tmp_path: Path,
 ) -> None:
-    """The fixture image supplies distro Chromium instead of bundled browsers."""
+    """The validator still supports an explicit Chromium executable override."""
     launch_log = tmp_path / "launches.log"
     options_log = tmp_path / "launch-options.log"
     browser_dir = tmp_path / "browser"
