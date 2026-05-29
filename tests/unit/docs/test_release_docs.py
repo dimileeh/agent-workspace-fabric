@@ -19,6 +19,7 @@ def test_releasing_docs_explain_manifest_inspection_and_verification() -> None:
     assert "scripts/generate_install_manifest.py" in docs
     assert "stable" in docs
     assert "prerelease" in docs
+    assert "auto" in docs
     assert "releases/download/vX.Y.Z" in docs
     assert "sha256sum -c artifacts/release/python-distribution-sha256.txt" in docs
     assert "jq" in docs
