@@ -216,12 +216,21 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
+    heartbeat = asyncio.create_task(
+        self._refresh_execution_claim_loop(workspace_id),
+        name=f"awf-provisioning-claim-{workspace_id}",
+    )
     try:
         await self._provisioner.provision_claimed(workspace_id)
     except Exception:
         # Provisioner.provision_claimed() already logged + transitioned to failed;
         # we swallow here so one bad workspace doesn't abort the batch.
         _log.exception("worker.provision_failed", workspace_id=workspace_id)
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+        await self._release_execution_claim(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:

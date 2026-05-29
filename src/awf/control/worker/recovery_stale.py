@@ -233,9 +233,12 @@ async def _list_stale_active_execution_candidates(
                 Workspace.status.in_(
                     [
                         WorkspaceStatus.requested.value,
-                        WorkspaceStatus.provisioning.value,
                         WorkspaceStatus.ready.value,
                     ]
+                ),
+                and_(
+                    Workspace.status == WorkspaceStatus.provisioning.value,
+                    _stale_execution_claim_filter(claim_cutoff),
                 ),
                 and_(
                     Workspace.status.in_(active_execution_values),

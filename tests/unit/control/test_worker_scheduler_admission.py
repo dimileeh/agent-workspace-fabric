@@ -229,6 +229,16 @@ async def _workspace_node_id(
         return workspace.node_id
 
 
+async def _workspace_execution_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> tuple[str | None, datetime | None]:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        return workspace.execution_claimed_by, workspace.execution_claim_expires_at
+
+
 async def _stale_events(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -370,6 +380,107 @@ async def test_named_worker_stamps_node_id_when_claiming_requested_for_provision
         WorkspaceStatus.provisioning.value
     )
     assert await _workspace_node_id(session_factory, workspace_id) == "local"
+
+
+@pytest.mark.unit
+async def test_live_named_provisioning_claim_is_hidden_from_sibling_stale_scan(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    claim_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+
+    assert await claim_worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    claimed_by, claim_expires_at = await _workspace_execution_claim(
+        session_factory,
+        workspace_id,
+    )
+    assert claimed_by == claim_worker._worker_id  # noqa: SLF001
+    assert claim_expires_at is not None
+    assert claim_expires_at > datetime.now(UTC)
+
+    sibling_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+
+    candidates = await sibling_worker._list_stale_active_execution_candidates(  # noqa: SLF001
+        exclude_ids=set()
+    )
+
+    assert [candidate.workspace_id for candidate in candidates] == []
+
+
+@pytest.mark.unit
+async def test_live_named_capacity_provisioning_claim_is_hidden_from_sibling_stale_scan(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=True,
+        node_id=None,
+    )
+    claim_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    claimed = await claim_worker._claim_requested_ids(  # noqa: SLF001
+        [workspace_id],
+        limit=1,
+    )
+    assert claimed == [workspace_id]
+
+    claimed_by, claim_expires_at = await _workspace_execution_claim(
+        session_factory,
+        workspace_id,
+    )
+    assert claimed_by == claim_worker._worker_id  # noqa: SLF001
+    assert claim_expires_at is not None
+    assert claim_expires_at > datetime.now(UTC)
+
+    sibling_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+
+    candidates = await sibling_worker._list_stale_active_execution_candidates(  # noqa: SLF001
+        exclude_ids=set()
+    )
+
+    assert [candidate.workspace_id for candidate in candidates] == []
 
 
 @pytest.mark.unit

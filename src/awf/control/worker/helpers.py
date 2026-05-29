@@ -338,7 +338,7 @@ def _workspace_claim_recheck_passes(
     status: WorkspaceStatus,
     claim_cutoff: datetime,
 ) -> bool:
-    if status in _ACTIVE_EXECUTION_STATUSES:
+    if status == WorkspaceStatus.provisioning or status in _ACTIVE_EXECUTION_STATUSES:
         return _execution_claim_is_stale(workspace, claim_cutoff)
     if status == WorkspaceStatus.monitoring_pr:
         return _monitor_claim_is_stale(workspace, claim_cutoff)
@@ -370,7 +370,7 @@ def _candidate_claim_is_stale(
     status: WorkspaceStatus,
     claim_cutoff: datetime,
 ) -> bool:
-    if status in _ACTIVE_EXECUTION_STATUSES:
+    if status == WorkspaceStatus.provisioning or status in _ACTIVE_EXECUTION_STATUSES:
         return _execution_claim_is_stale(workspace, claim_cutoff)
     if status == WorkspaceStatus.monitoring_pr:
         return _monitor_claim_is_stale(workspace, claim_cutoff)
