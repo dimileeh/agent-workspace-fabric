@@ -405,7 +405,7 @@ def write_host_setup_config(
     secures_parent_permissions = _is_standard_awf_config_path(config_path)
     payload = cast(
         dict[str, object],
-        config.model_dump(mode="json", exclude_none=True, warnings=False),
+        config.model_dump(mode="python", exclude_none=True, warnings=False),
     )
     try:
         _ensure_no_secret_payload(payload)
