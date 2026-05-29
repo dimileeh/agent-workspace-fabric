@@ -42,6 +42,7 @@ _FAKE_OPENAI_SECRET_VALUE_UPPER = "SK-proj-" + ("A" * 48)
 
 
 def _write_valid_source_checkout(root: Path) -> Path:
+    """Create a checkout tree containing every required source marker."""
     for marker in SOURCE_CHECKOUT_MARKERS:
         path = root / marker.path
         if marker.kind == "dir":
@@ -57,6 +58,7 @@ def test_host_setup_config_round_trips_with_conservative_permissions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify host setup config round-trips with restrictive permissions."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     verified = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
@@ -101,6 +103,7 @@ def test_host_setup_config_round_trips_with_conservative_permissions(
 def test_host_setup_config_write_preserves_explicit_parent_permissions(
     tmp_path: Path,
 ) -> None:
+    """Verify explicit config parents keep their existing permissions."""
     config_dir = tmp_path / "shared"
     config_dir.mkdir()
     if os.name == "posix":
@@ -120,6 +123,7 @@ def test_host_setup_config_write_preserves_explicit_awf_parent_permissions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify explicit `.awf` parents keep their existing permissions."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config_dir = tmp_path / "repo" / ".awf"
     config_dir.mkdir(parents=True)
@@ -141,6 +145,7 @@ def test_host_setup_config_write_preserves_parent_for_explicit_symlink_to_defaul
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify symlinked explicit paths do not harden the parent directory."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     default_path = default_host_setup_config_path()
     config_dir = tmp_path / "shared"
@@ -162,6 +167,7 @@ def test_host_setup_config_write_secures_explicit_default_parent_permissions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify the default config parent is secured even when passed explicitly."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config_path = default_host_setup_config_path()
 
@@ -191,6 +197,7 @@ def test_host_setup_config_write_uses_unique_temp_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify repeated config writes use distinct atomic temp paths."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     opened_paths: list[Path] = []
     original_open = os.open
@@ -200,6 +207,7 @@ def test_host_setup_config_write_uses_unique_temp_paths(
         flags: int,
         mode: int = 0o777,
     ) -> int:
+        """Record each opened temp path before delegating to `os.open`."""
         opened_paths.append(Path(os.fsdecode(path)))
         return original_open(path, flags, mode)
 
@@ -223,6 +231,7 @@ def test_host_setup_config_write_uses_unique_temp_paths(
 def test_host_setup_config_write_parent_creation_error_is_reason_coded(
     tmp_path: Path,
 ) -> None:
+    """Verify parent creation failures use the write-failed reason code."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.parent.mkdir(parents=True)
     config_path.parent.write_text("not a directory\n", encoding="utf-8")
@@ -242,6 +251,7 @@ def test_host_setup_config_write_persistence_error_uses_write_failed_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify low-level persistence failures use the write-failed reason code."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
 
     def _open_fails(
@@ -249,6 +259,7 @@ def test_host_setup_config_write_persistence_error_uses_write_failed_reason(
         flags: int,
         mode: int = 0o777,
     ) -> int:
+        """Raise an `OSError` to simulate a failed atomic write."""
         raise OSError("disk full")
 
     monkeypatch.setattr(os, "open", _open_fails)
@@ -273,6 +284,7 @@ def test_host_setup_config_write_filename_less_paths_are_reason_coded(
     config_path: str | Path,
     expected_path: Path,
 ) -> None:
+    """Verify filename-less config paths fail with structured details."""
     with pytest.raises(HostSetupConfigError) as exc_info:
         write_host_setup_config(HostSetupConfig(), path=config_path)
 
@@ -289,7 +301,10 @@ def test_host_setup_config_path_resolution_failure_for_default_home_is_reason_co
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
+    """Verify default-home path resolution failures are reason-coded."""
+
     def _home_unavailable() -> Path:
+        """Raise the same home lookup error produced by pathlib."""
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "home", _home_unavailable)
@@ -313,9 +328,11 @@ def test_host_setup_config_path_resolution_failure_for_explicit_path_is_reason_c
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
+    """Verify explicit path expansion failures are reason-coded."""
     config_path = Path("~/awf-config.yml")
 
     def _expanduser_unavailable(self: Path) -> Path:
+        """Raise the same expanduser error produced by pathlib."""
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
@@ -337,9 +354,11 @@ def test_host_setup_config_path_resolution_failure_for_explicit_path_is_reason_c
 def test_default_host_setup_config_path_resolution_failure_for_explicit_home_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify explicit home expansion failures are reason-coded."""
     home = Path("~/awf-home")
 
     def _expanduser_unavailable(self: Path) -> Path:
+        """Raise the same expanduser error produced by pathlib."""
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
@@ -356,6 +375,7 @@ def test_default_host_setup_config_path_resolution_failure_for_explicit_home_is_
 
 @pytest.mark.unit
 def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
+    """Verify raw secret-looking values are rejected and redacted."""
     with pytest.raises(ValidationError):
         ProviderConfig(credential_ref="ghp_abcdefghijklmnopqrstuvwxyz123456")
     with pytest.raises(ValidationError):
@@ -385,6 +405,7 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
 def test_host_setup_config_allows_non_secret_sk_prefixed_status_and_channel(
     tmp_path: Path,
 ) -> None:
+    """Verify non-secret status/channel values may start with `sk`."""
     config = HostSetupConfig(
         install=InstallConfig(channel="sk-beta"),
         providers={"openai": ProviderConfig(status="sk-active")},
@@ -404,6 +425,7 @@ def test_host_setup_config_allows_non_secret_sk_prefixed_status_and_channel(
 def test_host_setup_config_rejects_duplicate_yaml_keys_before_secret_scan(
     tmp_path: Path,
 ) -> None:
+    """Verify duplicate YAML keys are classified before secret scanning."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
@@ -434,6 +456,7 @@ def test_host_setup_config_rejects_duplicate_yaml_keys_before_secret_scan(
 def test_duplicate_key_loader_constructs_each_key_node_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify duplicate-key detection constructs each key only once."""
     loader = host_setup_config._DuplicateKeyRejectingSafeLoader("version: 1\n")
     node = loader.get_single_node()
     assert node is not None
@@ -441,6 +464,7 @@ def test_duplicate_key_loader_constructs_each_key_node_once(
     constructed_nodes: list[object] = []
 
     def _construct_once(_loader: object, yaml_node: object, *, deep: bool) -> object:
+        """Construct only the known key/value nodes for this loader test."""
         del deep
         constructed_nodes.append(yaml_node)
         if yaml_node is key_node:
@@ -480,6 +504,7 @@ def test_duplicate_key_loader_rejects_unhashable_constructed_keys() -> None:
 
 @pytest.mark.unit
 def test_host_setup_work_dir_documents_expanduser_contract() -> None:
+    """Verify the work-dir field documents `expanduser` handling."""
     description = HostSetupConfig.model_fields["work_dir"].description
 
     assert description is not None
@@ -489,6 +514,7 @@ def test_host_setup_work_dir_documents_expanduser_contract() -> None:
 
 @pytest.mark.unit
 def test_host_setup_config_reads_missing_and_empty_yaml_as_defaults(tmp_path: Path) -> None:
+    """Verify missing and empty config files load default settings."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
 
     assert read_host_setup_config(path=config_path) == HostSetupConfig()
@@ -501,6 +527,7 @@ def test_host_setup_config_reads_missing_and_empty_yaml_as_defaults(tmp_path: Pa
 
 @pytest.mark.unit
 def test_host_setup_config_rejects_non_mapping_yaml(tmp_path: Path) -> None:
+    """Verify non-mapping YAML files are reported as corrupt config."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text("- not-a-mapping\n", encoding="utf-8")
@@ -516,6 +543,7 @@ def test_host_setup_config_rejects_non_mapping_yaml(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_provider_config_accepts_missing_ref_and_rejects_unsafe_ref() -> None:
+    """Verify provider refs allow omission and reject unsafe literals."""
     assert ProviderConfig(credential_ref=None).credential_ref is None
 
     with pytest.raises(ValidationError) as exc_info:
@@ -526,6 +554,7 @@ def test_provider_config_accepts_missing_ref_and_rejects_unsafe_ref() -> None:
 
 @pytest.mark.unit
 def test_host_setup_config_read_wraps_unsupported_version(tmp_path: Path) -> None:
+    """Verify unsupported config versions are wrapped as corrupt config."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text("version: 2\n", encoding="utf-8")
@@ -548,6 +577,7 @@ def test_host_setup_config_read_wraps_validation_secret_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify read-time validation errors preserve secret-value classification."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
@@ -556,6 +586,7 @@ def test_host_setup_config_read_wraps_validation_secret_errors(
     )
 
     def _allow_secret_payload(value: object) -> None:
+        """Bypass pre-validation scanning so model validation owns the failure."""
         del value
 
     monkeypatch.setattr(host_setup_config, "_ensure_no_secret_payload", _allow_secret_payload)
@@ -575,6 +606,7 @@ def test_host_setup_config_read_wraps_validation_secret_errors(
 
 @pytest.mark.unit
 def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> None:
+    """Verify secret-like provider names are rejected and redacted."""
     raw_secret_key = "ghp_raw_secret"
     safe_provider = ProviderConfig(credential_ref="env://GITHUB_TOKEN")
 
@@ -607,6 +639,7 @@ def test_host_setup_config_rejects_secret_like_mapping_keys(tmp_path: Path) -> N
 
 @pytest.mark.unit
 def test_host_setup_config_write_revalidates_model_copy_updates(tmp_path: Path) -> None:
+    """Verify copied model updates are revalidated before writing."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     copied_config = HostSetupConfig().model_copy(
         update={"providers": {"github": {"credential_ref": "literal-token-file"}}}
@@ -639,6 +672,7 @@ def test_host_setup_config_write_wraps_validation_secret_errors(
     )
 
     def _allow_secret_payload(value: object) -> None:
+        """Bypass pre-validation scanning so model validation owns the failure."""
         del value
 
     monkeypatch.setattr(host_setup_config, "_ensure_no_secret_payload", _allow_secret_payload)
@@ -662,6 +696,7 @@ def test_host_setup_config_write_wraps_validation_secret_errors(
 def test_host_setup_config_write_wraps_non_serializable_model_copy_updates(
     tmp_path: Path,
 ) -> None:
+    """Verify non-serializable copied provider updates are wrapped."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     copied_config = HostSetupConfig().model_copy(update={"providers": {"github": object()}})
 
@@ -685,6 +720,7 @@ def test_host_setup_config_write_wraps_non_mapping_copied_mapping_fields(
     field_name: str,
     tmp_path: Path,
 ) -> None:
+    """Verify copied mapping fields must remain mappings at write time."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     copied_config = HostSetupConfig().model_copy(update={field_name: object()})
 
@@ -707,10 +743,12 @@ def test_host_setup_config_write_wraps_recursive_payload_scan_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify recursive payload scan failures are wrapped as corrupt config."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config = HostSetupConfig()
 
     def _raise_recursive_payload_error(value: object) -> None:
+        """Raise the recursive payload error from the secret scan hook."""
         raise host_setup_config._RecursivePayloadError(path=("providers",))
 
     monkeypatch.setattr(
@@ -732,6 +770,7 @@ def test_host_setup_config_write_wraps_recursive_payload_scan_errors(
 
 @pytest.mark.unit
 def test_host_setup_config_rejects_in_place_provider_mutation() -> None:
+    """Verify frozen provider mappings reject in-place mutation."""
     empty_config = HostSetupConfig()
 
     with pytest.raises(TypeError):
@@ -771,6 +810,7 @@ def test_host_setup_config_rejects_secret_payloads_inside_lists(
     expected_issue: str,
     expected_path: str,
 ) -> None:
+    """Verify list-contained raw secret payloads are rejected and redacted."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text(raw_config, encoding="utf-8")
@@ -788,6 +828,7 @@ def test_host_setup_config_rejects_secret_payloads_inside_lists(
 
 @pytest.mark.unit
 def test_host_setup_config_treats_recursive_yaml_alias_as_corrupt(tmp_path: Path) -> None:
+    """Verify recursive YAML aliases are classified as corrupt config."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text("version: 1\naudit: &a [*a]\n", encoding="utf-8")
@@ -803,6 +844,7 @@ def test_host_setup_config_treats_recursive_yaml_alias_as_corrupt(tmp_path: Path
 
 @pytest.mark.unit
 def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
+    """Verify tuple-contained secret payloads are rejected."""
     with pytest.raises(_SecretPayloadError) as exc_info:
         _ensure_no_secret_payload({"audit": ({"token": "ghp_raw_secret"},)})
 
@@ -814,6 +856,7 @@ def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
 
 @pytest.mark.unit
 def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> None:
+    """Verify non-list sequence containers are scanned for secrets."""
     with pytest.raises(_SecretPayloadError) as exc_info:
         _ensure_no_secret_payload({"audit": UserList([_FAKE_OPENAI_SECRET_VALUE])})
 
@@ -825,6 +868,7 @@ def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> Non
 
 @pytest.mark.unit
 def test_secret_payload_scan_rejects_recursive_mappings() -> None:
+    """Verify recursive mappings fail with recursive-alias details."""
     payload: dict[str, object] = {}
     payload["self"] = payload
 
@@ -839,6 +883,7 @@ def test_secret_payload_scan_rejects_recursive_mappings() -> None:
 
 @pytest.mark.unit
 def test_secret_payload_scan_tracks_non_string_mapping_keys() -> None:
+    """Verify secret scan locations include non-string mapping keys."""
     with pytest.raises(_SecretPayloadError) as exc_info:
         _ensure_no_secret_payload({1: [_FAKE_OPENAI_SECRET_VALUE]})
 
@@ -858,6 +903,7 @@ def test_secret_payload_scan_tracks_non_string_mapping_keys() -> None:
     ],
 )
 def test_secret_payload_scan_rejects_uppercase_token_prefixes(raw_secret: str) -> None:
+    """Verify uppercase token-like prefixes are still treated as secrets."""
     with pytest.raises(_SecretPayloadError) as exc_info:
         _ensure_no_secret_payload({"audit": [raw_secret]})
 
@@ -870,6 +916,7 @@ def test_secret_payload_scan_rejects_uppercase_token_prefixes(raw_secret: str) -
 
 @pytest.mark.unit
 def test_corrupt_config_has_reason_code_and_path_details(tmp_path: Path) -> None:
+    """Verify malformed YAML errors expose reason code and path details."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     config_path.parent.mkdir(parents=True)
     config_path.write_text("version: 1\napi: [unterminated\n", encoding="utf-8")
@@ -889,10 +936,12 @@ def test_unreadable_config_exists_check_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify unreadable config existence checks are reason-coded."""
     config_path = default_host_setup_config_path(home=tmp_path / "home")
     original_exists = Path.exists
 
     def _permission_denied_for_config(self: Path) -> bool:
+        """Raise permission denial only for the target config path."""
         if self == config_path:
             raise PermissionError("permission denied")
         return original_exists(self)
@@ -911,6 +960,7 @@ def test_unreadable_config_exists_check_is_reason_coded(
 
 @pytest.mark.unit
 def test_host_setup_error_to_dict_omits_empty_details(tmp_path: Path) -> None:
+    """Verify host setup errors omit empty details from dictionaries."""
     error = HostSetupConfigError(
         reason_code="HOST_SETUP_CONFIG_CORRUPT",
         message="Host setup config is corrupt or unsupported.",
@@ -927,6 +977,7 @@ def test_host_setup_error_to_dict_omits_empty_details(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_config_corrupt_error_accepts_default_details(tmp_path: Path) -> None:
+    """Verify corrupt config helper works without explicit details."""
     config_path = tmp_path / "config.yml"
 
     error = host_setup_config._config_corrupt_error(config_path)
@@ -944,9 +995,11 @@ def test_config_path_helpers_handle_resolution_and_platform_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify config path helpers handle fallback branches."""
     config_path = tmp_path / "config.yml"
 
     def _default_path_unavailable() -> Path:
+        """Raise a default-path resolution error for helper fallback coverage."""
         raise HostSetupConfigError(
             reason_code="HOST_SETUP_CONFIG_CORRUPT",
             message="Unable to resolve host setup config path.",
@@ -962,6 +1015,7 @@ def test_config_path_helpers_handle_resolution_and_platform_fallbacks(
     assert read_host_setup_config(path=config_path) == HostSetupConfig()
 
     def _absolute_unavailable(self: Path) -> Path:
+        """Raise during absolute path resolution for fallback coverage."""
         raise OSError("permission denied")
 
     monkeypatch.setattr(Path, "absolute", _absolute_unavailable)
@@ -973,6 +1027,7 @@ def test_config_path_helpers_handle_resolution_and_platform_fallbacks(
 
 @pytest.mark.unit
 def test_validation_location_formatter_handles_non_tuple_and_root_locations() -> None:
+    """Verify validation locations format scalars, tuples, and root paths."""
     assert host_setup_config._format_validation_location("version") == "version"
     assert (
         host_setup_config._format_validation_location(("providers", "github", "credential_ref"))
@@ -983,6 +1038,7 @@ def test_validation_location_formatter_handles_non_tuple_and_root_locations() ->
 
 @pytest.mark.unit
 def test_valid_source_checkout_returns_verified_asset_paths(tmp_path: Path) -> None:
+    """Verify a valid source checkout returns all resolved asset paths."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
 
     verified = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW)
@@ -1011,6 +1067,7 @@ def test_valid_source_checkout_returns_verified_asset_paths(tmp_path: Path) -> N
 
 @pytest.mark.unit
 def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) -> None:
+    """Verify missing checkout markers are reported in structured details."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     (checkout / "RELEASING.md").unlink()
 
@@ -1027,6 +1084,7 @@ def test_invalid_source_checkout_reports_missing_marker_details(tmp_path: Path) 
 
 @pytest.mark.unit
 def test_source_checkout_requires_workspace_compose_template(tmp_path: Path) -> None:
+    """Verify the workspace compose template is a required checkout asset."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     template = checkout / "docker/compose/workspace.base.yml.j2"
     if template.exists():
@@ -1058,6 +1116,7 @@ def test_source_checkout_requires_control_plane_docker_build_inputs(
     missing_marker: str,
     kind: str,
 ) -> None:
+    """Verify Docker build input markers are required checkout assets."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     marker_path = checkout / missing_marker
     if marker_path.exists():
@@ -1081,11 +1140,13 @@ def test_source_checkout_marker_probe_oserror_reports_unreadable_not_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify marker probe `OSError` values become unreadable details."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     releasing_path = (checkout / "RELEASING.md").resolve()
     original_is_file = Path.is_file
 
     def _is_file(self: Path) -> bool:
+        """Raise on one marker file and delegate other file checks."""
         if self.resolve() == releasing_path:
             raise OSError("permission denied")
         return original_is_file(self)
@@ -1107,10 +1168,12 @@ def test_source_checkout_unreadable_marker_reports_unreadable_details(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify unreadable marker paths are reported in checkout details."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     unreadable_marker = (checkout / "RELEASING.md").resolve()
 
     def _path_readable(path: Path) -> bool:
+        """Mark only the selected marker as unreadable."""
         return path.resolve() != unreadable_marker
 
     monkeypatch.setattr(source_assets, "_path_readable", _path_readable)
@@ -1129,6 +1192,7 @@ def test_source_checkout_resolve_failure_uses_expanded_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify source checkout resolve failures use the expanded path fallback."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     candidate = Path("~/missing-awf-source-checkout")
@@ -1136,6 +1200,7 @@ def test_source_checkout_resolve_failure_uses_expanded_fallback(
     original_resolve = Path.resolve
 
     def _resolve_unavailable(self: Path, *args: object, **kwargs: object) -> Path:
+        """Raise during resolution only for the expanded candidate."""
         if self == expanded:
             raise OSError("permission denied")
         return original_resolve(self, *args, **kwargs)
@@ -1155,9 +1220,11 @@ def test_source_checkout_resolve_failure_uses_expanded_fallback(
 def test_source_checkout_expanduser_failure_remains_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify source checkout expanduser failures remain reason-coded."""
     candidate = Path("~/missing-awf-source-checkout")
 
     def _expanduser_unavailable(self: Path) -> Path:
+        """Raise the same expanduser error produced by pathlib."""
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "expanduser", _expanduser_unavailable)
@@ -1176,11 +1243,13 @@ def test_source_checkout_root_is_dir_oserror_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify source checkout directory probe failures are reason-coded."""
     checkout = tmp_path / "checkout"
     resolved = checkout.resolve()
     original_is_dir = Path.is_dir
 
     def _is_dir(self: Path) -> bool:
+        """Raise on the checkout root and delegate other directory checks."""
         if self == resolved:
             raise OSError("permission denied")
         return original_is_dir(self)
@@ -1201,12 +1270,14 @@ def test_source_checkout_root_exists_oserror_reports_unreadable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify source checkout existence probe failures report unreadable roots."""
     checkout_file = tmp_path / "checkout-file"
     checkout_file.write_text("not a directory\n", encoding="utf-8")
     resolved = checkout_file.resolve()
     original_exists = Path.exists
 
     def _exists(self: Path) -> bool:
+        """Raise on the checkout root and delegate other existence checks."""
         if self == resolved:
             raise OSError("permission denied")
         return original_exists(self)
@@ -1224,6 +1295,7 @@ def test_source_checkout_root_exists_oserror_reports_unreadable(
 
 @pytest.mark.unit
 def test_source_checkout_file_root_reports_not_directory(tmp_path: Path) -> None:
+    """Verify file roots are reported as not-directory checkout paths."""
     checkout_file = tmp_path / "checkout-file"
     checkout_file.write_text("not a directory\n", encoding="utf-8")
 
@@ -1241,10 +1313,12 @@ def test_unreadable_source_checkout_reports_source_checkout_invalid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify unreadable checkout roots use the invalid checkout reason."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     resolved = checkout.resolve()
 
     def _unreadable_root(path: Path) -> bool:
+        """Mark only the checkout root as unreadable."""
         return path.resolve() != resolved
 
     monkeypatch.setattr(source_assets, "_path_readable", _unreadable_root)
@@ -1261,6 +1335,7 @@ def test_unreadable_source_checkout_reports_source_checkout_invalid(
 
 @pytest.mark.unit
 def test_stale_source_checkout_metadata_fails_without_package_fallback(tmp_path: Path) -> None:
+    """Verify stale metadata fails when package fallback cannot satisfy assets."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
     (checkout / "docker/control-plane.Dockerfile").unlink()
@@ -1276,6 +1351,7 @@ def test_stale_source_checkout_metadata_fails_without_package_fallback(tmp_path:
 
 @pytest.mark.unit
 def test_stale_source_checkout_metadata_reports_contract_drift(tmp_path: Path) -> None:
+    """Verify stale source metadata reports marker and asset contract drift."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
     stale_metadata = metadata.model_copy(
@@ -1309,6 +1385,7 @@ def test_path_readable_handles_missing_non_posix_and_oserror(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify readability helper handles missing, non-POSIX, and OS errors."""
     missing_path = tmp_path / "missing"
     readable_path = tmp_path / "readable.txt"
     unreadable_path = tmp_path / "unreadable.txt"
@@ -1323,6 +1400,7 @@ def test_path_readable_handles_missing_non_posix_and_oserror(
     original_exists = Path.exists
 
     def _exists(self: Path) -> bool:
+        """Raise on one path and delegate other existence checks."""
         if self == unreadable_path:
             raise OSError("permission denied")
         return original_exists(self)
@@ -1333,6 +1411,7 @@ def test_path_readable_handles_missing_non_posix_and_oserror(
 
 @pytest.mark.unit
 def test_now_utc_returns_timezone_aware_timestamp() -> None:
+    """Verify source asset timestamps are timezone-aware UTC values."""
     assert source_assets._now_utc().tzinfo is UTC
 
 
@@ -1340,6 +1419,7 @@ def test_now_utc_returns_timezone_aware_timestamp() -> None:
 def test_source_checkout_metadata_stale_detection_ignores_baseline_detail_count(
     tmp_path: Path,
 ) -> None:
+    """Verify baseline staleness details do not make fresh metadata stale."""
     checkout = _write_valid_source_checkout(tmp_path / "checkout")
     metadata = validate_source_checkout(checkout, clock=lambda: _FIXED_NOW).to_metadata()
 
