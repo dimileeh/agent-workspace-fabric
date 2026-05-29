@@ -32,6 +32,7 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS,
     _ACTIVE_EXECUTION_STATUSES,
     _DB_CONNECTION_TRANSIENT_EVENT_TYPE,
+    _REQUESTED_ADMISSION_SLOT_STATUSES,
     _RUNTIME_HEALTH_SCAN_STATUSES,
     _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE,
     _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
@@ -203,7 +204,9 @@ async def _list_stale_active_execution_candidates(
 ) -> list[_ActiveExecutionCandidate]:
     active_status_values = [status.value for status in _RUNTIME_HEALTH_SCAN_STATUSES]
     active_execution_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
+    admission_slot_status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     claim_cutoff = datetime.now(UTC)
+    worker_node_id = self._config.node_id or "local"
     stmt = (
         select(
             Workspace.id,
@@ -216,15 +219,26 @@ async def _list_stale_active_execution_candidates(
             Workspace.task_policy,
         )
         .where(Workspace.status.in_(active_status_values))
-        .where(Workspace.node_id == self._config.node_id)
+        .where(
+            or_(
+                Workspace.node_id == worker_node_id,
+                and_(
+                    Workspace.node_id.is_(None),
+                    Workspace.status.in_(admission_slot_status_values),
+                ),
+            )
+        )
         .where(
             or_(
                 Workspace.status.in_(
                     [
                         WorkspaceStatus.requested.value,
-                        WorkspaceStatus.provisioning.value,
                         WorkspaceStatus.ready.value,
                     ]
+                ),
+                and_(
+                    Workspace.status == WorkspaceStatus.provisioning.value,
+                    _stale_execution_claim_filter(claim_cutoff),
                 ),
                 and_(
                     Workspace.status.in_(active_execution_values),
@@ -308,6 +322,8 @@ async def _recover_stale_active_execution(
 
     finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
     task_policy: dict[str, Any] = candidate.task_policy or {}
+    if candidate.status == WorkspaceStatus.ready and finding is None:
+        return
     monitor_recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
     is_retry_recovery = (
         isinstance(monitor_recovery_state, Mapping)
@@ -900,19 +916,26 @@ async def _record_recoverable_runtime_stranding(
             finding.reason_code,
         ):
             return
-        claims_will_clear = any(
-            value is not None
-            for value in (
-                ws.execution_claimed_by,
-                ws.execution_claim_expires_at,
-                ws.monitor_claimed_by,
-                ws.monitor_claim_expires_at,
+        if candidate.status == WorkspaceStatus.monitoring_pr:
+            claims_will_clear = (
+                ws.monitor_claimed_by is not None or ws.monitor_claim_expires_at is not None
             )
-        )
-        ws.execution_claimed_by = None
-        ws.execution_claim_expires_at = None
-        ws.monitor_claimed_by = None
-        ws.monitor_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
+        else:
+            claims_will_clear = any(
+                value is not None
+                for value in (
+                    ws.execution_claimed_by,
+                    ws.execution_claim_expires_at,
+                    ws.monitor_claimed_by,
+                    ws.monitor_claim_expires_at,
+                )
+            )
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
         if claims_will_clear:
             await repo.advance_workspace_version(ws)
         await repo.add_event(

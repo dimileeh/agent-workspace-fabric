@@ -917,8 +917,13 @@ class TestRunOncePart007:
             config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
         )
 
-        async def _claim_without_commit(workspace_ids: list[str]) -> list[str]:
+        async def _claim_without_commit(
+            workspace_ids: list[str],
+            *,
+            limit: int | None = None,
+        ) -> list[str]:
             assert workspace_ids == [requested_id]
+            assert limit == 1
             return workspace_ids
 
         async def _list_requested_without_db() -> list[str]:

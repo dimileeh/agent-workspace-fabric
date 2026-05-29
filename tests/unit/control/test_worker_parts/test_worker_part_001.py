@@ -952,6 +952,79 @@ class TestRunOncePart001:
             assert count == 5
 
     @pytest.mark.unit
+    async def test_stale_requested_candidates_are_filtered_before_provision_slot_truncation(
+        self,
+    ) -> None:
+        worker = ControlWorker(
+            session_factory=object(),  # type: ignore[arg-type]
+            provisioner=SimpleNamespace(),
+            config=WorkerConfig(max_concurrent_provisions=3),
+        )
+        listed_ids = ["ws-stale", "ws-fresh-a", "ws-fresh-b"]
+        filter_calls: list[list[str]] = []
+        claimed_ids: list[str] = []
+        ordered_ids: list[str] = []
+        provisioned_ids: list[str] = []
+
+        async def _noop() -> None:
+            return None
+
+        async def _requested_provision_slots() -> int:
+            return 2
+
+        async def _list_requested() -> list[str]:
+            return listed_ids
+
+        async def _filter_current_requested_status(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            filter_calls.append(list(workspace_ids))
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            return [workspace_id for workspace_id in workspace_ids if workspace_id != "ws-stale"]
+
+        async def _claim_requested_ids(
+            workspace_ids: list[str] | None = None,
+            *,
+            limit: int | None = None,
+        ) -> list[str]:
+            assert limit == 2
+            assert workspace_ids == ["ws-fresh-a", "ws-fresh-b"]
+            claimed_ids.extend(workspace_ids)
+            return list(workspace_ids)
+
+        async def _record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            assert reason_code == "ORDERED_REQUESTED_PROVISIONING"
+            ordered_ids.extend(workspace_ids)
+
+        async def _safely_provision_claimed(workspace_id: str) -> None:
+            provisioned_ids.append(workspace_id)
+
+        worker._reconcile_stale_monitor_execution_tasks = _noop  # type: ignore[method-assign]
+        worker._maybe_expire_due_secret_leases = _noop  # type: ignore[method-assign]
+        worker._maybe_release_terminal_runtime = _noop  # type: ignore[method-assign]
+        worker._requested_provision_slots = _requested_provision_slots  # type: ignore[method-assign]
+        worker._list_requested = _list_requested  # type: ignore[method-assign]
+        worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
+        worker._claim_requested_ids = _claim_requested_ids  # type: ignore[method-assign]
+        worker._record_ordered_decisions = _record_ordered_decisions  # type: ignore[method-assign]
+        worker._safely_provision_claimed = _safely_provision_claimed  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 2
+
+        assert filter_calls == [listed_ids]
+        assert claimed_ids == ["ws-fresh-a", "ws-fresh-b"]
+        assert ordered_ids == ["ws-fresh-a", "ws-fresh-b"]
+        assert set(provisioned_ids) == {"ws-fresh-a", "ws-fresh-b"}
+
+    @pytest.mark.unit
     def test_allocated_reservation_signature_normalizes_float_drift(self) -> None:
         aggregate_total = worker_claims._AllocatedReservationTotals(  # noqa: SLF001
             workspace_count=2,

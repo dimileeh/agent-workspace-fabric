@@ -26,6 +26,15 @@ _RUNTIME_HEALTH_SCAN_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.monitoring_pr,
 )
 
+_REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
+    WorkspaceStatus.provisioning,
+    WorkspaceStatus.ready,
+    WorkspaceStatus.running,
+    WorkspaceStatus.validating,
+    WorkspaceStatus.pushing,
+    WorkspaceStatus.monitoring_pr,
+)
+
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 
 _STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"

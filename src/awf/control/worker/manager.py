@@ -27,6 +27,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig
 from awf.control.worker.constants import (
     ORDERED_MONITOR_RESUME_REASON,
@@ -104,6 +105,31 @@ class ControlWorker(WorkerDelegatesMixin):
         """Signal ``run_forever`` to exit after the current batch."""
         self._stopped.set()
 
+    async def _requested_provision_slots(self: Any) -> int:
+        provision_limit = int(max(0, self._config.max_concurrent_provisions))
+        if provision_limit <= 0:
+            return 0
+        if self._executor is None:
+            return provision_limit
+        task_available = int(self._available_execution_slots())
+        if task_available <= 0:
+            return 0
+        row_available = await self._requested_admission_row_slots()
+        return int(min(provision_limit, task_available, row_available))
+
+    async def _requested_admission_row_slots(self: Any) -> int:
+        async def _operation(session: AsyncSession) -> int:
+            return await _requested_admission_row_slots(
+                session,
+                config=self._config,
+            )
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
+
     async def run_once(self: Any) -> int:
         """List + dispatch requested provisioning and workspace runtime tasks.
 
@@ -131,17 +157,23 @@ class ControlWorker(WorkerDelegatesMixin):
                 set(self._execution_tasks) - tracked_execution_ids_before_recovery
             )
 
-        if _local_capacity_configured(self._config):
-            requested_ids = await self._claim_requested_ids()
-        else:
-            requested_ids = await self._list_requested()
+        requested_provision_slots = await self._requested_provision_slots()
+        requested_ids: list[str] = []
+        if requested_provision_slots > 0 and _local_capacity_configured(self._config):
+            requested_ids = await self._claim_requested_ids(limit=requested_provision_slots)
+        elif requested_provision_slots > 0:
+            listed_ids = await self._list_requested()
             requested_ids = await self._filter_current_status(
-                requested_ids,
+                listed_ids,
                 expected=WorkspaceStatus.requested,
                 action="provision",
             )
+            requested_ids = requested_ids[:requested_provision_slots]
             if requested_ids:
-                requested_ids = await self._claim_requested_ids(requested_ids)
+                requested_ids = await self._claim_requested_ids(
+                    requested_ids,
+                    limit=requested_provision_slots,
+                )
         if requested_ids:
             await self._record_ordered_decisions(
                 requested_ids,

@@ -1168,8 +1168,30 @@ class TestRunOnceExecutionPart003:
 
             async def execute(self, workspace_id: str, **_kwargs: object) -> None:
                 self.calls.append(workspace_id)
+                async with session_factory() as session:
+                    repo = WorkspaceRepository(session)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(ws, to=WorkspaceStatus.running, reason_code="TEST_RUN")
+                    await session.commit()
                 started.set()
                 await release.wait()
+                async with session_factory() as session:
+                    repo = WorkspaceRepository(session)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    if ws.status == WorkspaceStatus.running.value:
+                        await repo.transition(
+                            ws,
+                            to=WorkspaceStatus.validating,
+                            reason_code="TEST_VALIDATE",
+                        )
+                        await repo.transition(
+                            ws,
+                            to=WorkspaceStatus.completed,
+                            reason_code="TEST_COMPLETE",
+                        )
+                        await session.commit()
 
         executor = _BlockingExecutor()
         worker = ControlWorker(
@@ -1188,14 +1210,22 @@ class TestRunOnceExecutionPart003:
         await asyncio.wait_for(started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
         requested_id = await _create_requested(session_factory, origin_repo, "new-request")
-        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        assert provisioner.calls == [requested_id]
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
+        assert provisioner.calls == []
         assert executor.calls == [ready_id]
 
         release.set()
         await asyncio.wait_for(
             worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
         )
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
+
+        assert provisioner.calls == [requested_id]
+        assert executor.calls == [ready_id, requested_id]
 
     @pytest.mark.unit
     async def test_execution_limit_is_independent_from_provisioning_limit(
