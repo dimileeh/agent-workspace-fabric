@@ -139,6 +139,33 @@ def test_first_run_json_preserves_non_empty_remediation_next_steps() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_pretty_distinguishes_remediation_and_command_next_steps() -> None:
+    issue = first_run_issue_from_reason_code(
+        "PROVIDER_SETUP_AUTH_INVALID",
+        severity="warning",
+        next_steps=("Refresh the GitHub token.",),
+    )
+    payload = FirstRunPayload(
+        status="warning",
+        command="awf setup",
+        summary="GitHub provider is unavailable.",
+        reason_code="PROVIDER_SETUP_AUTH_INVALID",
+        issues=(issue,),
+        next_steps=("Continue without GitHub.",),
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+    lines = rendered_pretty.splitlines()
+
+    assert lines.count("Next:") == 1
+    assert "Remediation Next:" in lines
+    assert "  - Refresh the GitHub token." in lines
+    assert "  - Continue without GitHub." in lines
+    assert lines.index("Remediation Next:") < lines.index("  - Refresh the GitHub token.")
+    assert lines.index("Next:") < lines.index("  - Continue without GitHub.")
+
+
+@pytest.mark.unit
 def test_first_run_json_omits_empty_remediation_related_command() -> None:
     issue = first_run_issue_from_reason_code(
         "PROVIDER_SETUP_AUTH_INVALID",

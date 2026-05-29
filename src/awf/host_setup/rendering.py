@@ -383,7 +383,7 @@ def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:
             lines.append(f"Related Command: {related}")
         issue_next_steps = remediation.get("next_steps")
         if isinstance(issue_next_steps, list) and issue_next_steps:
-            lines.append("Next:")
+            lines.append("Remediation Next:")
             lines.extend(f"  - {step}" for step in issue_next_steps)
 
     details = issue.get("details")
