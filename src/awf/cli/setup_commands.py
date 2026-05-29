@@ -7,6 +7,7 @@ import typer
 from awf.cli.common import OutputFormat, _emit
 from awf.host_setup.rendering import (
     AWF_SETUP_PLACEHOLDER,
+    FirstRunPayload,
     first_run_failure_payload,
     render_first_run_json,
     render_first_run_pretty,
@@ -14,16 +15,21 @@ from awf.host_setup.rendering import (
 
 SETUP_PLACEHOLDER_REASON = AWF_SETUP_PLACEHOLDER
 
-_SETUP_PLACEHOLDER_PAYLOAD = first_run_failure_payload(
-    command="awf setup",
-    reason_code=SETUP_PLACEHOLDER_REASON,
-    summary="awf setup is reserved; host setup checks land in a later setup slice.",
-    status="blocked",
-    next_steps=(
-        "Run awf service bootstrap for current local Core startup.",
-        "Run awf init <path> to onboard a project repository.",
-    ),
+_SETUP_PLACEHOLDER_SUMMARY = "awf setup is reserved; host setup checks land in a later setup slice."
+_SETUP_PLACEHOLDER_NEXT_STEPS = (
+    "Run awf service bootstrap for current local Core startup.",
+    "Run awf init <path> to onboard a project repository.",
 )
+
+
+def _setup_placeholder_payload() -> FirstRunPayload:
+    return first_run_failure_payload(
+        command="awf setup",
+        reason_code=SETUP_PLACEHOLDER_REASON,
+        summary=_SETUP_PLACEHOLDER_SUMMARY,
+        status="blocked",
+        next_steps=_SETUP_PLACEHOLDER_NEXT_STEPS,
+    )
 
 
 def setup_command(
@@ -34,8 +40,9 @@ def setup_command(
     ),
 ) -> None:
     """Prepare this machine for AWF first-run use."""
+    payload = _setup_placeholder_payload()
     if fmt == OutputFormat.json:
-        _emit(render_first_run_json(_SETUP_PLACEHOLDER_PAYLOAD), fmt)
+        _emit(render_first_run_json(payload), fmt)
     else:
-        typer.echo(render_first_run_pretty(_SETUP_PLACEHOLDER_PAYLOAD), err=True)
+        typer.echo(render_first_run_pretty(payload), err=True)
     raise typer.Exit(code=1)
