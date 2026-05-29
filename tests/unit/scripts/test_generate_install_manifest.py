@@ -21,6 +21,7 @@ from scripts.generate_install_manifest import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "generate_install_manifest.py"
 REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
+GITHUB_ACTIONS_REF_ENV_KEYS = ("GITHUB_ACTIONS", "GITHUB_REF_NAME", "GITHUB_REF_TYPE")
 
 
 def _write_distribution_fixtures(
@@ -66,9 +67,10 @@ def _run_generator(
 ) -> subprocess.CompletedProcess[str]:
     """Run the manifest generator CLI against temporary release fixtures."""
     output = tmp_path / "awf-install-manifest.json"
-    env = None
+    env = os.environ.copy()
+    for key in GITHUB_ACTIONS_REF_ENV_KEYS:
+        env.pop(key, None)
     if env_overrides is not None:
-        env = os.environ.copy()
         env.update(env_overrides)
     return subprocess.run(
         [
@@ -186,6 +188,24 @@ def test_manifest_artifact_urls_are_pinned_to_release_tag(tmp_path: Path) -> Non
         assert "/raw/main/" not in url
         assert "/raw/development/" not in url
         assert "pypi.org" not in url
+
+
+@pytest.mark.unit
+def test_run_generator_ignores_ambient_github_actions_branch_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default subprocess tests do not inherit CI branch refs from pytest."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REF_NAME", "development")
+    monkeypatch.setenv("GITHUB_REF_TYPE", "branch")
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(tmp_path, dist_dir=dist_dir, checksums_file=checksums_file)
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" not in result.stdout
+    assert (tmp_path / "awf-install-manifest.json").is_file()
 
 
 @pytest.mark.unit
