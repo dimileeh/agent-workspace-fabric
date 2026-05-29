@@ -72,3 +72,12 @@ workspaces/
 # keep migration files; ignore local db dumps only
 *.dump
 *.sql.bak
+
+# Claude Code — commit project knowledge (.claude/agent-memory/, CLAUDE.md,
+# settings.json, .claude/skills/) but ignore per-developer state + secrets.
+.claude/settings.local.json
+.claude/.credentials.json
+.claude/.session*
+.claude/projects/
+.claude/todos/
+.claude/hooks/*.local.*
