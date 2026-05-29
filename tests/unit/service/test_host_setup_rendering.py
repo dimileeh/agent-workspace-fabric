@@ -417,6 +417,27 @@ def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("container_type", (set, frozenset))
+def test_provider_ref_redaction_renders_sets_as_sorted_lists(
+    container_type: type[set[str]] | type[frozenset[str]],
+) -> None:
+    raw_values = (
+        "z=env://OPENAI_API_KEY",
+        "plain",
+        "a=plain-file:///tmp/awf-secret",
+    )
+
+    redacted = _redact_provider_refs(container_type(raw_values))
+
+    assert isinstance(redacted, list)
+    assert redacted == [
+        "a=[redacted]",
+        "plain",
+        "z=[redacted]",
+    ]
+
+
+@pytest.mark.unit
 def test_provider_ref_key_redaction_requires_explicit_ref_key() -> None:
     redacted = _redact_provider_refs(
         {
