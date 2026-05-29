@@ -102,3 +102,18 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
     assert github_app_jwt not in repr(redacted)
     assert "secret-secret-secret" not in repr(redacted)
     assert "db_password" not in repr(redacted)
+
+
+@pytest.mark.unit
+def test_redact_audit_value_converts_tuples_to_lists_by_default() -> None:
+    redacted = redact_audit_value(
+        (
+            "safe",
+            ("Authorization: Bearer ghp_nestedSecretToken",),
+        )
+    )
+
+    assert redacted == [
+        "safe",
+        ["Authorization: Bearer [redacted]"],
+    ]

@@ -309,7 +309,7 @@ def render_first_run_pretty(payload: FirstRunPayload) -> str:
 def redact_first_run_value(value: Any) -> Any:
     """Recursively redact tokens and provider refs from first-run output values."""
     provider_redacted = _redact_provider_refs(value)
-    return redact_audit_value(provider_redacted)
+    return redact_audit_value(provider_redacted, preserve_tuples=True)
 
 
 def _redact_provider_refs(value: Any) -> Any:

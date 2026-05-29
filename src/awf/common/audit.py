@@ -103,7 +103,7 @@ def build_audit_payload(
     return cast(dict[str, Any], _drop_none(redact_audit_value(payload)))
 
 
-def redact_audit_value(value: Any) -> Any:
+def redact_audit_value(value: Any, *, preserve_tuples: bool = False) -> Any:
     """Recursively redact token-like values while preserving usage metadata."""
 
     if isinstance(value, Mapping):
@@ -113,14 +113,25 @@ def redact_audit_value(value: Any) -> Any:
             if _is_sensitive_key(key_text):
                 redacted[key_text] = REDACTION_MARKER
             else:
-                redacted[key_text] = redact_audit_value(item)
+                redacted[key_text] = redact_audit_value(
+                    item,
+                    preserve_tuples=preserve_tuples,
+                )
         return redacted
     if isinstance(value, list):
-        return [redact_audit_value(item) for item in value]
+        return [redact_audit_value(item, preserve_tuples=preserve_tuples) for item in value]
     if isinstance(value, tuple):
-        return [redact_audit_value(item) for item in value]
+        redacted_items = tuple(
+            redact_audit_value(item, preserve_tuples=preserve_tuples) for item in value
+        )
+        if preserve_tuples:
+            return redacted_items
+        return list(redacted_items)
     if isinstance(value, (set, frozenset)):
-        return [redact_audit_value(item) for item in sorted(value, key=str)]
+        return [
+            redact_audit_value(item, preserve_tuples=preserve_tuples)
+            for item in sorted(value, key=str)
+        ]
     if isinstance(value, str):
         return _redact_string(value)
     return value

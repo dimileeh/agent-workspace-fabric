@@ -13,6 +13,7 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_success_payload,
     first_run_warning_payload,
+    redact_first_run_value,
     render_first_run_json,
     render_first_run_pretty,
 )
@@ -213,4 +214,27 @@ def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
         "[redacted]",
         ["[redacted]"],
         {"provider_ref": "[redacted]"},
+    )
+
+
+@pytest.mark.unit
+def test_first_run_redaction_preserves_tuple_container_type() -> None:
+    redacted = redact_first_run_value(
+        (
+            "env://OPENAI_API_KEY",
+            ("Authorization: Bearer ghp_nestedSecretToken",),
+            {
+                "provider_ref": "keyring://awf/github/token",
+                "token": "sk-proj-dictKeySecretToken12345678901234567890",
+            },
+        )
+    )
+
+    assert redacted == (
+        "[redacted]",
+        ("Authorization: Bearer [redacted]",),
+        {
+            "provider_ref": "[redacted]",
+            "token": "[redacted]",
+        },
     )
