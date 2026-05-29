@@ -171,10 +171,13 @@ def _github_actions_skip_reason(tag: str) -> str | None:
 
     ref_name = os.environ.get("GITHUB_REF_NAME", "")
     ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     if not ref_name:
         return "GitHub Actions ref <unknown> is not a release tag"
     if ref_type:
         if ref_type == "tag" and ref_name == tag:
+            return None
+        if event_name == "workflow_dispatch" and ref_type == "branch":
             return None
         return f"GitHub Actions ref {ref_name or '<unknown>'} ({ref_type}) is not a release tag"
 

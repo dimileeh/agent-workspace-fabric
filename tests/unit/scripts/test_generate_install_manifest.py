@@ -21,7 +21,12 @@ from scripts.generate_install_manifest import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "generate_install_manifest.py"
 REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
-GITHUB_ACTIONS_REF_ENV_KEYS = ("GITHUB_ACTIONS", "GITHUB_REF_NAME", "GITHUB_REF_TYPE")
+GITHUB_ACTIONS_REF_ENV_KEYS = (
+    "GITHUB_ACTIONS",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
+)
 
 
 def _write_distribution_fixtures(
@@ -224,11 +229,11 @@ def test_run_generator_ignores_ambient_github_actions_branch_ref(
         },
     ],
 )
-def test_manifest_generator_skips_github_actions_branch_ref_without_writing_manifest(
+def test_manifest_generator_skips_non_dispatch_github_actions_branch_ref_without_writing_manifest(
     tmp_path: Path,
     env_overrides: dict[str, str],
 ) -> None:
-    """Actions branch dispatch skips manifest output and removes stale files."""
+    """Non-dispatch Actions branch refs skip manifest output and remove stale files."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
     output = tmp_path / "awf-install-manifest.json"
     output.write_text("stale manifest\n", encoding="utf-8")
@@ -244,6 +249,34 @@ def test_manifest_generator_skips_github_actions_branch_ref_without_writing_mani
     assert "SKIP:" in result.stdout
     assert "not a release tag" in result.stdout
     assert not output.exists()
+
+
+@pytest.mark.unit
+def test_manifest_generator_allows_workflow_dispatch_branch_ref(tmp_path: Path) -> None:
+    """Manual publish workflow dispatches from branches still emit the manifest."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    commit = "0123456789abcdef0123456789abcdef01234567"
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF_NAME": "development",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_SHA": commit,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" not in result.stdout
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["commit"] == commit
+    assert source["tag"] == "v0.1.0"
 
 
 @pytest.mark.unit
