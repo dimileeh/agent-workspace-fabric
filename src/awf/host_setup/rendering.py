@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from awf.common.audit import REDACTION_MARKER, redact_audit_text, redact_audit_value
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.host_setup.config import (
     HOST_SETUP_CONFIG_CORRUPT,
     HOST_SETUP_CONFIG_SECRET_VALUE,
@@ -318,8 +318,8 @@ def render_first_run_pretty(payload: FirstRunPayload) -> str:
 
 def redact_first_run_value(value: Any) -> Any:
     """Recursively redact tokens and provider refs from first-run output values."""
-    provider_redacted = _redact_provider_refs(value)
-    return redact_audit_value(provider_redacted, preserve_tuples=True)
+    audit_redacted = redact_audit_value(value, preserve_tuples=True)
+    return _redact_provider_refs(audit_redacted)
 
 
 def _redact_provider_refs(value: Any) -> Any:
@@ -339,7 +339,7 @@ def _redact_provider_refs(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return [_redact_provider_refs(item) for item in sorted(value, key=str)]
     if isinstance(value, str):
-        return redact_audit_text(_PROVIDER_REF_RE.sub(REDACTION_MARKER, value))
+        return _PROVIDER_REF_RE.sub(REDACTION_MARKER, value)
     return value
 
 

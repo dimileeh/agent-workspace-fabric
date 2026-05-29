@@ -304,3 +304,18 @@ def test_first_run_redaction_preserves_tuple_container_type() -> None:
             "token": "[redacted]",
         },
     )
+
+
+@pytest.mark.unit
+def test_first_run_redaction_does_not_double_redact_provider_ref_assignments() -> None:
+    redacted = redact_first_run_value(
+        {
+            "message": "TOKEN=env://OPENAI_API_KEY",
+            "nested": ("API_KEY=plain-file:///tmp/awf-secret",),
+        }
+    )
+
+    assert redacted == {
+        "message": "TOKEN=[redacted]",
+        "nested": ("API_KEY=[redacted]",),
+    }
