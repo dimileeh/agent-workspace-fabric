@@ -8,11 +8,13 @@ RUN apt-get update \
         chromium \
         fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /app/browser \
-    && npm install --prefix /app/browser --omit=dev --no-audit --no-fund --no-save playwright-core@1.49.1
+    && mkdir -p /app/browser /app/scripts \
+    && npm install --prefix /app/browser --omit=dev --no-audit --no-fund --no-save playwright-core@1.49.1 \
+    && useradd --create-home --uid 10001 awf \
+    && chown -R awf:awf /app
 
-COPY browser/validator-server.mjs ./browser/validator-server.mjs
-COPY scripts/container-healthcheck.mjs ./scripts/container-healthcheck.mjs
+COPY --chown=awf:awf browser/validator-server.mjs ./browser/validator-server.mjs
+COPY --chown=awf:awf scripts/container-healthcheck.mjs ./scripts/container-healthcheck.mjs
 
 ENV NODE_ENV=production
 ENV PORT=9323
@@ -20,5 +22,7 @@ ENV APP_BASE_URL=http://app:3000
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 EXPOSE 9323
+
+USER awf
 
 CMD ["node", "/app/browser/validator-server.mjs"]

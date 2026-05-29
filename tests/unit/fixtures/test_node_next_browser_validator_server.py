@@ -177,6 +177,20 @@ def test_browser_sidecar_dockerfile_uses_distro_chromium_contract() -> None:
     assert "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" in dockerfile
 
 
+def test_browser_sidecar_dockerfile_runs_validator_as_non_root_user() -> None:
+    """The browser validator fixture should not run as root."""
+    dockerfile = _BROWSER_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "useradd --create-home --uid 10001 awf" in dockerfile
+    assert "chown -R awf:awf /app" in dockerfile
+    assert "COPY --chown=awf:awf browser/validator-server.mjs" in dockerfile
+    assert "COPY --chown=awf:awf scripts/container-healthcheck.mjs" in dockerfile
+    assert "USER awf" in dockerfile
+    assert dockerfile.index("USER awf") < dockerfile.index(
+        'CMD ["node", "/app/browser/validator-server.mjs"]'
+    )
+
+
 class _HangingHealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         time.sleep(30)
