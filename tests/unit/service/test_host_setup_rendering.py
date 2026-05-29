@@ -670,6 +670,36 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
 
 
 @pytest.mark.unit
+def test_first_run_rendering_redacts_case_variant_token_prefixes() -> None:
+    """Verify first-run renderers redact case-variant token-looking values."""
+    raw_values = (
+        "GHP_firstRunCaseVariantToken",
+        "XOXB-firstRunCaseVariantToken",
+        "SK-proj-firstRunCaseVariantToken12345678901234567890",
+    )
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary=f"Credential probe failed for {raw_values[0]}.",
+        details={
+            "message": " ".join(raw_values),
+            raw_values[1]: "slack auth failed",
+            "nested": {"provider_error": raw_values[2]},
+        },
+        next_steps=(f"Rotate {raw_values[2]}.",),
+    )
+
+    rendered_json_text = json.dumps(render_first_run_json(payload), sort_keys=True)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    for raw_value in raw_values:
+        assert raw_value not in rendered_json_text
+        assert raw_value not in rendered_pretty
+    assert "[redacted]" in rendered_json_text
+    assert "[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
 def test_first_run_rendering_redacts_token_and_provider_ref_detail_keys() -> None:
     """Verify first-run rendering redacts sensitive mapping keys."""
     raw_token_key = "glpat-firstRunMapKeyValue"

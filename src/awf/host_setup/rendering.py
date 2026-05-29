@@ -109,6 +109,20 @@ _PROVIDER_REF_KEY_SUFFIX_RE = re.compile(
     r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)",
     re.IGNORECASE,
 )
+_FIRST_RUN_KNOWN_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
+    r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"glpat-[A-Za-z0-9_-]{8,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
+    r"sk-ant-[A-Za-z0-9_-]{8,}|"
+    r"sk-proj-[A-Za-z0-9_-]{8,}|"
+    r"sk-[A-Za-z0-9_-]{8,}|"
+    r"AIza[A-Za-z0-9_-]{12,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{8,}"
+    r")(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 
 
 class _FirstRunBaseModel(BaseModel):
@@ -410,7 +424,10 @@ def _redact_provider_refs(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return [_redact_provider_refs(item) for item in sorted(value, key=str)]
     if isinstance(value, str):
-        return _PROVIDER_REF_RE.sub(REDACTION_MARKER, value)
+        return _PROVIDER_REF_RE.sub(
+            REDACTION_MARKER,
+            _redact_first_run_known_tokens(value),
+        )
     return value
 
 
@@ -418,8 +435,14 @@ def _redact_first_run_mapping_key(key: Any) -> str:
     """Return a string mapping key with sensitive first-run content redacted."""
     key_text = str(key)
     audit_redacted = redact_audit_value(key_text, preserve_tuples=True)
-    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+    token_redacted = _redact_first_run_known_tokens(cast(str, audit_redacted))
+    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, token_redacted)
     return _redact_provider_ref_key_token_suffix(provider_redacted)
+
+
+def _redact_first_run_known_tokens(value: str) -> str:
+    """Redact known token prefixes case-insensitively for first-run output."""
+    return _FIRST_RUN_KNOWN_TOKEN_RE.sub(REDACTION_MARKER, value)
 
 
 def _redact_provider_ref_key_token_suffix(key: str) -> str:
@@ -435,7 +458,8 @@ def _is_sensitive_provider_ref_key_suffix(suffix: str) -> bool:
     if suffix == REDACTION_MARKER:
         return True
     audit_redacted = redact_audit_value(suffix, preserve_tuples=True)
-    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+    token_redacted = _redact_first_run_known_tokens(cast(str, audit_redacted))
+    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, token_redacted)
     return provider_redacted == REDACTION_MARKER
 
 
