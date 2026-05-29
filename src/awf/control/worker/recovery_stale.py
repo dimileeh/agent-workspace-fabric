@@ -32,6 +32,7 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_STALE_FAILURE_BLOCKING_SALVAGE_CHECKS,
     _ACTIVE_EXECUTION_STATUSES,
     _DB_CONNECTION_TRANSIENT_EVENT_TYPE,
+    _REQUESTED_ADMISSION_SLOT_STATUSES,
     _RUNTIME_HEALTH_SCAN_STATUSES,
     _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE,
     _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
@@ -203,6 +204,7 @@ async def _list_stale_active_execution_candidates(
 ) -> list[_ActiveExecutionCandidate]:
     active_status_values = [status.value for status in _RUNTIME_HEALTH_SCAN_STATUSES]
     active_execution_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
+    admission_slot_status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     claim_cutoff = datetime.now(UTC)
     stmt = (
         select(
@@ -216,7 +218,15 @@ async def _list_stale_active_execution_candidates(
             Workspace.task_policy,
         )
         .where(Workspace.status.in_(active_status_values))
-        .where(Workspace.node_id == self._config.node_id)
+        .where(
+            or_(
+                Workspace.node_id == self._config.node_id,
+                and_(
+                    Workspace.node_id.is_(None),
+                    Workspace.status.in_(admission_slot_status_values),
+                ),
+            )
+        )
         .where(
             or_(
                 Workspace.status.in_(

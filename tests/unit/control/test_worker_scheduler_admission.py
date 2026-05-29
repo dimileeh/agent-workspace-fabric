@@ -853,6 +853,53 @@ async def test_named_node_worker_counts_null_node_provisioning_rows_as_occupied(
 
 
 @pytest.mark.unit
+async def test_named_worker_recovers_null_node_provisioning_rows_that_block_admission(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_active_slot(
+        session_factory,
+        node_id=None,
+        status=WorkspaceStatus.provisioning,
+    )
+    compose_project_name = f"awf_{workspace_id}"
+    inspector = _RecordingRuntimeInspector(
+        {
+            compose_project_name: RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="legacy-null-agent",
+                        image="awf-agent-runtime:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        runtime_inspector=inspector,
+        config=WorkerConfig(
+            max_concurrent_provisions=5,
+            max_concurrent_executions=1,
+            node_id="worker-a",
+        ),
+    )
+
+    await worker._recover_stale_active_executions()  # noqa: SLF001
+
+    stale_events = await _stale_events(session_factory, workspace_id)
+    assert inspector.calls == [compose_project_name]
+    assert len(stale_events) == 1
+    assert await _workspace_status(session_factory, workspace_id) == (
+        WorkspaceStatus.provisioning.value
+    )
+
+
+@pytest.mark.unit
 async def test_null_node_worker_admission_ignores_active_rows_on_named_nodes(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

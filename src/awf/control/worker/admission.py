@@ -13,7 +13,9 @@ from awf.db.models import Workspace
 
 def _requested_admission_lock_node_ids(node_id: str | None) -> tuple[str, ...]:
     # Named workers count legacy null-node active rows, so they serialize with
-    # null-node claimers before taking their own per-node admission lock.
+    # null-node claimers before taking their own per-node admission lock. Stale
+    # recovery scans the same null-node legacy scope so these rows cannot wedge
+    # named-node admission indefinitely after an upgrade.
     if node_id is None or node_id == "local":
         return ("local",)
     return ("local", node_id)
