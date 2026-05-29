@@ -223,7 +223,11 @@ def first_run_warning_payload(
     details: Mapping[str, Any] | None = None,
     next_steps: tuple[str, ...] = (),
 ) -> FirstRunPayload:
-    """Build a first-run warning payload with one catalog-backed issue."""
+    """Build a first-run warning payload with one catalog-backed issue.
+
+    ``details`` are attached to the single issue (``issues[0].details``),
+    not to the top-level payload, unlike ``first_run_success_payload``.
+    """
     issue = first_run_issue_from_reason_code(
         reason_code,
         severity="warning",
@@ -248,7 +252,11 @@ def first_run_failure_payload(
     details: Mapping[str, Any] | None = None,
     next_steps: tuple[str, ...] = (),
 ) -> FirstRunPayload:
-    """Build a blocked/failed first-run payload with one catalog-backed issue."""
+    """Build a blocked/failed first-run payload with one catalog-backed issue.
+
+    ``details`` are attached to the single issue (``issues[0].details``),
+    not to the top-level payload, unlike ``first_run_success_payload``.
+    """
     issue = first_run_issue_from_reason_code(
         reason_code,
         severity=status,
