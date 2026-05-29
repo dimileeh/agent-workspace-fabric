@@ -269,9 +269,16 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     raw_payload = payload.model_dump(mode="json", exclude_none=True)
     if raw_payload.get("details") == {}:
         raw_payload.pop("details")
+    if raw_payload.get("next_steps") == []:
+        raw_payload.pop("next_steps")
     for issue in raw_payload.get("issues", []):
-        if isinstance(issue, dict) and issue.get("details") == {}:
+        if not isinstance(issue, dict):
+            continue
+        if issue.get("details") == {}:
             issue.pop("details")
+        remediation = issue.get("remediation")
+        if isinstance(remediation, dict) and remediation.get("next_steps") == []:
+            remediation.pop("next_steps")
     return cast(dict[str, Any], redact_first_run_value(raw_payload))
 
 

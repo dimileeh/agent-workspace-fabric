@@ -11,6 +11,7 @@ from awf.host_setup.rendering import (
     FirstRunPayload,
     _redact_provider_refs,
     first_run_failure_payload,
+    first_run_issue_from_reason_code,
     first_run_success_payload,
     first_run_warning_payload,
     redact_first_run_value,
@@ -90,6 +91,51 @@ def test_first_run_warning_payload_includes_structured_remediation() -> None:
     assert "Fix:" in rendered_pretty
     assert "Docs:" in rendered_pretty
     assert "Continue setup without GitHub." in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_json_omits_empty_optional_collections() -> None:
+    warning_payload = first_run_warning_payload(
+        command="awf setup",
+        reason_code="PROVIDER_SETUP_AUTH_INVALID",
+        summary="GitHub provider is unavailable.",
+    )
+    failure_payload = first_run_failure_payload(
+        command="awf start",
+        reason_code="START_HEALTH_TIMEOUT",
+        summary="AWF services did not become healthy.",
+    )
+
+    for payload in (warning_payload, failure_payload):
+        rendered_json = render_first_run_json(payload)
+        remediation = rendered_json["issues"][0]["remediation"]
+
+        assert "details" not in rendered_json
+        assert "next_steps" not in rendered_json
+        assert "details" not in rendered_json["issues"][0]
+        assert "next_steps" not in remediation
+
+
+@pytest.mark.unit
+def test_first_run_json_preserves_non_empty_remediation_next_steps() -> None:
+    issue = first_run_issue_from_reason_code(
+        "PROVIDER_SETUP_AUTH_INVALID",
+        severity="warning",
+        next_steps=("Refresh the GitHub token.",),
+    )
+    payload = FirstRunPayload(
+        status="warning",
+        command="awf setup",
+        summary="GitHub provider is unavailable.",
+        reason_code="PROVIDER_SETUP_AUTH_INVALID",
+        issues=(issue,),
+        next_steps=("Continue without GitHub.",),
+    )
+
+    rendered_json = render_first_run_json(payload)
+
+    assert rendered_json["next_steps"] == ["Continue without GitHub."]
+    assert rendered_json["issues"][0]["remediation"]["next_steps"] == ["Refresh the GitHub token."]
 
 
 @pytest.mark.unit
