@@ -414,6 +414,35 @@ def test_first_run_rendering_redacts_token_and_provider_ref_detail_keys() -> Non
 
 
 @pytest.mark.unit
+def test_first_run_rendering_preserves_colliding_redacted_mapping_keys() -> None:
+    """Verify redacted key collisions do not overwrite diagnostic details."""
+    raw_github_key = "ghp_firstRunMapKeyValue"
+    raw_gitlab_key = "glpat-firstRunMapKeyValue"
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary="Credential reference is invalid.",
+        details={
+            raw_github_key: "github auth failed",
+            raw_gitlab_key: "gitlab auth failed",
+        },
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_json_text = json.dumps(rendered_json, sort_keys=True)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    issue_details = rendered_json["issues"][0]["details"]
+    assert issue_details["[redacted]"] == "github auth failed"
+    assert issue_details["[redacted]#2"] == "gitlab auth failed"
+    for raw_key in (raw_github_key, raw_gitlab_key):
+        assert raw_key not in rendered_json_text
+        assert raw_key not in rendered_pretty
+    assert "  [redacted]: github auth failed" in rendered_pretty
+    assert "  [redacted]#2: gitlab auth failed" in rendered_pretty
+
+
+@pytest.mark.unit
 def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
     """Verify provider-ref redaction preserves tuple containers."""
     redacted = _redact_provider_refs(

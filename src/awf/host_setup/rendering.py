@@ -341,10 +341,11 @@ def _redact_provider_refs(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = _redact_first_run_mapping_key(key)
+            redacted_key = _deduplicate_redacted_mapping_key(redacted, key_text)
             if _is_provider_ref_key(key_text):
-                redacted[key_text] = REDACTION_MARKER
+                redacted[redacted_key] = REDACTION_MARKER
             else:
-                redacted[key_text] = _redact_provider_refs(item)
+                redacted[redacted_key] = _redact_provider_refs(item)
         return redacted
     if isinstance(value, list):
         return [_redact_provider_refs(item) for item in value]
@@ -362,6 +363,16 @@ def _redact_first_run_mapping_key(key: Any) -> str:
     key_text = str(key)
     audit_redacted = redact_audit_value(key_text, preserve_tuples=True)
     return _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+
+
+def _deduplicate_redacted_mapping_key(mapping: Mapping[str, Any], key: str) -> str:
+    """Return a rendered mapping key that preserves redacted-key collisions."""
+    if key not in mapping:
+        return key
+    suffix = 2
+    while f"{key}#{suffix}" in mapping:
+        suffix += 1
+    return f"{key}#{suffix}"
 
 
 def _is_provider_ref_key(key: str) -> bool:
