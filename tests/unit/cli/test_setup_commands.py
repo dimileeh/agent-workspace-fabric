@@ -31,8 +31,13 @@ def test_setup_placeholder_pretty_has_stable_reason_code() -> None:
 
     assert result.exit_code == 1
     assert result.stdout == ""
+    assert "Status: blocked" in result.stderr
+    assert "Command: awf setup" in result.stderr
     assert "AWF_SETUP_PLACEHOLDER" in result.stderr
-    assert "awf setup" in result.stderr
+    assert "Problem:" in result.stderr
+    assert "Cause:" in result.stderr
+    assert "Fix:" in result.stderr
+    assert "Docs:" in result.stderr
     assert "awf service bootstrap" in result.stderr
     assert "awf init <path>" in result.stderr
     assert "Traceback" not in result.stderr
@@ -44,13 +49,18 @@ def test_setup_placeholder_json_has_stable_shape() -> None:
 
     assert result.exit_code == 1
     payload = json.loads(result.output)
-    assert payload == {
-        "status": "blocked",
-        "reason_code": "AWF_SETUP_PLACEHOLDER",
-        "command": "awf setup",
-        "message": "awf setup is reserved; host setup checks land in a later setup slice.",
-        "next_steps": [
-            "Run awf service bootstrap for current local Core startup.",
-            "Run awf init <path> to onboard a project repository.",
-        ],
-    }
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "AWF_SETUP_PLACEHOLDER"
+    assert payload["command"] == "awf setup"
+    assert payload["summary"] == (
+        "awf setup is reserved; host setup checks land in a later setup slice."
+    )
+    assert payload["next_steps"] == [
+        "Run awf service bootstrap for current local Core startup.",
+        "Run awf init <path> to onboard a project repository.",
+    ]
+    assert payload["issues"][0]["reason_code"] == "AWF_SETUP_PLACEHOLDER"
+    assert payload["issues"][0]["remediation"]["problem"]
+    assert payload["issues"][0]["remediation"]["cause"]
+    assert payload["issues"][0]["remediation"]["fix"]
+    assert payload["issues"][0]["remediation"]["docs_link"]

@@ -5,19 +5,25 @@ from __future__ import annotations
 import typer
 
 from awf.cli.common import OutputFormat, _emit
+from awf.host_setup.rendering import (
+    AWF_START_PLACEHOLDER,
+    first_run_failure_payload,
+    render_first_run_json,
+    render_first_run_pretty,
+)
 
-START_PLACEHOLDER_REASON = "AWF_START_PLACEHOLDER"
+START_PLACEHOLDER_REASON = AWF_START_PLACEHOLDER
 
-_START_PLACEHOLDER_PAYLOAD = {
-    "status": "blocked",
-    "reason_code": START_PLACEHOLDER_REASON,
-    "command": "awf start",
-    "message": "awf start is reserved; local Core startup lands in a later start slice.",
-    "next_steps": [
+_START_PLACEHOLDER_PAYLOAD = first_run_failure_payload(
+    command="awf start",
+    reason_code=START_PLACEHOLDER_REASON,
+    summary="awf start is reserved; local Core startup lands in a later start slice.",
+    status="blocked",
+    next_steps=(
         "Run awf service bootstrap for current local Core startup.",
         "Run awf init <path> to onboard a project repository.",
-    ],
-}
+    ),
+)
 
 
 def start_command(
@@ -29,19 +35,7 @@ def start_command(
 ) -> None:
     """Start local AWF Core after first-run setup."""
     if fmt == OutputFormat.json:
-        _emit(_START_PLACEHOLDER_PAYLOAD, fmt)
+        _emit(render_first_run_json(_START_PLACEHOLDER_PAYLOAD), fmt)
     else:
-        typer.echo("AWF start: local AWF Core startup is reserved", err=True)
-        typer.echo(f"Reason: {START_PLACEHOLDER_REASON}", err=True)
-        typer.echo(
-            "Problem: `awf start` is a stable command surface; local Core startup "
-            "lands in a later start slice.",
-            err=True,
-        )
-        typer.echo("Next:", err=True)
-        typer.echo(
-            "  - Run `awf service bootstrap` for current local Core startup.",
-            err=True,
-        )
-        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
+        typer.echo(render_first_run_pretty(_START_PLACEHOLDER_PAYLOAD), err=True)
     raise typer.Exit(code=1)

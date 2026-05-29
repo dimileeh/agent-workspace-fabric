@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.host_setup.rendering import FIRST_RUN_FAILURE_REASON_CODES
 from awf.service.doctor.reasons import _REASON_TEXT
 
 
@@ -23,6 +24,28 @@ def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
         assert reason.likely_cause
         assert reason.action
         assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+def test_first_run_failure_reasons_have_operator_guidance() -> None:
+    missing_codes = set(FIRST_RUN_FAILURE_REASON_CODES) - set(_REASON_TEXT)
+
+    assert not missing_codes
+    for code in FIRST_RUN_FAILURE_REASON_CODES:
+        reason = _REASON_TEXT[code]
+        assert reason.message
+        assert reason.likely_cause
+        assert reason.action
+        assert reason.docs_link
+
+
+@pytest.mark.unit
+def test_first_run_failure_reasons_are_documented() -> None:
+    repo_root = Path(__file__).parent.parent.parent.parent
+    catalog_content = (repo_root / "docs" / "REASON_CATALOG.md").read_text()
+
+    for code in FIRST_RUN_FAILURE_REASON_CODES:
+        assert f"### {code}" in catalog_content
 
 
 def generate_expected_catalog(existing_content: str = "") -> str:

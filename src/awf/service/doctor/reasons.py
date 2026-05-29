@@ -18,6 +18,15 @@ class _ReasonText:
     docs_link: str
 
 
+def _reason_catalog_link(reason_code: str) -> str:
+    return f"docs/REASON_CATALOG.md#{reason_code.lower()}"
+
+
+def reason_text_for_code(reason_code: str) -> _ReasonText | None:
+    """Return operator-facing reason catalog text for a stable reason code."""
+    return _REASON_TEXT.get(reason_code)
+
+
 _REASON_TEXT: dict[str, _ReasonText] = {
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE: _ReasonText(
         (
@@ -37,6 +46,259 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf service logs --service worker",
         "docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed",
+    ),
+    "AWF_SETUP_PLACEHOLDER": _ReasonText(
+        "`awf setup` is registered but the first-run setup implementation is not active yet.",
+        (
+            "Use the current service bootstrap path for local Core startup, then "
+            "use project init for repository onboarding until the setup slice lands."
+        ),
+        "This build contains the stable command surface before the setup checks are implemented.",
+        "awf service bootstrap",
+        _reason_catalog_link("AWF_SETUP_PLACEHOLDER"),
+    ),
+    "AWF_START_PLACEHOLDER": _ReasonText(
+        "`awf start` is registered but the local Core start wrapper is not active yet.",
+        (
+            "Use the current service bootstrap path for local Core startup, then "
+            "use project init for repository onboarding until the start slice lands."
+        ),
+        "This build contains the stable command surface before the start wrapper is implemented.",
+        "awf service bootstrap",
+        _reason_catalog_link("AWF_START_PLACEHOLDER"),
+    ),
+    "HOST_SETUP_CONFIG_CORRUPT": _ReasonText(
+        "AWF could not read the host setup config.",
+        (
+            "Inspect `~/.awf/config.yml`, remove invalid YAML or unsupported "
+            "fields, then rerun `awf setup`."
+        ),
+        (
+            "The config file is malformed, has duplicate keys, uses unsupported "
+            "schema versions, or cannot be interpreted safely."
+        ),
+        "awf setup",
+        _reason_catalog_link("HOST_SETUP_CONFIG_CORRUPT"),
+    ),
+    "HOST_SETUP_CONFIG_SECRET_VALUE": _ReasonText(
+        "AWF rejected a host setup config value that looks like a secret.",
+        (
+            "Replace raw credentials in `~/.awf/config.yml` with keyring, env, "
+            "or approved plain-file refs, then rerun setup."
+        ),
+        "Host setup config stores references and metadata only, never raw provider credentials.",
+        "awf setup --provider <provider>",
+        _reason_catalog_link("HOST_SETUP_CONFIG_SECRET_VALUE"),
+    ),
+    "HOST_SETUP_CONFIG_WRITE_FAILED": _ReasonText(
+        "AWF could not write the host setup config.",
+        (
+            "Verify the `~/.awf` directory exists, is writable by your user, and "
+            "is not blocked by filesystem permissions, then rerun setup."
+        ),
+        "The host config path or parent directory is missing, read-only, or refused atomic writes.",
+        "awf setup",
+        _reason_catalog_link("HOST_SETUP_CONFIG_WRITE_FAILED"),
+    ),
+    "SOURCE_CHECKOUT_INVALID": _ReasonText(
+        "AWF could not verify the source checkout assets needed for first-run setup/start.",
+        (
+            "Run from the AWF repository root or pass `--source-checkout` pointing "
+            "at a complete checkout with pyproject, docs, migrations, and Docker assets."
+        ),
+        "The selected path is missing required AWF source markers or contains unreadable assets.",
+        "awf setup --source-checkout .",
+        _reason_catalog_link("SOURCE_CHECKOUT_INVALID"),
+    ),
+    "SOURCE_CHECKOUT_ASSETS_STALE": _ReasonText(
+        "AWF source checkout metadata is stale or no longer matches the current asset contract.",
+        (
+            "Re-run setup with the current checkout path so AWF can verify and "
+            "record fresh source asset metadata."
+        ),
+        "A previously recorded source checkout was moved, changed, or verified against an older asset list.",
+        "awf setup --source-checkout .",
+        _reason_catalog_link("SOURCE_CHECKOUT_ASSETS_STALE"),
+    ),
+    "SETUP_READINESS_FAILED": _ReasonText(
+        "AWF setup found one or more machine readiness blockers.",
+        (
+            "Fix the reported blockers such as Docker, Compose, Git, disk, port, "
+            "or PATH issues, then rerun `awf setup --dry-run`."
+        ),
+        "The local machine does not currently satisfy the prerequisites for first-run AWF Core.",
+        "awf setup --dry-run",
+        _reason_catalog_link("SETUP_READINESS_FAILED"),
+    ),
+    "SETUP_PROVIDER_UNKNOWN": _ReasonText(
+        "AWF setup was asked to configure an unsupported provider.",
+        (
+            "Use a supported provider name from setup help, or omit `--provider` "
+            "to evaluate all configured providers."
+        ),
+        "The provider selector does not match a provider known to this AWF build.",
+        "awf setup --help",
+        _reason_catalog_link("SETUP_PROVIDER_UNKNOWN"),
+    ),
+    "INTERACTIVE_INPUT_REQUIRED": _ReasonText(
+        "AWF setup needs interactive input that is unavailable in this run.",
+        (
+            "Run setup interactively, or provide safe env/keychain references "
+            "for the requested provider before retrying non-interactive setup."
+        ),
+        "A non-interactive setup path reached a prompt that would collect required settings or credentials.",
+        "awf setup --non-interactive",
+        _reason_catalog_link("INTERACTIVE_INPUT_REQUIRED"),
+    ),
+    "CREDENTIAL_BACKEND_UNAVAILABLE": _ReasonText(
+        "AWF could not access a usable credential storage backend.",
+        (
+            "Configure the OS keychain backend, provide env refs, or explicitly "
+            "choose the approved plain-file fallback when that policy applies."
+        ),
+        "The preferred keychain backend is unavailable and no safe fallback was selected.",
+        "awf setup --provider <provider>",
+        _reason_catalog_link("CREDENTIAL_BACKEND_UNAVAILABLE"),
+    ),
+    "CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED": _ReasonText(
+        "AWF refused to store a provider credential in a plain file without explicit consent.",
+        (
+            "Use keyring or env refs, or rerun setup with the explicit plain-file "
+            "consent flag only on an approved headless Linux path."
+        ),
+        "Plain-file provider secrets are an opt-in fallback and cannot be selected silently.",
+        "awf setup --allow-plain-secrets",
+        _reason_catalog_link("CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED"),
+    ),
+    "CREDENTIAL_REF_INVALID": _ReasonText(
+        "AWF rejected a malformed provider credential reference.",
+        (
+            "Use a `keyring://`, `env://`, or approved `plain-file://` reference "
+            "and keep raw token values out of config and JSON payloads."
+        ),
+        "The credential reference uses an unsupported scheme, unsafe path, or raw secret value.",
+        "awf setup --provider <provider>",
+        _reason_catalog_link("CREDENTIAL_REF_INVALID"),
+    ),
+    "PROVIDER_SETUP_AUTH_INVALID": _ReasonText(
+        "AWF could not authenticate one provider during setup.",
+        (
+            "Refresh that provider's credential or login state, then rerun setup "
+            "for the provider; other providers may remain usable."
+        ),
+        "The provider token, CLI login, or credential reference is missing, expired, or rejected.",
+        "awf setup --provider <provider>",
+        _reason_catalog_link("PROVIDER_SETUP_AUTH_INVALID"),
+    ),
+    "CLIENT_CONFIG_CONFLICT": _ReasonText(
+        "AWF found a client MCP configuration conflict.",
+        (
+            "Review the proposed diff or existing client config, resolve the "
+            "conflicting server entry, then rerun setup for that client."
+        ),
+        "A Claude or Codex MCP config already contains incompatible AWF server settings.",
+        "awf setup --client <client>",
+        _reason_catalog_link("CLIENT_CONFIG_CONFLICT"),
+    ),
+    "CLIENT_CONFIG_WRITE_FAILED": _ReasonText(
+        "AWF could not write a client MCP configuration file.",
+        (
+            "Check file permissions and parent directories, preserve any backup, "
+            "then rerun setup for the selected client."
+        ),
+        "The client config path is missing, read-only, locked by another process, or failed atomic write.",
+        "awf setup --client <client>",
+        _reason_catalog_link("CLIENT_CONFIG_WRITE_FAILED"),
+    ),
+    "INSTALLER_UNSUPPORTED_PLATFORM": _ReasonText(
+        "The AWF installer does not support this operating system or architecture.",
+        (
+            "Use a supported macOS/Linux platform, WSL where documented, or the "
+            "manual Python tool install path for this environment."
+        ),
+        "The installer detected an OS or CPU architecture outside the supported first release matrix.",
+        "uv tool install agent-workspace-fabric",
+        _reason_catalog_link("INSTALLER_UNSUPPORTED_PLATFORM"),
+    ),
+    "INSTALLER_DEPENDENCY_MISSING": _ReasonText(
+        "The AWF installer is missing a required host dependency.",
+        (
+            "Install the reported dependency such as `curl`, `tar`, `sh`, `uv`, "
+            "or `pipx`, then rerun the installer."
+        ),
+        "The selected install method depends on a host tool that is not available on PATH.",
+        "awf --help",
+        _reason_catalog_link("INSTALLER_DEPENDENCY_MISSING"),
+    ),
+    "INSTALLER_CHECKSUM_MISMATCH": _ReasonText(
+        "The AWF installer refused an artifact whose checksum did not match the manifest.",
+        (
+            "Do not run the downloaded artifact; retry against the canonical "
+            "release manifest or choose a different pinned version."
+        ),
+        "The downloaded wheel or source artifact differs from the manifest-pinned sha256.",
+        "awf --version",
+        _reason_catalog_link("INSTALLER_CHECKSUM_MISMATCH"),
+    ),
+    "INSTALLER_METHOD_FAILED": _ReasonText(
+        "The AWF installer method failed before AWF was installed.",
+        (
+            "Inspect the reported method output, fix package-manager or network "
+            "issues, and retry the same pinned install method."
+        ),
+        "The selected uv, pipx, or manual install command exited non-zero.",
+        "uv tool install agent-workspace-fabric",
+        _reason_catalog_link("INSTALLER_METHOD_FAILED"),
+    ),
+    "INSTALLER_PATH_NOT_REACHABLE": _ReasonText(
+        "The AWF installer completed but the `awf` executable is not reachable on PATH.",
+        (
+            "Open a new shell or update PATH using the installer-provided shell "
+            "hint, then verify with `awf --version`."
+        ),
+        "The tool install location is not visible to the current shell environment.",
+        "awf --version",
+        _reason_catalog_link("INSTALLER_PATH_NOT_REACHABLE"),
+    ),
+    "START_COMPOSE_ASSETS_MISSING": _ReasonText(
+        "AWF start could not locate the Compose or runtime assets needed to start local Core.",
+        (
+            "Use a valid package install or pass a verified `--source-checkout` "
+            "path that contains AWF Docker and Compose assets."
+        ),
+        "The selected package/source asset lane does not contain required bootstrap files.",
+        "awf start --source-checkout .",
+        _reason_catalog_link("START_COMPOSE_ASSETS_MISSING"),
+    ),
+    "START_PORT_CONFLICT": _ReasonText(
+        "AWF start found a local port conflict.",
+        (
+            "Stop the process using the reported port or configure a different "
+            "AWF API/console port before retrying start."
+        ),
+        "A local service is already bound to a port needed by AWF Core.",
+        "awf start",
+        _reason_catalog_link("START_PORT_CONFLICT"),
+    ),
+    "START_MIGRATION_FAILED": _ReasonText(
+        "AWF start could not complete local Core database migrations.",
+        (
+            "Inspect migration and Postgres logs, fix the database state, then "
+            "retry `awf start` or use expert service commands for recovery."
+        ),
+        "The local control-plane database rejected or failed a required schema migration.",
+        "awf service logs --service api",
+        _reason_catalog_link("START_MIGRATION_FAILED"),
+    ),
+    "START_HEALTH_TIMEOUT": _ReasonText(
+        "AWF start timed out waiting for local Core health checks.",
+        (
+            "Inspect API, worker, and Postgres logs, fix the failing service, "
+            "then rerun start with an appropriate timeout."
+        ),
+        "One or more local Core services did not become healthy before the start timeout.",
+        "awf service status",
+        _reason_catalog_link("START_HEALTH_TIMEOUT"),
     ),
     "DOCKER_OK": _ReasonText(
         "Docker daemon is reachable.",
