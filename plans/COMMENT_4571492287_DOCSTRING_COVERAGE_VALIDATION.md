@@ -24,5 +24,18 @@ Plan reference: `plans/COMMENT_4571492287_DOCSTRING_COVERAGE_PLAN.md`
     passed.
   - `uv run --python 3.12 --extra dev ruff check tests/unit/service/test_host_setup_rendering.py`
     passed.
+- Iteration 2 after the Pydantic dump floor regression test addition:
+  - Initial focused AST audit found
+    `tests/unit/service/test_host_setup_rendering.py:295:model_dump_without_fallback`.
+  - Added a behavior-neutral docstring to the nested
+    `model_dump_without_fallback` helper.
+  - Focused AST audit over the same 12 first-run Python files passed:
+    `files=12 callables_classes=80 missing=0`.
+  - `uv run --python 3.12 --extra dev ruff check --select D tests/unit/service/test_host_setup_rendering.py`
+    passed.
+  - `uv run --python 3.12 --extra dev ruff check tests/unit/service/test_host_setup_rendering.py`
+    passed.
+  - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_avoids_pydantic_dump_fallback_keyword -q`
+    passed with 1 test.
 
 Full AWF/GitHub validation remains owned by AWF after agent completion.

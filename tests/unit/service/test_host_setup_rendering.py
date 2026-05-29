@@ -296,6 +296,7 @@ def test_first_run_json_avoids_pydantic_dump_fallback_keyword(
         self: FirstRunPayload,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Reject the newer fallback keyword while delegating other dump calls."""
         if "fallback" in kwargs:
             raise TypeError("BaseModel.model_dump() got an unexpected keyword argument 'fallback'")
         return dict(original_model_dump(self, **kwargs))
