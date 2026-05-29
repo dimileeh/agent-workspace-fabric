@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from awf.common.token_patterns import compile_known_token_re
+
 REDACTION_MARKER = "<redacted>"
 
 _URL_CREDENTIAL_RE = re.compile(r"(\bhttps?://)([^/\s:@]+(?::[^/\s@]+)?@)", re.IGNORECASE)
@@ -23,18 +25,7 @@ _TOKEN_ASSIGNMENT_RE = re.compile(
     r"(?P=quote)",
     re.IGNORECASE,
 )
-_KNOWN_TOKEN_RE = re.compile(
-    # Python's regex alternation is left-to-right: keep provider-specific
-    # ``sk-`` prefixes before the generic ``sk-`` catch-all.
-    r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{6,}|"
-    r"github_pat_[A-Za-z0-9_]{6,}|"
-    r"sk-ant-[A-Za-z0-9_-]{8,}|"
-    r"sk-proj-[A-Za-z0-9_-]{8,}|"
-    r"sk-[A-Za-z0-9_-]{8,}|"
-    r"AIza[A-Za-z0-9_-]{12,}"
-    r")(?![A-Za-z0-9_])"
-)
+_KNOWN_TOKEN_RE = compile_known_token_re()
 
 
 def redact_secrets(text: str) -> str:

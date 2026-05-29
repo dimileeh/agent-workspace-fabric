@@ -12,9 +12,11 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
     raw_values = (
         "ghp_FAKEgithubTokenValue123456",
         "github_pat_FAKEgithubPatTokenValue_123456",
+        "glpat-fakeGitLabTokenValue123456",
         "sk-proj-fakeOpenAIProjectKey123456789",
         "sk-ant-fakeAnthropicKey123456789",
         "AIzaFakeGeminiApiKey1234567890ABCD",
+        "xoxb-fakeSlackTokenValue123456",
         "opaqueBearerToken123456",
         "basicHeaderValue123456",
         "url-password-value",
@@ -23,9 +25,11 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
     text = (
         "push token ghp_FAKEgithubTokenValue123456 "
         "pat github_pat_FAKEgithubPatTokenValue_123456 "
+        "gitlab glpat-fakeGitLabTokenValue123456 "
         "openai sk-proj-fakeOpenAIProjectKey123456789 "
         "anthropic sk-ant-fakeAnthropicKey123456789 "
         "gemini AIzaFakeGeminiApiKey1234567890ABCD "
+        "slack xoxb-fakeSlackTokenValue123456 "
         "Authorization: Bearer opaqueBearerToken123456 "
         "Authorization: Basic basicHeaderValue123456 "
         "repo https://user:url-password-value@github.com/example/repo.git "
@@ -36,7 +40,7 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
 
     for raw_value in raw_values:
         assert raw_value not in redacted
-    assert redacted.count(REDACTION_MARKER) == 9
+    assert redacted.count(REDACTION_MARKER) == 11
     assert "push token" in redacted
     assert "Authorization: Bearer <redacted>" in redacted
     assert "Authorization: Basic <redacted>" in redacted

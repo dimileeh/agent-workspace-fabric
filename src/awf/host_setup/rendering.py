@@ -10,6 +10,7 @@ from typing import Any, ClassVar, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from awf.common.audit import REDACTION_MARKER, redact_audit_value
+from awf.common.token_patterns import compile_known_token_re
 from awf.host_setup.config import (
     HOST_SETUP_CONFIG_CORRUPT,
     HOST_SETUP_CONFIG_SECRET_VALUE,
@@ -109,20 +110,7 @@ _PROVIDER_REF_KEY_SUFFIX_RE = re.compile(
     r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)",
     re.IGNORECASE,
 )
-_FIRST_RUN_KNOWN_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
-    r"github_pat_[A-Za-z0-9_]{8,}|"
-    r"glpat-[A-Za-z0-9_-]{8,}|"
-    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
-    r"sk-ant-[A-Za-z0-9_-]{8,}|"
-    r"sk-proj-[A-Za-z0-9_-]{8,}|"
-    r"sk-[A-Za-z0-9_-]{8,}|"
-    r"AIza[A-Za-z0-9_-]{12,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{8,}"
-    r")(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
+_FIRST_RUN_KNOWN_TOKEN_RE = compile_known_token_re(ignorecase=True)
 
 
 class _FirstRunBaseModel(BaseModel):
