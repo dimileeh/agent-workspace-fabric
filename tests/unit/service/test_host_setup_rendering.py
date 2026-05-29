@@ -140,6 +140,7 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
     raw_values = (
         "ghp_firstRunSecretToken",
         "github_pat_firstRunSecretToken",
+        "glpat-firstRunSecretToken",
         "sk-proj-firstRunSecretToken12345678901234567890",
         "sk-firstRunSecretToken12345678901234567890",
         "sk-ant-firstRunSecretToken",

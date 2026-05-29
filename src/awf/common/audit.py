@@ -47,6 +47,7 @@ _KNOWN_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])("
     r"gh[apousr]_[A-Za-z0-9_]{8,}|"
     r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"glpat-[A-Za-z0-9_-]{8,}|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
     r"sk-proj-[A-Za-z0-9_-]{8,}|"
