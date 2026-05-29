@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 import pytest
@@ -426,6 +427,33 @@ def test_first_run_rendering_coerces_arbitrary_detail_values_before_redaction() 
     assert raw_token not in rendered_json_text
     assert raw_token not in rendered_pretty
     assert "write_error: failed to write config: TOKEN=[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_json_normalizes_non_finite_float_details() -> None:
+    """Verify diagnostic floats render as strict JSON-compatible values."""
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="SETUP_READINESS_FAILED",
+        summary="AWF first-run checks failed.",
+        details={
+            "probe": {
+                "latency_seconds": 0.25,
+                "sample": math.nan,
+                "thresholds": (math.inf, -math.inf),
+            },
+        },
+    )
+
+    rendered_json = render_first_run_json(payload)
+
+    issue_details = rendered_json["issues"][0]["details"]
+    assert issue_details["probe"] == {
+        "latency_seconds": 0.25,
+        "sample": "nan",
+        "thresholds": ["inf", "-inf"],
+    }
+    _ = json.dumps(rendered_json, allow_nan=False)
 
 
 @pytest.mark.unit

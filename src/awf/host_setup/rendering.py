@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Collection, Mapping
 from typing import Any, ClassVar, Literal, cast
@@ -384,7 +385,9 @@ def _json_safe_first_run_value(value: Any) -> Any:
         return [_json_safe_first_run_value(item) for item in value]
     if isinstance(value, (set, frozenset)):
         return [_json_safe_first_run_value(item) for item in sorted(value, key=str)]
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     return redact_first_run_value(str(value))
 
