@@ -700,6 +700,29 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("raw_token", ["glpat-", "glpat-a"])
+def test_first_run_rendering_redacts_truncated_gitlab_pats(raw_token: str) -> None:
+    """Verify shortened rejected GitLab PAT values are not rendered."""
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary=f"Credential reference is invalid for {raw_token}.",
+        details={
+            "message": f"rejected config value {raw_token}",
+            raw_token: "gitlab auth failed",
+        },
+    )
+
+    rendered_json_text = json.dumps(render_first_run_json(payload), sort_keys=True)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert raw_token not in rendered_json_text
+    assert raw_token not in rendered_pretty
+    assert "[redacted]" in rendered_json_text
+    assert "[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
 def test_first_run_rendering_redacts_case_variant_token_prefixes() -> None:
     """Verify first-run renderers redact case-variant token-looking values."""
     raw_values = (
