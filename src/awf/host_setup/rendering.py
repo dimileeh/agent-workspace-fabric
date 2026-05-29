@@ -93,9 +93,12 @@ FirstRunStatus = Literal["success", "warning", "blocked", "failed"]
 FirstRunSeverity = Literal["info", "warning", "blocked", "failed"]
 
 _PROVIDER_REF_RE = re.compile(
-    # The word boundary anchors the leading scheme character; hyphen-prefixed
-    # contexts like x-plain-file:// still redact, but safeplain-file:// does not.
-    r"\b(?:keyring|env|plain-file)://[^\s\"'`,;)}\]]+",
+    # Match from the start of a URI-like scheme token so hyphen-prefixed
+    # contexts like x-plain-file:// redact as a whole, while safeplain-file://
+    # remains ordinary text.
+    r"(?<![A-Za-z0-9_-])"
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*-)?(?:keyring|env|plain-file)://"
+    r"[^\s\"'`,;)}\]]+",
     re.IGNORECASE,
 )
 _PROVIDER_REF_KEY_RE = re.compile(
@@ -283,7 +286,14 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
         raw_payload.pop("next_steps")
     # Keep issues present, even when empty, so success payload consumers can
     # rely on one stable field shape across all first-run statuses.
-    for issue in raw_payload.get("issues", []):
+    issues = raw_payload.get("issues")
+    if issues is None:
+        issues = ()
+    if not isinstance(issues, tuple):
+        raise TypeError(
+            "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple."
+        )
+    for issue in issues:
         if not isinstance(issue, dict):
             continue
         if issue.get("details") == {}:

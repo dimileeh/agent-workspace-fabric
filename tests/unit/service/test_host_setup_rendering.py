@@ -314,6 +314,32 @@ def test_first_run_json_avoids_pydantic_dump_fallback_keyword(
 
 
 @pytest.mark.unit
+def test_first_run_json_requires_tuple_issues_from_python_dump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify rendering fails loudly if the issues dump contract changes."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_with_list_issues(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Simulate a dump shape that no longer preserves tuple fields."""
+        raw_payload = dict(original_model_dump(self, **kwargs))
+        raw_payload["issues"] = []
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_list_issues)
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+    )
+
+    with pytest.raises(TypeError, match="must preserve issues as a tuple"):
+        render_first_run_json(payload)
+
+
+@pytest.mark.unit
 def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
     """Verify pretty output expands sequence details into nested lines."""
     payload = first_run_failure_payload(
@@ -570,6 +596,26 @@ def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
         "[redacted]",
         ["[redacted]"],
         {"provider_ref": "[redacted]"},
+    )
+
+
+@pytest.mark.unit
+def test_provider_ref_redaction_redacts_hyphen_prefixed_ref_tokens() -> None:
+    """Verify hyphen-prefixed ref tokens redact without leaking a prefix."""
+    redacted = _redact_provider_refs(
+        (
+            "x-plain-file:///tmp/awf-secret",
+            "x-env://OPENAI_API_KEY",
+            "TOKEN=env://OPENAI_API_KEY",
+            "safeplain-file:///tmp/not-a-provider-ref",
+        )
+    )
+
+    assert redacted == (
+        "[redacted]",
+        "[redacted]",
+        "TOKEN=[redacted]",
+        "safeplain-file:///tmp/not-a-provider-ref",
     )
 
 
