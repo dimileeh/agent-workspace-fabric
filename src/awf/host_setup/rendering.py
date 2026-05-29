@@ -280,6 +280,8 @@ def render_first_run_pretty(payload: FirstRunPayload) -> str:
     ]
     issues = rendered.get("issues")
     reason_code = rendered.get("reason_code")
+    # Helper-built warning/failure payloads render reasons per issue below.
+    # Preserve this fallback for direct FirstRunPayload callers without issues.
     if reason_code and not issues:
         lines.append(f"Reason: {reason_code}")
 

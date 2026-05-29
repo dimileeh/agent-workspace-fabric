@@ -8,6 +8,7 @@ import pytest
 
 from awf.host_setup.rendering import (
     FIRST_RUN_FAILURE_REASON_CODES,
+    FirstRunPayload,
     _redact_provider_refs,
     first_run_failure_payload,
     first_run_success_payload,
@@ -42,6 +43,21 @@ def test_first_run_success_payload_renders_pretty_and_json() -> None:
     assert "Summary: AWF first-run checks passed." in rendered_pretty
     assert "Next:" in rendered_pretty
     assert "  - awf start" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> None:
+    payload = FirstRunPayload(
+        status="failed",
+        command="awf setup",
+        summary="External first-run preflight failed.",
+        reason_code="EXTERNAL_PREFLIGHT_FAILED",
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert "Reason: EXTERNAL_PREFLIGHT_FAILED" in rendered_pretty
+    assert "Problem:" not in rendered_pretty
 
 
 @pytest.mark.unit
