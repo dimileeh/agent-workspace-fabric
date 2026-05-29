@@ -259,6 +259,33 @@ def test_manifest_normalizes_git_suffix_from_repository_clone_url(tmp_path: Path
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "repository_url",
+    [
+        f"{REPOSITORY_URL};download=1",
+        f"{REPOSITORY_URL}?download=1",
+        f"{REPOSITORY_URL}#install",
+    ],
+)
+def test_manifest_rejects_repository_urls_with_suffix_components(
+    tmp_path: Path,
+    repository_url: str,
+) -> None:
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        repository_url=repository_url,
+    )
+
+    assert result.returncode == 2
+    assert "repository URL must not include params, query, or fragment" in result.stderr
+    assert not (tmp_path / "awf-install-manifest.json").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("checksum_text", "expected_error"),
     [
         ("", "missing checksum"),

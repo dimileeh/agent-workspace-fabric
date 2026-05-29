@@ -227,6 +227,8 @@ def _normalize_repository_url(repository_url: str) -> str:
     parsed = urlparse(normalized)
     if parsed.scheme != "https" or parsed.netloc != "github.com":
         raise ManifestError("repository URL must be a pinned GitHub repository HTTPS URL")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ManifestError("repository URL must not include params, query, or fragment")
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2:
         raise ManifestError("repository URL must identify a GitHub owner and repository")
