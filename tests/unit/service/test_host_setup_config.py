@@ -37,6 +37,8 @@ from awf.host_setup.source_assets import (
 )
 
 _FIXED_NOW = datetime(2026, 5, 28, 12, 0, tzinfo=UTC)
+_FAKE_OPENAI_SECRET_VALUE = "sk-proj-" + ("a" * 48)
+_FAKE_OPENAI_SECRET_VALUE_UPPER = "SK-proj-" + ("A" * 48)
 
 
 def _write_valid_source_checkout(root: Path) -> Path:
@@ -358,7 +360,7 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
         ProviderConfig(credential_ref="ghp_abcdefghijklmnopqrstuvwxyz123456")
     with pytest.raises(ValidationError):
         HostSetupConfig.model_validate(
-            {"providers": {"openai": {"credential_ref": "sk-raw-secret-value"}}}
+            {"providers": {"openai": {"credential_ref": _FAKE_OPENAI_SECRET_VALUE}}}
         )
     with pytest.raises(ValidationError):
         HostSetupConfig.model_validate({"providers": {"github": {"token": "ghp_raw"}}})
@@ -377,6 +379,25 @@ def test_host_setup_config_rejects_secret_values(tmp_path: Path) -> None:
     assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
     assert error.path == config_path
     assert "ghp_raw_secret" not in str(error.to_dict())
+
+
+@pytest.mark.unit
+def test_host_setup_config_allows_non_secret_sk_prefixed_status_and_channel(
+    tmp_path: Path,
+) -> None:
+    config = HostSetupConfig(
+        install=InstallConfig(channel="sk-beta"),
+        providers={"openai": ProviderConfig(status="sk-active")},
+        clients={"codex": ClientIntegrationConfig(status="sk-configured")},
+    )
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+
+    write_host_setup_config(config, path=config_path)
+
+    loaded = read_host_setup_config(path=config_path)
+    assert loaded.install.channel == "sk-beta"
+    assert loaded.providers["openai"].status == "sk-active"
+    assert loaded.clients["codex"].status == "sk-configured"
 
 
 @pytest.mark.unit
@@ -648,7 +669,7 @@ def test_host_setup_config_rejects_in_place_provider_mutation() -> None:
     )
 
     with pytest.raises(TypeError):
-        configured.providers["openai"] = {"credential_ref": "sk-raw-secret-value"}
+        configured.providers["openai"] = {"credential_ref": _FAKE_OPENAI_SECRET_VALUE}
 
     assert set(configured.providers) == {"github"}
 
@@ -658,7 +679,7 @@ def test_host_setup_config_rejects_in_place_provider_mutation() -> None:
     ("raw_config", "expected_issue", "expected_path"),
     [
         (
-            "version: 1\naudit:\n  - sk-raw-secret-value\n",
+            f"version: 1\naudit:\n  - {_FAKE_OPENAI_SECRET_VALUE}\n",
             "secret-like value",
             "audit.[0]",
         ),
@@ -686,7 +707,7 @@ def test_host_setup_config_rejects_secret_payloads_inside_lists(
     assert error.reason_code == "HOST_SETUP_CONFIG_SECRET_VALUE"
     assert error.path == config_path
     assert error.details == {"issue": expected_issue, "path": expected_path}
-    assert "sk-raw-secret-value" not in str(error.to_dict())
+    assert _FAKE_OPENAI_SECRET_VALUE not in str(error.to_dict())
     assert "ghp_raw_secret" not in str(error.to_dict())
 
 
@@ -719,7 +740,7 @@ def test_secret_payload_scan_rejects_tuple_nested_secret_payloads() -> None:
 @pytest.mark.unit
 def test_secret_payload_scan_rejects_sequence_container_secret_payloads() -> None:
     with pytest.raises(_SecretPayloadError) as exc_info:
-        _ensure_no_secret_payload({"audit": UserList(["sk-raw-secret-value"])})
+        _ensure_no_secret_payload({"audit": UserList([_FAKE_OPENAI_SECRET_VALUE])})
 
     assert exc_info.value.details() == {
         "issue": "secret-like value",
@@ -744,7 +765,7 @@ def test_secret_payload_scan_rejects_recursive_mappings() -> None:
 @pytest.mark.unit
 def test_secret_payload_scan_tracks_non_string_mapping_keys() -> None:
     with pytest.raises(_SecretPayloadError) as exc_info:
-        _ensure_no_secret_payload({1: ["sk-raw-secret-value"]})
+        _ensure_no_secret_payload({1: [_FAKE_OPENAI_SECRET_VALUE]})
 
     assert exc_info.value.details() == {
         "issue": "secret-like value",
@@ -756,7 +777,7 @@ def test_secret_payload_scan_tracks_non_string_mapping_keys() -> None:
 @pytest.mark.parametrize(
     "raw_secret",
     [
-        "SK-proj-raw-secret-value",
+        _FAKE_OPENAI_SECRET_VALUE_UPPER,
         "GHP_raw_secret_value",
         "XOXB-raw-secret-value",
     ],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -36,7 +37,6 @@ DEFAULT_HOST_SETUP_WORK_DIR = "~/.awf/service"
 
 _SAFE_CREDENTIAL_REF_PREFIXES = ("keyring://", "env://", "plain-file://")
 _SECRET_VALUE_PREFIXES = (
-    "sk-",
     "ghp_",
     "gho_",
     "ghu_",
@@ -46,6 +46,10 @@ _SECRET_VALUE_PREFIXES = (
     "xoxb-",
     "xoxp-",
     "glpat-",
+)
+_OPENAI_SECRET_VALUE_RE = re.compile(
+    r"^sk-(?:(?:proj|svcacct)-)?[a-z0-9][a-z0-9_-]{31,}$",
+    re.IGNORECASE,
 )
 _SECRET_KEY_NAMES = frozenset(
     {
@@ -561,7 +565,11 @@ def _looks_like_secret_value(value: str) -> bool:
     """Return whether a string resembles a raw credential value."""
     stripped = value.strip()
     lower = stripped.lower()
-    return lower.startswith("bearer ") or lower.startswith(_SECRET_VALUE_PREFIXES)
+    return (
+        lower.startswith("bearer ")
+        or lower.startswith(_SECRET_VALUE_PREFIXES)
+        or _OPENAI_SECRET_VALUE_RE.match(stripped) is not None
+    )
 
 
 def _format_path(path: tuple[str, ...]) -> str:
