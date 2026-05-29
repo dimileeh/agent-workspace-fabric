@@ -34,6 +34,14 @@ npm --prefix apps/console run test:browser
 mkdir -p artifacts/release
 uv run --python 3.12 --with build python -m build
 sha256sum dist/* | tee artifacts/release/python-distribution-sha256.txt
+uv run --python 3.12 python scripts/generate_install_manifest.py \
+  --dist-dir dist \
+  --checksums-file artifacts/release/python-distribution-sha256.txt \
+  --output artifacts/release/awf-install-manifest.json \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric \
+  --channel auto
 docker build -t awf-control-plane:release-check -f docker/control-plane.Dockerfile .
 docker build -t awf-agent-runtime:release-check -f docker/agent-runtime.Dockerfile .
 ```
@@ -127,6 +135,72 @@ long-lived PyPI API token for the release workflow. Before the first publish:
 The workflow also builds distributions on `v*` tags and uploads checksum
 artifacts. Publishing remains manual until maintainers explicitly choose the
 target environment.
+
+## Install Manifest
+
+GitHub Releases is the canonical artifact source for the v1 installer trust
+chain. `aira.pro` may serve or redirect `install.sh`, but v1 installers must
+consume `awf-install-manifest.json` and verify a manifest-pinned `sha256`
+before installing a wheel.
+
+The manifest is generated from the built `dist/*` files and the existing
+`python-distribution-sha256.txt` checksum artifact:
+
+```bash
+uv run --python 3.12 python scripts/generate_install_manifest.py \
+  --dist-dir dist \
+  --checksums-file artifacts/release/python-distribution-sha256.txt \
+  --output artifacts/release/awf-install-manifest.json \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric \
+  --channel auto
+```
+
+Inspect the manifest before publishing release notes:
+
+```bash
+jq . artifacts/release/awf-install-manifest.json
+jq -r '.artifacts[] | [.kind, .name, .url, .sha256] | @tsv' \
+  artifacts/release/awf-install-manifest.json
+```
+
+Every artifact URL must be pinned to a GitHub Release tag, using the shape
+`https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/<filename>`.
+Do not use mutable latest URLs, branch URLs, raw GitHub URLs, or unpinned
+package-index URLs in the manifest. The channel does not change artifact URLs:
+version and tag pinning are the trust boundary.
+
+Verify the manifest hashes against the checksum artifact and the local
+distribution files:
+
+```bash
+sha256sum -c artifacts/release/python-distribution-sha256.txt
+python - <<'PY'
+import json
+from pathlib import Path
+
+manifest = json.loads(Path("artifacts/release/awf-install-manifest.json").read_text())
+checksums = {}
+for line in Path("artifacts/release/python-distribution-sha256.txt").read_text().splitlines():
+    digest, artifact = line.split(maxsplit=1)
+    checksums[Path(artifact).name] = digest
+
+for artifact in manifest["artifacts"]:
+    assert artifact["sha256"] == checksums[artifact["name"]], artifact["name"]
+PY
+```
+
+Channel semantics:
+
+- `stable` is for final package versions such as `0.1.0` and `1.2.3`.
+- `prerelease` is for alpha, beta, release-candidate, or dev versions such as
+  `0.2.0a1`, `0.2.0b1`, `0.2.0rc1`, and `0.2.0.dev1`.
+- `auto` maps final versions to `stable` and prerelease/dev versions to
+  `prerelease`.
+
+The v1 manifest includes reserved `signatures` fields. They are intentionally
+empty until a later signing slice adds release signing and verification.
 
 ## Homebrew Follow-Up
 
