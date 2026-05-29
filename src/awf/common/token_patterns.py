@@ -35,7 +35,15 @@ TOKEN_ASSIGNMENT_PATTERN: Final = (
 
 
 def compile_known_token_re(*, ignorecase: bool = False) -> re.Pattern[str]:
-    """Compile the shared known-token pattern with optional case folding."""
+    """Compile the shared known-token pattern with optional case folding.
+
+    Several provider-specific prefixes (``gh[apousr]_``, ``glpat-``, and
+    ``xox[baprs]-``) use ``*`` so truncated or rejected token values are still
+    redacted. Callers that previously relied on minimum-length guards now
+    accept shorter matches, which can produce false positives for variable names
+    that share a token prefix. Enable ``ignorecase=True`` for operator-facing
+    first-run output where case-variant tokens must be caught.
+    """
     flags = re.IGNORECASE if ignorecase else re.NOFLAG
     return re.compile(KNOWN_TOKEN_PATTERN, flags)
 

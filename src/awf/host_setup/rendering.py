@@ -260,6 +260,11 @@ def first_run_warning_payload(
 
     ``details`` are attached to the single issue (``issues[0].details``),
     not to the top-level payload, unlike ``first_run_success_payload``.
+
+    ``next_steps`` are attached to the top-level payload and rendered under
+    "Next:" in pretty output, not to the issue's remediation. To supply
+    remediation-scoped next steps, use ``first_run_issue_from_reason_code``
+    directly with ``next_steps`` and build the payload manually.
     """
     issue = first_run_issue_from_reason_code(
         reason_code,
@@ -289,6 +294,11 @@ def first_run_failure_payload(
 
     ``details`` are attached to the single issue (``issues[0].details``),
     not to the top-level payload, unlike ``first_run_success_payload``.
+
+    ``next_steps`` are attached to the top-level payload and rendered under
+    "Next:" in pretty output, not to the issue's remediation. To supply
+    remediation-scoped next steps, use ``first_run_issue_from_reason_code``
+    directly with ``next_steps`` and build the payload manually.
     """
     issue = first_run_issue_from_reason_code(
         reason_code,
