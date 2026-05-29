@@ -40,6 +40,14 @@ def _run_steps(job: dict[str, Any]) -> str:
     return "\n".join(str(step.get("run", "")) for step in _steps(job))
 
 
+def _step_named(job: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return a workflow step by display name."""
+    for step in _steps(job):
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"missing workflow step named {name!r}")
+
+
 def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
@@ -71,3 +79,19 @@ def test_publish_workflow_generates_manifest_without_removing_checksum_artifact(
     uploaded_paths = _uploaded_paths(build_job)
     assert "artifacts/release/python-distribution-sha256.txt" in uploaded_paths
     assert "artifacts/release/awf-install-manifest.json" in uploaded_paths
+
+
+@pytest.mark.unit
+def test_publish_workflow_does_not_treat_v_prefixed_branch_as_release_tag() -> None:
+    """Manual dispatch from a v-prefixed branch must still use the version tag."""
+    build_job = _job(_publish_workflow(), "build")
+    checkout = _step_named(build_job, "Checkout source")
+    checkout_config = checkout.get("with", {})
+    assert isinstance(checkout_config, dict)
+    assert checkout_config.get("fetch-tags") is True
+
+    commands = _run_steps(build_job)
+    assert 'if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == v* ]]' in commands
+    assert 'TAG="${GITHUB_REF_NAME}"' in commands
+    assert 'TAG="v${VERSION}"' in commands
+    assert 'TAG="${GITHUB_REF_NAME:-v${VERSION}}"' not in commands
