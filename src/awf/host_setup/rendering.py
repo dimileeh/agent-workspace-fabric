@@ -274,10 +274,10 @@ def first_run_failure_payload(
 
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     """Return a JSON-safe, redacted first-run payload dictionary."""
-    raw_payload = payload.model_dump(mode="json", exclude_none=True, fallback=str)
+    raw_payload = payload.model_dump(mode="python", exclude_none=True)
     if raw_payload.get("details") == {}:
         raw_payload.pop("details")
-    if raw_payload.get("next_steps") == []:
+    if raw_payload.get("next_steps") in ([], ()):
         raw_payload.pop("next_steps")
     # Keep issues present, even when empty, so success payload consumers can
     # rely on one stable field shape across all first-run statuses.
@@ -288,11 +288,12 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
             issue.pop("details")
         remediation = issue.get("remediation")
         if isinstance(remediation, dict):
-            if remediation.get("next_steps") == []:
+            if remediation.get("next_steps") in ([], ()):
                 remediation.pop("next_steps")
             if remediation.get("related_command") == "":
                 remediation.pop("related_command")
-    return cast(dict[str, Any], redact_first_run_value(raw_payload))
+    redacted_payload = redact_first_run_value(raw_payload)
+    return cast(dict[str, Any], _json_safe_first_run_value(redacted_payload))
 
 
 def render_first_run_pretty(payload: FirstRunPayload) -> str:
@@ -333,6 +334,24 @@ def redact_first_run_value(value: Any) -> Any:
     """Recursively redact tokens and provider refs from first-run output values."""
     audit_redacted = redact_audit_value(value, preserve_tuples=True)
     return _redact_provider_refs(audit_redacted)
+
+
+def _json_safe_first_run_value(value: Any) -> Any:
+    """Return a JSON-compatible first-run value after redaction."""
+    if isinstance(value, Mapping):
+        rendered: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            rendered_key = _deduplicate_redacted_mapping_key(rendered, key_text)
+            rendered[rendered_key] = _json_safe_first_run_value(item)
+        return rendered
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_first_run_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_json_safe_first_run_value(item) for item in sorted(value, key=str)]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return redact_first_run_value(str(value))
 
 
 def _redact_provider_refs(value: Any) -> Any:

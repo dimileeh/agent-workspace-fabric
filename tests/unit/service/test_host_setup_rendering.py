@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -282,6 +283,33 @@ def test_first_run_rendering_coerces_arbitrary_detail_values_before_redaction() 
     assert raw_token not in rendered_json_text
     assert raw_token not in rendered_pretty
     assert "write_error: failed to write config: TOKEN=[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_json_avoids_pydantic_dump_fallback_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify rendering supports the declared Pydantic dependency floor."""
+    original_model_dump = FirstRunPayload.model_dump
+
+    def model_dump_without_fallback(
+        self: FirstRunPayload,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if "fallback" in kwargs:
+            raise TypeError("BaseModel.model_dump() got an unexpected keyword argument 'fallback'")
+        return dict(original_model_dump(self, **kwargs))
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_without_fallback)
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+        details={"config_path": "/tmp/.awf/config.yml"},
+    )
+
+    rendered_json = render_first_run_json(payload)
+
+    assert rendered_json["details"] == {"config_path": "/tmp/.awf/config.yml"}
 
 
 @pytest.mark.unit
