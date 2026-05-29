@@ -372,6 +372,34 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
 
 
 @pytest.mark.unit
+def test_first_run_rendering_redacts_token_and_provider_ref_detail_keys() -> None:
+    raw_token_key = "glpat-firstRunMapKeyValue"
+    raw_provider_ref_key = "plain-file:///tmp/awf-ref"
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CREDENTIAL_REF_INVALID",
+        summary="Credential reference is invalid.",
+        details={
+            raw_token_key: "gitlab auth failed",
+            "provider_locations": {raw_provider_ref_key: "openai key missing"},
+        },
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_json_text = json.dumps(rendered_json, sort_keys=True)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    issue_details = rendered_json["issues"][0]["details"]
+    assert issue_details["[redacted]"] == "gitlab auth failed"
+    assert issue_details["provider_locations"]["[redacted]"] == "openai key missing"
+    for raw_key in (raw_token_key, raw_provider_ref_key):
+        assert raw_key not in rendered_json_text
+        assert raw_key not in rendered_pretty
+    assert "  [redacted]: gitlab auth failed" in rendered_pretty
+    assert "    [redacted]: openai key missing" in rendered_pretty
+
+
+@pytest.mark.unit
 def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
     redacted = _redact_provider_refs(
         (

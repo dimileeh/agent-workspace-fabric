@@ -339,7 +339,7 @@ def _redact_provider_refs(value: Any) -> Any:
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
-            key_text = str(key)
+            key_text = _redact_first_run_mapping_key(key)
             if _is_provider_ref_key(key_text):
                 redacted[key_text] = REDACTION_MARKER
             else:
@@ -354,6 +354,12 @@ def _redact_provider_refs(value: Any) -> Any:
     if isinstance(value, str):
         return _PROVIDER_REF_RE.sub(REDACTION_MARKER, value)
     return value
+
+
+def _redact_first_run_mapping_key(key: Any) -> str:
+    key_text = str(key)
+    audit_redacted = redact_audit_value(key_text, preserve_tuples=True)
+    return _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
 
 
 def _is_provider_ref_key(key: str) -> bool:
