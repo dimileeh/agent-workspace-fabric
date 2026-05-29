@@ -247,6 +247,29 @@ def test_manifest_generator_skips_github_actions_branch_ref_without_writing_mani
 
 
 @pytest.mark.unit
+def test_manifest_generator_skips_github_actions_without_ref_metadata(
+    tmp_path: Path,
+) -> None:
+    """Actions runs without ref metadata skip rather than generating unproven manifests."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    output = tmp_path / "awf-install-manifest.json"
+    output.write_text("stale manifest\n", encoding="utf-8")
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides={"GITHUB_ACTIONS": "true"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" in result.stdout
+    assert "<unknown>" in result.stdout
+    assert "not a release tag" in result.stdout
+    assert not output.exists()
+
+
+@pytest.mark.unit
 def test_manifest_generator_allows_github_actions_tag_ref(tmp_path: Path) -> None:
     """Actions tag dispatch for the release tag generates the manifest."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
@@ -365,6 +388,31 @@ def test_manifest_normalizes_git_suffix_from_repository_clone_url(tmp_path: Path
     for artifact in artifacts:
         assert artifact["url"].startswith(f"{REPOSITORY_URL}/releases/download/")
         assert ".git/releases/download/" not in artifact["url"]
+
+
+@pytest.mark.unit
+def test_manifest_normalizes_repository_url_path_separators(tmp_path: Path) -> None:
+    """Repository URLs with extra path separators are canonicalized before URL assembly."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        repository_url="https://github.com//dimileeh///aira-agent-workspace-fabric//",
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["repository"] == REPOSITORY_URL
+
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    for artifact in artifacts:
+        assert artifact["url"].startswith(f"{REPOSITORY_URL}/releases/download/")
+        assert "github.com//" not in artifact["url"]
 
 
 @pytest.mark.unit

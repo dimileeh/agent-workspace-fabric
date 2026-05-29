@@ -171,6 +171,8 @@ def _github_actions_skip_reason(tag: str) -> str | None:
 
     ref_name = os.environ.get("GITHUB_REF_NAME", "")
     ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+    if not ref_name:
+        return "GitHub Actions ref <unknown> is not a release tag"
     if ref_type:
         if ref_type == "tag" and ref_name == tag:
             return None
@@ -249,7 +251,8 @@ def _normalize_repository_url(repository_url: str) -> str:
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2:
         raise ManifestError("repository URL must identify a GitHub owner and repository")
-    return normalized
+    owner, repo = parts
+    return f"https://github.com/{owner}/{repo}"
 
 
 def _validate_tag(tag: str, version: str) -> None:
