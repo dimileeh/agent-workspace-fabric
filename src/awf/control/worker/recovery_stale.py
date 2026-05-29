@@ -916,19 +916,26 @@ async def _record_recoverable_runtime_stranding(
             finding.reason_code,
         ):
             return
-        claims_will_clear = any(
-            value is not None
-            for value in (
-                ws.execution_claimed_by,
-                ws.execution_claim_expires_at,
-                ws.monitor_claimed_by,
-                ws.monitor_claim_expires_at,
+        if candidate.status == WorkspaceStatus.monitoring_pr:
+            claims_will_clear = (
+                ws.monitor_claimed_by is not None or ws.monitor_claim_expires_at is not None
             )
-        )
-        ws.execution_claimed_by = None
-        ws.execution_claim_expires_at = None
-        ws.monitor_claimed_by = None
-        ws.monitor_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
+        else:
+            claims_will_clear = any(
+                value is not None
+                for value in (
+                    ws.execution_claimed_by,
+                    ws.execution_claim_expires_at,
+                    ws.monitor_claimed_by,
+                    ws.monitor_claim_expires_at,
+                )
+            )
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
         if claims_will_clear:
             await repo.advance_workspace_version(ws)
         await repo.add_event(

@@ -66,6 +66,13 @@ from awf.db.repositories.task_repo import (
 )
 
 
+def _transition_releases_provisioning_execution_claim(
+    old_state: str,
+    to: WorkspaceStatus,
+) -> bool:
+    return old_state == WorkspaceStatus.provisioning.value and to != WorkspaceStatus.provisioning
+
+
 class _RepositoriesProxy:
     @property
     def set_committed_value(self) -> Any:
@@ -758,6 +765,9 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_releases_provisioning_execution_claim(old_state, to):
+            workspace.execution_claimed_by = None
+            workspace.execution_claim_expires_at = None
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
@@ -834,6 +844,9 @@ class WorkspaceRepository:
         old_state = workspace.status
         workspace.status = to.value
         workspace.updated_at = now
+        if _transition_releases_provisioning_execution_claim(old_state, to):
+            workspace.execution_claimed_by = None
+            workspace.execution_claim_expires_at = None
         return await self._finish_transition_if_current(
             workspace,
             old_state=old_state,
@@ -867,6 +880,9 @@ class WorkspaceRepository:
                 (Workspace.monitor_started_at.is_(None), now),
                 else_=Workspace.monitor_started_at,
             )
+        if _transition_releases_provisioning_execution_claim(from_status.value, to):
+            values["execution_claimed_by"] = None
+            values["execution_claim_expires_at"] = None
 
         result = await self._session.execute(
             update(Workspace)

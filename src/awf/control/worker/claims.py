@@ -721,11 +721,12 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
 async def _release_execution_claim(self: Any, workspace_id: str) -> None:
     try:
         async with self._session_factory() as session:
-            await WorkspaceRepository(session).release_execution_claim(
+            released = await WorkspaceRepository(session).release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
             )
-            await session.commit()
+            if released:
+                await session.commit()
     except Exception:
         _log.exception(
             "worker.execution_claim_release_failed",
