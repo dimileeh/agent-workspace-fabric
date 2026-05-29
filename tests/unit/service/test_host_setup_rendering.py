@@ -93,6 +93,26 @@ def test_first_run_warning_payload_includes_structured_remediation() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_warning_and_failure_payloads_omit_empty_issue_details() -> None:
+    warning_payload = first_run_warning_payload(
+        command="awf setup",
+        reason_code="PROVIDER_SETUP_AUTH_INVALID",
+        summary="GitHub provider is unavailable.",
+    )
+    failure_payload = first_run_failure_payload(
+        command="awf start",
+        reason_code="START_HEALTH_TIMEOUT",
+        summary="AWF services did not become healthy.",
+    )
+
+    for payload in (warning_payload, failure_payload):
+        rendered_json = render_first_run_json(payload)
+
+        assert "details" not in rendered_json
+        assert "details" not in rendered_json["issues"][0]
+
+
+@pytest.mark.unit
 def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
     payload = first_run_failure_payload(
         command="awf setup",
