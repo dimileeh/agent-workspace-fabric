@@ -191,6 +191,44 @@ for artifact in manifest["artifacts"]:
 PY
 ```
 
+The generator only writes manifest metadata; it does not publish files to
+GitHub Releases. After the tag exists and the publish workflow has produced the
+release artifacts, upload the exact distributions, checksum file, and manifest
+as GitHub Release assets before publishing release notes or pointing installers
+at the manifest:
+
+```bash
+gh release create v0.1.0 \
+  dist/* \
+  artifacts/release/python-distribution-sha256.txt \
+  artifacts/release/awf-install-manifest.json \
+  --title "Agent Workspace Fabric v0.1.0" \
+  --notes-file path/to/release-notes.md \
+  --verify-tag
+```
+
+If the GitHub Release already exists, attach or replace the assets explicitly:
+
+```bash
+gh release upload v0.1.0 \
+  dist/* \
+  artifacts/release/python-distribution-sha256.txt \
+  artifacts/release/awf-install-manifest.json \
+  --clobber
+```
+
+Actions artifacts are workflow audit artifacts only; they are not served from
+`/releases/download/`. Do not publish, advertise, or let installers consume
+`awf-install-manifest.json` until every manifest artifact URL resolves from the
+GitHub Release:
+
+```bash
+jq -r '.artifacts[].url' artifacts/release/awf-install-manifest.json |
+  while IFS= read -r url; do
+    curl --fail --head --location "$url" >/dev/null
+  done
+```
+
 Channel semantics:
 
 - `stable` is for final package versions such as `0.1.0` and `1.2.3`.

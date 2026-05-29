@@ -27,3 +27,17 @@ def test_releasing_docs_explain_manifest_inspection_and_verification() -> None:
     assert "signatures" in docs
     assert "reserved" in docs
     assert "/latest/" not in docs
+
+
+@pytest.mark.unit
+def test_releasing_docs_require_release_asset_publication_before_manifest_use() -> None:
+    """Manifest docs require published GitHub Release assets before consumption."""
+    docs = RELEASING_PATH.read_text(encoding="utf-8")
+
+    assert "GitHub Release assets" in docs
+    assert "Actions artifacts" in docs
+    assert "not served from" in docs
+    assert "`/releases/download/`" in docs
+    assert "gh release upload" in docs
+    assert "curl --fail --head --location" in docs
+    assert "Do not publish, advertise, or let installers consume" in docs
