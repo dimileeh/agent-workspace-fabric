@@ -311,6 +311,29 @@ def test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar() -> No
 
 
 @pytest.mark.unit
+def test_first_run_pretty_renders_json_style_scalar_details() -> None:
+    """Verify pretty scalar details match JSON-style boolean/null rendering."""
+    payload = first_run_success_payload(
+        command="awf setup",
+        summary="AWF first-run checks passed.",
+        details={
+            "healthy": True,
+            "cache_warm": False,
+            "retry_after": None,
+            "attempts": 3,
+        },
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+    lines = rendered_pretty.splitlines()
+
+    assert "  attempts: 3" in lines
+    assert "  cache_warm: false" in lines
+    assert "  healthy: true" in lines
+    assert "  retry_after: null" in lines
+
+
+@pytest.mark.unit
 def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
     """Verify every first-run failure reason renders a complete pretty panel."""
     for reason_code in FIRST_RUN_FAILURE_REASON_CODES:

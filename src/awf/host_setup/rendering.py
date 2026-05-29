@@ -455,7 +455,7 @@ def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str
 
 def _format_pretty_value(value: Any) -> str:
     """Return a stable scalar representation for pretty output."""
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (bool, int, float, list, tuple)) or value is None:
         return json.dumps(value, sort_keys=True)
     return str(value)
 
