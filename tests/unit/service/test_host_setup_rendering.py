@@ -8,6 +8,7 @@ import pytest
 
 from awf.host_setup.rendering import (
     FIRST_RUN_FAILURE_REASON_CODES,
+    _redact_provider_refs,
     first_run_failure_payload,
     first_run_success_payload,
     first_run_warning_payload,
@@ -177,3 +178,20 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
     assert "plain-file:///tmp/awf-secret" not in rendered_json_text
     assert "[redacted]" in rendered_json_text
     assert "[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
+    redacted = _redact_provider_refs(
+        (
+            "env://OPENAI_API_KEY",
+            ["plain-file:///tmp/awf-secret"],
+            {"provider_ref": "keyring://awf/github/token"},
+        )
+    )
+
+    assert redacted == (
+        "[redacted]",
+        ["[redacted]"],
+        {"provider_ref": "[redacted]"},
+    )

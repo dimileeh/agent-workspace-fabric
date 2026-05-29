@@ -321,7 +321,7 @@ def _redact_provider_refs(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_provider_refs(item) for item in value]
     if isinstance(value, tuple):
-        return [_redact_provider_refs(item) for item in value]
+        return tuple(_redact_provider_refs(item) for item in value)
     if isinstance(value, (set, frozenset)):
         return [_redact_provider_refs(item) for item in sorted(value, key=str)]
     if isinstance(value, str):
