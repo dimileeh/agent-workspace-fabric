@@ -53,9 +53,11 @@ async function validateInBrowser() {
 }
 
 function launchBrowser() {
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim();
   const promise = chromium.launch({
     headless: true,
     args: ["--no-sandbox"],
+    ...(executablePath ? { executablePath } : {}),
   }).catch((error) => {
     if (browserPromise === promise) {
       browserPromise = undefined;
