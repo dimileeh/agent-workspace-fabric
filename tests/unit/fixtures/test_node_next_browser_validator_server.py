@@ -182,9 +182,14 @@ def test_browser_sidecar_dockerfile_runs_validator_as_non_root_user() -> None:
     dockerfile = _BROWSER_DOCKERFILE.read_text(encoding="utf-8")
 
     assert "useradd --create-home --uid 10001 awf" in dockerfile
+    assert "mkdir -p /home/awf/.cache /home/awf/.config" in dockerfile
+    assert "chown -R awf:awf /app /home/awf" in dockerfile
     assert "chown -R awf:awf /app" in dockerfile
     assert "COPY --chown=awf:awf browser/validator-server.mjs" in dockerfile
     assert "COPY --chown=awf:awf scripts/container-healthcheck.mjs" in dockerfile
+    assert "ENV HOME=/home/awf" in dockerfile
+    assert "ENV XDG_CACHE_HOME=/home/awf/.cache" in dockerfile
+    assert "ENV XDG_CONFIG_HOME=/home/awf/.config" in dockerfile
     assert "USER awf" in dockerfile
     assert dockerfile.index("USER awf") < dockerfile.index(
         'CMD ["node", "/app/browser/validator-server.mjs"]'

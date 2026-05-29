@@ -11,12 +11,16 @@ RUN apt-get update \
     && mkdir -p /app/browser /app/scripts \
     && npm install --prefix /app/browser --omit=dev --no-audit --no-fund --no-save playwright-core@1.49.1 \
     && useradd --create-home --uid 10001 awf \
-    && chown -R awf:awf /app
+    && mkdir -p /home/awf/.cache /home/awf/.config \
+    && chown -R awf:awf /app /home/awf
 
 COPY --chown=awf:awf browser/validator-server.mjs ./browser/validator-server.mjs
 COPY --chown=awf:awf scripts/container-healthcheck.mjs ./scripts/container-healthcheck.mjs
 
 ENV NODE_ENV=production
+ENV HOME=/home/awf
+ENV XDG_CACHE_HOME=/home/awf/.cache
+ENV XDG_CONFIG_HOME=/home/awf/.config
 ENV PORT=9323
 ENV APP_BASE_URL=http://app:3000
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
