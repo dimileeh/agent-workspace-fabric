@@ -206,6 +206,7 @@ async def _list_stale_active_execution_candidates(
     active_execution_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
     admission_slot_status_values = [status.value for status in _REQUESTED_ADMISSION_SLOT_STATUSES]
     claim_cutoff = datetime.now(UTC)
+    worker_node_id = self._config.node_id or "local"
     stmt = (
         select(
             Workspace.id,
@@ -220,7 +221,7 @@ async def _list_stale_active_execution_candidates(
         .where(Workspace.status.in_(active_status_values))
         .where(
             or_(
-                Workspace.node_id == self._config.node_id,
+                Workspace.node_id == worker_node_id,
                 and_(
                     Workspace.node_id.is_(None),
                     Workspace.status.in_(admission_slot_status_values),
