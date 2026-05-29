@@ -6,6 +6,8 @@ import re
 
 from awf.common.token_patterns import compile_known_token_re, compile_token_assignment_re
 
+# Runtime logs intentionally use angle brackets; audit and first-run JSON use
+# ``awf.common.audit.REDACTION_MARKER`` as their separate stable contract.
 REDACTION_MARKER = "<redacted>"
 
 _URL_CREDENTIAL_RE = re.compile(r"(\bhttps?://)([^/\s:@]+(?::[^/\s@]+)?@)", re.IGNORECASE)

@@ -1,4 +1,4 @@
-"""Shared token-shaped secret recognition patterns."""
+"""Shared token-shaped secret and provider-ref recognition patterns."""
 
 from __future__ import annotations
 
@@ -32,6 +32,18 @@ TOKEN_ASSIGNMENT_PATTERN: Final = (
     r"(?P<value>[^\s\"'`,;)}\]]+)"
     r"(?P=quote)"
 )
+PROVIDER_REF_PATTERN: Final = (
+    # Match from the start of a URI-like scheme token so hyphen-prefixed
+    # contexts like x-plain-file:// redact as a whole, while safeplain-file://
+    # remains ordinary text.
+    r"(?<![A-Za-z0-9_-])"
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*-)?(?:keyring|env|plain-file)://"
+    r"[^\s\"'`,;)}\]]+"
+)
+PROVIDER_REF_KEY_PATTERN: Final = r"(?:credential|provider)[_-]refs?"
+PROVIDER_REF_KEY_SUFFIX_PATTERN: Final = (
+    r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)"
+)
 
 
 def compile_known_token_re(*, ignorecase: bool = False) -> re.Pattern[str]:
@@ -51,3 +63,18 @@ def compile_known_token_re(*, ignorecase: bool = False) -> re.Pattern[str]:
 def compile_token_assignment_re() -> re.Pattern[str]:
     """Compile the shared assignment-style token redaction pattern."""
     return re.compile(TOKEN_ASSIGNMENT_PATTERN, re.IGNORECASE)
+
+
+def compile_provider_ref_re() -> re.Pattern[str]:
+    """Compile the shared provider credential reference pattern."""
+    return re.compile(PROVIDER_REF_PATTERN, re.IGNORECASE)
+
+
+def compile_provider_ref_key_re() -> re.Pattern[str]:
+    """Compile the shared provider credential reference key pattern."""
+    return re.compile(PROVIDER_REF_KEY_PATTERN, re.IGNORECASE)
+
+
+def compile_provider_ref_key_suffix_re() -> re.Pattern[str]:
+    """Compile the shared provider credential reference key-suffix pattern."""
+    return re.compile(PROVIDER_REF_KEY_SUFFIX_PATTERN, re.IGNORECASE)

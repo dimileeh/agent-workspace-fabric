@@ -7,7 +7,12 @@ import re
 import pytest
 
 from awf.common import audit, redaction
-from awf.common.token_patterns import KNOWN_TOKEN_PATTERN
+from awf.common.token_patterns import (
+    KNOWN_TOKEN_PATTERN,
+    PROVIDER_REF_KEY_PATTERN,
+    PROVIDER_REF_KEY_SUFFIX_PATTERN,
+    PROVIDER_REF_PATTERN,
+)
 from awf.host_setup import rendering
 
 
@@ -18,6 +23,19 @@ def test_redactors_share_known_token_pattern() -> None:
     assert redaction._KNOWN_TOKEN_RE.pattern == KNOWN_TOKEN_PATTERN  # noqa: SLF001
     assert rendering._FIRST_RUN_KNOWN_TOKEN_RE.pattern == KNOWN_TOKEN_PATTERN  # noqa: SLF001
     assert rendering._FIRST_RUN_KNOWN_TOKEN_RE.flags & re.IGNORECASE  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_first_run_redactor_uses_shared_provider_ref_patterns() -> None:
+    """Verify first-run provider-ref redaction compiles from common patterns."""
+    assert rendering._PROVIDER_REF_RE.pattern == PROVIDER_REF_PATTERN  # noqa: SLF001
+    assert rendering._PROVIDER_REF_KEY_RE.pattern == PROVIDER_REF_KEY_PATTERN  # noqa: SLF001
+    assert (  # noqa: SLF001
+        rendering._PROVIDER_REF_KEY_SUFFIX_RE.pattern == PROVIDER_REF_KEY_SUFFIX_PATTERN
+    )
+    assert rendering._PROVIDER_REF_RE.flags & re.IGNORECASE  # noqa: SLF001
+    assert rendering._PROVIDER_REF_KEY_RE.flags & re.IGNORECASE  # noqa: SLF001
+    assert rendering._PROVIDER_REF_KEY_SUFFIX_RE.flags & re.IGNORECASE  # noqa: SLF001
 
 
 @pytest.mark.unit

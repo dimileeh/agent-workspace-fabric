@@ -11,7 +11,12 @@ from typing import Any, ClassVar, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from awf.common.audit import REDACTION_MARKER, redact_audit_value
-from awf.common.token_patterns import compile_known_token_re
+from awf.common.token_patterns import (
+    compile_known_token_re,
+    compile_provider_ref_key_re,
+    compile_provider_ref_key_suffix_re,
+    compile_provider_ref_re,
+)
 from awf.host_setup.config import (
     HOST_SETUP_CONFIG_CORRUPT,
     HOST_SETUP_CONFIG_SECRET_VALUE,
@@ -94,23 +99,9 @@ FIRST_RUN_FAILURE_REASON_CODES: tuple[str, ...] = (
 FirstRunStatus = Literal["success", "warning", "blocked", "failed"]
 FirstRunSeverity = Literal["info", "warning", "blocked", "failed"]
 
-_PROVIDER_REF_RE = re.compile(
-    # Match from the start of a URI-like scheme token so hyphen-prefixed
-    # contexts like x-plain-file:// redact as a whole, while safeplain-file://
-    # remains ordinary text.
-    r"(?<![A-Za-z0-9_-])"
-    r"(?:[A-Za-z][A-Za-z0-9+.-]*-)?(?:keyring|env|plain-file)://"
-    r"[^\s\"'`,;)}\]]+",
-    re.IGNORECASE,
-)
-_PROVIDER_REF_KEY_RE = re.compile(
-    r"(?:credential|provider)[_-]refs?",
-    re.IGNORECASE,
-)
-_PROVIDER_REF_KEY_SUFFIX_RE = re.compile(
-    r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)",
-    re.IGNORECASE,
-)
+_PROVIDER_REF_RE = compile_provider_ref_re()
+_PROVIDER_REF_KEY_RE = compile_provider_ref_key_re()
+_PROVIDER_REF_KEY_SUFFIX_RE = compile_provider_ref_key_suffix_re()
 _NUMERIC_SUFFIX_KEY_RE = re.compile(r"(?P<base>.*?)#(?P<suffix>\d+)$")
 _FIRST_RUN_KNOWN_TOKEN_RE = compile_known_token_re(ignorecase=True)
 
@@ -291,6 +282,10 @@ def first_run_failure_payload(
     next_steps: tuple[str, ...] = (),
 ) -> FirstRunPayload:
     """Build a blocked/failed first-run payload with one catalog-backed issue.
+
+    The helper mirrors ``status`` into the single issue's ``severity``. For
+    payloads with different command status and triage severity semantics, build
+    a ``FirstRunPayload`` with ``first_run_issue_from_reason_code`` directly.
 
     ``details`` are attached to the single issue (``issues[0].details``),
     not to the top-level payload, unlike ``first_run_success_payload``.
