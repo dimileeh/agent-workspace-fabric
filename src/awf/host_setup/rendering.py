@@ -285,8 +285,11 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
         if issue.get("details") == {}:
             issue.pop("details")
         remediation = issue.get("remediation")
-        if isinstance(remediation, dict) and remediation.get("next_steps") == []:
-            remediation.pop("next_steps")
+        if isinstance(remediation, dict):
+            if remediation.get("next_steps") == []:
+                remediation.pop("next_steps")
+            if remediation.get("related_command") == "":
+                remediation.pop("related_command")
     return cast(dict[str, Any], redact_first_run_value(raw_payload))
 
 

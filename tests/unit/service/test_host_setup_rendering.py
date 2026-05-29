@@ -139,6 +139,28 @@ def test_first_run_json_preserves_non_empty_remediation_next_steps() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_json_omits_empty_remediation_related_command() -> None:
+    issue = first_run_issue_from_reason_code(
+        "PROVIDER_SETUP_AUTH_INVALID",
+        severity="warning",
+        related_command="",
+    )
+    payload = FirstRunPayload(
+        status="warning",
+        command="awf setup",
+        summary="GitHub provider is unavailable.",
+        reason_code="PROVIDER_SETUP_AUTH_INVALID",
+        issues=(issue,),
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert "related_command" not in rendered_json["issues"][0]["remediation"]
+    assert "Related Command:" not in rendered_pretty
+
+
+@pytest.mark.unit
 def test_first_run_warning_and_failure_payloads_omit_empty_issue_details() -> None:
     warning_payload = first_run_warning_payload(
         command="awf setup",

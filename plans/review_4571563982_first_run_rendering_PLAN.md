@@ -10,6 +10,11 @@ strip empty top-level `next_steps: []` and empty remediation-level
 `next_steps: []` so absence checks are consistent for empty optional
 collections.
 
+A follow-up review on the same comment identified one more empty optional value:
+`remediation.related_command` can be an empty string when a future catalog entry
+or explicit override provides `""`. Pretty rendering treats that as absent, so
+JSON rendering should strip it as well for contract consistency.
+
 Scope is limited to first-run rendering behavior, focused tests, and this plan
 and validation record.
 
@@ -24,6 +29,9 @@ and validation record.
 - Keep non-empty issue details in warning/failure payloads unchanged and
   redacted.
 - Preserve the existing public `redact_first_run_value` tuple behavior.
+- Add a regression test proving empty remediation `related_command: ""` is
+  omitted from JSON while pretty output remains absent.
+- Keep non-empty remediation `related_command` unchanged.
 - Do not broaden validation beyond focused tests; AWF/GitHub own broad
   validation after agent completion.
 
@@ -36,9 +44,12 @@ and validation record.
    `next_steps`, ensuring populated steps remain in JSON.
 3. Update `render_first_run_json` to remove empty `details` and empty
    `next_steps` from the relevant dictionaries after `model_dump`.
-4. Run focused tests for the new regression, existing warning details behavior,
+4. Add a focused failing test for empty remediation `related_command: ""`.
+5. Update `render_first_run_json` to strip empty remediation
+   `related_command` after `model_dump`.
+6. Run focused tests for the new regression, existing warning details behavior,
    non-empty next-step preservation, and tuple-preservation behavior.
-5. Record validation evidence in
+7. Record validation evidence in
    `plans/review_4571563982_first_run_rendering_VALIDATION.md`.
 
 ## Verification Commands and Pass Criteria
@@ -47,6 +58,7 @@ and validation record.
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
 
 Pass criteria: all focused tests pass; no broad AWF/GitHub-owned validation is

@@ -17,6 +17,10 @@ Plan reference: `plans/review_4571563982_first_run_rendering_PLAN.md`
   preserved; the review's tuple-preservation observation was already addressed
   in the current workspace by `preserve_tuples=True` and its public-pipeline
   regression test.
+- Complete: Added a regression test proving empty remediation
+  `related_command: ""` is omitted from JSON while pretty output remains absent.
+- Complete: Existing non-empty remediation `related_command` behavior remains
+  unchanged, covered by the failure payload test.
 - Complete: Validation stayed focused. Full AWF/GitHub validation was not run
   inside the agent phase because AWF owns broad validation after completion.
 
@@ -39,6 +43,12 @@ Focused checks:
   - Pass: `1 passed in 0.45s`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_and_failure_payloads_omit_empty_issue_details tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
   - Pass: `5 passed in 0.44s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command -q`
+  - Initial failure before the renderer change: JSON still contained
+    `related_command: ""`.
+  - Pass after the renderer change: `1 passed in 0.43s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation tests/unit/service/test_host_setup_rendering.py::test_first_run_failure_payload_includes_reason_and_safe_details tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
+  - Pass: `6 passed in 0.42s`
 - `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
   - Pass: `All checks passed!`
 - `git diff --check`
