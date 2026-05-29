@@ -47,6 +47,16 @@ def _assert_workspace_create_help_exposes_model_and_effort(stdout: str) -> None:
     assert "--effort" in visible_help
 
 
+def _assert_current_first_path_guidance(stdout: str) -> None:
+    visible_help = " ".join(click.unstyle(stdout).split()).lower()
+    stale_help = visible_help.replace("`", "")
+    assert "current runnable first path" in visible_help
+    assert "awf service bootstrap" in visible_help
+    assert "awf init <path>" in visible_help
+    assert "recommended first path is awf setup" not in stale_help
+    assert "awf setup, then awf start" not in stale_help
+
+
 def _assert_control_headers(
     headers: dict[str, str],
     *,
@@ -945,25 +955,25 @@ class TestCliHelp:
         result = _runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "Mutates:" in result.stdout
-        assert "recommended first path" in result.stdout.lower()
+        _assert_current_first_path_guidance(result.stdout)
 
     @pytest.mark.unit
     def test_init_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["init", "--help"])
         assert result.exit_code == 0
-        assert "recommended first path" in result.stdout.lower()
+        _assert_current_first_path_guidance(result.stdout)
 
     @pytest.mark.unit
     def test_service_bootstrap_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["service", "bootstrap", "--help"])
         assert result.exit_code == 0
-        assert "recommended first path" in result.stdout.lower()
+        _assert_current_first_path_guidance(result.stdout)
 
     @pytest.mark.unit
     def test_workspace_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["workspace", "--help"])
         assert result.exit_code == 0
-        assert "recommended first path" in result.stdout.lower()
+        _assert_current_first_path_guidance(result.stdout)
 
 
 class TestServiceDoctorBundle:

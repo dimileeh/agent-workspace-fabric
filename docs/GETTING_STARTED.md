@@ -67,36 +67,39 @@ uv sync
 Homebrew is planned after the Python package has stable tagged artifacts and a
 passing formula audit; it is not a supported install channel yet.
 
-### Recommended Local Bootstrap
+### Recommended First-Run Sequence
 
-Once AWF is installed, the fastest path to a working local control plane is
-`awf init`. With no arguments it bootstraps AWF on this machine: it checks
-Docker, ensures the host state directory under
-`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, seeds
-`docker/compose/.env` from `docker/compose/.env.example` when present or
-`.env.example` otherwise when the source checkout includes
-`docker/compose/local-service.yml`, and falls back to `.env` otherwise (use
-`--no-write-env` to skip), then starts or validates the local Postgres +
-migrate + API + worker stack via
-`awf service bootstrap`.
+Once AWF is installed, the current runnable first-run sequence is local Core
+startup, health check, then project onboarding. Export the required local
+service values before bootstrapping Core so Compose can interpolate the API,
+worker, and Postgres service environment:
 
 ```bash
-awf init
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
+export AWF_GITHUB_TOKEN="$(gh auth token)"
+awf service bootstrap
 awf service status --format pretty
 ```
 
-If bootstrap or first-run health checks fail, use the
+`awf service bootstrap` starts the local AWF Core stack, and
+`awf service status --format pretty` confirms API, database, Docker, image,
+disk, provider, and cleanup health.
+
+`awf setup` and `awf start` are reserved first-run command surfaces. They are
+present in help for the future grammar, but today `awf setup` exits with
+`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
+`awf service bootstrap` until those setup and start slices land.
+
+If service bootstrap, startup, or first-run health checks fail, use the
 [First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
 before continuing with provider or workspace-level work.
 
-After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
-PRs and use `awf init <path>` to create or inspect a project repository's
-`.awf/workspace.yml` (see [Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode
-walkthrough and per-provider copy-paste prompts). The two `awf init` shapes are
-explicit:
+After local Core reports success, use `awf init <path>` to create or inspect a
+project repository's `.awf/workspace.yml` (see
+[Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode walkthrough and
+per-provider copy-paste prompts).
 
-- `awf init` — bootstrap AWF on this machine (Docker, state dir,
-  `docker/compose/.env` or `.env`, service stack).
 - `awf init <path>` — run local project onboarding. Interactive terminals get
   a short guided profile setup; automation can use
   `awf init <path> --write-profile --yes` to write detected defaults.
@@ -111,16 +114,17 @@ monitor policy, idempotency, console inspection, and mocked-local validation.
 
 ### Configure Environment
 
-In source checkouts that include local Compose assets, `awf init` writes
-`docker/compose/.env` automatically. The repo-root `.env` is still useful for
-Python `awf` commands in package or non-source contexts.
+In source checkouts that include local Compose assets, `awf service bootstrap`
+uses `docker/compose/.env` for Compose-interpolated service values. The
+repo-root `.env` is still useful for Python `awf` commands in package or
+non-source contexts.
 
 Transition note: `awf service status`, `awf service doctor`, and
 `awf service bootstrap` resolve `docker/compose/.env` from verified AWF source
 checkouts with local service Compose assets. In package installs, AWF uses the
 bundled Compose assets and reads `.env` from the working directory; copy any
-existing `docker/compose/.env` values to `.env` or run `awf init` from the
-directory where you want local service settings to live.
+existing `docker/compose/.env` values to `.env` or run `awf service bootstrap`
+from the directory where you want local service settings to live.
 
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,

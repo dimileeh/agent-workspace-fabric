@@ -8,11 +8,8 @@ from typing import Any
 
 import pytest
 import yaml
-from typer.testing import CliRunner
 
-from awf.cli.main import app
-
-_runner = CliRunner()
+from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service_bootstrap
 
 
 def _docker_diagnostic(status: str = "ok") -> Any:
@@ -307,7 +304,7 @@ def test_init_without_path_preserves_root_env_header_before_overlay_only_keys(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -360,7 +357,7 @@ def test_init_without_path_merges_root_env_into_root_example_when_compose_exampl
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -416,7 +413,7 @@ def test_init_without_path_preserves_context_before_seed_overlay_key(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -470,7 +467,7 @@ def test_init_without_path_deduplicates_root_only_overlay_keys(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -524,7 +521,7 @@ def test_init_without_path_preserves_trailing_root_env_overlay_context(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -570,7 +567,7 @@ def test_init_without_path_preserves_comment_only_root_env_overlay(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -620,7 +617,7 @@ def test_init_without_path_keeps_trailing_shared_overlay_context_with_seed_key(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_text(encoding="utf-8") == (
@@ -661,7 +658,7 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     expected_env_file = workspace_compose / ".env"
@@ -690,7 +687,7 @@ def test_init_without_path_does_not_seed_current_compose_dir_without_asset_root(
     root_example.write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=None)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
@@ -724,7 +721,7 @@ def test_init_without_path_seeds_local_env_for_packaged_bootstrap_assets(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=packaged_root)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (project_dir / ".env").read_text(encoding="utf-8") == "AWF_API_TOKEN=packaged\n"
@@ -986,7 +983,7 @@ def test_init_without_path_does_not_seed_asset_root_without_compose_service(
     root_example.write_text("AWF_API_TOKEN=root\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
@@ -1016,7 +1013,7 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
 
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
@@ -1070,7 +1067,7 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
 
-    result = _runner.invoke(app, ["init", "--provider", "github"])
+    result = invoke_init_service_bootstrap(["--provider", "github"])
 
     assert result.exit_code == 0, result.output
     bootstrap_call = captured["bootstrap_calls"][0]
@@ -1085,6 +1082,25 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     assert service_environ["AWF_GITHUB_TOKEN"] == secret
     assert bootstrap_call["env_file"] == workspace_root / "docker" / "compose" / ".env"
     assert secret not in result.output
+
+
+@pytest.mark.unit
+def test_init_bootstrap_helper_rejects_unknown_provider_before_local_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy helper provider validation should fail before Compose discovery."""
+    from awf.cli import init_ops
+
+    def _fail_compose_resolution() -> None:
+        pytest.fail("provider validation should run before Compose path resolution")
+
+    monkeypatch.setattr(init_ops, "_resolve_service_compose_paths", _fail_compose_resolution)
+
+    result = invoke_init_service_bootstrap(["--provider", "bogus"])
+
+    assert result.exit_code == 2
+    assert "error: unknown provider(s): bogus" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.unit
@@ -1129,7 +1145,7 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
 
-    result = _runner.invoke(app, ["init", "--no-write-env"])
+    result = invoke_init_service_bootstrap(["--no-write-env"])
 
     assert result.exit_code == 0, result.output
     assert captured["preflight_settings"].docker_host == docker_host
@@ -1187,7 +1203,7 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (compose / ".env").read_bytes() == compose_example.read_bytes()
@@ -1223,7 +1239,7 @@ def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
 
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = compose / ".env"
@@ -1249,7 +1265,7 @@ def test_init_without_path_does_not_overwrite_existing_source_compose_env(
     example.write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert env_file.read_text(encoding="utf-8") == "AWF_API_TOKEN=already_set\n"
@@ -1273,7 +1289,7 @@ def test_init_without_path_preserves_env_created_during_seed_race(
         contents=b"AWF_API_TOKEN=concurrent\n",
     )
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / ".env").read_bytes() == b"AWF_API_TOKEN=concurrent\n"
@@ -1290,7 +1306,7 @@ def test_init_without_path_seeds_env_when_missing(
     example.write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     env_file = tmp_path / ".env"
@@ -1310,7 +1326,7 @@ def test_init_without_path_does_not_emit_seeded_token_values(
     (tmp_path / ".env.example").write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert secret not in result.output
@@ -1331,7 +1347,7 @@ def test_init_without_path_does_not_emit_seeded_compose_token_values(
     example.write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert secret not in result.output
@@ -1349,7 +1365,7 @@ def test_init_without_path_does_not_overwrite_existing_env(
     env_file.write_text("AWF_API_TOKEN=already_set\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert env_file.read_text(encoding="utf-8") == "AWF_API_TOKEN=already_set\n"
@@ -1365,7 +1381,7 @@ def test_init_without_path_no_write_env_flag_skips_seeding(
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init", "--no-write-env"])
+    result = invoke_init_service_bootstrap(["--no-write-env"])
 
     assert result.exit_code == 0, result.output
     assert not (tmp_path / ".env").exists()
@@ -1381,7 +1397,7 @@ def test_init_without_path_warns_when_env_example_missing(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert not (tmp_path / ".env").exists()
@@ -1402,7 +1418,7 @@ def test_init_without_path_warns_when_compose_env_templates_missing(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
@@ -1442,7 +1458,7 @@ def test_init_without_path_warns_when_compose_env_parent_creation_fails(
     captured = _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
     _fail_path_mkdir(monkeypatch, failing_path="docker/compose")
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
     output = result.output
 
     assert result.exit_code == 0, output
@@ -1468,7 +1484,7 @@ def test_init_without_path_warns_when_env_write_fails(
     captured = _stub_bootstrap_mode(monkeypatch)
     _fail_path_write(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
     output = result.output
 
     assert result.exit_code == 0, output

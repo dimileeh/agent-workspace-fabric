@@ -16,6 +16,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import click
 import httpx
@@ -25,6 +26,7 @@ from click.core import ParameterSource
 from awf.cli.common import (
     OutputFormat,
     _call,
+    _emit,
 )
 from awf.cli.init_ops import (
     _prompt_project_onboarding_choices,
@@ -32,13 +34,14 @@ from awf.cli.init_ops import (
     _resolve_service_env_files,
     _resolve_service_runtime_env_files,
     _run_init_project_onboarding,
-    _run_init_service_bootstrap,
     _stdio_is_interactive,
     _trusted_service_compose_env_file,
 )
 from awf.cli.mcp_commands import mcp_app
 from awf.cli.profile_smoke_commands import profile_app, smoke_app
 from awf.cli.service_commands import service_app
+from awf.cli.setup_commands import setup_command
+from awf.cli.start_commands import start_command
 from awf.cli.workspace_commands import locks_app, operations_app, workspace_app
 
 __all__ = [
@@ -55,9 +58,9 @@ __all__ = [
 ]
 
 _DX_FIRST_PATH_HELP = """
-For first-time users: the recommended first path is to run `awf init`
-to verify prerequisites and bootstrap your local service stack, followed by
-`awf init <path>` to prepare your project repository.
+For first-time users: the current runnable first path is
+`awf service bootstrap`, then `awf init <path>` to prepare your project
+repository. `awf setup` and `awf start` are reserved future command surfaces.
 """
 
 _MUTATES_GLOBAL_HELP = """
@@ -66,9 +69,8 @@ via the async worker.
 """
 
 _PROVIDER_HELP_PASSTHROUGH = (
-    "Repeatable provider strictness check passed through to local "
-    "service bootstrap: github, codex, claude_code, gemini, opencode, "
-    "or docker."
+    "Legacy no-path init bootstrap provider flag. Hidden from help and rejected "
+    "with migration guidance; use `awf service bootstrap`."
 )
 
 
@@ -86,25 +88,95 @@ app.add_typer(locks_app, name="locks")
 app.add_typer(operations_app, name="operations")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(smoke_app, name="smoke")
+app.command(
+    "setup",
+    help=(
+        "Prepare this machine for AWF first-run use. "
+        "Reserved before full setup checks land. "
+        "Current runnable path: awf service bootstrap, then awf init <path>."
+    ),
+)(setup_command)
+app.command(
+    "start",
+    help=(
+        "Start local AWF Core after setup. "
+        "Reserved before service startup lands. "
+        "Current runnable path: awf service bootstrap, then awf init <path>."
+    ),
+)(start_command)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
-_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
-_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
+_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = "180"
+_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = "2"
+_INIT_REQUIRES_PROJECT_PATH_REASON = "AWF_INIT_REQUIRES_PROJECT_PATH"
+
+
+def _init_migration_payload(
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "error",
+        "reason_code": _INIT_REQUIRES_PROJECT_PATH_REASON,
+        "command": "awf init",
+        "message": "`awf init` requires a project path.",
+        "next_steps": [
+            "Run awf service bootstrap to start local AWF Core.",
+            "Run awf init <path> to onboard a project repository.",
+        ],
+    }
+    if legacy_flags:
+        payload["rejected_flags"] = legacy_flags
+    if path_required_flags:
+        payload["path_required_flags"] = path_required_flags
+    return payload
+
+
+def _emit_init_migration_error(
+    fmt: OutputFormat,
+    *,
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> NoReturn:
+    payload = _init_migration_payload(legacy_flags, path_required_flags)
+    if fmt == OutputFormat.json:
+        _emit(payload, fmt)
+    else:
+        typer.echo("AWF init: project path required", err=True)
+        typer.echo(f"Reason: {_INIT_REQUIRES_PROJECT_PATH_REASON}", err=True)
+        typer.echo(
+            "Problem: `awf init` no longer bootstraps the local service stack.",
+            err=True,
+        )
+        if legacy_flags:
+            typer.echo(
+                "Rejected legacy no-path init flag(s): " + ", ".join(legacy_flags),
+                err=True,
+            )
+        if path_required_flags:
+            typer.echo(
+                "Project path required for flag(s): " + ", ".join(path_required_flags),
+                err=True,
+            )
+        typer.echo("Next:", err=True)
+        typer.echo("  - Run `awf service bootstrap` to start local AWF Core.", err=True)
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
+    raise typer.Exit(code=2)
 
 
 @app.command(
     "init",
-    help=f"Bootstrap AWF on this machine, or run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
+    help=f"Run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
 )
 def init(
     path: Path | None = typer.Argument(
         None,
         help=(
-            "Path to a checked-out repository. Omit to bootstrap the local "
-            "AWF service stack on this machine."
+            "Path to a checked-out repository. Required for project onboarding; "
+            "run `awf service bootstrap` first when local Core is not running."
         ),
     ),
     include_smoke_request: bool = typer.Option(
@@ -143,34 +215,32 @@ def init(
     write_env: bool = typer.Option(
         True,
         "--write-env/--no-write-env",
-        help=(
-            "When bootstrapping the local service, seed the Compose env target "
-            "if it is missing. Target path: docker/compose/.env. Uses existing "
-            "`.env` values before example templates, and uses `.env` when "
-            "Compose assets are unavailable. Has no effect in project-onboarding mode."
-        ),
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
     ),
-    timeout_seconds: float = typer.Option(
+    timeout_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS,
         "--timeout-seconds",
-        min=0.0,
-        help="Local service bootstrap: maximum time to wait for readiness.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
     ),
-    poll_interval_seconds: float = typer.Option(
+    poll_interval_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS,
         "--poll-interval-seconds",
-        min=0.01,
-        help="Local service bootstrap: seconds between readiness polls.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
     ),
-    skip_agent_runtime_build: bool = typer.Option(
+    skip_agent_runtime_build: bool = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         False,
         "--skip-agent-runtime-build",
-        help="Local service bootstrap: skip building the agent runtime image.",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
     ),
-    provider: list[str] = typer.Option(
+    provider: list[str] = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
         [],
         "--provider",
         help=_PROVIDER_HELP_PASSTHROUGH,
+        hidden=True,
     ),
     fmt: OutputFormat = typer.Option(
         OutputFormat.pretty,
@@ -178,7 +248,7 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
-    """Bootstrap the local AWF service or run project-onboarding checks."""
+    """Run project-onboarding checks for a repository path."""
     ctx = click.get_current_context()
 
     def _explicit(name: str) -> bool:
@@ -186,36 +256,35 @@ def init(
         return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
     if path is None:
-        project_only_flags: list[str] = []
-        if include_smoke_request:
-            project_only_flags.append("--include-smoke-request")
+        path_required_flags: list[str] = []
+        legacy_flags: list[str] = []
+        if _explicit("include_smoke_request"):
+            path_required_flags.append("--include-smoke-request")
         if _explicit("guided"):
-            project_only_flags.append("--guided" if guided else "--no-guided")
+            path_required_flags.append("--guided" if guided else "--no-guided")
         if _explicit("write_profile"):
-            project_only_flags.append("--write-profile")
+            path_required_flags.append("--write-profile")
         if _explicit("yes"):
-            project_only_flags.append("--yes")
+            path_required_flags.append("--yes")
         if _explicit("template"):
-            project_only_flags.append("--template")
+            path_required_flags.append("--template")
         if _explicit("force"):
-            project_only_flags.append("--force")
-        if project_only_flags:
-            typer.echo(
-                "error: project-onboarding flag(s) "
-                f"{', '.join(project_only_flags)} require a project path; pass "
-                "`awf init <path>`.",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        _run_init_service_bootstrap(
-            write_env=write_env,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            skip_agent_runtime_build=skip_agent_runtime_build,
-            providers=provider,
-            fmt=fmt,
+            path_required_flags.append("--force")
+        if _explicit("skip_agent_runtime_build"):
+            legacy_flags.append("--skip-agent-runtime-build")
+        if _explicit("provider"):
+            legacy_flags.append("--provider")
+        if _explicit("timeout_seconds"):
+            legacy_flags.append("--timeout-seconds")
+        if _explicit("poll_interval_seconds"):
+            legacy_flags.append("--poll-interval-seconds")
+        if _explicit("write_env"):
+            legacy_flags.append("--write-env" if write_env else "--no-write-env")
+        _emit_init_migration_error(
+            fmt,
+            legacy_flags=legacy_flags,
+            path_required_flags=path_required_flags,
         )
-        return
 
     bootstrap_only_flags: list[str] = []
     if _explicit("skip_agent_runtime_build"):
@@ -230,9 +299,9 @@ def init(
         bootstrap_only_flags.append("--write-env" if write_env else "--no-write-env")
     if bootstrap_only_flags:
         typer.echo(
-            "error: bootstrap-only flag(s) "
-            f"{', '.join(bootstrap_only_flags)} require running `awf init` "
-            "without a project path.",
+            "error: legacy bootstrap-only flag(s) "
+            f"{', '.join(bootstrap_only_flags)} are not valid for project onboarding; "
+            "run `awf service bootstrap` for local service setup.",
             err=True,
         )
         raise typer.Exit(code=2)

@@ -44,23 +44,37 @@ uv tool install . --force
 Homebrew is planned after AWF has stable tagged Python artifacts and a passing
 formula audit.
 
-## Bootstrap AWF
+## Set Up And Start AWF
 
-For PR creation and monitoring, export a GitHub token before bootstrapping so
-the API and worker containers receive it when they are created:
+The current runnable first-run sequence is local Core startup, health check,
+then project onboarding. Export the required local service values before
+starting Core so Compose can interpolate the API, worker, and Postgres service
+environment:
 
 ```bash
+export AWF_API_TOKEN="$(openssl rand -hex 32)"
+export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf init
+awf service bootstrap
 awf service status --format pretty
 ```
 
-`awf init` without a path checks local prerequisites, creates the host state
-directory, writes `docker/compose/.env` from `.env.example` when the source
-checkout contains `docker/compose/local-service.yml` (or `.env` in package
-installs), and starts the local Postgres, migration, API, and worker stack.
+`awf service bootstrap` starts the local AWF Core stack, and
+`awf service status --format pretty` confirms API, database, Docker, image,
+disk, provider, and cleanup health.
 
-If you set or refresh the GitHub token after `awf init`, rerun the service
+`awf setup` and `awf start` are reserved first-run command surfaces. They are
+present in help for the future grammar, but today `awf setup` exits with
+`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
+`awf service bootstrap` until those setup and start slices land.
+
+In source checkouts with local Compose assets, `awf service bootstrap` reads
+`docker/compose/.env` when that file already exists. If you prefer persistent
+values across shells, copy `.env.example` to `docker/compose/.env` and set
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and `AWF_GITHUB_TOKEN` there before
+bootstrapping.
+
+If you set or refresh the GitHub token after starting Core, rerun the service
 bootstrap so Compose recreates the service containers with the updated
 environment:
 
