@@ -101,9 +101,9 @@ docker image inspect awf-agent-runtime:latest
 
 ### Database Migrations
 
-SQLite local API runs create tables automatically at startup. For Postgres, the
-preferred bootstrap command runs migrations through the Compose `migrate`
-service before starting the API and worker:
+The control-plane database is PostgreSQL. The preferred bootstrap command runs
+Alembic migrations through the Compose `migrate` service before starting the API
+and worker:
 
 ```bash
 uv run --python 3.12 --extra dev awf service bootstrap
