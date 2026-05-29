@@ -6,6 +6,8 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 
+from awf.common.token_patterns import compile_known_token_re, compile_token_assignment_re
+
 AUDIT_SCHEMA = "control_audit.v1"
 REDACTION_MARKER = "[redacted]"
 
@@ -30,31 +32,12 @@ _AUTHORIZATION_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.IGNORECASE)
-_TOKEN_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<key>"
-    r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
-    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY)"
-    r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
-    r"|PASSWORD|PASSWD|SECRET"
-    r")\b"
-    r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
-    r"(?P=quote)",
-    re.IGNORECASE,
-)
-_KNOWN_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
-    r"github_pat_[A-Za-z0-9_]{8,}|"
-    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
-    r"sk-ant-[A-Za-z0-9_-]{8,}|"
-    r"sk-proj-[A-Za-z0-9_-]{8,}|"
-    r"sk-[A-Za-z0-9_-]{8,}|"
-    r"AIza[A-Za-z0-9_-]{12,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{8,}"
-    r")(?![A-Za-z0-9_])"
-)
+_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
+# Audit diagnostics intentionally redact bare provider prefixes such as
+# ``ghp_`` when they appear as values. This can catch non-secret false
+# positives, but keeps rejected/truncated credential values out of durable
+# audit records.
+_KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
 
 
 def build_audit_payload(
@@ -77,7 +60,6 @@ def build_audit_payload(
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the compact JSON payload stored on audit workspace events."""
-
     payload: dict[str, Any] = {
         "schema": AUDIT_SCHEMA,
         "actor": actor,
@@ -102,9 +84,8 @@ def build_audit_payload(
     return cast(dict[str, Any], _drop_none(redact_audit_value(payload)))
 
 
-def redact_audit_value(value: Any) -> Any:
+def redact_audit_value(value: Any, *, preserve_tuples: bool = False) -> Any:
     """Recursively redact token-like values while preserving usage metadata."""
-
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
@@ -112,14 +93,25 @@ def redact_audit_value(value: Any) -> Any:
             if _is_sensitive_key(key_text):
                 redacted[key_text] = REDACTION_MARKER
             else:
-                redacted[key_text] = redact_audit_value(item)
+                redacted[key_text] = redact_audit_value(
+                    item,
+                    preserve_tuples=preserve_tuples,
+                )
         return redacted
     if isinstance(value, list):
-        return [redact_audit_value(item) for item in value]
+        return [redact_audit_value(item, preserve_tuples=preserve_tuples) for item in value]
     if isinstance(value, tuple):
-        return [redact_audit_value(item) for item in value]
+        redacted_items = tuple(
+            redact_audit_value(item, preserve_tuples=preserve_tuples) for item in value
+        )
+        if preserve_tuples:
+            return redacted_items
+        return list(redacted_items)
     if isinstance(value, (set, frozenset)):
-        return [redact_audit_value(item) for item in sorted(value, key=str)]
+        return [
+            redact_audit_value(item, preserve_tuples=preserve_tuples)
+            for item in sorted(value, key=str)
+        ]
     if isinstance(value, str):
         return _redact_string(value)
     return value
@@ -127,11 +119,11 @@ def redact_audit_value(value: Any) -> Any:
 
 def redact_audit_text(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
     """Redact token-like content from a durable diagnostic string."""
-
     return _redact_string(value, limit=limit)
 
 
 def _is_sensitive_key(key: str) -> bool:
+    """Return whether an audit mapping key should force value redaction."""
     if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
         return True
     return bool(
@@ -140,6 +132,7 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
+    """Redact token-like substrings from a scalar audit string."""
     redacted = _URL_CREDENTIAL_RE.sub(r"\1" + REDACTION_MARKER + "@", value)
     redacted = _AUTHORIZATION_RE.sub(r"\1" + REDACTION_MARKER, redacted)
     redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
@@ -151,11 +144,13 @@ def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
 
 
 def _redact_assignment(match: re.Match[str]) -> str:
+    """Redact a regex-matched key/value secret assignment."""
     quote = match.group("quote")
     return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
 
 
 def _drop_none(value: Any) -> Any:
+    """Recursively remove ``None`` values from audit payload containers."""
     if isinstance(value, Mapping):
         return {
             str(key): cleaned

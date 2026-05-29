@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { chromium } from "playwright-core";
+import { chromium } from "playwright";
 
 const FIXTURE_ID = "awf-node-profile-fixture";
 let browserPromise;
@@ -53,9 +53,11 @@ async function validateInBrowser() {
 }
 
 function launchBrowser() {
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim();
   const promise = chromium.launch({
     headless: true,
-    args: ["--no-sandbox"],
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    ...(executablePath ? { executablePath } : {}),
   }).catch((error) => {
     if (browserPromise === promise) {
       browserPromise = undefined;
