@@ -23,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-tags: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -50,8 +53,9 @@ jobs:
               print(tomllib.load(project_file)["project"]["version"])
           PY
           )"
-          TAG="${GITHUB_REF_NAME:-v${VERSION}}"
-          if [[ "${TAG}" != v* ]]; then
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
             TAG="v${VERSION}"
           fi
           .venv/bin/python scripts/generate_install_manifest.py \
