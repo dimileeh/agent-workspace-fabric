@@ -254,6 +254,34 @@ def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_rendering_coerces_arbitrary_detail_values_before_redaction() -> None:
+    """Verify arbitrary diagnostic objects render instead of crashing."""
+    raw_token = "ghp_firstRunObjectSecret"
+
+    class ArbitraryWriteError:
+        def __str__(self) -> str:
+            return f"failed to write config: TOKEN={raw_token}"
+
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="CLIENT_CONFIG_WRITE_FAILED",
+        summary="AWF could not write client configuration.",
+        details={"write_error": ArbitraryWriteError()},
+    )
+
+    rendered_json = render_first_run_json(payload)
+    rendered_json_text = json.dumps(rendered_json, sort_keys=True)
+    rendered_pretty = render_first_run_pretty(payload)
+
+    assert rendered_json["issues"][0]["details"]["write_error"] == (
+        "failed to write config: TOKEN=[redacted]"
+    )
+    assert raw_token not in rendered_json_text
+    assert raw_token not in rendered_pretty
+    assert "write_error: failed to write config: TOKEN=[redacted]" in rendered_pretty
+
+
+@pytest.mark.unit
 def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
     """Verify pretty output expands sequence details into nested lines."""
     payload = first_run_failure_payload(
