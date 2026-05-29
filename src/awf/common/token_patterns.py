@@ -9,8 +9,8 @@ KNOWN_TOKEN_PATTERN: Final = (
     # Python's regex alternation is left-to-right: keep provider-specific
     # ``sk-`` prefixes before the generic ``sk-`` catch-all.
     r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{6,}|"
-    r"github_pat_[A-Za-z0-9_]{6,}|"
+    r"gh[apousr]_[A-Za-z0-9_]*|"
+    r"github_pat_[A-Za-z0-9_]*|"
     r"glpat-[A-Za-z0-9_-]*|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
