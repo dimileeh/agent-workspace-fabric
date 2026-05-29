@@ -48,3 +48,18 @@ def test_shared_redactors_catch_truncated_github_tokens(raw_token: str) -> None:
         }
     )
     assert raw_token not in str(first_run_redacted)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw_token", ["xoxb-", "xoxb-a", "xoxp-", "xoxp-a"])
+def test_shared_redactors_catch_truncated_slack_tokens(raw_token: str) -> None:
+    """Verify shortened rejected Slack token values do not leak in diagnostics."""
+    assert raw_token not in redaction.redact_secrets(f"rejected token {raw_token}")
+    assert raw_token not in audit.redact_audit_text(f"rejected token {raw_token}")
+    first_run_redacted = rendering.redact_first_run_value(
+        {
+            "message": f"rejected token {raw_token}",
+            raw_token: "slack auth failed",
+        }
+    )
+    assert raw_token not in str(first_run_redacted)

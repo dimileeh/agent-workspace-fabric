@@ -717,10 +717,19 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "raw_token",
-    ["glpat-", "glpat-a", "ghp_", "ghp_a", "gho_a", "github_pat_a"],
+    [
+        "glpat-",
+        "glpat-a",
+        "ghp_",
+        "ghp_a",
+        "gho_a",
+        "github_pat_a",
+        "xoxb-a",
+        "xoxp-",
+    ],
 )
-def test_first_run_rendering_redacts_truncated_pat_values(raw_token: str) -> None:
-    """Verify shortened rejected PAT values are not rendered."""
+def test_first_run_rendering_redacts_truncated_token_values(raw_token: str) -> None:
+    """Verify shortened rejected token values are not rendered."""
     payload = first_run_failure_payload(
         command="awf setup",
         reason_code="CREDENTIAL_REF_INVALID",
