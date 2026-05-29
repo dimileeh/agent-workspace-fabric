@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any, ClassVar, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -362,12 +362,17 @@ def _json_safe_first_run_value(value: Any) -> Any:
     """Return a JSON-compatible first-run value after redaction."""
     if isinstance(value, Mapping):
         rendered: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
+        items = [(str(key), item) for key, item in value.items()]
+        reserved_keys = {key_text for key_text, _ in items}
+        for key_text, item in items:
             # Provider-ref redaction already preserves sensitive string-key
             # collisions. This final pass covers JSON key coercion collisions
             # for direct helper callers and future non-string upstream shapes.
-            rendered_key = _deduplicate_redacted_mapping_key(rendered, key_text)
+            rendered_key = _deduplicate_redacted_mapping_key(
+                rendered,
+                key_text,
+                reserved_keys=reserved_keys,
+            )
             rendered[rendered_key] = _json_safe_first_run_value(item)
         return rendered
     if isinstance(value, (list, tuple)):
@@ -383,11 +388,16 @@ def _redact_provider_refs(value: Any) -> Any:
     """Recursively redact provider credential references from arbitrary values."""
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = _redact_first_run_mapping_key(key)
+        items = [(_redact_first_run_mapping_key(key), item) for key, item in value.items()]
+        reserved_keys = {key_text for key_text, _ in items}
+        for key_text, item in items:
             # This pass preserves collisions introduced by content redaction in
             # mapping keys; JSON-safe rendering has its own coercion guard.
-            redacted_key = _deduplicate_redacted_mapping_key(redacted, key_text)
+            redacted_key = _deduplicate_redacted_mapping_key(
+                redacted,
+                key_text,
+                reserved_keys=reserved_keys,
+            )
             if _is_provider_ref_key(key_text):
                 redacted[redacted_key] = REDACTION_MARKER
             else:
@@ -429,18 +439,26 @@ def _is_sensitive_provider_ref_key_suffix(suffix: str) -> bool:
     return provider_redacted == REDACTION_MARKER
 
 
-def _deduplicate_redacted_mapping_key(mapping: Mapping[str, Any], key: str) -> str:
+def _deduplicate_redacted_mapping_key(
+    mapping: Mapping[str, Any],
+    key: str,
+    *,
+    reserved_keys: Collection[str] = (),
+) -> str:
     """Return a rendered mapping key that preserves redacted-key collisions.
 
     Suffixes colliding keys as ``key#2``, ``key#3``, skipping any slot already
-    occupied by a non-collision entry in the mapping.
+    occupied by a non-collision entry in the mapping or reserved by a natural
+    source key that has not been rendered yet.
     """
     if key not in mapping:
         return key
     suffix = 2
-    while f"{key}#{suffix}" in mapping:
+    candidate = f"{key}#{suffix}"
+    while candidate in mapping or candidate in reserved_keys:
         suffix += 1
-    return f"{key}#{suffix}"
+        candidate = f"{key}#{suffix}"
+    return candidate
 
 
 def _is_provider_ref_key(key: str) -> bool:
