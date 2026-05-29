@@ -15,6 +15,7 @@ _runner = CliRunner()
 
 @pytest.mark.unit
 def test_setup_help_describes_first_run_surface() -> None:
+    """Verify setup help points operators at the current first-run paths."""
     result = _runner.invoke(app, ["setup", "--help"], env={"COLUMNS": "180"})
     visible_help = click.unstyle(result.output)
 
@@ -27,6 +28,7 @@ def test_setup_help_describes_first_run_surface() -> None:
 
 @pytest.mark.unit
 def test_setup_placeholder_pretty_has_stable_reason_code() -> None:
+    """Verify pretty setup placeholder output includes stable guidance."""
     result = _runner.invoke(app, ["setup"])
 
     assert result.exit_code == 1
@@ -45,6 +47,7 @@ def test_setup_placeholder_pretty_has_stable_reason_code() -> None:
 
 @pytest.mark.unit
 def test_setup_placeholder_json_has_stable_shape() -> None:
+    """Verify JSON setup placeholder output has the stable first-run shape."""
     result = _runner.invoke(app, ["setup", "--format", "json"])
 
     assert result.exit_code == 1

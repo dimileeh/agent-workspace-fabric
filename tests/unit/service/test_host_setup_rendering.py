@@ -22,6 +22,7 @@ from awf.host_setup.rendering import (
 
 @pytest.mark.unit
 def test_first_run_success_payload_renders_pretty_and_json() -> None:
+    """Verify success payloads render stable JSON and pretty output."""
     payload = first_run_success_payload(
         command="awf setup",
         summary="AWF first-run checks passed.",
@@ -49,6 +50,7 @@ def test_first_run_success_payload_renders_pretty_and_json() -> None:
 
 @pytest.mark.unit
 def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> None:
+    """Verify direct payloads can show top-level reasons without issues."""
     payload = FirstRunPayload(
         status="failed",
         command="awf setup",
@@ -64,6 +66,7 @@ def test_first_run_pretty_renders_top_level_reason_without_issue_details() -> No
 
 @pytest.mark.unit
 def test_first_run_warning_payload_includes_structured_remediation() -> None:
+    """Verify warning payloads include issue-scoped remediation guidance."""
     payload = first_run_warning_payload(
         command="awf setup",
         reason_code="PROVIDER_SETUP_AUTH_INVALID",
@@ -95,6 +98,7 @@ def test_first_run_warning_payload_includes_structured_remediation() -> None:
 
 @pytest.mark.unit
 def test_first_run_json_omits_empty_optional_collections() -> None:
+    """Verify JSON rendering omits empty optional first-run collections."""
     warning_payload = first_run_warning_payload(
         command="awf setup",
         reason_code="PROVIDER_SETUP_AUTH_INVALID",
@@ -118,6 +122,7 @@ def test_first_run_json_omits_empty_optional_collections() -> None:
 
 @pytest.mark.unit
 def test_first_run_json_preserves_non_empty_remediation_next_steps() -> None:
+    """Verify JSON rendering keeps non-empty remediation next steps."""
     issue = first_run_issue_from_reason_code(
         "PROVIDER_SETUP_AUTH_INVALID",
         severity="warning",
@@ -140,6 +145,7 @@ def test_first_run_json_preserves_non_empty_remediation_next_steps() -> None:
 
 @pytest.mark.unit
 def test_first_run_pretty_distinguishes_remediation_and_command_next_steps() -> None:
+    """Verify pretty output distinguishes remediation and command next steps."""
     issue = first_run_issue_from_reason_code(
         "PROVIDER_SETUP_AUTH_INVALID",
         severity="warning",
@@ -167,6 +173,7 @@ def test_first_run_pretty_distinguishes_remediation_and_command_next_steps() -> 
 
 @pytest.mark.unit
 def test_first_run_json_omits_empty_remediation_related_command() -> None:
+    """Verify JSON rendering omits empty remediation related commands."""
     issue = first_run_issue_from_reason_code(
         "PROVIDER_SETUP_AUTH_INVALID",
         severity="warning",
@@ -189,6 +196,7 @@ def test_first_run_json_omits_empty_remediation_related_command() -> None:
 
 @pytest.mark.unit
 def test_first_run_warning_and_failure_payloads_omit_empty_issue_details() -> None:
+    """Verify warning/failure JSON omits empty issue details."""
     warning_payload = first_run_warning_payload(
         command="awf setup",
         reason_code="PROVIDER_SETUP_AUTH_INVALID",
@@ -209,6 +217,7 @@ def test_first_run_warning_and_failure_payloads_omit_empty_issue_details() -> No
 
 @pytest.mark.unit
 def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
+    """Verify failure payloads render reasons while redacting details."""
     payload = first_run_failure_payload(
         command="awf setup",
         reason_code="SETUP_PROVIDER_UNKNOWN",
@@ -245,6 +254,7 @@ def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
 
 @pytest.mark.unit
 def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
+    """Verify pretty output expands sequence details into nested lines."""
     payload = first_run_failure_payload(
         command="awf start",
         reason_code="START_HEALTH_TIMEOUT",
@@ -284,6 +294,7 @@ def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
 
 @pytest.mark.unit
 def test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar() -> None:
+    """Verify pretty output renders empty nested mappings as scalar values."""
     payload = first_run_failure_payload(
         command="awf start",
         reason_code="START_HEALTH_TIMEOUT",
@@ -301,6 +312,7 @@ def test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar() -> No
 
 @pytest.mark.unit
 def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
+    """Verify every first-run failure reason renders a complete pretty panel."""
     for reason_code in FIRST_RUN_FAILURE_REASON_CODES:
         payload = first_run_failure_payload(
             command="awf setup",
@@ -327,6 +339,7 @@ def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
 
 @pytest.mark.unit
 def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -> None:
+    """Verify first-run renderers redact tokens, provider refs, and keys."""
     raw_values = (
         "ghp_firstRunSecretToken",
         "github_pat_firstRunSecretToken",
@@ -373,6 +386,7 @@ def test_first_run_rendering_redacts_tokens_provider_refs_and_sensitive_keys() -
 
 @pytest.mark.unit
 def test_first_run_rendering_redacts_token_and_provider_ref_detail_keys() -> None:
+    """Verify first-run rendering redacts sensitive mapping keys."""
     raw_token_key = "glpat-firstRunMapKeyValue"
     raw_provider_ref_key = "plain-file:///tmp/awf-ref"
     payload = first_run_failure_payload(
@@ -401,6 +415,7 @@ def test_first_run_rendering_redacts_token_and_provider_ref_detail_keys() -> Non
 
 @pytest.mark.unit
 def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
+    """Verify provider-ref redaction preserves tuple containers."""
     redacted = _redact_provider_refs(
         (
             "env://OPENAI_API_KEY",
@@ -421,6 +436,7 @@ def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
 def test_provider_ref_redaction_renders_sets_as_sorted_lists(
     container_type: type[set[str]] | type[frozenset[str]],
 ) -> None:
+    """Verify provider-ref redaction renders sets as deterministic lists."""
     raw_values = (
         "z=env://OPENAI_API_KEY",
         "plain",
@@ -439,6 +455,7 @@ def test_provider_ref_redaction_renders_sets_as_sorted_lists(
 
 @pytest.mark.unit
 def test_provider_ref_key_redaction_requires_explicit_ref_key() -> None:
+    """Verify provider-ref key redaction only matches explicit ref keys."""
     redacted = _redact_provider_refs(
         {
             "credential_ref": "literal-provider-location",
@@ -468,6 +485,7 @@ def test_provider_ref_key_redaction_requires_explicit_ref_key() -> None:
 
 @pytest.mark.unit
 def test_first_run_redaction_preserves_tuple_container_type() -> None:
+    """Verify public first-run redaction preserves tuple containers."""
     redacted = redact_first_run_value(
         (
             "env://OPENAI_API_KEY",
@@ -491,6 +509,7 @@ def test_first_run_redaction_preserves_tuple_container_type() -> None:
 
 @pytest.mark.unit
 def test_first_run_redaction_does_not_double_redact_provider_ref_assignments() -> None:
+    """Verify provider-ref assignments are redacted exactly once."""
     redacted = redact_first_run_value(
         {
             "message": "TOKEN=env://OPENAI_API_KEY",

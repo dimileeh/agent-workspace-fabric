@@ -78,7 +78,6 @@ def build_audit_payload(
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the compact JSON payload stored on audit workspace events."""
-
     payload: dict[str, Any] = {
         "schema": AUDIT_SCHEMA,
         "actor": actor,
@@ -105,7 +104,6 @@ def build_audit_payload(
 
 def redact_audit_value(value: Any, *, preserve_tuples: bool = False) -> Any:
     """Recursively redact token-like values while preserving usage metadata."""
-
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
@@ -139,11 +137,11 @@ def redact_audit_value(value: Any, *, preserve_tuples: bool = False) -> Any:
 
 def redact_audit_text(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
     """Redact token-like content from a durable diagnostic string."""
-
     return _redact_string(value, limit=limit)
 
 
 def _is_sensitive_key(key: str) -> bool:
+    """Return whether an audit mapping key should force value redaction."""
     if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
         return True
     return bool(
@@ -152,6 +150,7 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
+    """Redact token-like substrings from a scalar audit string."""
     redacted = _URL_CREDENTIAL_RE.sub(r"\1" + REDACTION_MARKER + "@", value)
     redacted = _AUTHORIZATION_RE.sub(r"\1" + REDACTION_MARKER, redacted)
     redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
@@ -163,11 +162,13 @@ def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
 
 
 def _redact_assignment(match: re.Match[str]) -> str:
+    """Redact a regex-matched key/value secret assignment."""
     quote = match.group("quote")
     return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
 
 
 def _drop_none(value: Any) -> Any:
+    """Recursively remove ``None`` values from audit payload containers."""
     if isinstance(value, Mapping):
         return {
             str(key): cleaned

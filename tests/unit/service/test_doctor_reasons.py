@@ -10,6 +10,7 @@ from awf.service.doctor.reasons import _REASON_TEXT
 
 @pytest.mark.unit
 def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
+    """Verify protected-scope terminal reason codes include operator guidance."""
     expected_codes = {
         "PROTECTED_SCOPE_DIFF_UNAVAILABLE",
         "PROTECTED_SCOPE_PUSH_BLOCKED",
@@ -28,6 +29,7 @@ def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
 
 @pytest.mark.unit
 def test_first_run_failure_reasons_have_operator_guidance() -> None:
+    """Verify first-run failure reason codes map to operator guidance."""
     missing_codes = set(FIRST_RUN_FAILURE_REASON_CODES) - set(_REASON_TEXT)
 
     assert not missing_codes
@@ -41,6 +43,7 @@ def test_first_run_failure_reasons_have_operator_guidance() -> None:
 
 @pytest.mark.unit
 def test_first_run_failure_reasons_are_documented() -> None:
+    """Verify first-run failure reason codes are present in the catalog."""
     repo_root = Path(__file__).parent.parent.parent.parent
     catalog_content = (repo_root / "docs" / "REASON_CATALOG.md").read_text()
 
@@ -49,6 +52,7 @@ def test_first_run_failure_reasons_are_documented() -> None:
 
 
 def generate_expected_catalog(existing_content: str = "") -> str:
+    """Generate the expected reason catalog content from Python source."""
     lines = [
         "# AWF Reason and Error Code Catalog\n",
         "This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.\n",
@@ -97,6 +101,7 @@ def generate_expected_catalog(existing_content: str = "") -> str:
 
 @pytest.mark.unit
 def test_reason_catalog_is_synchronized_with_python_source() -> None:
+    """Verify the checked-in reason catalog matches Python reason text."""
     repo_root = Path(__file__).parent.parent.parent.parent
     catalog_path = repo_root / "docs" / "REASON_CATALOG.md"
 

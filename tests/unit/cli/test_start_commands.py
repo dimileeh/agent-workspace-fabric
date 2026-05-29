@@ -15,6 +15,7 @@ _runner = CliRunner()
 
 @pytest.mark.unit
 def test_start_help_describes_local_core_surface() -> None:
+    """Verify start help points operators at the current local Core path."""
     result = _runner.invoke(app, ["start", "--help"], env={"COLUMNS": "180"})
     visible_help = click.unstyle(result.output)
 
@@ -27,6 +28,7 @@ def test_start_help_describes_local_core_surface() -> None:
 
 @pytest.mark.unit
 def test_start_placeholder_pretty_has_stable_reason_code() -> None:
+    """Verify pretty start placeholder output includes stable guidance."""
     result = _runner.invoke(app, ["start"])
 
     assert result.exit_code == 1
@@ -45,6 +47,7 @@ def test_start_placeholder_pretty_has_stable_reason_code() -> None:
 
 @pytest.mark.unit
 def test_start_placeholder_json_has_stable_shape() -> None:
+    """Verify JSON start placeholder output has the stable first-run shape."""
     result = _runner.invoke(app, ["start", "--format", "json"])
 
     assert result.exit_code == 1

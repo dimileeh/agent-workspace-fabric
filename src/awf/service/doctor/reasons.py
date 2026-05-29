@@ -11,6 +11,8 @@ from awf.service.doctor.models import DiagnosticStatus
 
 @dataclass(frozen=True)
 class _ReasonText:
+    """Operator-facing reason text and remediation guidance."""
+
     message: str
     action: str
     likely_cause: str
@@ -19,6 +21,7 @@ class _ReasonText:
 
 
 def _reason_catalog_link(reason_code: str) -> str:
+    """Return the local reason catalog anchor for a stable reason code."""
     return f"docs/REASON_CATALOG.md#{reason_code.lower()}"
 
 
@@ -1009,6 +1012,7 @@ def _reason_text(
     status: DiagnosticStatus,
     context: Mapping[str, str] | None = None,
 ) -> _ReasonText:
+    """Return catalog text or fallback diagnostic guidance for a reason."""
     text = _REASON_TEXT.get(reason)
     if text is None:
         if status == "ok":

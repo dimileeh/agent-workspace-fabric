@@ -11,6 +11,7 @@ import awf.host_setup.rendering as rendering
 
 
 def _fail_if_payload_built_at_import(*args: object, **kwargs: object) -> NoReturn:
+    """Fail if a placeholder payload is built during module import."""
     raise AssertionError("placeholder payload was constructed during module import")
 
 
@@ -26,6 +27,7 @@ def test_first_run_placeholders_are_not_built_at_import(
     monkeypatch: pytest.MonkeyPatch,
     module_name: str,
 ) -> None:
+    """Verify setup/start imports do not construct placeholder payloads."""
     module = importlib.import_module(module_name)
 
     try:

@@ -23,6 +23,7 @@ _SETUP_PLACEHOLDER_NEXT_STEPS = (
 
 
 def _setup_placeholder_payload() -> FirstRunPayload:
+    """Build the reserved setup command first-run placeholder payload."""
     return first_run_failure_payload(
         command="awf setup",
         reason_code=SETUP_PLACEHOLDER_REASON,

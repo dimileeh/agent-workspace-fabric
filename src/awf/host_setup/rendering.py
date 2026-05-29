@@ -336,6 +336,7 @@ def redact_first_run_value(value: Any) -> Any:
 
 
 def _redact_provider_refs(value: Any) -> Any:
+    """Recursively redact provider credential references from arbitrary values."""
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
@@ -357,16 +358,19 @@ def _redact_provider_refs(value: Any) -> Any:
 
 
 def _redact_first_run_mapping_key(key: Any) -> str:
+    """Return a string mapping key with sensitive first-run content redacted."""
     key_text = str(key)
     audit_redacted = redact_audit_value(key_text, preserve_tuples=True)
     return _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
 
 
 def _is_provider_ref_key(key: str) -> bool:
+    """Return whether a mapping key denotes provider credential references."""
     return bool(_PROVIDER_REF_KEY_RE.fullmatch(key))
 
 
 def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:
+    """Render one first-run issue as pretty output lines."""
     lines: list[str] = []
     reason_code = issue.get("reason_code")
     if reason_code:
@@ -400,6 +404,7 @@ def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:
 
 
 def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> list[str]:
+    """Render mapping details as sorted, nested pretty output lines."""
     lines: list[str] = []
     for key in sorted(mapping):
         value = mapping[key]
@@ -416,6 +421,7 @@ def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> 
 
 
 def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str) -> list[str]:
+    """Render sequence details as nested pretty output lines."""
     lines: list[str] = []
     for item in sequence:
         if isinstance(item, Mapping):
@@ -437,6 +443,7 @@ def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str
 
 
 def _format_pretty_value(value: Any) -> str:
+    """Return a stable scalar representation for pretty output."""
     if isinstance(value, (list, tuple)):
         return json.dumps(value, sort_keys=True)
     return str(value)

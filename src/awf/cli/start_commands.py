@@ -25,6 +25,7 @@ _START_PLACEHOLDER_NEXT_STEPS = (
 
 
 def _start_placeholder_payload() -> FirstRunPayload:
+    """Build the reserved start command first-run placeholder payload."""
     return first_run_failure_payload(
         command="awf start",
         reason_code=START_PLACEHOLDER_REASON,

@@ -9,6 +9,7 @@ from awf.common.audit import AUDIT_SCHEMA, build_audit_payload, redact_audit_val
 
 @pytest.mark.unit
 def test_build_audit_payload_keeps_common_keys_and_safe_evidence_refs() -> None:
+    """Verify audit payload construction preserves safe common evidence."""
     payload = build_audit_payload(
         actor="executor",
         action="git_push",
@@ -51,6 +52,7 @@ def test_build_audit_payload_keeps_common_keys_and_safe_evidence_refs() -> None:
 
 @pytest.mark.unit
 def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usage() -> None:
+    """Verify audit redaction keeps usage metrics while removing secrets."""
     github_app_jwt = (
         "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWItYXBwIn0.c2lnbmF0dXJlX3Nob3VsZF9ub3RfcGVyc2lzdA"
     )
@@ -106,6 +108,7 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
 
 @pytest.mark.unit
 def test_redact_audit_value_converts_tuples_to_lists_by_default() -> None:
+    """Verify audit redaction normalizes tuples to JSON-style lists by default."""
     redacted = redact_audit_value(
         (
             "safe",
