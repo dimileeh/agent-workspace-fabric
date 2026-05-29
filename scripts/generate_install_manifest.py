@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             channel=args.channel,
             generated_at=args.generated_at,
             package=args.package,
-            commit=args.commit,
+            commit=_resolve_commit(args.commit),
         )
     except (OSError, ManifestError, ValueError) as exc:
         parser.error(str(exc))
@@ -187,6 +187,15 @@ def _remove_skipped_output(output: Path) -> None:
         output.unlink()
     except FileNotFoundError:
         return
+
+
+def _resolve_commit(explicit_commit: str | None) -> str | None:
+    """Resolve source commit provenance for CLI-generated manifests."""
+    if explicit_commit is not None:
+        return explicit_commit
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return None
+    return os.environ.get("GITHUB_SHA") or None
 
 
 def _is_final_version(version: str) -> bool:

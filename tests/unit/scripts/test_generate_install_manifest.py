@@ -63,6 +63,7 @@ def _run_generator(
     tag: str = "v0.1.0",
     generated_at: str = "2026-05-29T00:00:00Z",
     repository_url: str = REPOSITORY_URL,
+    commit: str | None = None,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the manifest generator CLI against temporary release fixtures."""
@@ -72,27 +73,30 @@ def _run_generator(
         env.pop(key, None)
     if env_overrides is not None:
         env.update(env_overrides)
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--dist-dir",
+        str(dist_dir),
+        "--checksums-file",
+        str(checksums_file),
+        "--output",
+        str(output),
+        "--version",
+        version,
+        "--tag",
+        tag,
+        "--repository-url",
+        repository_url,
+        "--channel",
+        channel,
+        "--generated-at",
+        generated_at,
+    ]
+    if commit is not None:
+        command.extend(["--commit", commit])
     return subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--dist-dir",
-            str(dist_dir),
-            "--checksums-file",
-            str(checksums_file),
-            "--output",
-            str(output),
-            "--version",
-            version,
-            "--tag",
-            tag,
-            "--repository-url",
-            repository_url,
-            "--channel",
-            channel,
-            "--generated-at",
-            generated_at,
-        ],
+        command,
         check=False,
         capture_output=True,
         env=env,
@@ -260,6 +264,82 @@ def test_manifest_generator_allows_github_actions_tag_ref(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "awf-install-manifest.json").is_file()
+
+
+@pytest.mark.unit
+def test_manifest_generator_records_github_sha_when_actions_tag_ref_omits_commit(
+    tmp_path: Path,
+) -> None:
+    """Actions tag builds use GITHUB_SHA as commit provenance by default."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    commit = "0123456789abcdef0123456789abcdef01234567"
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REF_NAME": "v0.1.0",
+            "GITHUB_REF_TYPE": "tag",
+            "GITHUB_SHA": commit,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["commit"] == commit
+
+
+@pytest.mark.unit
+def test_manifest_generator_prefers_explicit_commit_over_github_sha(
+    tmp_path: Path,
+) -> None:
+    """Explicit --commit keeps priority over the Actions environment."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        commit=commit,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_REF_NAME": "v0.1.0",
+            "GITHUB_REF_TYPE": "tag",
+            "GITHUB_SHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["commit"] == commit
+
+
+@pytest.mark.unit
+def test_manifest_generator_ignores_github_sha_outside_actions(tmp_path: Path) -> None:
+    """Local generation does not infer commit provenance from stray env vars."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        env_overrides={
+            "GITHUB_SHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = _load_manifest(tmp_path / "awf-install-manifest.json")
+    source = manifest["source"]
+    assert isinstance(source, dict)
+    assert source["commit"] is None
 
 
 @pytest.mark.unit
@@ -539,3 +619,11 @@ def test_channel_auto_selects_prerelease_for_prerelease_versions(version: str) -
 
     with pytest.raises(ValueError, match="stable channel requires a final version"):
         resolve_channel(version, "stable")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("version", ["0.1.0", "1.2.3"])
+def test_channel_prerelease_rejects_final_versions(version: str) -> None:
+    """The prerelease channel rejects final versions."""
+    with pytest.raises(ValueError, match="prerelease channel requires a prerelease version"):
+        resolve_channel(version, "prerelease")
