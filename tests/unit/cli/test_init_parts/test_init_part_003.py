@@ -9,11 +9,8 @@ from typing import Any
 
 import pytest
 import yaml
-from typer.testing import CliRunner
 
-from awf.cli.main import app
-
-_runner = CliRunner()
+from tests.unit.cli.test_init_parts._bootstrap_helper import invoke_init_service_bootstrap
 
 
 def _docker_diagnostic(status: str = "ok") -> Any:
@@ -411,7 +408,7 @@ def test_init_without_path_json_marks_env_write_failed(
     else:
         _fail_path_write(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -444,7 +441,7 @@ def test_init_without_path_json_normalizes_asset_root_env_write_failure(
     _stub_bootstrap_mode(monkeypatch, asset_root=workspace_root)
     _fail_path_write(monkeypatch, failing_path="../docker/compose/.env")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -473,7 +470,7 @@ def test_init_without_path_json_marks_env_overlay_read_failed(
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
     _fail_path_read_bytes(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1163,7 +1160,7 @@ def test_init_without_path_json_marks_multiline_env_overlay_merge_failed(
     )
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -1197,7 +1194,7 @@ def test_init_without_path_json_marks_non_utf8_env_overlay_merge_failed(
     (tmp_path / ".env").write_bytes(b"AWF_API_TOKEN=root\nINVALID=\xff\n")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
@@ -1223,7 +1220,7 @@ def test_init_without_path_runs_docker_availability_check_first(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1241,7 +1238,7 @@ def test_init_without_path_prints_env_success_before_docker_preflight_failure(
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1264,7 +1261,7 @@ def test_init_without_path_json_includes_env_action_when_docker_preflight_fails(
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1289,7 +1286,7 @@ def test_init_without_path_json_includes_env_error_when_docker_preflight_fails(
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
     _fail_path_write(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1324,7 +1321,7 @@ def test_init_without_path_json_includes_env_action_when_local_checks_fail(
 
     monkeypatch.setattr(doctor_mod, "collect_doctor_report", _fail_to_collect_doctor_report)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1350,7 +1347,7 @@ def test_init_without_path_warns_when_env_write_and_docker_preflight_fail(
     captured = _stub_bootstrap_mode(monkeypatch, docker_status="fail")
     _fail_path_write(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init"])
+    result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 1, result.output
     assert captured["bootstrap_calls"] == []
@@ -1387,7 +1384,7 @@ def test_init_without_path_fails_when_docker_diagnostic_missing(
     monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
     monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1, result.output
     assert bootstrap_calls == []
@@ -1405,9 +1402,8 @@ def test_init_without_path_passes_strict_provider_options_to_bootstrap(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     captured = _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(
-        app,
-        ["init", "--provider", "github", "--provider", "opencode"],
+    result = invoke_init_service_bootstrap(
+        ["--provider", "github", "--provider", "opencode"],
     )
 
     assert result.exit_code == 0, result.output
@@ -1423,7 +1419,7 @@ def test_init_without_path_passes_skip_agent_runtime_build_flag(
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     captured = _stub_bootstrap_mode(monkeypatch)
 
-    result = _runner.invoke(app, ["init", "--skip-agent-runtime-build"])
+    result = invoke_init_service_bootstrap(["--skip-agent-runtime-build"])
 
     assert result.exit_code == 0, result.output
     options = captured["bootstrap_calls"][0]["options"]
@@ -1445,7 +1441,7 @@ def test_init_without_path_handles_bootstrap_failure_without_traceback(
     )
     _stub_bootstrap_mode(monkeypatch, bootstrap_error=error)
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
@@ -1476,7 +1472,7 @@ def test_init_without_path_json_includes_env_error_when_bootstrap_fails(
     _stub_bootstrap_mode(monkeypatch, bootstrap_error=error)
     _fail_path_write(monkeypatch, failing_path=".env")
 
-    result = _runner.invoke(app, ["init", "--format", "json"])
+    result = invoke_init_service_bootstrap(["--format", "json"])
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)

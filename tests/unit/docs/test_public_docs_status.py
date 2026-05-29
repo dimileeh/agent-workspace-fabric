@@ -20,6 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 README_PATH = REPO_ROOT / "README.md"
 DOCS_INDEX_CANDIDATES = (README_PATH, REPO_ROOT / "docs" / "README.md")
 
+ROOT_PUBLIC_DOC_NAMES = {
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "RELEASING.md",
+}
 INTERNAL_DOC_PREFIXES = ("docs/awf-plans/",)
 PLANNING_DOC_NAMES = {
     "docs/awf_prd_v2.2.md",
@@ -108,16 +113,141 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
+def test_quickstart_uses_runnable_startup_path() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    startup_section = quickstart_text.split("## Set Up And Start AWF", maxsplit=1)[1].split(
+        "## Open The Console",
+        maxsplit=1,
+    )[0]
+
+    assert (
+        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty"
+    ) in startup_section
+    assert "persists\nCompose-interpolated service values" not in startup_section
+    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert not re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" in startup_section
+    assert "AWF_START_PLACEHOLDER" in startup_section
+
+
+def test_getting_started_uses_runnable_startup_path() -> None:
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
+    startup_section = getting_started_text.split(
+        "### Recommended First-Run Sequence",
+        maxsplit=1,
+    )[1].split("### Configure Environment", maxsplit=1)[0]
+    configure_section = getting_started_text.split(
+        "### Configure Environment",
+        maxsplit=1,
+    )[1].split("### Run Locally", maxsplit=1)[0]
+
+    assert (
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty"
+    ) in startup_section
+    assert not re.search(r"(?m)^awf setup\s*$", startup_section)
+    assert not re.search(r"(?m)^awf start\s*$", startup_section)
+    assert "AWF_SETUP_PLACEHOLDER" in startup_section
+    assert "AWF_START_PLACEHOLDER" in startup_section
+    assert "awf init <path> --write-profile --yes" in startup_section
+    assert re.search(r"`awf service bootstrap`\s+uses", configure_section)
+    assert "`awf start` uses" not in configure_section
+    assert "run `awf service bootstrap`" in configure_section
+    assert "run `awf start`" not in configure_section
+
+
+def test_mcp_setup_prerequisites_use_runnable_startup_path() -> None:
+    mcp_setup_text = (REPO_ROOT / "docs" / "MCP_SETUP.md").read_text(encoding="utf-8")
+    prerequisites_section = mcp_setup_text.split("## Prerequisites", maxsplit=1)[1].split(
+        "## Claude Code",
+        maxsplit=1,
+    )[0]
+
+    assert len(re.findall(r"(?m)^awf service bootstrap\s*$", prerequisites_section)) == 2
+    assert (
+        len(re.findall(r"(?m)^awf service status --format pretty\s*$", prerequisites_section)) == 2
+    )
+    assert re.search(r"(?m)^} > \.env\s*\nawf service bootstrap$", prerequisites_section)
+    assert re.search(
+        r"(?m)^} > docker/compose/\.env\s*\nawf service bootstrap$",
+        prerequisites_section,
+    )
+    assert (
+        'export AWF_DATABASE_URL="postgresql+asyncpg://awf:'
+        '${AWF_POSTGRES_PASSWORD}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"'
+    ) in prerequisites_section
+    assert not re.search(r"(?m)^awf setup\s*$", prerequisites_section)
+    assert not re.search(r"(?m)^awf start\s*$", prerequisites_section)
+
+
+def test_project_onboarding_first_run_uses_runnable_startup_path() -> None:
+    onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
+    first_run_section = onboarding_text.split(
+        "## First-run operator command",
+        maxsplit=1,
+    )[1].split("## One-message prompt", maxsplit=1)[0]
+
+    assert (
+        'export AWF_API_TOKEN="$(openssl rand -hex 32)"\n'
+        'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"\n'
+        'export AWF_GITHUB_TOKEN="$(gh auth token)"\n'
+        "awf service bootstrap\n"
+        "awf service status --format pretty\n"
+        "awf init ."
+    ) in first_run_section
+    assert not re.search(r"(?m)^awf setup\s*$", first_run_section)
+    assert not re.search(r"(?m)^awf start\s*$", first_run_section)
+    assert "AWF_SETUP_PLACEHOLDER" in first_run_section
+    assert "AWF_START_PLACEHOLDER" in first_run_section
+
+
 def test_project_onboarding_docs_make_awf_init_primary() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
     onboarding_text = (REPO_ROOT / "docs" / "PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
+    assert "awf setup" in quickstart_text
+    assert "awf start" in quickstart_text
     assert "awf init . --write-profile --yes" in quickstart_text
+    assert "awf setup" in getting_started_text
+    assert "awf start" in getting_started_text
     assert "awf init <path> --write-profile --yes" in getting_started_text
     assert "awf init . --write-profile --yes" in onboarding_text
     assert "v2 request-shaped" not in onboarding_text
     assert "awf profile init . --write" not in quickstart_text
+
+
+def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None:
+    public_paths = [Path("README.md"), *map(Path, sorted(_public_docs()))]
+    forbidden_patterns = [
+        r"`awf init`\s+without a path",
+        r"`awf init`\s+\(no path\)",
+        r"(?m)^\s*awf init\s*(?:#\s*.*bootstrap.*)?$",
+        r"`awf init`\s+or\s+`awf service bootstrap`",
+        r"after `awf init` or `awf service bootstrap`",
+        r"`awf init`\s+writes the local service environment",
+        r"run `awf init` to verify prerequisites and bootstrap",
+        r"`awf init`\. With no arguments it bootstraps",
+    ]
+
+    offenders: list[str] = []
+    public_texts: list[str] = []
+    for rel_path in public_paths:
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        public_texts.append(text)
+        for pattern in forbidden_patterns:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                offenders.append(f"{rel_path}: {pattern}")
+
+    public_text = "\n".join(public_texts)
+    assert not offenders
+    assert "awf setup" in public_text
+    assert "awf start" in public_text
 
 
 def test_changelog_and_upgrade_guide_are_discoverable() -> None:
@@ -280,6 +410,25 @@ def test_public_docs_are_discovered_from_docs_tree(
     assert _public_docs() == {"docs/NEW_GUIDE.md"}
 
 
+def test_root_public_docs_linked_from_readme_are_discovered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (tmp_path / "README.md").write_text(
+        "See [release checklist](RELEASING.md).\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "RELEASING.md").write_text("# Release Checklist\n", encoding="utf-8")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
+
+    assert _public_docs() == {"RELEASING.md"}
+
+
 def test_copy_paste_docs_ignore_missing_readme_linked_docs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,6 +524,8 @@ def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
 
 
 def _is_public_doc_path(rel_path: str) -> bool:
+    if rel_path in ROOT_PUBLIC_DOC_NAMES:
+        return True
     if not rel_path.startswith("docs/"):
         return False
     if any(rel_path.startswith(prefix) for prefix in INTERNAL_DOC_PREFIXES):

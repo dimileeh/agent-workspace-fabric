@@ -29,7 +29,8 @@ runtime state, worktree, and artifacts). For cleanup, use explicit GC workflows
 
 ## Symptom: service bootstrap command fails
 
-Run these checks after `awf init` or `awf service bootstrap` exits with an error:
+Run these checks after the lower-level `awf service bootstrap` command exits
+with an error:
 
 If `awf service bootstrap` reports `SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND`, run the
 bootstrap command from an AWF source checkout. The local service bootstrap needs
@@ -40,7 +41,6 @@ local Docker stack by itself.
 1. Run the bootstrap and collect the full error output:
 
 ```bash
-awf init
 awf service bootstrap
 ```
 
@@ -238,7 +238,7 @@ awf service bootstrap
 awf service status --format pretty
 ```
 
-4. Re-run an onboarding command once bootstrap succeeds:
+4. Re-run project onboarding once bootstrap succeeds:
 
 ```bash
 awf init <path>

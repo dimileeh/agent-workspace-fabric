@@ -56,7 +56,7 @@ def test_troubleshooting_guide_has_actionable_commands() -> None:
     content = TROUBLESHOOTING_PATH.read_text(encoding="utf-8")
 
     required_commands = (
-        "awf init",
+        "awf init <path>",
         "awf service bootstrap",
         "awf service status",
         "awf service doctor",
