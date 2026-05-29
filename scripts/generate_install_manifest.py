@@ -76,6 +76,7 @@ def build_manifest(
     _validate_tag(tag, version)
 
     distribution_files = _distribution_files(dist_dir)
+    _validate_distribution_metadata(distribution_files, package=package, version=version)
     checksums = _parse_checksums(checksums_file)
     _validate_checksum_coverage(distribution_files, checksums)
     _validate_checksum_content(distribution_files, checksums)
@@ -206,6 +207,56 @@ def _distribution_files(dist_dir: Path) -> list[Path]:
     for file in files:
         _artifact_kind(file)
     return files
+
+
+def _validate_distribution_metadata(files: list[Path], *, package: str, version: str) -> None:
+    expected_package = _normalize_distribution_package(package)
+    expected_version = _normalize_distribution_version(version)
+    for file in files:
+        artifact_package, artifact_version = _distribution_package_version(file)
+        if (
+            _normalize_distribution_package(artifact_package) != expected_package
+            or _normalize_distribution_version(artifact_version) != expected_version
+        ):
+            raise ManifestError(
+                "distribution artifact does not match requested package/version: "
+                f"{file.name} (found {artifact_package} {artifact_version}, "
+                f"expected {package} {version})"
+            )
+
+
+def _distribution_package_version(file: Path) -> tuple[str, str]:
+    name = file.name
+    if name.endswith(".whl"):
+        return _wheel_package_version(name)
+    if name.endswith(".tar.gz"):
+        return _sdist_package_version(name)
+    raise ManifestError(f"unexpected distribution artifact: {name}")
+
+
+def _wheel_package_version(name: str) -> tuple[str, str]:
+    parts = name[:-4].split("-")
+    if len(parts) not in {5, 6}:
+        raise ManifestError(f"malformed wheel distribution artifact: {name}")
+    return parts[0], parts[1]
+
+
+def _sdist_package_version(name: str) -> tuple[str, str]:
+    try:
+        package, version = name[:-7].rsplit("-", maxsplit=1)
+    except ValueError as exc:
+        raise ManifestError(f"malformed sdist distribution artifact: {name}") from exc
+    if not package or not version:
+        raise ManifestError(f"malformed sdist distribution artifact: {name}")
+    return package, version
+
+
+def _normalize_distribution_package(package: str) -> str:
+    return re.sub(r"[-_.]+", "-", package).lower()
+
+
+def _normalize_distribution_version(version: str) -> str:
+    return version.lower()
 
 
 def _parse_checksums(checksums_file: Path) -> dict[str, str]:

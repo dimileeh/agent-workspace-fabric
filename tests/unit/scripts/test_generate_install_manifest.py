@@ -231,6 +231,33 @@ def test_manifest_rejects_checksum_that_does_not_match_distribution_content(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stale_artifact_name",
+    [
+        "agent_workspace_fabric-0.0.9-py3-none-any.whl",
+        "agent_workspace_fabric-0.0.9.tar.gz",
+        "other_package-0.1.0-py3-none-any.whl",
+        "other_package-0.1.0.tar.gz",
+    ],
+)
+def test_manifest_rejects_stale_distribution_artifact_package_or_version(
+    tmp_path: Path,
+    stale_artifact_name: str,
+) -> None:
+    dist_dir, checksums_file, files = _write_distribution_fixtures(tmp_path)
+    stale_artifact = dist_dir / stale_artifact_name
+    stale_artifact.write_bytes(b"stale artifact\n")
+    _write_checksums(checksums_file, [*files, stale_artifact])
+
+    result = _run_generator(tmp_path, dist_dir=dist_dir, checksums_file=checksums_file)
+
+    assert result.returncode == 2
+    assert "does not match requested package/version" in result.stderr
+    assert stale_artifact_name in result.stderr
+    assert not (tmp_path / "awf-install-manifest.json").exists()
+
+
+@pytest.mark.unit
 def test_manifest_hashes_distribution_artifacts_with_bounded_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
