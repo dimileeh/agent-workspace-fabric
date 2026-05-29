@@ -97,7 +97,7 @@ _PROVIDER_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _PROVIDER_REF_KEY_RE = re.compile(
-    r"(?:^|[_-])(?:credential|provider)[_-]?refs?(?:$|[_-])",
+    r"(?:credential|provider)[_-]refs?",
     re.IGNORECASE,
 )
 
@@ -357,7 +357,7 @@ def _redact_provider_refs(value: Any) -> Any:
 
 
 def _is_provider_ref_key(key: str) -> bool:
-    return bool(_PROVIDER_REF_KEY_RE.search(key))
+    return bool(_PROVIDER_REF_KEY_RE.fullmatch(key))
 
 
 def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:
@@ -397,7 +397,7 @@ def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> 
     lines: list[str] = []
     for key in sorted(mapping):
         value = mapping[key]
-        if isinstance(value, Mapping):
+        if isinstance(value, Mapping) and value:
             lines.append(f"{prefix}{key}:")
             lines.extend(_render_mapping_lines(value, prefix=f"{prefix}  "))
             continue

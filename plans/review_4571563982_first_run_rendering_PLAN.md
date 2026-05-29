@@ -31,6 +31,15 @@ The current review pass on the same comment id adds two follow-up observations:
   recurse into nested mappings/sequences so richer first-run details stay
   readable.
 
+Iteration 2 follow-up observations from the same review-level comment:
+
+- Empty nested mappings inside a non-empty `details` mapping should render as
+  scalar empty mappings instead of orphaned pretty-output headers.
+- Provider-reference key redaction should target explicit
+  `credential_ref(s)` / `provider_ref(s)` key names with `_` or `-`
+  separators, not no-separator spellings or unrelated keys that merely contain
+  those words as a substring.
+
 ## Requirements Checklist
 
 - Add or update a regression test proving helper-built warning/failure payloads
@@ -49,6 +58,11 @@ The current review pass on the same comment id adds two follow-up observations:
   code comment explaining why it is exempt from empty-field omission.
 - Add a focused regression test proving list/tuple `details` values render as
   indented pretty lines, including nested mappings and redacted values.
+- Add a focused regression test proving empty nested mapping values do not
+  produce orphaned pretty-output headers.
+- Add a focused regression test proving provider-reference key redaction is
+  exact enough to avoid no-separator and mid-key substring matches while still
+  redacting supported `credential_ref(s)` / `provider_ref(s)` forms.
 - Do not broaden validation beyond focused tests; AWF/GitHub own broad
   validation after agent completion.
 
@@ -70,9 +84,14 @@ The current review pass on the same comment id adds two follow-up observations:
    values under `details`.
 8. Update `_render_mapping_lines` to recurse through list/tuple values and
    render sequence items on indented lines while preserving scalar formatting.
-9. Run focused tests for the new regression, existing warning details behavior,
+9. Add a focused failing test for empty nested mappings in pretty details and
+   update `_render_mapping_lines` to handle empty mappings as scalar values.
+10. Add a focused failing test for provider-reference key matching breadth and
+    tighten `_PROVIDER_REF_KEY_RE` / `_is_provider_ref_key` to avoid
+    no-separator and substring matches.
+11. Run focused tests for the new regression, existing warning details behavior,
    non-empty next-step preservation, and tuple-preservation behavior.
-10. Record validation evidence in
+12. Record validation evidence in
    `plans/review_4571563982_first_run_rendering_VALIDATION.md`.
 
 ## Verification Commands and Pass Criteria
@@ -84,6 +103,8 @@ The current review pass on the same comment id adds two follow-up observations:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_sequence_details_as_nested_lines -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_requires_explicit_ref_key -q`
 - `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`

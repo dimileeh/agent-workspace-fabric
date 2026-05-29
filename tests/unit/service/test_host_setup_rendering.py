@@ -256,6 +256,23 @@ def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar() -> None:
+    payload = first_run_failure_payload(
+        command="awf start",
+        reason_code="START_HEALTH_TIMEOUT",
+        summary="AWF service ports are unavailable.",
+        details={"config": {}, "path": "/tmp/awf"},
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+    lines = rendered_pretty.splitlines()
+
+    assert "  config: {}" in lines
+    assert "  config:" not in lines
+    assert "  path: /tmp/awf" in lines
+
+
+@pytest.mark.unit
 def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
     for reason_code in FIRST_RUN_FAILURE_REASON_CODES:
         payload = first_run_failure_payload(
@@ -342,6 +359,35 @@ def test_provider_ref_redaction_preserves_tuple_container_type() -> None:
         ["[redacted]"],
         {"provider_ref": "[redacted]"},
     )
+
+
+@pytest.mark.unit
+def test_provider_ref_key_redaction_requires_explicit_ref_key() -> None:
+    redacted = _redact_provider_refs(
+        {
+            "credential_ref": "literal-provider-location",
+            "credential_refs": ("literal-provider-location",),
+            "provider-ref": "literal-provider-location",
+            "provider-refs": "literal-provider-location",
+            "credentialref": "display value",
+            "providerref": "display value",
+            "last_credential_ref_update": "2026-05-29",
+            "provider_ref_hint": "metadata only",
+            "nested": {"message": "env://OPENAI_API_KEY"},
+        }
+    )
+
+    assert redacted == {
+        "credential_ref": "[redacted]",
+        "credential_refs": "[redacted]",
+        "provider-ref": "[redacted]",
+        "provider-refs": "[redacted]",
+        "credentialref": "display value",
+        "providerref": "display value",
+        "last_credential_ref_update": "2026-05-29",
+        "provider_ref_hint": "metadata only",
+        "nested": {"message": "[redacted]"},
+    }
 
 
 @pytest.mark.unit
