@@ -263,6 +263,25 @@ def test_host_setup_config_write_persistence_error_uses_write_failed_reason(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("config_path", "expected_path"),
+    [(Path(), Path()), ("", Path()), (Path("/"), Path("/"))],
+)
+def test_host_setup_config_write_filename_less_paths_are_reason_coded(
+    config_path: str | Path,
+    expected_path: Path,
+) -> None:
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(HostSetupConfig(), path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_WRITE_FAILED"
+    assert error.path == expected_path
+    assert error.details == {"error_type": "ValueError"}
+    assert "has an empty name" not in str(error.to_dict())
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("operation", ["read", "write"])
 def test_host_setup_config_path_resolution_failure_for_default_home_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,

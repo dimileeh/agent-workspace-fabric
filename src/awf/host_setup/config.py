@@ -426,7 +426,13 @@ def write_host_setup_config(
         validated_config.model_dump(mode="json", exclude_none=True),
     )
 
-    tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        tmp_path = config_path.with_name(f".{config_path.name}.{secrets.token_hex(8)}.tmp")
+    except ValueError as exc:
+        raise _config_write_failed_error(
+            config_path,
+            details={"error_type": type(exc).__name__},
+        ) from exc
     text = yaml.safe_dump(payload, sort_keys=False)
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
