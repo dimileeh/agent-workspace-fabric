@@ -103,7 +103,10 @@ _PROVIDER_REF_RE = compile_provider_ref_re()
 _PROVIDER_REF_KEY_RE = compile_provider_ref_key_re()
 _PROVIDER_REF_KEY_SUFFIX_RE = compile_provider_ref_key_suffix_re()
 _NUMERIC_SUFFIX_KEY_RE = re.compile(r"(?P<base>.*?)#(?P<suffix>\d+)$")
-_FIRST_RUN_KNOWN_TOKEN_RE = compile_known_token_re(ignorecase=True)
+_FIRST_RUN_KNOWN_TOKEN_RE = compile_known_token_re(
+    ignorecase=True,
+    match_truncated_provider_tokens=True,
+)
 
 
 class _FirstRunBaseModel(BaseModel):
@@ -312,40 +315,7 @@ def first_run_failure_payload(
 
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     """Return a JSON-safe, redacted first-run payload dictionary."""
-    raw_payload = payload.model_dump(mode="python", exclude_none=True)
-    # Pydantic dumps BaseModel layers into fresh dicts, so optional wrapper-key
-    # cleanup below cannot mutate the frozen model. mode="python" can preserve
-    # user-supplied details mappings by reference, so this cleanup only removes
-    # wrapper keys and never mutates details mapping contents.
-    if raw_payload.get("details") == {}:
-        raw_payload.pop("details")
-    if raw_payload.get("next_steps") in ([], ()):
-        raw_payload.pop("next_steps")
-    # Keep issues present, even when empty, so success payload consumers can
-    # rely on one stable field shape across all first-run statuses.
-    issues = raw_payload.get("issues")
-    if issues is None:
-        issues = ()
-    if not isinstance(issues, (tuple, list)):
-        raise TypeError(
-            "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple or list."
-        )
-    # Iterate the dumped container directly. Issue and remediation mappings are
-    # the same fresh wrapper dicts held by raw_payload["issues"], so pop()
-    # cleanup below is visible to redact_first_run_value(raw_payload).
-    for issue in issues:
-        if not isinstance(issue, dict):
-            continue
-        if issue.get("details") == {}:
-            issue.pop("details")
-        remediation = issue.get("remediation")
-        if isinstance(remediation, dict):
-            if remediation.get("next_steps") in ([], ()):
-                remediation.pop("next_steps")
-            # None is already excluded by exclude_none=True above.
-            # str_strip_whitespace can normalise whitespace-only values to "".
-            if remediation.get("related_command") == "":
-                remediation.pop("related_command")
+    raw_payload = _clean_first_run_dump(payload.model_dump(mode="python", exclude_none=True))
     redacted_payload = redact_first_run_value(raw_payload)
     return cast(dict[str, Any], _json_safe_first_run_value(redacted_payload))
 
@@ -388,6 +358,45 @@ def redact_first_run_value(value: Any) -> Any:
     """Recursively redact tokens and provider refs from first-run output values."""
     audit_redacted = redact_audit_value(value, preserve_tuples=True)
     return _redact_provider_refs(audit_redacted)
+
+
+def _clean_first_run_dump(raw_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return first-run dump data with empty wrapper fields omitted."""
+    cleaned = dict(raw_payload)
+    if cleaned.get("details") == {}:
+        cleaned.pop("details", None)
+    if cleaned.get("next_steps") in ([], ()):
+        cleaned.pop("next_steps", None)
+
+    issues = cleaned.get("issues")
+    if issues is None:
+        return cleaned
+    if not isinstance(issues, (tuple, list)):
+        raise TypeError(
+            "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple or list."
+        )
+
+    cleaned_issues: list[Any] = []
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            cleaned_issues.append(issue)
+            continue
+        cleaned_issue = dict(issue)
+        if cleaned_issue.get("details") == {}:
+            cleaned_issue.pop("details", None)
+        remediation = cleaned_issue.get("remediation")
+        if isinstance(remediation, Mapping):
+            cleaned_remediation = dict(remediation)
+            if cleaned_remediation.get("next_steps") in ([], ()):
+                cleaned_remediation.pop("next_steps", None)
+            # None is already excluded by exclude_none=True above.
+            # str_strip_whitespace can normalise whitespace-only values to "".
+            if cleaned_remediation.get("related_command") == "":
+                cleaned_remediation.pop("related_command", None)
+            cleaned_issue["remediation"] = cleaned_remediation
+        cleaned_issues.append(cleaned_issue)
+    cleaned["issues"] = tuple(cleaned_issues) if isinstance(issues, tuple) else cleaned_issues
+    return cleaned
 
 
 def _json_safe_first_run_value(value: Any) -> Any:
@@ -477,10 +486,7 @@ def _is_sensitive_provider_ref_key_suffix(suffix: str) -> bool:
     """Return whether a provider-ref key suffix is already or should be redacted."""
     if suffix == REDACTION_MARKER:
         return True
-    audit_redacted = redact_audit_value(suffix, preserve_tuples=True)
-    token_redacted = _redact_first_run_known_tokens(cast(str, audit_redacted))
-    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, token_redacted)
-    return provider_redacted == REDACTION_MARKER
+    return bool(_FIRST_RUN_KNOWN_TOKEN_RE.fullmatch(suffix) or _PROVIDER_REF_RE.fullmatch(suffix))
 
 
 def _deduplicate_redacted_mapping_key(

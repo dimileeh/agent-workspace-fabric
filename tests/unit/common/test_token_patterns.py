@@ -12,6 +12,7 @@ from awf.common.token_patterns import (
     PROVIDER_REF_KEY_PATTERN,
     PROVIDER_REF_KEY_SUFFIX_PATTERN,
     PROVIDER_REF_PATTERN,
+    compile_known_token_re,
 )
 from awf.host_setup import rendering
 
@@ -23,6 +24,19 @@ def test_redactors_share_known_token_pattern() -> None:
     assert redaction._KNOWN_TOKEN_RE.pattern == KNOWN_TOKEN_PATTERN  # noqa: SLF001
     assert rendering._FIRST_RUN_KNOWN_TOKEN_RE.pattern == KNOWN_TOKEN_PATTERN  # noqa: SLF001
     assert rendering._FIRST_RUN_KNOWN_TOKEN_RE.flags & re.IGNORECASE  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_known_token_pattern_can_keep_historical_minimum_length_guards() -> None:
+    """Verify callers can opt into strict provider token body lengths."""
+    strict_re = compile_known_token_re(match_truncated_provider_tokens=False)
+
+    assert strict_re.search("rejected ghp_ token") is None
+    assert strict_re.search("rejected glpat-a token") is None
+    assert strict_re.search("rejected xoxb-a token") is None
+    assert strict_re.search("accepted ghp_12345678 token")
+    assert strict_re.search("accepted glpat-123456 token")
+    assert strict_re.search("accepted xoxb-123456 token")
 
 
 @pytest.mark.unit

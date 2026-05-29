@@ -46,18 +46,39 @@ PROVIDER_REF_KEY_SUFFIX_PATTERN: Final = (
 )
 
 
-def compile_known_token_re(*, ignorecase: bool = False) -> re.Pattern[str]:
+STRICT_KNOWN_TOKEN_PATTERN: Final = (
+    r"(?<![A-Za-z0-9_])("
+    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
+    r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"glpat-[A-Za-z0-9_-]{6,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
+    r"sk-ant-[A-Za-z0-9_-]{8,}|"
+    r"sk-proj-[A-Za-z0-9_-]{8,}|"
+    r"sk-[A-Za-z0-9_-]{8,}|"
+    r"AIza[A-Za-z0-9_-]{12,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{6,}"
+    r")(?![A-Za-z0-9_])"
+)
+
+
+def compile_known_token_re(
+    *,
+    ignorecase: bool = False,
+    match_truncated_provider_tokens: bool = True,
+) -> re.Pattern[str]:
     """Compile the shared known-token pattern with optional case folding.
 
     Several provider-specific prefixes (``gh[apousr]_``, ``glpat-``, and
-    ``xox[baprs]-``) use ``*`` so truncated or rejected token values are still
-    redacted. Callers that previously relied on minimum-length guards now
-    accept shorter matches, which can produce false positives for variable names
-    that share a token prefix. Enable ``ignorecase=True`` for operator-facing
-    first-run output where case-variant tokens must be caught.
+    ``xox[baprs]-``) can use ``*`` so truncated or rejected token values are
+    still redacted. Passing ``match_truncated_provider_tokens=True`` makes this
+    false-positive tradeoff explicit at security redaction call sites. Use
+    ``False`` only for detection paths that need the historical minimum-length
+    guards. Enable ``ignorecase=True`` for operator-facing first-run output
+    where case-variant tokens must be caught.
     """
     flags = re.IGNORECASE if ignorecase else re.NOFLAG
-    return re.compile(KNOWN_TOKEN_PATTERN, flags)
+    pattern = KNOWN_TOKEN_PATTERN if match_truncated_provider_tokens else STRICT_KNOWN_TOKEN_PATTERN
+    return re.compile(pattern, flags)
 
 
 def compile_token_assignment_re() -> re.Pattern[str]:

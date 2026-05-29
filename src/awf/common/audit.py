@@ -33,7 +33,11 @@ _AUTHORIZATION_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.IGNORECASE)
 _TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
-_KNOWN_TOKEN_RE = compile_known_token_re()
+# Audit diagnostics intentionally redact bare provider prefixes such as
+# ``ghp_`` when they appear as values. This can catch non-secret false
+# positives, but keeps rejected/truncated credential values out of durable
+# audit records.
+_KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
 
 
 def build_audit_payload(

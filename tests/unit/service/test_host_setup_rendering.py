@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from awf.host_setup import rendering
 from awf.host_setup.rendering import (
     FIRST_RUN_FAILURE_REASON_CODES,
     FirstRunPayload,
@@ -271,6 +272,63 @@ def test_first_run_json_omits_empty_optional_collections() -> None:
         assert "next_steps" not in rendered_json
         assert "details" not in rendered_json["issues"][0]
         assert "next_steps" not in remediation
+
+
+@pytest.mark.unit
+def test_first_run_json_cleanup_does_not_mutate_model_dump_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cleanup removes empty wrapper fields without mutating dump data."""
+    raw_payload: dict[str, Any] = {
+        "status": "failed",
+        "command": "awf setup",
+        "summary": "Provider selection failed.",
+        "reason_code": "SETUP_PROVIDER_UNKNOWN",
+        "details": {},
+        "next_steps": (),
+        "issues": (
+            {
+                "reason_code": "SETUP_PROVIDER_UNKNOWN",
+                "severity": "failed",
+                "details": {},
+                "remediation": {
+                    "problem": "Unknown provider.",
+                    "cause": "The requested provider is not configured.",
+                    "fix": "Select a supported provider.",
+                    "docs_link": "https://example.invalid/docs",
+                    "related_command": "",
+                    "next_steps": (),
+                },
+            },
+        ),
+    }
+
+    def model_dump_with_raw_payload(
+        _self: FirstRunPayload,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return raw_payload
+
+    monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_raw_payload)
+    payload = first_run_failure_payload(
+        command="awf setup",
+        reason_code="SETUP_PROVIDER_UNKNOWN",
+        summary="Provider selection failed.",
+    )
+
+    rendered_json = render_first_run_json(payload)
+
+    assert "details" not in rendered_json
+    assert "next_steps" not in rendered_json
+    assert "details" not in rendered_json["issues"][0]
+    assert "next_steps" not in rendered_json["issues"][0]["remediation"]
+    assert "related_command" not in rendered_json["issues"][0]["remediation"]
+    assert raw_payload["details"] == {}
+    assert raw_payload["next_steps"] == ()
+    raw_issue = raw_payload["issues"][0]
+    assert raw_issue["details"] == {}
+    assert raw_issue["remediation"]["next_steps"] == ()
+    assert raw_issue["remediation"]["related_command"] == ""
 
 
 @pytest.mark.unit
@@ -1013,6 +1071,22 @@ def test_provider_ref_key_redaction_handles_token_contaminated_ref_keys() -> Non
         "provider-ref-[redacted]": "[redacted]",
         "provider_ref_hint-[redacted]": "metadata only",
     }
+
+
+@pytest.mark.unit
+def test_provider_ref_key_suffix_sensitivity_short_circuits_known_sensitive_suffixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify known sensitive suffix checks avoid the audit redaction pipeline."""
+
+    def fail_audit_redaction(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("audit redaction should not run for suffix sensitivity")
+
+    monkeypatch.setattr(rendering, "redact_audit_value", fail_audit_redaction)
+
+    assert rendering._is_sensitive_provider_ref_key_suffix("ghp_firstRunSecretToken")
+    assert rendering._is_sensitive_provider_ref_key_suffix("env://OPENAI_API_KEY")
+    assert not rendering._is_sensitive_provider_ref_key_suffix("metadata-only")
 
 
 @pytest.mark.unit

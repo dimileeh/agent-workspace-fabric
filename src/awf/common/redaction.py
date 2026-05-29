@@ -17,7 +17,9 @@ _AUTHORIZATION_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
 _TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
-_KNOWN_TOKEN_RE = compile_known_token_re()
+# Runtime logs use the same explicit truncated-token policy as audit records:
+# prefer a visible false positive over leaking rejected credential fragments.
+_KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
 
 
 def redact_secrets(text: str) -> str:
