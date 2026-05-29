@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -143,6 +144,7 @@ async def test_node_next_browser_profile_healthchecks_precede_browser_validate(
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
 def test_browser_validate_script_retries_transient_validation_response() -> None:
     _TransientBrowserValidationHandler.failures_remaining = 1
     _TransientBrowserValidationHandler.request_count = 0
