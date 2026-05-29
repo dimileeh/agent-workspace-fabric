@@ -267,6 +267,8 @@ def first_run_failure_payload(
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     """Return a JSON-safe, redacted first-run payload dictionary."""
     raw_payload = payload.model_dump(mode="json", exclude_none=True)
+    if raw_payload.get("details") == {}:
+        raw_payload.pop("details")
     return cast(dict[str, Any], redact_first_run_value(raw_payload))
 
 

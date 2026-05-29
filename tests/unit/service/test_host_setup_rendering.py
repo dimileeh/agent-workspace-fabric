@@ -81,6 +81,7 @@ def test_first_run_warning_payload_includes_structured_remediation() -> None:
     assert remediation["cause"]
     assert remediation["fix"]
     assert remediation["docs_link"]
+    assert "details" not in rendered_json
     assert rendered_json["issues"][0]["details"] == {"provider": "github"}
     assert "Reason: PROVIDER_SETUP_AUTH_INVALID" in rendered_pretty
     assert "Problem:" in rendered_pretty
@@ -111,6 +112,7 @@ def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
     issue = rendered_json["issues"][0]
     assert issue["reason_code"] == "SETUP_PROVIDER_UNKNOWN"
     assert issue["severity"] == "failed"
+    assert "details" not in rendered_json
     assert issue["details"] == {
         "provider": "unknown",
         "credential_ref": "[redacted]",
