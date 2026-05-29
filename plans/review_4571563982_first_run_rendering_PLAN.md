@@ -53,6 +53,18 @@ Iteration 3 follow-up observations from the same review-level comment:
   otherwise exact provider-ref key is contaminated with a token-like suffix that
   may already have been content-redacted to `[redacted]`.
 
+Iteration 4 follow-up observations from the same review-level comment:
+
+- The `issues` loop currently converts a dumped issues list to a local tuple,
+  but the cleanup relies on mutating the same issue dictionaries still held by
+  `raw_payload["issues"]` before redaction. Drop the unnecessary tuple
+  conversion and document that shared-reference assumption directly in
+  `render_first_run_json`.
+- The reported GitHub token minimum-length regression is stale in this
+  workspace: `KNOWN_TOKEN_PATTERN` already uses `{6,}` for `gh[apousr]_` and
+  `github_pat_`, and the existing shared-pattern test asserts audit,
+  operator-facing, and first-run redactors all compile from that source.
+
 ## Requirements Checklist
 
 - Add or update a regression test proving helper-built warning/failure payloads
@@ -81,6 +93,10 @@ Iteration 3 follow-up observations from the same review-level comment:
 - Add a focused regression test proving token-contaminated
   `credential_ref(s)` / `provider_ref(s)` keys blanket-redact their values while
   still avoiding the broader non-provider-ref key matches from Iteration 2.
+- Make the dumped issues shared-reference mutation contract explicit without
+  changing JSON rendering behavior.
+- Verify the GitHub token minimum concern is already covered by the shared token
+  pattern source and targeted shared-pattern test.
 - Do not broaden validation beyond focused tests; AWF/GitHub own broad
   validation after agent completion.
 
@@ -113,9 +129,15 @@ Iteration 3 follow-up observations from the same review-level comment:
 12. Add a focused failing test for token-contaminated provider-ref keys and
     update provider-ref key classification to detect exact provider-ref keys
     with a single token-like suffix.
-13. Run focused tests for the new regression, existing warning details behavior,
+13. Remove the redundant issues-list-to-tuple conversion in
+    `render_first_run_json` and add a nearby comment explaining that issue and
+    remediation dict mutations are visible through `raw_payload`.
+14. Confirm the shared token pattern already has the pre-existing GitHub `{6,}`
+    minimum and keep the existing shared-pattern test as the regression
+    coverage.
+15. Run focused tests for the new regression, existing warning details behavior,
    non-empty next-step preservation, and tuple-preservation behavior.
-14. Record validation evidence in
+16. Record validation evidence in
    `plans/review_4571563982_first_run_rendering_VALIDATION.md`.
 
 ## Verification Commands and Pass Criteria
@@ -130,6 +152,8 @@ Iteration 3 follow-up observations from the same review-level comment:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_requires_explicit_ref_key -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_handles_token_contaminated_ref_keys -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py -q`
 - `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`

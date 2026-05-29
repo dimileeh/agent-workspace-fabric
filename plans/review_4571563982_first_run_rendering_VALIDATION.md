@@ -149,6 +149,34 @@ Iteration 3 evidence:
 - `git diff --check`
   - Pass: no whitespace errors.
 
+## Iteration 4
+
+Follow-up requirements from the same review-level comment:
+
+- Complete: Removed the unnecessary local tuple conversion in
+  `render_first_run_json` and added an inline comment explaining that the issue
+  and remediation dictionaries are the same fresh wrapper dictionaries retained
+  by `raw_payload["issues"]`.
+- Complete: Verified the reported GitHub token minimum-length regression is
+  stale in this workspace. `KNOWN_TOKEN_PATTERN` already uses `{6,}` for
+  `gh[apousr]_` and `github_pat_`, and the existing shared-pattern test confirms
+  audit, operator-facing, and first-run redactors compile from that one pattern.
+- Complete: Kept validation focused. Full AWF/GitHub validation was not run
+  inside the agent phase because AWF owns broad validation after completion.
+
+Iteration 4 evidence:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps -q`
+  - Pass: `2 passed in 0.50s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py -q`
+  - Pass: `1 passed in 0.44s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/common/test_token_patterns.py`
+  - Pass: `All checks passed!`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/common/test_token_patterns.py`
+  - Pass: `2 files already formatted`
+- `git diff --check`
+  - Pass: no whitespace errors.
+
 ## Gaps
 
 None.

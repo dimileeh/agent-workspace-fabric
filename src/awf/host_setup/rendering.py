@@ -303,8 +303,9 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
         raise TypeError(
             "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple or list."
         )
-    if isinstance(issues, list):
-        issues = tuple(issues)
+    # Iterate the dumped container directly. Issue and remediation mappings are
+    # the same fresh wrapper dicts held by raw_payload["issues"], so pop()
+    # cleanup below is visible to redact_first_run_value(raw_payload).
     for issue in issues:
         if not isinstance(issue, dict):
             continue
