@@ -93,6 +93,8 @@ FirstRunStatus = Literal["success", "warning", "blocked", "failed"]
 FirstRunSeverity = Literal["info", "warning", "blocked", "failed"]
 
 _PROVIDER_REF_RE = re.compile(
+    # The word boundary anchors the leading scheme character; hyphen-prefixed
+    # contexts like x-plain-file:// still redact, but safeplain-file:// does not.
     r"\b(?:keyring|env|plain-file)://[^\s\"'`,;)}\]]+",
     re.IGNORECASE,
 )
@@ -290,6 +292,8 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
         if isinstance(remediation, dict):
             if remediation.get("next_steps") in ([], ()):
                 remediation.pop("next_steps")
+            # None is already excluded by exclude_none=True above.
+            # str_strip_whitespace can normalise whitespace-only values to "".
             if remediation.get("related_command") == "":
                 remediation.pop("related_command")
     redacted_payload = redact_first_run_value(raw_payload)
