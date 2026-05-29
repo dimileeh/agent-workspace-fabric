@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -178,12 +179,61 @@ def _github_actions_skip_reason(tag: str) -> str | None:
         if ref_type == "tag" and ref_name == tag:
             return None
         if event_name == "workflow_dispatch" and ref_type == "branch":
-            return None
+            return _github_actions_branch_dispatch_skip_reason(ref_name=ref_name, tag=tag)
         return f"GitHub Actions ref {ref_name or '<unknown>'} ({ref_type}) is not a release tag"
 
     if ref_name and ref_name != tag:
         return f"GitHub Actions ref {ref_name} is not a release tag"
     return None
+
+
+def _github_actions_branch_dispatch_skip_reason(*, ref_name: str, tag: str) -> str | None:
+    """Return why a manual branch dispatch cannot prove release tag provenance."""
+    github_sha = os.environ.get("GITHUB_SHA", "")
+    if not github_sha:
+        return (
+            f"GitHub Actions workflow_dispatch branch ref {ref_name} is not a release tag "
+            f"and could not verify release tag {tag}: GITHUB_SHA is unset"
+        )
+
+    tag_commit = _resolve_git_tag_commit(tag)
+    if tag_commit is None:
+        return (
+            f"GitHub Actions workflow_dispatch branch ref {ref_name} is not a release tag "
+            f"and could not verify release tag {tag} at GITHUB_SHA {github_sha}"
+        )
+    if tag_commit.lower() != github_sha.lower():
+        return (
+            f"GitHub Actions workflow_dispatch branch ref {ref_name} is not a release tag: "
+            f"release tag {tag} resolves to {tag_commit}, but GITHUB_SHA is {github_sha}"
+        )
+    return None
+
+
+def _resolve_git_tag_commit(tag: str) -> str | None:
+    """Resolve a local Git tag to its peeled commit SHA."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                f"refs/tags/{tag}^{{commit}}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    return lines[0].strip() or None
 
 
 def _remove_skipped_output(output: Path) -> None:

@@ -26,6 +26,7 @@ GITHUB_ACTIONS_REF_ENV_KEYS = (
     "GITHUB_EVENT_NAME",
     "GITHUB_REF_NAME",
     "GITHUB_REF_TYPE",
+    "GITHUB_SHA",
 )
 
 
@@ -58,6 +59,36 @@ def _write_checksums(path: Path, files: list[Path]) -> str:
     return content
 
 
+def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command in a test repository."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_git_commit(repo: Path, filename: str, content: str) -> str:
+    """Write a file, commit it, and return the resulting commit SHA."""
+    (repo / filename).write_text(content, encoding="utf-8")
+    _run_git(repo, "add", filename)
+    _run_git(repo, "commit", "-m", f"commit {filename}")
+    return _run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _init_git_repo_with_release_tag(tmp_path: Path) -> tuple[Path, str]:
+    """Create a git repository whose release tag points at HEAD."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init")
+    _run_git(repo, "config", "user.name", "AWF Test")
+    _run_git(repo, "config", "user.email", "awf@example.com")
+    commit = _write_git_commit(repo, "release.txt", "release\n")
+    _run_git(repo, "tag", "v0.1.0", commit)
+    return repo, commit
+
+
 def _run_generator(
     tmp_path: Path,
     *,
@@ -69,6 +100,7 @@ def _run_generator(
     generated_at: str = "2026-05-29T00:00:00Z",
     repository_url: str = REPOSITORY_URL,
     commit: str | None = None,
+    cwd: Path | None = None,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the manifest generator CLI against temporary release fixtures."""
@@ -104,6 +136,7 @@ def _run_generator(
         command,
         check=False,
         capture_output=True,
+        cwd=cwd,
         env=env,
         text=True,
     )
@@ -252,15 +285,48 @@ def test_manifest_generator_skips_non_dispatch_github_actions_branch_ref_without
 
 
 @pytest.mark.unit
-def test_manifest_generator_allows_workflow_dispatch_branch_ref(tmp_path: Path) -> None:
-    """Manual publish workflow dispatches from branches still emit the manifest."""
+def test_manifest_generator_skips_workflow_dispatch_branch_ref_without_verified_tag(
+    tmp_path: Path,
+) -> None:
+    """Manual branch dispatches skip when tag provenance cannot be verified."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
     commit = "0123456789abcdef0123456789abcdef01234567"
+    output = tmp_path / "awf-install-manifest.json"
+    output.write_text("stale manifest\n", encoding="utf-8")
 
     result = _run_generator(
         tmp_path,
         dist_dir=dist_dir,
         checksums_file=checksums_file,
+        cwd=tmp_path,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF_NAME": "development",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_SHA": commit,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" in result.stdout
+    assert "could not verify release tag v0.1.0" in result.stdout
+    assert not output.exists()
+
+
+@pytest.mark.unit
+def test_manifest_generator_allows_workflow_dispatch_branch_ref_with_matching_tag(
+    tmp_path: Path,
+) -> None:
+    """Manual branch dispatches emit manifests when the release tag matches HEAD."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    repo, commit = _init_git_repo_with_release_tag(tmp_path)
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        cwd=repo,
         env_overrides={
             "GITHUB_ACTIONS": "true",
             "GITHUB_EVENT_NAME": "workflow_dispatch",
@@ -277,6 +343,38 @@ def test_manifest_generator_allows_workflow_dispatch_branch_ref(tmp_path: Path) 
     assert isinstance(source, dict)
     assert source["commit"] == commit
     assert source["tag"] == "v0.1.0"
+
+
+@pytest.mark.unit
+def test_manifest_generator_skips_workflow_dispatch_branch_ref_with_mismatched_tag(
+    tmp_path: Path,
+) -> None:
+    """Manual branch dispatches skip when the release tag points elsewhere."""
+    dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
+    repo, tag_commit = _init_git_repo_with_release_tag(tmp_path)
+    branch_commit = _write_git_commit(repo, "branch.txt", "branch\n")
+    output = tmp_path / "awf-install-manifest.json"
+    output.write_text("stale manifest\n", encoding="utf-8")
+
+    result = _run_generator(
+        tmp_path,
+        dist_dir=dist_dir,
+        checksums_file=checksums_file,
+        cwd=repo,
+        env_overrides={
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF_NAME": "development",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_SHA": branch_commit,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "SKIP:" in result.stdout
+    assert f"release tag v0.1.0 resolves to {tag_commit}" in result.stdout
+    assert f"GITHUB_SHA is {branch_commit}" in result.stdout
+    assert not output.exists()
 
 
 @pytest.mark.unit
