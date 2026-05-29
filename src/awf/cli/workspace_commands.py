@@ -29,9 +29,9 @@ from awf.db.enums import (
 )
 
 _DX_FIRST_PATH_HELP = (
-    "For first-time users: the recommended first path is to run `awf init` "
-    "to verify prerequisites and bootstrap your local service stack, followed "
-    "by `awf init <path>` to prepare your project repository."
+    "For first-time users: the current runnable first path is "
+    "`awf service bootstrap`, then `awf init <path>` to prepare your project "
+    "repository. `awf setup` and `awf start` are reserved future command surfaces."
 )
 
 workspace_app = typer.Typer(
