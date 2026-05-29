@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for manifest generation."""
     parser = argparse.ArgumentParser(description="Generate awf-install-manifest.json.")
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--checksums-file", type=Path, required=True)
@@ -164,6 +165,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _github_actions_skip_reason(tag: str) -> str | None:
+    """Return a skip reason when Actions is not running for the release tag."""
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return None
 
@@ -180,6 +182,7 @@ def _github_actions_skip_reason(tag: str) -> str | None:
 
 
 def _remove_skipped_output(output: Path) -> None:
+    """Remove stale manifest output when generation is intentionally skipped."""
     try:
         output.unlink()
     except FileNotFoundError:
@@ -187,14 +190,17 @@ def _remove_skipped_output(output: Path) -> None:
 
 
 def _is_final_version(version: str) -> bool:
+    """Return whether the package version is a supported final release."""
     return FINAL_VERSION_RE.match(version) is not None
 
 
 def _is_prerelease_version(version: str) -> bool:
+    """Return whether the package version is a supported prerelease."""
     return PRERELEASE_VERSION_RE.match(version) is not None
 
 
 def _default_generated_at() -> str:
+    """Return a UTC timestamp, honoring SOURCE_DATE_EPOCH when present."""
     source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if source_date_epoch:
         try:
@@ -209,6 +215,7 @@ def _default_generated_at() -> str:
 
 
 def _validate_generated_at(value: str) -> str:
+    """Validate and normalize an explicit UTC RFC3339 timestamp."""
     if not GENERATED_AT_RE.match(value):
         raise ManifestError("generated_at must be UTC RFC3339 format: YYYY-MM-DDTHH:MM:SSZ")
     try:
@@ -221,6 +228,7 @@ def _validate_generated_at(value: str) -> str:
 
 
 def _normalize_repository_url(repository_url: str) -> str:
+    """Normalize and validate the GitHub repository URL for artifact links."""
     normalized = repository_url.rstrip("/")
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
@@ -236,11 +244,13 @@ def _normalize_repository_url(repository_url: str) -> str:
 
 
 def _validate_tag(tag: str, version: str) -> None:
+    """Require the release tag to pin the package version."""
     if tag != f"v{version}":
         raise ManifestError(f"tag must pin the package version as v{version}")
 
 
 def _distribution_files(dist_dir: Path) -> list[Path]:
+    """Return sorted distribution artifacts after validating their types."""
     if not dist_dir.is_dir():
         raise ManifestError(f"dist directory does not exist: {dist_dir}")
 
@@ -256,6 +266,7 @@ def _distribution_files(dist_dir: Path) -> list[Path]:
 
 
 def _validate_distribution_metadata(files: list[Path], *, package: str, version: str) -> None:
+    """Ensure distribution filenames match the requested package and version."""
     expected_package = _normalize_distribution_package(package)
     expected_version = _normalize_distribution_version(version)
     for file in files:
@@ -272,6 +283,7 @@ def _validate_distribution_metadata(files: list[Path], *, package: str, version:
 
 
 def _distribution_package_version(file: Path) -> tuple[str, str]:
+    """Extract package and version metadata from a distribution artifact name."""
     name = file.name
     if name.endswith(".whl"):
         return _wheel_package_version(name)
@@ -281,6 +293,7 @@ def _distribution_package_version(file: Path) -> tuple[str, str]:
 
 
 def _wheel_package_version(name: str) -> tuple[str, str]:
+    """Extract package and version metadata from a wheel filename."""
     parts = name[:-4].split("-")
     if len(parts) not in {5, 6}:
         raise ManifestError(f"malformed wheel distribution artifact: {name}")
@@ -288,6 +301,7 @@ def _wheel_package_version(name: str) -> tuple[str, str]:
 
 
 def _sdist_package_version(name: str) -> tuple[str, str]:
+    """Extract package and version metadata from an sdist filename."""
     try:
         package, version = name[:-7].rsplit("-", maxsplit=1)
     except ValueError as exc:
@@ -298,14 +312,17 @@ def _sdist_package_version(name: str) -> tuple[str, str]:
 
 
 def _normalize_distribution_package(package: str) -> str:
+    """Normalize a package name using distribution filename rules."""
     return re.sub(r"[-_.]+", "-", package).lower()
 
 
 def _normalize_distribution_version(version: str) -> str:
+    """Normalize a version string for distribution filename comparison."""
     return version.lower()
 
 
 def _parse_checksums(checksums_file: Path) -> dict[str, str]:
+    """Parse SHA-256 checksums by artifact filename."""
     if not checksums_file.is_file():
         raise ManifestError(f"checksums file does not exist: {checksums_file}")
 
@@ -331,6 +348,7 @@ def _parse_checksums(checksums_file: Path) -> dict[str, str]:
 
 
 def _validate_checksum_coverage(files: list[Path], checksums: dict[str, str]) -> None:
+    """Ensure checksums exactly cover the discovered distribution artifacts."""
     artifact_names = {file.name for file in files}
     checksum_names = set(checksums)
 
@@ -346,6 +364,7 @@ def _validate_checksum_coverage(files: list[Path], checksums: dict[str, str]) ->
 
 
 def _validate_checksum_content(files: list[Path], checksums: dict[str, str]) -> None:
+    """Verify artifact bytes match the supplied SHA-256 checksums."""
     for file in files:
         sha256 = hashlib.sha256()
         with file.open("rb") as artifact:
@@ -364,6 +383,7 @@ def _artifact_entry(
     repository_url: str,
     tag: str,
 ) -> dict[str, Any]:
+    """Build one manifest artifact entry for a distribution file."""
     kind = _artifact_kind(file)
     return {
         "kind": kind,
@@ -376,6 +396,7 @@ def _artifact_entry(
 
 
 def _artifact_kind(file: Path) -> str:
+    """Classify a distribution artifact as a wheel or sdist."""
     name = file.name
     if name.endswith(".whl"):
         return "wheel"
@@ -385,6 +406,7 @@ def _artifact_kind(file: Path) -> str:
 
 
 def _platform_metadata(kind: str) -> dict[str, str]:
+    """Return install platform metadata for an artifact kind."""
     if kind == "wheel":
         return {
             "arch": "any",

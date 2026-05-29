@@ -13,12 +13,14 @@ PUBLISH_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 
 
 def _publish_workflow() -> dict[str, Any]:
+    """Load the publish workflow YAML as a mapping."""
     loaded = yaml.safe_load(PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
 
 
 def _job(workflow: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return a named workflow job mapping."""
     jobs = workflow.get("jobs", {})
     assert isinstance(jobs, dict)
     job = jobs.get(name)
@@ -27,16 +29,19 @@ def _job(workflow: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return mapping steps from a workflow job."""
     steps = job.get("steps", [])
     assert isinstance(steps, list)
     return [step for step in steps if isinstance(step, dict)]
 
 
 def _run_steps(job: dict[str, Any]) -> str:
+    """Concatenate shell command bodies from workflow steps."""
     return "\n".join(str(step.get("run", "")) for step in _steps(job))
 
 
 def _uploaded_paths(job: dict[str, Any]) -> set[str]:
+    """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
     for step in _steps(job):
         if step.get("uses") != "actions/upload-artifact@v4":
@@ -53,6 +58,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
 
 @pytest.mark.unit
 def test_publish_workflow_generates_manifest_without_removing_checksum_artifact() -> None:
+    """The publish workflow creates and uploads both checksum and manifest files."""
     build_job = _job(_publish_workflow(), "build")
     commands = _run_steps(build_job)
 

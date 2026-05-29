@@ -28,6 +28,7 @@ def _write_distribution_fixtures(
     *,
     version: str = "0.1.0",
 ) -> tuple[Path, Path, list[Path]]:
+    """Create paired wheel, sdist, and checksum fixtures for manifest tests."""
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
     wheel = dist_dir / f"agent_workspace_fabric-{version}-py3-none-any.whl"
@@ -41,6 +42,7 @@ def _write_distribution_fixtures(
 
 
 def _write_checksums(path: Path, files: list[Path]) -> str:
+    """Write a release-style SHA-256 checksum file for fixture artifacts."""
     lines = []
     for file in files:
         digest = hashlib.sha256(file.read_bytes()).hexdigest()
@@ -62,6 +64,7 @@ def _run_generator(
     repository_url: str = REPOSITORY_URL,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run the manifest generator CLI against temporary release fixtures."""
     output = tmp_path / "awf-install-manifest.json"
     env = None
     if env_overrides is not None:
@@ -96,6 +99,7 @@ def _run_generator(
 
 
 def _load_manifest(path: Path) -> dict[str, object]:
+    """Load generated manifest JSON from disk."""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -103,6 +107,7 @@ def _load_manifest(path: Path) -> dict[str, object]:
 def test_manifest_generator_emits_deterministic_manifest_from_dist_and_checksums(
     tmp_path: Path,
 ) -> None:
+    """The generator emits stable JSON without mutating checksum inputs."""
     dist_dir, checksums_file, files = _write_distribution_fixtures(tmp_path)
     original_checksums = checksums_file.read_text(encoding="utf-8")
 
@@ -146,6 +151,7 @@ def test_manifest_rejects_malformed_explicit_generated_at(
     tmp_path: Path,
     generated_at: str,
 ) -> None:
+    """Explicit generated_at values must use UTC second-precision Zulu form."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(
@@ -162,6 +168,7 @@ def test_manifest_rejects_malformed_explicit_generated_at(
 
 @pytest.mark.unit
 def test_manifest_artifact_urls_are_pinned_to_release_tag(tmp_path: Path) -> None:
+    """Artifact URLs are pinned to immutable GitHub Release tag downloads."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(tmp_path, dist_dir=dist_dir, checksums_file=checksums_file)
@@ -197,6 +204,7 @@ def test_manifest_generator_skips_github_actions_branch_ref_without_writing_mani
     tmp_path: Path,
     env_overrides: dict[str, str],
 ) -> None:
+    """Actions branch dispatch skips manifest output and removes stale files."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
     output = tmp_path / "awf-install-manifest.json"
     output.write_text("stale manifest\n", encoding="utf-8")
@@ -216,6 +224,7 @@ def test_manifest_generator_skips_github_actions_branch_ref_without_writing_mani
 
 @pytest.mark.unit
 def test_manifest_generator_allows_github_actions_tag_ref(tmp_path: Path) -> None:
+    """Actions tag dispatch for the release tag generates the manifest."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(
@@ -235,6 +244,7 @@ def test_manifest_generator_allows_github_actions_tag_ref(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_manifest_normalizes_git_suffix_from_repository_clone_url(tmp_path: Path) -> None:
+    """Repository clone URLs lose their .git suffix before URL assembly."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(
@@ -270,6 +280,7 @@ def test_manifest_rejects_repository_urls_with_suffix_components(
     tmp_path: Path,
     repository_url: str,
 ) -> None:
+    """Repository URLs with params, queries, or fragments are rejected."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(
@@ -312,6 +323,7 @@ def test_manifest_requires_checksums_for_every_distribution_artifact(
     checksum_text: str,
     expected_error: str,
 ) -> None:
+    """Checksum files must exactly cover every distribution artifact once."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
     checksums_file.write_text(checksum_text, encoding="utf-8")
     original_checksums = checksums_file.read_text(encoding="utf-8")
@@ -328,6 +340,7 @@ def test_manifest_requires_checksums_for_every_distribution_artifact(
 def test_manifest_rejects_checksum_that_does_not_match_distribution_content(
     tmp_path: Path,
 ) -> None:
+    """Checksum validation rejects artifacts whose bytes do not match."""
     dist_dir, checksums_file, files = _write_distribution_fixtures(tmp_path)
     wrong_digest = "0" * 64
     sdist_digest = hashlib.sha256(files[1].read_bytes()).hexdigest()
@@ -357,6 +370,7 @@ def test_manifest_rejects_stale_distribution_artifact_package_or_version(
     tmp_path: Path,
     stale_artifact_name: str,
 ) -> None:
+    """Distribution artifacts must match the requested package and version."""
     dist_dir, checksums_file, files = _write_distribution_fixtures(tmp_path)
     stale_artifact = dist_dir / stale_artifact_name
     stale_artifact.write_bytes(b"stale artifact\n")
@@ -375,6 +389,7 @@ def test_manifest_hashes_distribution_artifacts_with_bounded_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Checksum verification streams artifacts instead of reading them at once."""
     artifact = tmp_path / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
     content = b"wheel fixture\n" * 10_000
     artifact.write_bytes(content)
@@ -384,28 +399,36 @@ def test_manifest_hashes_distribution_artifacts_with_bounded_reads(
     original_read_bytes = Path.read_bytes
 
     class TrackingReader:
+        """File wrapper that records read sizes used by checksum validation."""
+
         def __init__(self, handle: object) -> None:
+            """Wrap the opened artifact handle."""
             self._handle = handle
 
         def __enter__(self) -> TrackingReader:
+            """Return the wrapper as the context manager value."""
             return self
 
         def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            """Close the wrapped file handle when the context exits."""
             self._handle.close()
 
         def read(self, size: int = -1) -> bytes:
+            """Record bounded read sizes before delegating to the artifact."""
             read_sizes.append(size)
             if size <= 0:
                 raise AssertionError("checksum validation must use bounded reads")
             return self._handle.read(size)
 
     def tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        """Return the tracking wrapper only for the artifact under test."""
         handle = original_open(self, *args, **kwargs)
         if self == artifact:
             return TrackingReader(handle)
         return handle
 
     def forbidden_read_bytes(self: Path) -> bytes:
+        """Fail if checksum validation tries to read the full artifact."""
         if self == artifact:
             raise AssertionError("checksum validation must not load the full artifact")
         return original_read_bytes(self)
@@ -420,6 +443,7 @@ def test_manifest_hashes_distribution_artifacts_with_bounded_reads(
 
 @pytest.mark.unit
 def test_manifest_rejects_unexpected_distribution_artifacts(tmp_path: Path) -> None:
+    """Only wheels and source distributions are accepted as release artifacts."""
     dist_dir, checksums_file, files = _write_distribution_fixtures(tmp_path)
     unexpected = dist_dir / "agent_workspace_fabric-0.1.0.zip"
     unexpected.write_bytes(b"unexpected\n")
@@ -433,6 +457,7 @@ def test_manifest_rejects_unexpected_distribution_artifacts(tmp_path: Path) -> N
 
 @pytest.mark.unit
 def test_manifest_records_platform_metadata_for_wheel_and_sdist(tmp_path: Path) -> None:
+    """Wheel and sdist entries include their expected platform metadata."""
     dist_dir, checksums_file, _files = _write_distribution_fixtures(tmp_path)
 
     result = _run_generator(tmp_path, dist_dir=dist_dir, checksums_file=checksums_file)
@@ -460,6 +485,7 @@ def test_manifest_records_platform_metadata_for_wheel_and_sdist(tmp_path: Path) 
 def test_default_generated_at_uses_source_date_epoch_as_zulu_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SOURCE_DATE_EPOCH produces deterministic UTC generated_at values."""
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1790553600")
 
     assert _default_generated_at() == "2026-09-28T00:00:00Z"
@@ -469,6 +495,7 @@ def test_default_generated_at_uses_source_date_epoch_as_zulu_timestamp(
 def test_default_generated_at_rejects_out_of_range_source_date_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Invalid SOURCE_DATE_EPOCH values produce a manifest input error."""
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1" * 100)
 
     with pytest.raises(ManifestError, match="Invalid SOURCE_DATE_EPOCH timestamp"):
@@ -478,6 +505,7 @@ def test_default_generated_at_rejects_out_of_range_source_date_epoch(
 @pytest.mark.unit
 @pytest.mark.parametrize("version", ["0.1.0", "1.2.3", "2.0.0.post1"])
 def test_channel_auto_selects_stable_for_final_versions(version: str) -> None:
+    """The auto channel resolves final versions to stable."""
     assert resolve_channel(version, "auto") == "stable"
     assert resolve_channel(version, "stable") == "stable"
 
@@ -485,6 +513,7 @@ def test_channel_auto_selects_stable_for_final_versions(version: str) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("version", ["0.2.0a1", "0.2.0b1", "0.2.0rc1", "0.2.0.dev1"])
 def test_channel_auto_selects_prerelease_for_prerelease_versions(version: str) -> None:
+    """The auto channel resolves prerelease versions to prerelease."""
     assert resolve_channel(version, "auto") == "prerelease"
     assert resolve_channel(version, "prerelease") == "prerelease"
 

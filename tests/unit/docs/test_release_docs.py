@@ -12,6 +12,7 @@ RELEASING_PATH = REPO_ROOT / "RELEASING.md"
 
 @pytest.mark.unit
 def test_releasing_docs_explain_manifest_inspection_and_verification() -> None:
+    """Release docs describe manifest inspection and immutable verification."""
     docs = RELEASING_PATH.read_text(encoding="utf-8")
 
     assert "awf-install-manifest.json" in docs
