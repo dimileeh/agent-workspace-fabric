@@ -407,19 +407,16 @@ def write_host_setup_config(
     """Atomically write host setup config with conservative permissions."""
     config_path = _resolve_config_path(path)
     secures_parent_permissions = _is_standard_awf_config_path(config_path)
-    payload = cast(
-        dict[str, object],
-        config.model_dump(mode="python", exclude_none=True, warnings=False),
-    )
+    raw_payload = _host_setup_config_revalidation_payload(config)
     try:
-        _ensure_no_secret_payload(payload)
+        _ensure_no_secret_payload(raw_payload)
     except _SecretPayloadError as exc:
         raise _config_secret_error(config_path, details=exc.details()) from exc
     except _RecursivePayloadError as exc:
         raise _config_corrupt_error(config_path, details=exc.details()) from exc
 
     try:
-        validated_config = HostSetupConfig.model_validate(payload)
+        validated_config = HostSetupConfig.model_validate(raw_payload)
     except ValidationError as exc:
         details = _validation_error_details(exc)
         if _validation_contains_secret_error(exc):
@@ -455,6 +452,11 @@ def write_host_setup_config(
             config_path,
             details={"error_type": type(exc).__name__},
         ) from exc
+
+
+def _host_setup_config_revalidation_payload(config: HostSetupConfig) -> dict[str, object]:
+    """Return raw field values for validation without invoking field serializers."""
+    return {field_name: getattr(config, field_name) for field_name in HostSetupConfig.model_fields}
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:

@@ -628,6 +628,29 @@ def test_host_setup_config_write_wraps_non_serializable_model_copy_updates(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("field_name", ["providers", "clients"])
+def test_host_setup_config_write_wraps_non_mapping_copied_mapping_fields(
+    field_name: str,
+    tmp_path: Path,
+) -> None:
+    config_path = default_host_setup_config_path(home=tmp_path / "home")
+    copied_config = HostSetupConfig().model_copy(update={field_name: object()})
+
+    with pytest.raises(HostSetupConfigError) as exc_info:
+        write_host_setup_config(copied_config, path=config_path)
+
+    error = exc_info.value
+    assert error.reason_code == "HOST_SETUP_CONFIG_CORRUPT"
+    assert error.path == config_path
+    assert error.details == {
+        "error_count": 1,
+        "error_types": ["dict_type"],
+        "locations": [field_name],
+    }
+    assert not config_path.exists()
+
+
+@pytest.mark.unit
 def test_host_setup_config_write_wraps_recursive_payload_scan_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
