@@ -299,10 +299,12 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     issues = raw_payload.get("issues")
     if issues is None:
         issues = ()
-    if not isinstance(issues, tuple):
+    if not isinstance(issues, (tuple, list)):
         raise TypeError(
-            "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple."
+            "FirstRunPayload.model_dump(mode='python') must preserve issues as a tuple or list."
         )
+    if isinstance(issues, list):
+        issues = tuple(issues)
     for issue in issues:
         if not isinstance(issue, dict):
             continue

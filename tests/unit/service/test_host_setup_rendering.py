@@ -457,10 +457,10 @@ def test_first_run_json_avoids_pydantic_dump_fallback_keyword(
 
 
 @pytest.mark.unit
-def test_first_run_json_requires_tuple_issues_from_python_dump(
+def test_first_run_json_accepts_list_issues_from_python_dump(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify rendering fails loudly if the issues dump contract changes."""
+    """Verify rendering normalizes list-shaped issue dumps."""
     original_model_dump = FirstRunPayload.model_dump
 
     def model_dump_with_list_issues(
@@ -469,17 +469,19 @@ def test_first_run_json_requires_tuple_issues_from_python_dump(
     ) -> dict[str, Any]:
         """Simulate a dump shape that no longer preserves tuple fields."""
         raw_payload = dict(original_model_dump(self, **kwargs))
-        raw_payload["issues"] = []
+        raw_payload["issues"] = list(raw_payload["issues"])
         return raw_payload
 
     monkeypatch.setattr(FirstRunPayload, "model_dump", model_dump_with_list_issues)
-    payload = first_run_success_payload(
+    payload = first_run_failure_payload(
         command="awf setup",
-        summary="AWF first-run checks passed.",
+        reason_code="SETUP_READINESS_FAILED",
+        summary="AWF first-run checks failed.",
     )
 
-    with pytest.raises(TypeError, match="must preserve issues as a tuple"):
-        render_first_run_json(payload)
+    rendered_json = render_first_run_json(payload)
+
+    assert rendered_json["issues"][0]["reason_code"] == "SETUP_READINESS_FAILED"
 
 
 @pytest.mark.unit
