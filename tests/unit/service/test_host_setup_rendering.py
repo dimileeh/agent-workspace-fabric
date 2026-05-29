@@ -259,7 +259,10 @@ def test_first_run_rendering_coerces_arbitrary_detail_values_before_redaction() 
     raw_token = "ghp_firstRunObjectSecret"
 
     class ArbitraryWriteError:
+        """Stringifies to a diagnostic message containing a secret."""
+
         def __str__(self) -> str:
+            """Return the error text that rendering must redact."""
             return f"failed to write config: TOKEN={raw_token}"
 
     payload = first_run_failure_payload(
