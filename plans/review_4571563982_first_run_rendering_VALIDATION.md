@@ -21,6 +21,12 @@ Plan reference: `plans/review_4571563982_first_run_rendering_PLAN.md`
   `related_command: ""` is omitted from JSON while pretty output remains absent.
 - Complete: Existing non-empty remediation `related_command` behavior remains
   unchanged, covered by the failure payload test.
+- Complete: The stable success JSON shape still keeps `issues: []`, and
+  `render_first_run_json` now documents why that field is exempt from empty
+  optional-field omission.
+- Complete: Pretty rendering now expands non-empty list/tuple values in
+  `details` into indented sequence lines, recursing into nested mappings and
+  preserving redaction.
 - Complete: Validation stayed focused. Full AWF/GitHub validation was not run
   inside the agent phase because AWF owns broad validation after completion.
 
@@ -49,8 +55,18 @@ Focused checks:
   - Pass after the renderer change: `1 passed in 0.43s`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation tests/unit/service/test_host_setup_rendering.py::test_first_run_failure_payload_includes_reason_and_safe_details tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
   - Pass: `6 passed in 0.42s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_sequence_details_as_nested_lines -q`
+  - Initial failure before the renderer change: pretty output still rendered
+    `paths: ["[redacted]"]` and `port_conflicts: [...]` inline.
+  - Pass after the renderer change: `1 passed in 0.41s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_success_payload_renders_pretty_and_json tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_optional_collections tests/unit/service/test_host_setup_rendering.py::test_first_run_json_preserves_non_empty_remediation_next_steps tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation tests/unit/service/test_host_setup_rendering.py::test_first_run_failure_payload_includes_reason_and_safe_details tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_sequence_details_as_nested_lines tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
+  - Pass: `8 passed in 0.44s`
 - `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
   - Pass: `All checks passed!`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
+  - Pass: `2 files already formatted`
+- `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`
+  - Pass: `Success: no issues found in 1 source file`
 - `git diff --check`
   - Pass: no whitespace errors.
 

@@ -217,6 +217,45 @@ def test_first_run_failure_payload_includes_reason_and_safe_details() -> None:
 
 
 @pytest.mark.unit
+def test_first_run_pretty_renders_sequence_details_as_nested_lines() -> None:
+    payload = first_run_failure_payload(
+        command="awf start",
+        reason_code="START_HEALTH_TIMEOUT",
+        summary="AWF service ports are unavailable.",
+        details={
+            "paths": ("plain-file:///tmp/awf-secret",),
+            "port_conflicts": [
+                {"container": 8000, "host": 8000},
+                {"container": 5432, "provider_ref": "env://POSTGRES_PASSWORD"},
+            ],
+        },
+    )
+
+    rendered_pretty = render_first_run_pretty(payload)
+    lines = rendered_pretty.splitlines()
+
+    assert 'paths: ["[redacted]"]' not in rendered_pretty
+    assert "port_conflicts: [" not in rendered_pretty
+    assert "  paths:" in lines
+    paths_index = lines.index("  paths:")
+    assert lines[paths_index + 1] == "    - [redacted]"
+    assert (
+        "\n".join(
+            [
+                "  port_conflicts:",
+                "    -",
+                "      container: 8000",
+                "      host: 8000",
+                "    -",
+                "      container: 5432",
+                "      provider_ref: [redacted]",
+            ]
+        )
+        in rendered_pretty
+    )
+
+
+@pytest.mark.unit
 def test_every_first_run_failure_reason_can_render_a_pretty_panel() -> None:
     for reason_code in FIRST_RUN_FAILURE_REASON_CODES:
         payload = first_run_failure_payload(

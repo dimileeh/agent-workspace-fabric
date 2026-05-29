@@ -18,6 +18,19 @@ JSON rendering should strip it as well for contract consistency.
 Scope is limited to first-run rendering behavior, focused tests, and this plan
 and validation record.
 
+## Assumptions/Changes
+
+The current review pass on the same comment id adds two follow-up observations:
+
+- Successful JSON payloads intentionally keep `issues: []` for stable consumer
+  shape even though other empty optional fields are omitted. Existing tests
+  assert this contract, so this pass should document the exemption in code
+  rather than removing the field.
+- Pretty rendering currently formats list/tuple values inside `details` as
+  one-line JSON. It should render sequence items across indented lines and
+  recurse into nested mappings/sequences so richer first-run details stay
+  readable.
+
 ## Requirements Checklist
 
 - Add or update a regression test proving helper-built warning/failure payloads
@@ -32,6 +45,10 @@ and validation record.
 - Add a regression test proving empty remediation `related_command: ""` is
   omitted from JSON while pretty output remains absent.
 - Keep non-empty remediation `related_command` unchanged.
+- Preserve the stable success JSON shape with `issues: []` and add an inline
+  code comment explaining why it is exempt from empty-field omission.
+- Add a focused regression test proving list/tuple `details` values render as
+  indented pretty lines, including nested mappings and redacted values.
 - Do not broaden validation beyond focused tests; AWF/GitHub own broad
   validation after agent completion.
 
@@ -47,9 +64,15 @@ and validation record.
 4. Add a focused failing test for empty remediation `related_command: ""`.
 5. Update `render_first_run_json` to strip empty remediation
    `related_command` after `model_dump`.
-6. Run focused tests for the new regression, existing warning details behavior,
+6. Add a code comment in `render_first_run_json` explaining the intentional
+   `issues: []` success shape.
+7. Add a focused failing test for structured pretty rendering of sequence
+   values under `details`.
+8. Update `_render_mapping_lines` to recurse through list/tuple values and
+   render sequence items on indented lines while preserving scalar formatting.
+9. Run focused tests for the new regression, existing warning details behavior,
    non-empty next-step preservation, and tuple-preservation behavior.
-7. Record validation evidence in
+10. Record validation evidence in
    `plans/review_4571563982_first_run_rendering_VALIDATION.md`.
 
 ## Verification Commands and Pass Criteria
@@ -60,6 +83,11 @@ and validation record.
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_warning_payload_includes_structured_remediation -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_json_omits_empty_remediation_related_command -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_preserves_tuple_container_type -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_sequence_details_as_nested_lines -q`
+- `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
+- `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`
+- `git diff --check`
 
 Pass criteria: all focused tests pass; no broad AWF/GitHub-owned validation is
 run inside the agent phase.

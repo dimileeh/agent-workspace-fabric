@@ -279,6 +279,8 @@ def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
         raw_payload.pop("details")
     if raw_payload.get("next_steps") == []:
         raw_payload.pop("next_steps")
+    # Keep issues present, even when empty, so success payload consumers can
+    # rely on one stable field shape across all first-run statuses.
     for issue in raw_payload.get("issues", []):
         if not isinstance(issue, dict):
             continue
@@ -399,7 +401,32 @@ def _render_mapping_lines(mapping: Mapping[str, Any], *, prefix: str = "  ") -> 
             lines.append(f"{prefix}{key}:")
             lines.extend(_render_mapping_lines(value, prefix=f"{prefix}  "))
             continue
+        if isinstance(value, (list, tuple)) and value:
+            lines.append(f"{prefix}{key}:")
+            lines.extend(_render_sequence_lines(value, prefix=f"{prefix}  "))
+            continue
         lines.append(f"{prefix}{key}: {_format_pretty_value(value)}")
+    return lines
+
+
+def _render_sequence_lines(sequence: list[Any] | tuple[Any, ...], *, prefix: str) -> list[str]:
+    lines: list[str] = []
+    for item in sequence:
+        if isinstance(item, Mapping):
+            if item:
+                lines.append(f"{prefix}-")
+                lines.extend(_render_mapping_lines(item, prefix=f"{prefix}  "))
+            else:
+                lines.append(f"{prefix}- {{}}")
+            continue
+        if isinstance(item, (list, tuple)):
+            if item:
+                lines.append(f"{prefix}-")
+                lines.extend(_render_sequence_lines(item, prefix=f"{prefix}  "))
+            else:
+                lines.append(f"{prefix}- []")
+            continue
+        lines.append(f"{prefix}- {_format_pretty_value(item)}")
     return lines
 
 
