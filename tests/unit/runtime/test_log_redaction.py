@@ -50,6 +50,23 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "token",
+    [
+        "ghp_ABCDEF",
+        "gho_ABCDEFG",
+        "github_pat_ABCDEF",
+        "github_pat_ABCDEFG",
+    ],
+)
+def test_redact_secrets_catches_truncated_github_tokens(token: str) -> None:
+    redacted = redact_secrets(f"clone failed with token {token} in stderr")
+
+    assert token not in redacted
+    assert f"token {REDACTION_MARKER} in stderr" in redacted
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("GH_TOKEN='gho_fakeGitHubOauthToken123456'", "GH_TOKEN='<redacted>'"),
