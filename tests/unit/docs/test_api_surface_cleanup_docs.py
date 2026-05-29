@@ -29,6 +29,12 @@ RETIRED_OPERATOR_SCRIPTS = (
     "scripts/salvage_workspace.py",
 )
 
+SUPPORTED_GENERATOR_SCRIPTS = {
+    "generate_install_manifest.py",
+    "generate_openapi.py",
+    "generate_reason_catalog.py",
+}
+
 
 def _public_docs_text() -> str:
     chunks: list[str] = []
@@ -75,4 +81,4 @@ def test_scripts_directory_contains_only_supported_generators() -> None:
         if path.is_file() and path.name != "__init__.py"
     }
 
-    assert scripts == {"generate_openapi.py", "generate_reason_catalog.py"}
+    assert scripts == SUPPORTED_GENERATOR_SCRIPTS
