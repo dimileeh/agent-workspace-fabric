@@ -181,9 +181,6 @@ def _normalize_repository_url(repository_url: str) -> str:
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2:
         raise ManifestError("repository URL must identify a GitHub owner and repository")
-    forbidden = ("/latest/", "/raw/", "/tree/", "/blob/")
-    if any(segment in f"{parsed.path}/" for segment in forbidden):
-        raise ManifestError("repository URL must not contain mutable release or branch paths")
     return normalized
 
 
