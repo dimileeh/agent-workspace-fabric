@@ -14,7 +14,8 @@ current PR diff, plus focused local validation evidence.
 - Add concise docstrings to undocumented focused tests and test helpers in
   `tests/unit/scripts/test_generate_install_manifest.py`,
   `tests/unit/docs/test_release_docs.py`, and
-  `tests/unit/test_publish_workflow_release_artifacts.py`.
+  `tests/unit/test_publish_workflow_release_artifacts.py`, plus any later
+  PR-diff Python test files that the diff-scoped audit reports.
 - Keep runtime behavior and existing assertions unchanged.
 - Avoid protected workflow, quality-gate, and configuration edits.
 - Run focused checks for the touched files and record that broad AWF/GitHub
@@ -58,11 +59,13 @@ PY
 uv run --python 3.12 --extra dev ruff check \
   scripts/generate_install_manifest.py \
   tests/unit/scripts/test_generate_install_manifest.py \
+  tests/unit/docs/test_api_surface_cleanup_docs.py \
   tests/unit/docs/test_release_docs.py \
   tests/unit/test_publish_workflow_release_artifacts.py
 
 uv run --python 3.12 --extra dev pytest \
   tests/unit/scripts/test_generate_install_manifest.py \
+  tests/unit/docs/test_api_surface_cleanup_docs.py \
   tests/unit/docs/test_release_docs.py \
   tests/unit/test_publish_workflow_release_artifacts.py \
   -q

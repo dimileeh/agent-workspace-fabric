@@ -1,3 +1,5 @@
+"""Documentation tests for public API surface cleanup."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,6 +39,7 @@ SUPPORTED_GENERATOR_SCRIPTS = {
 
 
 def _public_docs_text() -> str:
+    """Return concatenated public docs text for surface assertions."""
     chunks: list[str] = []
     for relative_path in PUBLIC_DOCS:
         path = REPO_ROOT / relative_path
@@ -47,6 +50,7 @@ def _public_docs_text() -> str:
 
 @pytest.mark.unit
 def test_public_docs_publish_single_workspace_create_surface() -> None:
+    """Public docs expose only the current workspace creation surface."""
     docs = _public_docs_text()
 
     assert "POST /v1/workspaces" in docs
@@ -66,6 +70,7 @@ def test_public_docs_publish_single_workspace_create_surface() -> None:
 
 @pytest.mark.unit
 def test_public_docs_do_not_recommend_retired_operator_scripts() -> None:
+    """Public docs do not direct operators to retired standalone scripts."""
     docs = _public_docs_text()
 
     for script in RETIRED_OPERATOR_SCRIPTS:
@@ -75,6 +80,7 @@ def test_public_docs_do_not_recommend_retired_operator_scripts() -> None:
 
 @pytest.mark.unit
 def test_scripts_directory_contains_only_supported_generators() -> None:
+    """The scripts directory keeps only supported generator entrypoints."""
     scripts = {
         path.name
         for path in (REPO_ROOT / "scripts").iterdir()
