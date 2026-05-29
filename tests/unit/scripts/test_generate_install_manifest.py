@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.generate_install_manifest import _validate_checksum_content, resolve_channel
+from scripts.generate_install_manifest import (
+    ManifestError,
+    _default_generated_at,
+    _validate_checksum_content,
+    resolve_channel,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "generate_install_manifest.py"
@@ -309,6 +314,25 @@ def test_manifest_records_platform_metadata_for_wheel_and_sdist(tmp_path: Path) 
     }
     assert by_kind["wheel"]["signatures"] == []
     assert by_kind["sdist"]["signatures"] == []
+
+
+@pytest.mark.unit
+def test_default_generated_at_uses_source_date_epoch_as_zulu_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1790553600")
+
+    assert _default_generated_at() == "2026-09-28T00:00:00Z"
+
+
+@pytest.mark.unit
+def test_default_generated_at_rejects_out_of_range_source_date_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1" * 100)
+
+    with pytest.raises(ManifestError, match="Invalid SOURCE_DATE_EPOCH timestamp"):
+        _default_generated_at()
 
 
 @pytest.mark.unit

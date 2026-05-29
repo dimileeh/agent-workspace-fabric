@@ -163,16 +163,11 @@ def _default_generated_at() -> str:
             seconds = int(source_date_epoch)
         except ValueError as exc:
             raise ManifestError("SOURCE_DATE_EPOCH must be an integer Unix timestamp") from exc
-        return (
-            datetime.fromtimestamp(seconds, UTC)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace(
-                "+00:00",
-                "Z",
-            )
-        )
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (OSError, OverflowError) as exc:
+            raise ManifestError(f"Invalid SOURCE_DATE_EPOCH timestamp: {exc}") from exc
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _normalize_repository_url(repository_url: str) -> str:
