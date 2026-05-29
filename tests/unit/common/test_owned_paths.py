@@ -1,0 +1,65 @@
+"""Owned-path classification helper tests."""
+
+from __future__ import annotations
+
+import pytest
+
+from awf.common.owned_paths import (
+    interworkspace_owned_paths,
+    is_internal_plan_artifact_owned_path,
+    normalize_owned_path,
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw_path", "normalized"),
+    [
+        (" ./docs//awf-plans/../awf-plans/ws.md ", "docs/awf-plans/ws.md"),
+        ("docs\\awf-plans\\**", "docs/awf-plans/**"),
+        ("", ""),
+    ],
+)
+def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
+    assert normalize_owned_path(raw_path) == normalized
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/awf-plans",
+        "docs/awf-plans/**",
+        "docs/awf-plans/ws_123.md",
+        "./docs/awf-plans/ws_123.conformance.json",
+    ],
+)
+def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
+    assert is_internal_plan_artifact_owned_path(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/**",
+        "docs/runbooks/**",
+        "plans/**",
+        "docs/awf-plans-other/**",
+    ],
+)
+def test_real_docs_and_repo_plan_paths_are_not_internal_plan_artifacts(path: str) -> None:
+    assert is_internal_plan_artifact_owned_path(path) is False
+
+
+@pytest.mark.unit
+def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> None:
+    assert interworkspace_owned_paths(
+        [
+            "",
+            "docs/awf-plans/**",
+            "src/awf/**",
+            "docs/runbooks/**",
+            "./docs/awf-plans/ws.md",
+        ]
+    ) == ("src/awf/**", "docs/runbooks/**")

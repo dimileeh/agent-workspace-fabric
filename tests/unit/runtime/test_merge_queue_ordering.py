@@ -23,6 +23,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState
+from awf.service.merge_queue import list_merge_queue_blockers_for_candidate
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
 from tests.unit.runtime.test_pr_monitor import _status
@@ -58,7 +59,9 @@ async def _seed_monitoring_candidate(
     pr_number: int,
     created_at: datetime,
     status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
+    owned_paths: list[str] | None = None,
 ) -> tuple[str, str, str]:
+    resolved_owned_paths = list(owned_paths or ["src/shared/**"])
     async with factory() as session:
         workspace_repo = WorkspaceRepository(session)
         workspace = await workspace_repo.create(
@@ -67,7 +70,7 @@ async def _seed_monitoring_candidate(
             task_title=title,
             task_prompt=f"Implement {title}.",
             task_external_id=f"RUNTIME-QUEUE-{pr_number}",
-            owned_paths=["src/shared/**"],
+            owned_paths=resolved_owned_paths,
             auto_merge=True,
             agent=AgentRuntime.claude_code.value,
             test_commands=["pytest -q"],
@@ -90,7 +93,7 @@ async def _seed_monitoring_candidate(
             external_id=workspace.task_external_id,
             idempotency_key=None,
             task_class=None,
-            owned_paths=["src/shared/**"],
+            owned_paths=resolved_owned_paths,
         )
         attempt = await TaskAttemptRepository(session).create_for_workspace(
             task=task,
@@ -128,6 +131,93 @@ async def _seed_monitoring_candidate(
         candidate.updated_at = created_at
         await session.commit()
         return workspace.id, attempt.id, candidate.id
+
+
+@pytest.mark.unit
+async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _seed_monitoring_candidate(
+        factory,
+        title="Older plan artifact",
+        pr_number=81,
+        created_at=now,
+        owned_paths=["src/feature-a/**", "docs/awf-plans/**"],
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later plan artifact",
+        pr_number=82,
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["src/feature-b/**", "docs/awf-plans/**"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
+async def test_plan_artifact_overlap_does_not_hide_real_merge_queue_overlap(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older real overlap",
+        pr_number=83,
+        created_at=now,
+        owned_paths=["src/shared/**", "docs/awf-plans/**"],
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later real overlap",
+        pr_number=84,
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert [blocker.workspace_id for blocker in blockers] == [older_workspace_id]
+
+
+@pytest.mark.unit
+async def test_candidate_with_only_plan_artifact_path_does_not_block_merge_queue(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _seed_monitoring_candidate(
+        factory,
+        title="Older plan only",
+        pr_number=85,
+        created_at=now,
+        owned_paths=["docs/awf-plans/**"],
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later source work",
+        pr_number=86,
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["src/later/**", "docs/awf-plans/**"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
 
 
 @pytest.mark.unit

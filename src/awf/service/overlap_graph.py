@@ -11,6 +11,7 @@ from typing import Final, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.owned_paths import interworkspace_owned_paths
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import owned_path_overlap_match
@@ -238,8 +239,10 @@ def _workspace_overlap_path_matches(
 ) -> _WorkspaceOverlapPathMatches:
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
-    for left_owned_path in sorted(dict.fromkeys(left.owned_paths)):
-        for right_owned_path in sorted(dict.fromkeys(right.owned_paths)):
+    left_paths = sorted(dict.fromkeys(interworkspace_owned_paths(left.owned_paths)))
+    right_paths = sorted(dict.fromkeys(interworkspace_owned_paths(right.owned_paths)))
+    for left_owned_path in left_paths:
+        for right_owned_path in right_paths:
             overlap = owned_path_overlap_match(left_owned_path, right_owned_path)
             if overlap is None:
                 continue

@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.owned_paths import interworkspace_owned_paths
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -272,12 +273,12 @@ def _workspace_overlap_risks_by_id(
     risks_by_workspace: dict[str, tuple[WorkspaceLockOverlapRisk, ...]] = {}
     for workspace in workspaces:
         risks: list[WorkspaceLockOverlapRisk] = []
-        owned_paths = workspace.owned_paths
+        owned_paths = interworkspace_owned_paths(workspace.owned_paths)
         key = (workspace.repo_url, workspace.branch_base)
         for other in candidates_by_repo_base.get(key, ()):
             if other.workspace_id == workspace.workspace_id:
                 continue
-            for overlapping_owned_path in other.owned_paths:
+            for overlapping_owned_path in interworkspace_owned_paths(other.owned_paths):
                 for owned_path in owned_paths:
                     if owned_paths_overlap(overlapping_owned_path, owned_path):
                         risks.append(

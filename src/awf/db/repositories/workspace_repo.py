@@ -26,6 +26,7 @@ from awf.common.audit import build_audit_payload
 from awf.common.ids import (
     new_event_id,
 )
+from awf.common.owned_paths import interworkspace_owned_paths
 from awf.db.enums import (
     AgentRuntime,
     OperationType,
@@ -434,7 +435,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathOverlap]:
-        requested_paths = [path for path in owned_paths if _normalize_owned_path(path) != ""]
+        requested_paths = list(interworkspace_owned_paths(owned_paths))
         if not requested_paths:
             return []
 
@@ -450,9 +451,7 @@ class WorkspaceRepository:
         rows = list((await self._session.execute(stmt)).scalars())
         overlaps: list[OwnedPathOverlap] = []
         for workspace in rows:
-            for existing_path in workspace.owned_paths:
-                if _normalize_owned_path(existing_path) == "":
-                    continue
+            for existing_path in interworkspace_owned_paths(workspace.owned_paths):
                 for requested_path in requested_paths:
                     if _owned_paths_overlap(existing_path, requested_path):
                         overlaps.append(

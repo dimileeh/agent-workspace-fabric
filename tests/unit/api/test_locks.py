@@ -272,3 +272,35 @@ async def test_get_locks_exposes_owned_path_overlap_risks(
             "owned_path": "src/awf/api/**",
         }
     ]
+
+
+@pytest.mark.unit
+async def test_get_locks_ignores_internal_plan_artifact_only_overlap_risks(
+    client: AsyncClient,
+) -> None:
+    existing_id = await _create_lock_workspace(
+        client,
+        title="Existing source work",
+        owned_paths=["src/existing/**", "docs/awf-plans/**"],
+    )
+    response = await client.post(
+        "/v1/workspaces",
+        json=_v2_body(
+            title="Independent source work",
+            owned_paths=["src/requested/**", "docs/awf-plans/**"],
+        ),
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["warnings"] == []
+    requested_id = str(body["workspace_id"])
+
+    locks = await client.get("/v1/locks")
+
+    assert locks.status_code == 200
+    items = {item["workspace_id"]: item for item in locks.json()["items"]}
+    assert items[existing_id]["owned_paths"] == ["src/existing/**", "docs/awf-plans/**"]
+    assert items[requested_id]["owned_paths"] == ["src/requested/**", "docs/awf-plans/**"]
+    assert items[existing_id]["overlap_risks"] == []
+    assert items[requested_id]["overlap_risks"] == []

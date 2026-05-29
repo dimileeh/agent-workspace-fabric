@@ -49,6 +49,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
+from awf.common.owned_paths import is_internal_plan_artifact_owned_path
 from awf.db.models import (
     ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
     MergeCandidate,
@@ -397,8 +398,7 @@ def _path_matches(path: str, pattern: str) -> bool:
 
 
 def _is_plan_artifact_path(path: str) -> bool:
-    normalized = path.strip().replace("\\", "/").removeprefix("./")
-    return _path_matches(normalized, PLAN_ARTIFACT_PATH_PATTERN)
+    return is_internal_plan_artifact_owned_path(path)
 
 
 def _target_changes_are_only_plan_artifacts(changed_paths: Sequence[str]) -> bool:

@@ -934,6 +934,78 @@ class TestOwnedPathOverlapLookup:
         assert overlaps == []
 
     @pytest.mark.unit
+    async def test_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/existing/**", "docs/awf-plans/**"],
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/requested/**", "docs/awf-plans/**"],
+        )
+
+        assert overlaps == []
+
+    @pytest.mark.unit
+    async def test_internal_plan_artifact_filter_does_not_hide_real_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/shared/**", "docs/awf-plans/**"],
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
+        )
+
+        assert overlaps == [
+            repositories.OwnedPathOverlap(
+                workspace_id=existing.id,
+                existing_path="src/shared/**",
+                requested_path="src/shared/module.py",
+            )
+        ]
+
+    @pytest.mark.unit
+    async def test_real_docs_owned_paths_still_report_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["docs/runbooks/**"],
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["docs/runbooks/deploy.md"],
+        )
+
+        assert overlaps == [
+            repositories.OwnedPathOverlap(
+                workspace_id=existing.id,
+                existing_path="docs/runbooks/**",
+                requested_path="docs/runbooks/deploy.md",
+            )
+        ]
+
+    @pytest.mark.unit
     async def test_same_paths_on_different_repo_or_base_branch_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:

@@ -28,6 +28,7 @@ from awf.api.schemas import (
     StaleReasonResponse,
     WorkspaceEventResponse,
 )
+from awf.common.owned_paths import interworkspace_owned_paths
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
     MergeCandidate,
@@ -760,8 +761,8 @@ def _candidate_blocks_target(
 def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
     paths = tuple(path for path in candidate.workspace.owned_paths if path)
     if paths:
-        return paths
-    return tuple(path for path in candidate.attempt.owned_paths if path)
+        return interworkspace_owned_paths(paths)
+    return interworkspace_owned_paths(path for path in candidate.attempt.owned_paths if path)
 
 
 def _is_merge_ready_candidate(candidate: MergeCandidate) -> bool:
