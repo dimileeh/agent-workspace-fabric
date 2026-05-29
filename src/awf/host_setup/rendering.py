@@ -105,6 +105,10 @@ _PROVIDER_REF_KEY_RE = re.compile(
     r"(?:credential|provider)[_-]refs?",
     re.IGNORECASE,
 )
+_PROVIDER_REF_KEY_SUFFIX_RE = re.compile(
+    r"(?P<base>(?:credential|provider)[_-]refs?)(?P<separator>[_:-])(?P<suffix>.+)",
+    re.IGNORECASE,
+)
 
 
 class _FirstRunBaseModel(BaseModel):
@@ -280,6 +284,10 @@ def first_run_failure_payload(
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
     """Return a JSON-safe, redacted first-run payload dictionary."""
     raw_payload = payload.model_dump(mode="python", exclude_none=True)
+    # Pydantic dumps BaseModel layers into fresh dicts, so optional wrapper-key
+    # cleanup below cannot mutate the frozen model. mode="python" can preserve
+    # user-supplied details mappings by reference, so this cleanup only removes
+    # wrapper keys and never mutates details mapping contents.
     if raw_payload.get("details") == {}:
         raw_payload.pop("details")
     if raw_payload.get("next_steps") in ([], ()):
@@ -356,6 +364,9 @@ def _json_safe_first_run_value(value: Any) -> Any:
         rendered: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
+            # Provider-ref redaction already preserves sensitive string-key
+            # collisions. This final pass covers JSON key coercion collisions
+            # for direct helper callers and future non-string upstream shapes.
             rendered_key = _deduplicate_redacted_mapping_key(rendered, key_text)
             rendered[rendered_key] = _json_safe_first_run_value(item)
         return rendered
@@ -374,6 +385,8 @@ def _redact_provider_refs(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = _redact_first_run_mapping_key(key)
+            # This pass preserves collisions introduced by content redaction in
+            # mapping keys; JSON-safe rendering has its own coercion guard.
             redacted_key = _deduplicate_redacted_mapping_key(redacted, key_text)
             if _is_provider_ref_key(key_text):
                 redacted[redacted_key] = REDACTION_MARKER
@@ -395,7 +408,25 @@ def _redact_first_run_mapping_key(key: Any) -> str:
     """Return a string mapping key with sensitive first-run content redacted."""
     key_text = str(key)
     audit_redacted = redact_audit_value(key_text, preserve_tuples=True)
-    return _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+    return _redact_provider_ref_key_token_suffix(provider_redacted)
+
+
+def _redact_provider_ref_key_token_suffix(key: str) -> str:
+    """Redact token-like suffixes appended to explicit provider-ref keys."""
+    match = _PROVIDER_REF_KEY_SUFFIX_RE.fullmatch(key)
+    if match is None or not _is_sensitive_provider_ref_key_suffix(match.group("suffix")):
+        return key
+    return f"{match.group('base')}{match.group('separator')}{REDACTION_MARKER}"
+
+
+def _is_sensitive_provider_ref_key_suffix(suffix: str) -> bool:
+    """Return whether a provider-ref key suffix is already or should be redacted."""
+    if suffix == REDACTION_MARKER:
+        return True
+    audit_redacted = redact_audit_value(suffix, preserve_tuples=True)
+    provider_redacted = _PROVIDER_REF_RE.sub(REDACTION_MARKER, cast(str, audit_redacted))
+    return provider_redacted == REDACTION_MARKER
 
 
 def _deduplicate_redacted_mapping_key(mapping: Mapping[str, Any], key: str) -> str:
@@ -414,7 +445,12 @@ def _deduplicate_redacted_mapping_key(mapping: Mapping[str, Any], key: str) -> s
 
 def _is_provider_ref_key(key: str) -> bool:
     """Return whether a mapping key denotes provider credential references."""
-    return bool(_PROVIDER_REF_KEY_RE.fullmatch(key))
+    if _PROVIDER_REF_KEY_RE.fullmatch(key):
+        return True
+    suffix_match = _PROVIDER_REF_KEY_SUFFIX_RE.fullmatch(key)
+    if suffix_match is None:
+        return False
+    return _is_sensitive_provider_ref_key_suffix(suffix_match.group("suffix"))
 
 
 def _render_issue_lines(issue: Mapping[str, Any]) -> list[str]:

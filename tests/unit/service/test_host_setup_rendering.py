@@ -841,6 +841,27 @@ def test_provider_ref_key_redaction_requires_explicit_ref_key() -> None:
 
 
 @pytest.mark.unit
+def test_provider_ref_key_redaction_handles_token_contaminated_ref_keys() -> None:
+    """Verify token-contaminated provider-ref keys still redact whole values."""
+    raw_github_suffix = "ghp_firstRunSecretToken"
+    raw_gitlab_suffix = "glpat-firstRunSecretToken"
+
+    redacted = _redact_provider_refs(
+        {
+            f"credential_ref_{raw_github_suffix}": "literal-provider-location",
+            f"provider-ref-{raw_gitlab_suffix}": {"location": "literal-provider-location"},
+            f"provider_ref_hint-{raw_gitlab_suffix}": "metadata only",
+        }
+    )
+
+    assert redacted == {
+        "credential_ref_[redacted]": "[redacted]",
+        "provider-ref-[redacted]": "[redacted]",
+        "provider_ref_hint-[redacted]": "metadata only",
+    }
+
+
+@pytest.mark.unit
 def test_first_run_redaction_preserves_tuple_container_type() -> None:
     """Verify public first-run redaction preserves tuple containers."""
     redacted = redact_first_run_value(

@@ -40,6 +40,19 @@ Iteration 2 follow-up observations from the same review-level comment:
   separators, not no-separator spellings or unrelated keys that merely contain
   those words as a substring.
 
+Iteration 3 follow-up observations from the same review-level comment:
+
+- The `mode="python"` optional-field cleanup mutates the dumped payload shape
+  before redaction. The code should document that it only mutates fresh
+  BaseModel wrapper dictionaries and does not mutate preserved `details`
+  mappings.
+- Key deduplication intentionally happens in both the provider-ref redaction
+  pass and the JSON-safe coercion pass for different collision sources. The code
+  should document that distinction.
+- Provider-ref key classification should still blanket-redact values when an
+  otherwise exact provider-ref key is contaminated with a token-like suffix that
+  may already have been content-redacted to `[redacted]`.
+
 ## Requirements Checklist
 
 - Add or update a regression test proving helper-built warning/failure payloads
@@ -63,6 +76,11 @@ Iteration 2 follow-up observations from the same review-level comment:
 - Add a focused regression test proving provider-reference key redaction is
   exact enough to avoid no-separator and mid-key substring matches while still
   redacting supported `credential_ref(s)` / `provider_ref(s)` forms.
+- Add maintainability comments for the `mode="python"` cleanup and the two
+  deduplication layers without changing behavior.
+- Add a focused regression test proving token-contaminated
+  `credential_ref(s)` / `provider_ref(s)` keys blanket-redact their values while
+  still avoiding the broader non-provider-ref key matches from Iteration 2.
 - Do not broaden validation beyond focused tests; AWF/GitHub own broad
   validation after agent completion.
 
@@ -89,9 +107,15 @@ Iteration 2 follow-up observations from the same review-level comment:
 10. Add a focused failing test for provider-reference key matching breadth and
     tighten `_PROVIDER_REF_KEY_RE` / `_is_provider_ref_key` to avoid
     no-separator and substring matches.
-11. Run focused tests for the new regression, existing warning details behavior,
+11. Add comments documenting why `render_first_run_json` optional-field cleanup
+    mutates only safe wrapper dictionaries and why deduplication exists in both
+    redaction and JSON-safe coercion.
+12. Add a focused failing test for token-contaminated provider-ref keys and
+    update provider-ref key classification to detect exact provider-ref keys
+    with a single token-like suffix.
+13. Run focused tests for the new regression, existing warning details behavior,
    non-empty next-step preservation, and tuple-preservation behavior.
-12. Record validation evidence in
+14. Record validation evidence in
    `plans/review_4571563982_first_run_rendering_VALIDATION.md`.
 
 ## Verification Commands and Pass Criteria
@@ -105,6 +129,7 @@ Iteration 2 follow-up observations from the same review-level comment:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_sequence_details_as_nested_lines -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_first_run_pretty_renders_empty_nested_mapping_details_as_scalar -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_requires_explicit_ref_key -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_handles_token_contaminated_ref_keys -q`
 - `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`

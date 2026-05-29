@@ -109,6 +109,46 @@ Iteration 2 evidence:
 - `git diff --check`
   - Pass: no whitespace errors.
 
+## Iteration 3
+
+Follow-up requirements from the same review-level comment:
+
+- Complete: Added maintainability comments documenting that
+  `render_first_run_json` only mutates fresh BaseModel wrapper dictionaries and
+  does not mutate preserved `details` mappings.
+- Complete: Added comments distinguishing redaction-time key collision
+  deduplication from the final JSON-safe key-coercion deduplication guard.
+- Complete: Added a regression test proving token-contaminated
+  `credential_ref(s)` / `provider_ref(s)` keys redact their rendered key and
+  blanket-redact their values, while a non-provider-ref hint key keeps its value.
+- Complete: Kept validation focused. Full AWF/GitHub validation was not run
+  inside the agent phase because AWF owns broad validation after completion.
+
+Iteration 3 evidence:
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_handles_token_contaminated_ref_keys -q`
+  - Initial failure before the renderer changes: the
+    `credential_ref_ghp...` key leaked through with its literal value, and the
+    `provider-ref-[redacted]` key kept a nested literal value instead of
+    blanket-redacting it.
+  - Pass after the renderer changes: `1 passed in 0.43s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_requires_explicit_ref_key tests/unit/service/test_host_setup_rendering.py::test_provider_ref_key_redaction_handles_token_contaminated_ref_keys tests/unit/service/test_host_setup_rendering.py::test_first_run_rendering_redacts_token_and_provider_ref_detail_keys tests/unit/service/test_host_setup_rendering.py::test_first_run_rendering_preserves_colliding_redacted_mapping_keys tests/unit/service/test_host_setup_rendering.py::test_first_run_redaction_does_not_double_redact_provider_ref_assignments -q`
+  - Pass: `5 passed in 0.48s`
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_host_setup_rendering.py -q`
+  - Pass: `36 passed in 0.64s`
+- `uv run --python 3.12 --extra dev ruff check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
+  - Pass: `All checks passed!`
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`
+  - Initial result after the test addition: `Would reformat:
+    tests/unit/service/test_host_setup_rendering.py`.
+  - Pass after applying `uv run --python 3.12 --extra dev ruff format
+    src/awf/host_setup/rendering.py tests/unit/service/test_host_setup_rendering.py`:
+    `2 files already formatted`
+- `uv run --python 3.12 --extra dev mypy src/awf/host_setup/rendering.py`
+  - Pass: `Success: no issues found in 1 source file`
+- `git diff --check`
+  - Pass: no whitespace errors.
+
 ## Gaps
 
 None.
