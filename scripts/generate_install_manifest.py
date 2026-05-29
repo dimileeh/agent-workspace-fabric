@@ -190,8 +190,6 @@ def _normalize_repository_url(repository_url: str) -> str:
 def _validate_tag(tag: str, version: str) -> None:
     if tag != f"v{version}":
         raise ManifestError(f"tag must pin the package version as v{version}")
-    if "latest" in tag or "/" in tag:
-        raise ManifestError("tag must be a release tag, not a mutable ref")
 
 
 def _distribution_files(dist_dir: Path) -> list[Path]:
