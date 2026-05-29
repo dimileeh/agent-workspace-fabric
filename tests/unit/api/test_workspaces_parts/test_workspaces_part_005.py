@@ -855,8 +855,8 @@ class TestCreateWorkspacePolicyMetadata:
 
         assert detail.status_code == 200
         assert overview.status_code == 200
-        _assert_effective_identity(detail.json(), model="claude-opus-4-7")
-        _assert_effective_identity(overview.json()["items"][0], model="claude-opus-4-7")
+        _assert_effective_identity(detail.json(), model="claude-opus-4-8")
+        _assert_effective_identity(overview.json()["items"][0], model="claude-opus-4-8")
 
     @pytest.mark.unit
     async def test_v2_idempotency_replay_ignores_defaulted_identity_projection(

@@ -34,13 +34,11 @@ class ClaudeCodeAdapter(AgentAdapter):
 
 
 def _claude_effort_for_awf_effort(effort: str) -> str:
-    """Map AWF's abstract effort policy to Claude Code's concrete flag.
+    """Normalize AWF's effort policy to Claude Code's ``--effort`` flag.
 
-    Recent Claude Code builds accept ``xhigh`` and ``max``; older builds only
-    accept ``max`` as their top effort. Use ``max`` for AWF's ``xhigh`` so
-    dogfood workspaces keep running across both CLI generations.
+    The ``claude`` CLI accepts the same effort ladder AWF uses
+    (``low``, ``medium``, ``high``, ``xhigh``, ``max``), so the requested effort
+    is propagated as-is. In particular ``xhigh`` stays ``xhigh`` and is not
+    collapsed to ``max``.
     """
-    normalized = effort.lower()
-    if normalized in {"xhigh", "max"}:
-        return "max"
-    return normalized
+    return effort.lower()
