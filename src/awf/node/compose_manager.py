@@ -483,6 +483,12 @@ class ComposeManager:
         container already removed, timeout, unparseable inspect output) is caught
         and recorded as a ``companion_logs_capture_error`` marker so the caller
         can still re-raise the original ``ComposeOperationError`` unchanged.
+
+        The ``companion_logs_capture_error`` marker is always a uniform
+        ``dict[str, str]`` so consumers never have to special-case its shape:
+        top-level failures (``ps``/``inspect``/JSON) are keyed under
+        ``"_top_level"`` and per-container ``docker logs`` failures under the
+        compose service name.
         """
         compose_file = self._projects_dir / workspace_id / "compose.yml"
         payload: dict[str, Any] = {
@@ -514,7 +520,9 @@ class ComposeManager:
         except ComposeOperationError as exc:
             return self._diagnostics_with_capture_error(payload, operation="inspect", exc=exc)
         except json.JSONDecodeError as exc:
-            payload["companion_logs_capture_error"] = f"inspect: unparseable JSON ({exc})"
+            payload["companion_logs_capture_error"] = {
+                "_top_level": f"inspect: unparseable JSON ({exc})"
+            }
             return _redacted_diagnostics(payload)
 
         containers = inspected if isinstance(inspected, list) else []
@@ -525,10 +533,12 @@ class ComposeManager:
         companion_logs: dict[str, list[str]] = {}
         logs_capture_error: dict[str, str] = {}
 
-        for container in containers:
+        for idx, container in enumerate(containers):
             if not _container_is_unhealthy(container):
                 continue
-            service = _compose_service_name(container) or str(container.get("Id") or "<unknown>")
+            service = _compose_service_name(container) or str(
+                container.get("Id") or f"<unknown-{idx}>"
+            )
             companion_health[service] = _container_health_summary(container)
             test = _container_healthcheck_test(container)
             if test is not None:
@@ -580,7 +590,9 @@ class ComposeManager:
             reason_code=exc.reason_code,
             error=redact_secrets(str(exc)),
         )
-        payload["companion_logs_capture_error"] = f"{operation}: {_capture_error_detail(exc)}"
+        payload["companion_logs_capture_error"] = {
+            "_top_level": f"{operation}: {_capture_error_detail(exc)}"
+        }
         return _redacted_diagnostics(payload)
 
     # ── Internals ──────────────────────────────────────────────────────────

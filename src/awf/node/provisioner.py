@@ -548,7 +548,10 @@ class Provisioner:
                     {
                         "schema": SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
                         "compose_project": project_name,
-                        "companion_logs_capture_error": f"{reason_code}: {exc}",
+                        # Uniform ``dict[str, str]`` shape — matches the
+                        # compose-manager capture markers so consumers never
+                        # special-case a bare str vs a per-service dict.
+                        "companion_logs_capture_error": {"_top_level": f"{reason_code}: {exc}"},
                     }
                 ),
             )

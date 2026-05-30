@@ -660,7 +660,9 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_gone",
             )
 
-        assert "backend" in payload["companion_logs_capture_error"]
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert isinstance(marker["backend"], str)
         # Health + healthcheck still captured despite the logs failure.
         assert "backend" in payload["companion_health"]
         assert payload["healthcheck_test"]["backend"] == ["CMD", "x"]
@@ -718,6 +720,87 @@ class TestCaptureCompanionDiagnostics:
         assert marker.startswith("DOCKER_UNAVAILABLE"), marker
 
     @pytest.mark.unit
+    async def test_capture_error_marker_is_always_a_dict_keyed_by_scope(
+        self, manager: ComposeManager
+    ) -> None:
+        """``companion_logs_capture_error`` is a uniform ``dict[str, str]``.
+
+        Regression for the inconsistent-shape review: top-level failures
+        (ps/inspect/JSON) are keyed under ``_top_level`` and per-container logs
+        failures under the compose service name, so consumers never have to
+        special-case a bare ``str`` vs a per-service ``dict``.
+        """
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_gone",
+                    service="backend",
+                    health_status="unhealthy",
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_gone"],
+                inspect_stdout=inspect,
+                logs_by_container={},  # per-container logs failure → service-keyed marker
+            ),
+        ):
+            per_container = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_shape_pc",
+                workspace_id="ws_shape_pc",
+            )
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(ps_returncode=1, ps_stderr=b"boom"),
+        ):
+            top_level = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_shape_tl",
+                workspace_id="ws_shape_tl",
+            )
+
+        for marker in (
+            per_container["companion_logs_capture_error"],
+            top_level["companion_logs_capture_error"],
+        ):
+            assert isinstance(marker, dict)
+            assert all(isinstance(k, str) and isinstance(v, str) for k, v in marker.items())
+        assert set(per_container["companion_logs_capture_error"]) == {"backend"}
+        assert set(top_level["companion_logs_capture_error"]) == {"_top_level"}
+
+    @pytest.mark.unit
+    async def test_unidentifiable_containers_get_distinct_fallback_keys(
+        self, manager: ComposeManager
+    ) -> None:
+        """Containers lacking both a compose service label and an ``Id`` must not
+        collide on a single ``<unknown>`` key — each unhealthy one keeps its own
+        diagnostics entry via an index-disambiguated fallback key.
+        """
+        inspect = json.dumps(
+            [
+                _inspect_entry(container_id=None, service=None, status="exited", exit_code=1),
+                _inspect_entry(container_id=None, service=None, status="exited", exit_code=2),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["a", "b"],
+                inspect_stdout=inspect,
+                logs_by_container={},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_noident",
+                workspace_id="ws_noident",
+            )
+
+        # Both unhealthy containers survive under distinct keys, not collapsed.
+        assert len(payload["companion_health"]) == 2
+        assert set(payload["companion_health"]) == {"<unknown-0>", "<unknown-1>"}
+
+    @pytest.mark.unit
     async def test_top_level_ps_error_returns_partial_payload(
         self, manager: ComposeManager
     ) -> None:
@@ -731,7 +814,10 @@ class TestCaptureCompanionDiagnostics:
             )
 
         assert isinstance(payload, dict)
-        assert isinstance(payload["companion_logs_capture_error"], str)
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert marker["_top_level"].startswith("ps:")
+        assert "docker ps boom" in marker["_top_level"]
         assert "companion_health" not in payload
 
     @pytest.mark.unit
@@ -749,7 +835,9 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_inspectfail",
             )
 
-        assert isinstance(payload["companion_logs_capture_error"], str)
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert marker["_top_level"].startswith("inspect:")
         assert "companion_health" not in payload
 
     @pytest.mark.unit
@@ -768,7 +856,9 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_badjson",
             )
 
-        assert isinstance(payload["companion_logs_capture_error"], str)
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert marker["_top_level"].startswith("inspect: unparseable JSON")
         assert "companion_health" not in payload
 
     @pytest.mark.unit
@@ -861,4 +951,6 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_nodocker",
             )
 
-        assert isinstance(payload["companion_logs_capture_error"], str)
+        marker = payload["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert marker["_top_level"].startswith("ps:")

@@ -652,10 +652,11 @@ class TestServiceStartupDiagnostics:
             assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
             assert failed_event.payload is not None
             # The capture error is recorded under the fallback reason code so the
-            # marker is still present for operators.
-            assert failed_event.payload["companion_logs_capture_error"].startswith(
-                "CAPTURE_FAILED:"
-            )
+            # marker is still present for operators. It uses the same uniform
+            # ``dict[str, str]`` shape as the compose-manager capture markers.
+            marker = failed_event.payload["companion_logs_capture_error"]
+            assert isinstance(marker, dict)
+            assert marker["_top_level"].startswith("CAPTURE_FAILED:")
 
     @pytest.mark.unit
     async def test_cancellation_during_diagnostics_capture_still_marks_failed(
