@@ -412,6 +412,15 @@ def test_request_admission_limiter_separates_endpoint_families() -> None:
     ).allowed
 
 
+# Deadlock guard, not a synchronization deadline: a ``Barrier`` releases the
+# instant the last party arrives (microseconds here), so a generous timeout never
+# weakens the race amplification — it only prevents a spurious ``BrokenBarrierError``
+# when a worker thread is CPU-starved under saturated parallelism (e.g. ``-n 20``
+# plus coverage tracing). Kept well under pytest's per-test timeout so a genuine
+# deadlock still surfaces clearly.
+_ADMISSION_START_BARRIER_TIMEOUT_SECONDS = 10.0
+
+
 @pytest.mark.unit
 def test_request_admission_limiter_serializes_concurrent_admissions() -> None:
     concurrent_requests = 8
@@ -424,7 +433,7 @@ def test_request_admission_limiter_serializes_concurrent_admissions() -> None:
     start_barrier = threading.Barrier(concurrent_requests)
 
     def admit_concurrently() -> bool:
-        start_barrier.wait(timeout=1)
+        start_barrier.wait(timeout=_ADMISSION_START_BARRIER_TIMEOUT_SECONDS)
         return limiter.admit(
             endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
             identity=identity,
