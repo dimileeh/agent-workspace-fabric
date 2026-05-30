@@ -12,8 +12,11 @@ _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = "ws_*"
 _WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
+_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN: Final = r"[0-9]+"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
-    r"^ws_[A-Za-z0-9_*?-]+(?:\.md|(?:\.conformance)?\.json)$"
+    rf"^ws_(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|"
+    rf"{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN}|\*)"
+    r"(?:\.md|(?:\.conformance)?\.json)$"
 )
 
 
