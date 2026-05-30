@@ -247,22 +247,16 @@ def evaluate_staleness(
     dep_changes = _matched(target.changed_paths, policy.dependency_paths)
     build_changes = _matched(target.changed_paths, policy.build_config_paths)
     overlap = _matched(target.changed_paths, candidate.owned_paths)
-    plan_artifact_overlap = [
-        path
-        for path in overlap
+    plan_artifact_overlap: list[str] = []
+    blocking_overlap: list[str] = []
+    for path in overlap:
         if _is_plan_artifact_path(
             path,
             internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
-        )
-    ]
-    blocking_overlap = [
-        path
-        for path in overlap
-        if not _is_plan_artifact_path(
-            path,
-            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
-        )
-    ]
+        ):
+            plan_artifact_overlap.append(path)
+        else:
+            blocking_overlap.append(path)
 
     if _is_sensitive_task_class(
         candidate.task_class,
