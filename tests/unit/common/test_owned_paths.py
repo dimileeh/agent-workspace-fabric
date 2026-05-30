@@ -406,6 +406,22 @@ def test_workspace_id_glob_matching_uses_configured_glob_prefix(
 
 
 @pytest.mark.unit
+def test_interworkspace_owned_paths_deduplicates_filtered_paths() -> None:
+    """Filtered paths are unique by normalized path with first spelling preserved."""
+    assert interworkspace_owned_paths(
+        [
+            "src/awf/**",
+            "docs/awf-plans/ws_123.md",
+            "src/awf/**",
+            "./src/awf/**",
+            "docs/awf-plans/ws_456.json",
+            "docs/runbooks/**",
+            "docs/runbooks/**",
+        ]
+    ) == ("src/awf/**", "docs/runbooks/**")
+
+
+@pytest.mark.unit
 def test_interworkspace_owned_paths_normalizes_each_path_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

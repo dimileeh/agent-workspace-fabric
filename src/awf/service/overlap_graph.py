@@ -257,19 +257,15 @@ def _workspace_overlap_path_matches(
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
     left_paths = sorted(
-        dict.fromkeys(
-            interworkspace_owned_paths(
-                left.owned_paths,
-                internal_plan_artifact_paths=left.internal_plan_artifact_paths,
-            )
+        interworkspace_owned_paths(
+            left.owned_paths,
+            internal_plan_artifact_paths=left.internal_plan_artifact_paths,
         )
     )
     right_paths = sorted(
-        dict.fromkeys(
-            interworkspace_owned_paths(
-                right.owned_paths,
-                internal_plan_artifact_paths=right.internal_plan_artifact_paths,
-            )
+        interworkspace_owned_paths(
+            right.owned_paths,
+            internal_plan_artifact_paths=right.internal_plan_artifact_paths,
         )
     )
     for left_owned_path in left_paths:

@@ -112,13 +112,20 @@ def _matches_configured_internal_plan_artifact_path(
     normalized: str,
     internal_plan_artifact_paths: Iterable[str],
 ) -> bool:
-    """Return true when a normalized path matches configured artifact paths."""
+    """Return true when a normalized path matches normalized artifact paths.
+
+    Public helpers normalize both the path under test and configured artifact
+    paths before calling this private matcher.
+    """
     for artifact_path in internal_plan_artifact_paths:
         if not artifact_path:
             continue
         if normalized == artifact_path:
             return True
         if _WORKSPACE_ID_GLOB in normalized and _workspace_id_glob_path_matches(
+            # The path being classified is the pattern here. Match the concrete
+            # configured artifact path against it so persisted `ws_*` owned
+            # paths can still be recognized as generated artifacts.
             artifact_path,
             normalized,
         ):
@@ -137,17 +144,17 @@ def _matches_configured_internal_plan_artifact_path(
     return False
 
 
-def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool:
-    """Match a configured artifact path with a constrained workspace-id glob."""
-    pattern = _workspace_id_glob_path_pattern(artifact_path)
-    return pattern is not None and re.fullmatch(pattern, normalized) is not None
+def _workspace_id_glob_path_matches(path: str, workspace_id_glob_path: str) -> bool:
+    """Match a path against a constrained workspace-id glob path."""
+    pattern = _workspace_id_glob_path_pattern(workspace_id_glob_path)
+    return pattern is not None and re.fullmatch(pattern, path) is not None
 
 
-def _workspace_id_glob_path_pattern(artifact_path: str) -> str | None:
+def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
     """Build a regex that requires repeated workspace-id globs to share one id."""
     # Keep the constrained regex in sync with generated workspace ids.
     escaped_glob = re.escape(_WORKSPACE_ID_GLOB)
-    escaped_path = re.escape(artifact_path)
+    escaped_path = re.escape(workspace_id_glob_path)
     path_parts = escaped_path.split(escaped_glob)
     if len(path_parts) == 1:
         return None
@@ -194,11 +201,13 @@ def interworkspace_owned_paths(
 ) -> tuple[str, ...]:
     """Owned paths that should participate in inter-workspace dependency checks.
 
-    Filtering compares normalized paths, but the returned entries preserve each
-    caller-provided path string. Callers that compare returned paths must still
-    normalize before matching.
+    Filtering and deduplication compare normalized paths. Returned entries keep
+    the first caller-provided string for each normalized path, so callers that do
+    their own comparisons should normalize those preserved strings before
+    matching.
     """
     filtered_paths: list[str] = []
+    seen_normalized: set[str] = set()
     normalized_internal_paths = _normalized_internal_plan_artifact_paths(
         internal_plan_artifact_paths
     )
@@ -209,5 +218,8 @@ def interworkspace_owned_paths(
             internal_plan_artifact_paths=normalized_internal_paths,
         ):
             continue
+        if normalized in seen_normalized:
+            continue
+        seen_normalized.add(normalized)
         filtered_paths.append(path)
     return tuple(filtered_paths)
