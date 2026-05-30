@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.db.repositories as repositories
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import QueueDecisionRepository, WorkspaceRepository
@@ -28,6 +29,7 @@ def _request(
     title: str = "Owned path policy",
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
+    workspace_profile: dict[str, object] | None = None,
 ) -> WorkspaceCreateRequest:
     task = {
         "title": title,
@@ -41,7 +43,10 @@ def _request(
     return WorkspaceCreateRequest(
         repo={"url": repo_url, "base_branch": base_branch},
         task=task,
-        workspace={"profile_ref": "auto", "profile": None},
+        workspace={
+            "profile_ref": None if workspace_profile is not None else "auto",
+            "profile": workspace_profile,
+        },
         validation={"commands": ["pytest -q"], "requested_tier": 1},
         resources={},
         preflight={
@@ -213,6 +218,58 @@ async def test_create_attaches_overlap_coordination_context_to_workspace_metadat
         "trigger_type": "path_overlap",
         "stale_reason_code": "STALE_OVERLAP",
     }
+
+
+@pytest.mark.unit
+async def test_direct_create_custom_plan_path_keeps_real_ws_file_overlap_warning(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = iter(
+        [
+            "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "ws_bbbbbbbbbbbbbbbbbbbbbbbb",
+        ]
+    )
+    monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(ids))
+    service = WorkspaceService(factory)
+    real_docs_path = "docs/ws_0123456789abcdef01234567.md"
+    custom_profile: dict[str, object] = {
+        "name": "custom-plan-paths",
+        "planning": {"required": True, "plan_path": "docs/{workspace_id}.md"},
+    }
+    existing = await service.create(
+        _request(
+            title="existing real ws-shaped docs file",
+            owned_paths=[real_docs_path],
+        )
+    )
+
+    created = await service.create(
+        _request(
+            title="new real ws-shaped docs file",
+            owned_paths=[real_docs_path],
+            workspace_profile=custom_profile,
+        )
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        decisions = await QueueDecisionRepository(session).list_for_workspace(created.id)
+
+    assert existing.id == "ws_aaaaaaaaaaaaaaaaaaaaaaaa"
+    assert created.id == "ws_bbbbbbbbbbbbbbbbbbbbbbbb"
+    assert workspace is not None
+    warning = workspace.task_policy["coordination"]["warnings"][0]
+    assert warning["workspace_ids"] == [existing.id]
+    assert warning["overlaps"][0] == {
+        "workspace_id": existing.id,
+        "existing_path": real_docs_path,
+        "requested_path": real_docs_path,
+        "match_reason_code": "OWNED_PATH_EXACT_MATCH",
+        "explanation": f"Owned paths normalize to the same path: {real_docs_path}.",
+    }
+    assert decisions[0].overlap_risk_summary["workspace_ids"] == [existing.id]
 
 
 @pytest.mark.unit

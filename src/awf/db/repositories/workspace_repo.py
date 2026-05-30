@@ -144,13 +144,14 @@ class WorkspaceRepository:
         idempotency_key: str | None = None,
         task_kind: str = "feature_branch_pr",
         remote_push_branch: str | None = None,
+        workspace_id: str | None = None,
     ) -> Workspace:
         """Create a new workspace in ``requested`` status and emit a creation event.
 
         Does not commit — the caller owns the transaction boundary.
         """
         workspace = Workspace(
-            id=new_workspace_id(),
+            id=workspace_id or new_workspace_id(),
             status=WorkspaceStatus.requested.value,
             version=1,
             event_sequence=1,
