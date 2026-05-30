@@ -58,3 +58,29 @@ def test_uninstall_with_nothing_installed_is_a_noop(harness: InstallerHarness) -
 
     assert result.returncode == 0, result.stderr
     assert f"uv tool uninstall {PACKAGE}" not in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_uninstall_ignores_uv_substring_fork(harness: InstallerHarness) -> None:
+    """A similarly-named uv tool must not match PACKAGE as a substring."""
+    # Only forks are present; the real package is NOT managed by uv. A substring
+    # match would wrongly run ``uv tool uninstall agent-workspace-fabric``.
+    harness.add_uv(list_output="my-agent-workspace-fabric-fork v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    assert f"uv tool uninstall {PACKAGE}" not in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_uninstall_ignores_pipx_substring_fork(harness: InstallerHarness) -> None:
+    """A similarly-named pipx package must not match PACKAGE as a substring."""
+    harness.add_uv(list_output="")
+    harness.add_pipx(list_output="package my-agent-workspace-fabric-fork 0.1.0\n")
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    assert f"pipx uninstall {PACKAGE}" not in "\n".join(harness.calls())

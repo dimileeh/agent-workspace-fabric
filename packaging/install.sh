@@ -534,13 +534,22 @@ verify_awf() {
 
 uv_lists_package() {
     command -v uv >/dev/null 2>&1 || return 1
-    uv tool list 2>/dev/null | grep -q "$PACKAGE" || return 1
+    # Anchor to the package as a whole token (uv prints the name at the start of
+    # the line) so a differently-named fork such as my-agent-workspace-fabric-fork
+    # is not matched as a substring and mistaken for an AWF-managed install.
+    # grep -w would not be enough here: the hyphens in $PACKAGE are non-word
+    # characters, so a word-boundary match would still accept a *-fabric-* name.
+    uv tool list 2>/dev/null | grep -qE "^${PACKAGE}( |$)" || return 1
     return 0
 }
 
 pipx_lists_package() {
     command -v pipx >/dev/null 2>&1 || return 1
-    pipx list 2>/dev/null | grep -q "$PACKAGE" || return 1
+    # Require the package name as its own token (start of line or preceded by a
+    # space, and followed by a space) so a differently-named fork is not matched
+    # as a substring. The leading-space alternative tolerates the "package "
+    # prefix that `pipx list` emits.
+    pipx list 2>/dev/null | grep -qE "(^| )${PACKAGE} " || return 1
     return 0
 }
 
