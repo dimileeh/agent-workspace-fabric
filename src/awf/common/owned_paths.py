@@ -135,7 +135,10 @@ def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool
     """Match a configured artifact path with a constrained workspace-id glob."""
     # Keep the constrained regex in sync with generated workspace ids.
     glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
-    workspace_id_pattern = rf"{re.escape(glob_prefix)}{_WORKSPACE_ID_SUFFIX_PATTERN}"
+    workspace_id_pattern = (
+        rf"{re.escape(glob_prefix)}"
+        rf"(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN})"
+    )
     pattern = re.escape(artifact_path).replace(
         re.escape(_WORKSPACE_ID_GLOB),
         workspace_id_pattern,

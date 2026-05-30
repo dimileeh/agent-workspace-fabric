@@ -210,6 +210,38 @@ def test_unknown_custom_plan_template_keeps_real_ws_docs() -> None:
 
 
 @pytest.mark.unit
+def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
+    """Unknown custom artifact paths use the same shorthand ids as default paths."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {
+            "planning": {
+                "plan_path": "docs/alternate/{workspace_id}.md",
+                "conformance_report_path": "docs/alternate/{workspace_id}.json",
+            },
+        },
+    )
+
+    assert internal_paths == ("docs/alternate/ws_*.md", "docs/alternate/ws_*.json")
+    assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_123.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_123.json",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert interworkspace_owned_paths(
+        [
+            "docs/alternate/ws_123.md",
+            "docs/alternate/ws_123.json",
+            "docs/alternate/ws_protocol.md",
+            "docs/alternate/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/alternate/ws_protocol.md", "docs/alternate/README.md")
+
+
+@pytest.mark.unit
 def test_workspace_scoped_custom_plan_parent_scope_is_internal_artifact() -> None:
     """Workspace-id parent directories may still be treated as artifact scopes."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
