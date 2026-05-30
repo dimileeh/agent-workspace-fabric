@@ -472,6 +472,52 @@ async def test_autofixable_precommit_repair_raises_when_retry_commit_still_fails
 
 
 @pytest.mark.unit
+async def test_autofixable_precommit_repair_retry_commit_format_rewrite_override(
+    tmp_path: Path,
+) -> None:
+    """Regression: autofix retry commit that re-fails with awf-ruff-format-check
+    must override reason_code to POST_AGENT_FORMAT_REPAIR_FAILED, matching the
+    deterministic repair path (see PR review thread PRRT_kwDOSJAM6s6F5i4A).
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    format_only_retry_stderr = "\n".join(
+        [
+            "ruff format --check.....................................................Failed",
+            "- hook id: awf-ruff-format-check",
+            "- exit code: 1",
+            "",
+            "Would reformat: src/app.py",
+            "1 file would be reformatted",
+        ]
+    )
+    with pytest.raises(executor_quality_gates._PostAgentCommitStepError) as exc_info:
+        await executor._run_post_agent_autofixable_precommit_repair(
+            workspace_id="ws_autofix",
+            worktree_path=tmp_path / "worktree",
+            commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+            classification=_autofix_classification(),
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(
+                return_value=CommandResult(returncode=1, stdout="", stderr=format_only_retry_stderr)
+            ),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
+
+    assert exc_info.value.stage == "git commit"
+    assert exc_info.value.precommit_repair_attempted is True
+    assert exc_info.value.repair_strategy == "deterministic_autofix"
+    assert exc_info.value.reason_code_override == "POST_AGENT_FORMAT_REPAIR_FAILED"
+
+
+@pytest.mark.unit
 def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
     assert (
         _failure_reason_for_phase(

@@ -806,6 +806,12 @@ async def _run_post_agent_autofixable_precommit_repair(
         format_repair_attempted=True,
         precommit_repair_attempted=True,
         repair_strategy="deterministic_autofix",
+        reason_code_override=(
+            POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+            if retry_classification.reason_code
+            == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+            else None
+        ),
     )
 
 
