@@ -70,7 +70,7 @@ def _internal_plan_artifact_paths_from_template(
         paths.append(normalized.replace(_WORKSPACE_ID_PLACEHOLDER, workspace_id))
 
     parent, separator, _filename = normalized.rpartition("/")
-    if separator and parent:
+    if separator and parent and _WORKSPACE_ID_PLACEHOLDER in parent:
         wildcard_parent = parent.replace(_WORKSPACE_ID_PLACEHOLDER, _WORKSPACE_ID_GLOB)
         paths.append(f"{wildcard_parent}/**")
         if workspace_id:

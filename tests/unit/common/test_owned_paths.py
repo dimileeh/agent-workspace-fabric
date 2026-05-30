@@ -102,6 +102,7 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
         workspace_id="ws_custom",
     )
 
+    assert "docs/alternate/**" not in internal_paths
     assert is_internal_plan_artifact_owned_path(
         "docs/alternate/ws_custom.md",
         internal_plan_artifact_paths=internal_paths,
@@ -128,7 +129,53 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
             "src/awf/**",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/alternate/README.md", "docs/alternate/ws_custom.notes.md", "src/awf/**")
+    ) == (
+        "docs/alternate/**",
+        "docs/alternate/README.md",
+        "docs/alternate/ws_custom.notes.md",
+        "src/awf/**",
+    )
+
+
+@pytest.mark.unit
+def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None:
+    """Real files in a custom plan artifact parent directory keep overlap checks."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "docs/runbooks/{workspace_id}.md"}},
+        workspace_id="ws_custom",
+    )
+
+    assert internal_paths == ("docs/runbooks/ws_*.md", "docs/runbooks/ws_custom.md")
+    assert interworkspace_owned_paths(
+        [
+            "docs/runbooks/**",
+            "docs/runbooks/ws_*.md",
+            "docs/runbooks/ws_custom.md",
+            "docs/runbooks/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/runbooks/**", "docs/runbooks/README.md")
+
+
+@pytest.mark.unit
+def test_workspace_scoped_custom_plan_parent_scope_is_internal_artifact() -> None:
+    """Workspace-id parent directories may still be treated as artifact scopes."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "docs/runbooks/{workspace_id}/plan.md"}},
+        workspace_id="ws_custom",
+    )
+
+    assert "docs/runbooks/ws_*/**" in internal_paths
+    assert "docs/runbooks/ws_custom/**" in internal_paths
+    assert interworkspace_owned_paths(
+        [
+            "docs/runbooks/**",
+            "docs/runbooks/ws_*/**",
+            "docs/runbooks/ws_custom/**",
+            "docs/runbooks/ws_custom/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/runbooks/**", "docs/runbooks/ws_custom/README.md")
 
 
 @pytest.mark.unit
