@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     _agent_can_triage_review_comment,
     _mark_review_thread_addressed,
+    _review_thread_body_hash,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.comments import (
@@ -38,6 +39,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _mark_review_comment_addressed,
+    _redact_and_truncate_github_error,
     _review_comment_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -444,14 +446,19 @@ async def _run_fix_cycle(
     return cast(_GitPushResult, push_result)
 
 
-def _deferred_issue_filed_marker(thread_id: str) -> str:
+def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
     """State key recording that a tracking issue was filed for a deferred thread.
 
     Distinct from the verdict/body-hash keys that ``_clear_addressed_state_by_id``
     pops, so the marker survives a resolve-retry's state clear and keeps the
     capture idempotent across outer monitor iterations (no duplicate issues).
+
+    Keyed by the thread body hash as well as the id: a same-body resolve-retry
+    stays idempotent, but if the thread later gains new reviewer replies the
+    hash changes and the new feedback is captured into a fresh issue rather than
+    silently resolved under the stale one.
     """
-    return f"__deferred_issue_filed__:{thread_id}"
+    return f"__deferred_issue_filed__:{thread_id}:{body_hash}"
 
 
 async def _capture_deferred_review_thread(
@@ -470,15 +477,16 @@ async def _capture_deferred_review_thread(
 ) -> bool:
     """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
 
-    Posts an explanatory PR comment and files a tracking issue. Idempotent: a
-    per-thread marker records that the issue was already filed so a later
-    resolve-retry (which clears the verdict and re-addresses the thread) does
-    not file a duplicate. Returns True when the deferred work is durably
-    captured (caller may resolve the thread), or False on capture failure
-    (caller downgrades the verdict to ``needs_human`` so the merge stays
+    Posts an explanatory PR comment and files a tracking issue. Idempotent per
+    thread *and body*: a marker records that the issue was already filed so a
+    later same-body resolve-retry (which clears the verdict and re-addresses the
+    thread) does not file a duplicate, while new reviewer replies (a changed
+    body) are captured into a fresh issue. Returns True when the deferred work
+    is durably captured (caller may resolve the thread), or False on capture
+    failure (caller downgrades the verdict to ``needs_human`` so the merge stays
     blocked and the operator is notified).
     """
-    marker = _deferred_issue_filed_marker(thread.thread_id)
+    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
     if state.threads_addressed_ids.get(marker):
         return True
     location = thread.path or "the PR diff"
@@ -499,10 +507,13 @@ async def _capture_deferred_review_thread(
             body=issue_body,
         )
     except GitHubClientError as exc:
+        # Redact before logging/persisting: gh CLI errors can echo tokens or
+        # credentialed URLs.
+        redacted_error = _redact_and_truncate_github_error(str(exc))
         _log.warning(
             "monitor.deferred_capture_failed",
             thread_id=thread.thread_id,
-            stderr=exc.stderr,
+            stderr=_redact_and_truncate_github_error(exc.stderr),
         )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
@@ -517,7 +528,7 @@ async def _capture_deferred_review_thread(
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
-            evidence={"thread_ids": [thread.thread_id], "error_message": str(exc)},
+            evidence={"thread_ids": [thread.thread_id], "error_message": redacted_error},
         )
         return False
     # Filing the tracking issue is the durable capture. Record it immediately so
@@ -539,7 +550,7 @@ async def _capture_deferred_review_thread(
             "monitor.deferred_capture_comment_failed",
             thread_id=thread.thread_id,
             issue_url=issue_url,
-            stderr=exc.stderr,
+            stderr=_redact_and_truncate_github_error(exc.stderr),
         )
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,

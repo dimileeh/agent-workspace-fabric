@@ -1006,6 +1006,10 @@ class TestParseVerdict:
             # Empty agent output is a failure to produce, not a considered
             # deferral — it blocks the merge (needs_human), never auto-captured (#305).
             ("", "needs_human"),
+            # Whitespace-only output is also a failure to produce -> needs_human,
+            # never the fix_committed default that would clear blocking feedback.
+            ("\n", "needs_human"),
+            ("   \t  \n", "needs_human"),
             ("fixed in commit abc1234", "fix_committed"),
             ("FALSE POSITIVE: existing code is fine", "false_positive"),
             ("false positive: yep", "false_positive"),

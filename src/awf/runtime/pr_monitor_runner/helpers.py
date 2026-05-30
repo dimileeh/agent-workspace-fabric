@@ -136,9 +136,10 @@ def _parse_verdict(stdout: str) -> Verdict:
 
 
 def _parse_verdict_result(stdout: str) -> VerdictResult:
-    if not stdout:
-        # Empty agent output is a failure to produce, not a considered
-        # deferral. Treat it as needs_human so it blocks the merge instead of
+    if not stdout.strip():
+        # Empty or whitespace-only agent output is a failure to produce, not a
+        # considered deferral. Treat it as needs_human so it blocks the merge
+        # instead of
         # triggering the follow-up defer capture (comment + filed issue +
         # resolve) on a thread the agent never actually addressed (#305).
         return VerdictResult(verdict="needs_human")
@@ -368,9 +369,15 @@ def _stale_pending_check_warning_key(
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
-    _, human_deferred = _collect_defer_items(status, state)
+    bot_items, human_deferred = _collect_defer_items(status, state)
     if human_deferred:
         return "human review feedback was deferred by the agent and remains unresolved"
+    # #305: a bot inline thread (``defer``/``needs_human``) or a bot
+    # ``needs_human`` comment also blocks the merge in ``pr_monitor.decide``
+    # even though it isn't human-authored. Surface it as a reason instead of
+    # letting the caller emit a false "ready to merge" notification.
+    if any(item["kind"] == "thread" or item.get("verdict") == "needs_human" for item in bot_items):
+        return "review feedback needs human input and remains unresolved on GitHub"
     if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
         return (
             f"GitHub reports merge state {status.merge_state_status.value}; "
@@ -1182,18 +1189,25 @@ def _initial_review_grace_wait_seconds(
 def _collect_defer_items(
     status: PRStatus, state: MonitorState
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Collect deferred threads/comments, partitioned by author kind.
+    """Collect deferred / needs-human threads/comments, partitioned by author.
 
     Returns ``(bot_items, human_items)``. Items whose author classifies
     as a bot per ``pr_monitor._is_bot_author`` go into the first list;
     the rest (including unknown-author items, which the merge gate
     treats as human for safety) go into the second — the artifact
     mirrors that classification so orchestrators see the same picture.
+
+    Both ``defer`` and ``needs_human`` verdicts are collected (#305): a
+    ``needs_human`` item blocks the merge just as a ``defer`` one does, so
+    dropping it would let the terminal artifact and notification under-report
+    the open feedback. Each item carries its ``verdict`` so consumers can tell
+    the two apart.
     """
     bot_items: list[dict[str, object]] = []
     human_items: list[dict[str, object]] = []
     for t in status.unresolved_inline_threads:
-        if state.threads_addressed_ids.get(t.thread_id) != "defer":
+        verdict = state.threads_addressed_ids.get(t.thread_id)
+        if verdict not in {"defer", "needs_human"}:
             continue
         bucket = bot_items if _is_bot_review_thread(t) else human_items
         bucket.append(
@@ -1204,11 +1218,13 @@ def _collect_defer_items(
                 "path": t.path,
                 "line": t.line,
                 "body": t.body_excerpt,
+                "verdict": verdict,
                 "agent_verdict_reason": None,
             }
         )
     for c in status.unresolved_review_comments:
-        if state.threads_addressed_ids.get(c.comment_id) != "defer":
+        verdict = state.threads_addressed_ids.get(c.comment_id)
+        if verdict not in {"defer", "needs_human"}:
             continue
         bucket = bot_items if _is_bot_author(c.author) else human_items
         bucket.append(
@@ -1219,6 +1235,7 @@ def _collect_defer_items(
                 "path": None,
                 "line": None,
                 "body": c.body_excerpt,
+                "verdict": verdict,
                 "agent_verdict_reason": None,
             }
         )
