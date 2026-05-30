@@ -63,6 +63,34 @@ def test_reachability_failure_does_not_claim_success(harness: InstallerHarness) 
 
 
 @pytest.mark.unit
+def test_default_install_bin_off_path_is_reachable_with_advice(
+    harness: InstallerHarness,
+) -> None:
+    """A default install into ~/.local/bin off PATH succeeds with PATH advice.
+
+    With no ``--install-dir``, uv/pipx install into ``~/.local/bin``. When that
+    directory is not on PATH the install is still valid: reachability must fall
+    back to the default bin dir and succeed with PATH advice, not fail with
+    ``AWF_NOT_REACHABLE``.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds"
+    default_bin = harness.home / ".local" / "bin"
+    default_bin.mkdir(parents=True)
+    harness.add_awf(directory=default_bin)  # awf lands in the default bin, off PATH
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+    # The user still gets actionable PATH advice for the off-PATH default bin.
+    assert "export PATH=" in result.stderr
+    assert str(default_bin) in result.stderr
+
+
+@pytest.mark.unit
 def test_invalid_method_is_a_bad_usage_error(harness: InstallerHarness) -> None:
     """An unsupported ``--method`` value is rejected before any work."""
     result = harness.run(["--method", "conda"])

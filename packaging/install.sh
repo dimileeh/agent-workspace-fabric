@@ -483,12 +483,13 @@ dir_on_path() {
 }
 
 verify_awf() {
-    local resolved="" on_path=0
+    local resolved="" on_path=0 bindir
+    bindir="$(default_bin_dir)"
     if command -v awf >/dev/null 2>&1; then
         resolved="$(command -v awf)"
         on_path=1
-    elif [ -n "$INSTALL_DIR" ] && [ -x "${INSTALL_DIR}/awf" ]; then
-        resolved="${INSTALL_DIR}/awf"
+    elif [ -x "${bindir}/awf" ]; then
+        resolved="${bindir}/awf"
         on_path=0
     else
         print_path_advice
