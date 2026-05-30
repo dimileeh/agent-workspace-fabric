@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
@@ -73,6 +74,15 @@ async def _run_operator_hint_cycle(
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
+        )
+    except ProtectedScopeDiffError as exc:
+        return cast(
+            _GitPushResult,
+            await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            ),
         )
     except _MonitorPolicyBlockedError as exc:
         return _GitPushResult(pushed=False, failed=True, returncode=1, stderr=str(exc))

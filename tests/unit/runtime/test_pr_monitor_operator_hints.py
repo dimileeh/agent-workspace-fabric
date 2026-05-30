@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -130,6 +131,82 @@ async def test_operator_hint_action_dispatches_repair_and_clears_pending_state(
     assert operation.payload["action"] == "operator_hint_repair"
     assert operation.payload["reason_code"] == "OPERATOR_REMONITOR"
     assert operation.result["outcome"] == "operator_hint_pushed"
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_converts_protected_scope_diff_error_to_push_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="repair touched protected workflow",
+        operation_id="op_protected_scope",
+        requested_at="2026-05-30T12:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    captured: dict[str, object] = {}
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _raise_protected_scope(**_kwargs: object) -> None:
+        raise ProtectedScopeDiffError("agent touched protected workflow")
+
+    async def _protected_scope_result(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(kwargs["exc"]),
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _raise_protected_scope)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_result,
+    )
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_scope",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.protected_scope_diff_unavailable is True
+    assert captured["workspace_id"] == "ws_operator_hint_scope"
+    assert captured["remote_branch"] == "awf/ws_operator_hint_scope"
+    assert isinstance(captured["exc"], ProtectedScopeDiffError)
+    assert state.pending_operator_hint == hint
 
 
 @pytest.mark.unit
