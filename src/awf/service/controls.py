@@ -551,7 +551,7 @@ class WorkspaceControlService:
         pending_operator_hint: dict[str, object] | None = None
         hint_state_changed = False
         reason_text = (reason or "").strip()
-        if current == WorkspaceStatus.monitoring_pr and reason_text:
+        if reason_text:
             monitor_state = dict(workspace.monitor_threads_addressed or {})
             past_settle = remonitor_has_elapsed_settle(
                 monitor_state,

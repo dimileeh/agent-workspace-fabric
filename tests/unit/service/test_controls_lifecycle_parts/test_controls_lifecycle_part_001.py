@@ -25,7 +25,13 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY
+from awf.runtime.operator_hints import (
+    OPERATOR_HINT_STATE_KEY,
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_key,
+)
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
@@ -1058,6 +1064,90 @@ async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
         "monitor_iter_count_reset_from": 8,
         "candidate_reopened": False,
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_failed_workspace_past_settle_persists_operator_hint_and_warns(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    hint = "fix the reviewer-requested release note before merge"
+    head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(46)
+    initial_started_key = _initial_review_grace_started_key(46)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=46,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=head_sha,
+    )
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/46"
+    workspace.pr_number = 46
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = head_sha
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=hint,
+        idempotency_key="remonitor-failed-past-settle-hint",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
+    assert workspace.version == 2
+    assert initial_done_key not in monitor_state
+    assert settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[settle_started_key]) >= 1_000_000_000
+    assert persisted_hint == {
+        "operation_id": operations[0].id,
+        "reason": hint,
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": persisted_hint["requested_at"],
+        "status": "pending",
+    }
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].event_type == "workspace.remonitor_requested"
+    assert events[0].old_state == WorkspaceStatus.failed.value
+    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
+    assert events[0].payload["state_reset"] == {
+        "from": WorkspaceStatus.failed.value,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": 3,
+        "candidate_reopened": False,
+    }
+    assert events[0].payload["pending_operator_hint"] == persisted_hint
+    assert events[0].payload["warnings"] == warnings
 
 
 @pytest.mark.unit
