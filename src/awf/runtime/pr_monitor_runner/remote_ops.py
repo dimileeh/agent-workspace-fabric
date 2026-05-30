@@ -139,6 +139,15 @@ class _ProtectedScopePushBlock:
     violations: tuple[Any, ...] = ()
 
 
+@dataclass(frozen=True)
+class _WorkflowScopePushBlock:
+    """Parsed GitHub missing-workflow-scope push rejection details."""
+
+    blocked: bool
+    message: str = ""
+    paths: tuple[str, ...] = ()
+
+
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
     """Map a push result to the monitor operation outcome label."""
     if push_result.reason_code in {
@@ -455,8 +464,9 @@ async def _git_push_result(
         )
 
     workflow_scope_block = _workflow_scope_push_block(r.stderr or r.stdout)
-    if workflow_scope_block is not None:
-        message, paths = workflow_scope_block
+    if workflow_scope_block.blocked:
+        message = workflow_scope_block.message
+        paths = workflow_scope_block.paths
         _log.warning(
             "monitor.push_failed_missing_workflow_scope",
             paths=list(paths),
@@ -548,13 +558,13 @@ async def _git_push_result(
     )
 
 
-def _workflow_scope_push_block(output: str) -> tuple[str, tuple[str, ...]] | None:
+def _workflow_scope_push_block(output: str) -> _WorkflowScopePushBlock:
     normalized = " ".join(output.split())
     lower = normalized.lower()
     if "refusing to allow" not in lower or "workflow" not in lower:
-        return None
+        return _WorkflowScopePushBlock(blocked=False)
     if _MISSING_WORKFLOW_SCOPE_RE.search(normalized) is None:
-        return None
+        return _WorkflowScopePushBlock(blocked=False)
     paths = tuple(
         dict.fromkeys(
             match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(normalized)
@@ -566,7 +576,7 @@ def _workflow_scope_push_block(output: str) -> tuple[str, tuple[str, ...]] | Non
         f"`workflow` scope{path_suffix}. Grant a GitHub token with workflow "
         "push permission, then rerun the monitor repair."
     )
-    return message, paths
+    return _WorkflowScopePushBlock(blocked=True, message=message, paths=paths)
 
 
 async def _run_sync_base(
