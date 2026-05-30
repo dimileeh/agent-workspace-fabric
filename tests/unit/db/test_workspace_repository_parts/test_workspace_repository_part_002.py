@@ -983,14 +983,8 @@ class TestOwnedPathOverlapLookup:
     async def test_custom_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
         self,
         session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Profile-configured planning artifacts are excluded from repository overlaps."""
-        monkeypatch.setattr(
-            repositories,
-            "new_workspace_id",
-            lambda: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
-        )
         custom_profile = {
             "planning": {
                 "required": True,
@@ -998,13 +992,19 @@ class TestOwnedPathOverlapLookup:
                 "conformance_report_path": "docs/alternate/{workspace_id}.json",
             },
         }
+        existing_artifact_path = "docs/alternate/ws_*.md"
+        requested_artifact_path = "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md"
+        assert (
+            repositories.owned_path_overlap_match(existing_artifact_path, requested_artifact_path)
+            is not None
+        )
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(
             session,
             repo,
             owned_paths=[
                 "src/existing/**",
-                "docs/alternate/ws_aaaaaaaaaaaaaaaaaaaaaaaa.md",
+                existing_artifact_path,
             ],
             resolved_profile=custom_profile,
         )
@@ -1014,7 +1014,7 @@ class TestOwnedPathOverlapLookup:
             branch_base="development",
             owned_paths=[
                 "src/requested/**",
-                "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
+                requested_artifact_path,
             ],
             resolved_profile=custom_profile,
         )

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.executor import execution_flow as executor_execution_flow
 from awf.control.executor import execution_validation as executor_execution_validation
+from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _profile_from_resolved_profile_snapshot,
@@ -286,6 +287,85 @@ async def test_runtime_profile_snapshot_commits_json_string_returning_value() ->
     assert session.scalar_calls == 0
     assert session.commits == 1
     assert frozen_snapshot == snapshot
+
+
+@pytest.mark.unit
+async def test_runtime_profile_snapshot_logs_warning_for_unparseable_returning_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _custom_planning_profile("repo-auto")
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class OpaqueReturningValue:
+        pass
+
+    class RecordingLogger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            warnings.append((event, kwargs))
+
+    class FakeUpdateResult:
+        def scalar_one_or_none(self) -> OpaqueReturningValue:
+            return OpaqueReturningValue()
+
+    class ReturningOpaqueSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.execute_calls = 0
+            self.scalar_calls = 0
+
+        async def __aenter__(self) -> ReturningOpaqueSession:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def execute(self, statement: object) -> FakeUpdateResult:
+            self.execute_calls += 1
+            compiled = str(statement)
+            assert "UPDATE workspaces" in compiled
+            assert "RETURNING workspaces.resolved_profile" in compiled
+            return FakeUpdateResult()
+
+        async def scalar(self, statement: object) -> None:
+            self.scalar_calls += 1
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class ReturningOpaqueSessionFactory:
+        def __init__(self) -> None:
+            self.sessions: list[ReturningOpaqueSession] = []
+
+        def __call__(self) -> ReturningOpaqueSession:
+            session = ReturningOpaqueSession()
+            self.sessions.append(session)
+            return session
+
+    monkeypatch.setattr(executor_state_ops, "_log", RecordingLogger())
+    session_factory = ReturningOpaqueSessionFactory()
+    executor = SimpleNamespace(_session_factory=session_factory)
+
+    frozen_snapshot = await _persist_resolved_profile_snapshot_if_missing(
+        executor,
+        workspace_id="ws_profile_returning_opaque",
+        profile=profile,
+    )
+
+    session = session_factory.sessions[0]
+    assert session.execute_calls == 1
+    assert session.scalar_calls == 0
+    assert session.commits == 1
+    assert frozen_snapshot == snapshot
+    assert warnings == [
+        (
+            "executor.resolved_profile_returning_unparseable",
+            {
+                "workspace_id": "ws_profile_returning_opaque",
+                "returned_type": "OpaqueReturningValue",
+            },
+        )
+    ]
 
 
 @pytest.mark.unit

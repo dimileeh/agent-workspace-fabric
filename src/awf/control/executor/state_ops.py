@@ -86,6 +86,12 @@ async def _persist_resolved_profile_snapshot_if_missing(
         returned_snapshot = result.scalar_one_or_none()
         persisted_snapshot = _resolved_profile_snapshot_from_db_value(returned_snapshot)
         if returned_snapshot is not None:
+            if persisted_snapshot is None:
+                _log.warning(
+                    "executor.resolved_profile_returning_unparseable",
+                    workspace_id=workspace_id,
+                    returned_type=type(returned_snapshot).__name__,
+                )
             await session.commit()
             return persisted_snapshot if persisted_snapshot is not None else snapshot
         frozen_snapshot = await session.scalar(
