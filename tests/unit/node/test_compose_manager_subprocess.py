@@ -666,6 +666,58 @@ class TestCaptureCompanionDiagnostics:
         assert payload["healthcheck_test"]["backend"] == ["CMD", "x"]
 
     @pytest.mark.unit
+    async def test_logs_daemon_failure_classified_docker_unavailable_with_combined_stderr(
+        self, manager: ComposeManager
+    ) -> None:
+        """Daemon failures on the ``docker logs`` path must read ``DOCKER_UNAVAILABLE``.
+
+        ``capture_companion_diagnostics`` runs ``docker logs`` with
+        ``combine_stderr=True``, which folds the child's stderr into stdout and makes
+        ``communicate()`` yield ``None`` for the stderr stream. A docker-daemon error
+        therefore surfaces in *stdout*, so daemon detection must inspect stdout in that
+        mode — otherwise the always-empty stderr makes it misclassify the marker as
+        ``COMPOSE_COMMAND_FAILED``.
+        """
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_backend",
+                    service="backend",
+                    health_status="unhealthy",
+                    healthcheck_test=["CMD", "x"],
+                ),
+            ]
+        ).encode()
+        daemon_error = (
+            b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            b"Is the docker daemon running?"
+        )
+
+        def _fake(*cmd: str, **_kwargs: Any) -> AsyncMock:
+            subcommand = cmd[1]
+            if subcommand == "ps":
+                return _mock_proc(returncode=0, stdout=b"c_backend")
+            if subcommand == "inspect":
+                return _mock_proc(returncode=0, stdout=inspect)
+            if subcommand == "logs":
+                # combine_stderr=True folds stderr into stdout, so the daemon error
+                # lands in stdout and communicate() returns None for the stderr stream.
+                return _mock_proc(returncode=1, stdout=daemon_error, stderr=None)
+            raise AssertionError(f"unexpected docker subcommand: {subcommand}")
+
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_fake,
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_daemon",
+                workspace_id="ws_daemon",
+            )
+
+        marker = payload["companion_logs_capture_error"]["backend"]
+        assert marker.startswith("DOCKER_UNAVAILABLE"), marker
+
+    @pytest.mark.unit
     async def test_top_level_ps_error_returns_partial_payload(
         self, manager: ComposeManager
     ) -> None:

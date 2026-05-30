@@ -737,7 +737,9 @@ class ComposeManager:
         assert proc.returncode is not None
         if proc.returncode != 0:
             reason_code = "COMPOSE_COMMAND_FAILED"
-            err_lower = stderr.lower()
+            # With ``combine_stderr`` the child's stderr is folded into stdout, so a
+            # daemon-unavailability message surfaces there; otherwise it is in stderr.
+            err_lower = (stdout if combine_stderr else stderr).lower()
             if (
                 "daemon" in err_lower
                 or "error during connect" in err_lower
