@@ -262,6 +262,69 @@ def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
 
 
 @pytest.mark.unit
+def test_repeated_workspace_id_placeholders_require_the_same_id() -> None:
+    """Multi-placeholder templates do not hide cross-workspace path overlaps."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "{workspace_id}/archive/{workspace_id}_report.md"}},
+    )
+
+    same_workspace_path = "ws_123/archive/ws_123_report.md"
+    mixed_workspace_path = "ws_123/archive/ws_456_report.md"
+
+    assert internal_paths == ("ws_*/archive/ws_*_report.md", "ws_*/archive/**")
+    assert is_internal_plan_artifact_owned_path(
+        same_workspace_path,
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        mixed_workspace_path,
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert interworkspace_owned_paths(
+        [
+            same_workspace_path,
+            mixed_workspace_path,
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == (mixed_workspace_path,)
+
+
+@pytest.mark.unit
+def test_custom_profile_parent_scope_filters_concrete_workspace_scope() -> None:
+    """Generated custom parent scopes filter concrete workspace scope ownership."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "{workspace_id}/plans/{workspace_id}.md"}},
+    )
+
+    assert internal_paths == ("ws_*/plans/ws_*.md", "ws_*/plans/**")
+    assert is_internal_plan_artifact_owned_path(
+        "ws_123/plans/**",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert is_internal_plan_artifact_owned_path(
+        "ws_123/plans/ws_123.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "ws_123/plans/ws_456.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "ws_123/plans/README.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert interworkspace_owned_paths(
+        [
+            "ws_123/plans/**",
+            "ws_123/plans/ws_123.md",
+            "ws_123/plans/ws_456.md",
+            "ws_123/plans/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("ws_123/plans/ws_456.md", "ws_123/plans/README.md")
+
+
+@pytest.mark.unit
 def test_workspace_scoped_custom_plan_parent_scope_is_internal_artifact() -> None:
     """Workspace-id parent directories may still be treated as artifact scopes."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(

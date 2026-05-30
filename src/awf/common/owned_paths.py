@@ -120,17 +120,14 @@ def _matches_configured_internal_plan_artifact_path(
             normalized,
         ):
             return True
-        # Apart from persisted workspace-id wildcard scopes matched above,
-        # "/**"-suffix entries are exact-only. Sub-path matching relies on the
-        # companion workspace-id filename patterns that
-        # _internal_plan_artifact_paths_from_template always generates
-        # alongside every "/**" entry. Do not add standalone "/**" entries
-        # without them.
-        if artifact_path.endswith("/**"):
-            continue
         if _WORKSPACE_ID_GLOB in artifact_path:
             if _workspace_id_glob_path_matches(normalized, artifact_path):
                 return True
+            continue
+        # "/**"-suffix entries without a workspace-id glob are exact-only.
+        # Configured leaf patterns classify generated files; scope entries only
+        # classify the persisted owned-path scope declaration itself.
+        if artifact_path.endswith("/**"):
             continue
         if _has_wildcard(artifact_path) and fnmatchcase(normalized, artifact_path):
             return True
@@ -139,17 +136,33 @@ def _matches_configured_internal_plan_artifact_path(
 
 def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool:
     """Match a configured artifact path with a constrained workspace-id glob."""
+    pattern = _workspace_id_glob_path_pattern(artifact_path)
+    return pattern is not None and re.fullmatch(pattern, normalized) is not None
+
+
+def _workspace_id_glob_path_pattern(artifact_path: str) -> str | None:
+    """Build a regex that requires repeated workspace-id globs to share one id."""
     # Keep the constrained regex in sync with generated workspace ids.
+    escaped_glob = re.escape(_WORKSPACE_ID_GLOB)
+    escaped_path = re.escape(artifact_path)
+    path_parts = escaped_path.split(escaped_glob)
+    if len(path_parts) == 1:
+        return None
+
     glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
-    workspace_id_pattern = (
-        rf"{re.escape(glob_prefix)}"
+    workspace_id_suffix_pattern = (
         rf"(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN})"
     )
-    pattern = re.escape(artifact_path).replace(
-        re.escape(_WORKSPACE_ID_GLOB),
-        workspace_id_pattern,
+    first_workspace_id_pattern = (
+        rf"{re.escape(glob_prefix)}(?P<workspace_id>{workspace_id_suffix_pattern})"
     )
-    return re.fullmatch(pattern, normalized) is not None
+    repeated_workspace_id_pattern = rf"{re.escape(glob_prefix)}(?P=workspace_id)"
+
+    pattern = path_parts[0]
+    for index, path_part in enumerate(path_parts[1:]):
+        pattern += first_workspace_id_pattern if index == 0 else repeated_workspace_id_pattern
+        pattern += path_part
+    return pattern
 
 
 def _has_wildcard(path: str) -> bool:
