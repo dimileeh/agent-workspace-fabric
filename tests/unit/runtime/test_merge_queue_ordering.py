@@ -145,14 +145,14 @@ async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
         title="Older plan artifact",
         pr_number=81,
         created_at=now,
-        owned_paths=["src/feature-a/**", "docs/awf-plans/**"],
+        owned_paths=["src/feature-a/**", "docs/awf-plans/ws_*.md"],
     )
     _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
         factory,
         title="Later plan artifact",
         pr_number=82,
         created_at=now + timedelta(minutes=5),
-        owned_paths=["src/feature-b/**", "docs/awf-plans/**"],
+        owned_paths=["src/feature-b/**", "docs/awf-plans/ws_*.md"],
     )
 
     async with factory() as session:
@@ -162,6 +162,36 @@ async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
         )
 
     assert blockers == []
+
+
+@pytest.mark.unit
+async def test_awf_plans_readme_overlap_blocks_later_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The tracked awf-plans README still participates in merge ordering."""
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older awf-plans docs",
+        pr_number=181,
+        created_at=now,
+        owned_paths=["docs/awf-plans/**"],
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later awf-plans README",
+        pr_number=182,
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["docs/awf-plans/README.md"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert [blocker.workspace_id for blocker in blockers] == [older_workspace_id]
 
 
 @pytest.mark.unit
@@ -175,14 +205,14 @@ async def test_plan_artifact_overlap_does_not_hide_real_merge_queue_overlap(
         title="Older real overlap",
         pr_number=83,
         created_at=now,
-        owned_paths=["src/shared/**", "docs/awf-plans/**"],
+        owned_paths=["src/shared/**", "docs/awf-plans/ws_*.md"],
     )
     _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
         factory,
         title="Later real overlap",
         pr_number=84,
         created_at=now + timedelta(minutes=5),
-        owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
+        owned_paths=["src/shared/module.py", "docs/awf-plans/ws_*.md"],
     )
 
     async with factory() as session:
@@ -205,14 +235,14 @@ async def test_candidate_with_only_plan_artifact_path_does_not_block_merge_queue
         title="Older plan only",
         pr_number=85,
         created_at=now,
-        owned_paths=["docs/awf-plans/**"],
+        owned_paths=["docs/awf-plans/ws_*.md"],
     )
     _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
         factory,
         title="Later source work",
         pr_number=86,
         created_at=now + timedelta(minutes=5),
-        owned_paths=["src/later/**", "docs/awf-plans/**"],
+        owned_paths=["src/later/**", "docs/awf-plans/ws_*.md"],
     )
 
     async with factory() as session:

@@ -282,13 +282,13 @@ async def test_get_locks_ignores_internal_plan_artifact_only_overlap_risks(
     existing_id = await _create_lock_workspace(
         client,
         title="Existing source work",
-        owned_paths=["src/existing/**", "docs/awf-plans/**"],
+        owned_paths=["src/existing/**", "docs/awf-plans/ws_*.md"],
     )
     response = await client.post(
         "/v1/workspaces",
         json=_v2_body(
             title="Independent source work",
-            owned_paths=["src/requested/**", "docs/awf-plans/**"],
+            owned_paths=["src/requested/**", "docs/awf-plans/ws_*.md"],
         ),
     )
 
@@ -301,7 +301,10 @@ async def test_get_locks_ignores_internal_plan_artifact_only_overlap_risks(
 
     assert locks.status_code == 200
     items = {item["workspace_id"]: item for item in locks.json()["items"]}
-    assert items[existing_id]["owned_paths"] == ["src/existing/**", "docs/awf-plans/**"]
-    assert items[requested_id]["owned_paths"] == ["src/requested/**", "docs/awf-plans/**"]
+    assert items[existing_id]["owned_paths"] == ["src/existing/**", "docs/awf-plans/ws_*.md"]
+    assert items[requested_id]["owned_paths"] == [
+        "src/requested/**",
+        "docs/awf-plans/ws_*.md",
+    ]
     assert items[existing_id]["overlap_risks"] == []
     assert items[requested_id]["overlap_risks"] == []

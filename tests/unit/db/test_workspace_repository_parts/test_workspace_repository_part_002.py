@@ -945,13 +945,13 @@ class TestOwnedPathOverlapLookup:
         await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/existing/**", "docs/awf-plans/**"],
+            owned_paths=["src/existing/**", "docs/awf-plans/ws_*.md"],
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/requested/**", "docs/awf-plans/**"],
+            owned_paths=["src/requested/**", "docs/awf-plans/ws_*.md"],
         )
 
         assert overlaps == []
@@ -966,13 +966,13 @@ class TestOwnedPathOverlapLookup:
         existing = await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/shared/**", "docs/awf-plans/**"],
+            owned_paths=["src/shared/**", "docs/awf-plans/ws_*.md"],
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
+            owned_paths=["src/shared/module.py", "docs/awf-plans/ws_*.md"],
         )
 
         assert overlaps == [
@@ -1007,6 +1007,33 @@ class TestOwnedPathOverlapLookup:
                 workspace_id=existing.id,
                 existing_path="docs/runbooks/**",
                 requested_path="docs/runbooks/deploy.md",
+            )
+        ]
+
+    @pytest.mark.unit
+    async def test_awf_plans_readme_owned_paths_still_report_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The tracked awf-plans README is not filtered as generated metadata."""
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["docs/awf-plans/**"],
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["docs/awf-plans/README.md"],
+        )
+
+        assert overlaps == [
+            repositories.OwnedPathOverlap(
+                workspace_id=existing.id,
+                existing_path="docs/awf-plans/**",
+                requested_path="docs/awf-plans/README.md",
             )
         ]
 

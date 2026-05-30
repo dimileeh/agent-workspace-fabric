@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Final
 
-INTERNAL_PLAN_ARTIFACT_PREFIX: Final = "docs/awf-plans"
+INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
+INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
+    r"^ws_[A-Za-z0-9_*?-]+(?:\.conformance\.json|\.md)$"
+)
 
 
 def normalize_owned_path(path: str) -> str:
@@ -25,9 +29,11 @@ def normalize_owned_path(path: str) -> str:
 def is_internal_plan_artifact_owned_path(path: str) -> bool:
     """Return true for AWF-generated planning/conformance artifact paths."""
     normalized = normalize_owned_path(path)
-    return normalized == INTERNAL_PLAN_ARTIFACT_PREFIX or normalized.startswith(
-        f"{INTERNAL_PLAN_ARTIFACT_PREFIX}/"
-    )
+    prefix = f"{INTERNAL_PLAN_ARTIFACT_DIR}/"
+    if not normalized.startswith(prefix):
+        return False
+    filename = normalized.removeprefix(prefix)
+    return "/" not in filename and INTERNAL_PLAN_ARTIFACT_NAME_RE.fullmatch(filename) is not None
 
 
 def interworkspace_owned_paths(paths: Iterable[str]) -> tuple[str, ...]:

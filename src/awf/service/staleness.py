@@ -32,9 +32,9 @@ Reason codes:
 * ``STALE_BUILD_CONFIG``    — a build-config file (``Dockerfile``,
   ``docker-compose``, CI workflows) changed while policy marks the candidate's
   task class build-config-sensitive.
-* ``ADVISORY_PLAN_ARTIFACT_OVERLAP`` — workspace-specific AWF plan/conformance
-  artifacts under ``docs/awf-plans/**`` overlapped. Visible to operators, but
-  does not block merge by itself.
+* ``ADVISORY_PLAN_ARTIFACT_OVERLAP`` — workspace-specific AWF ``ws_*``
+  plan/conformance artifacts under ``docs/awf-plans/`` overlapped. Visible to
+  operators, but does not block merge by itself.
 """
 
 from __future__ import annotations

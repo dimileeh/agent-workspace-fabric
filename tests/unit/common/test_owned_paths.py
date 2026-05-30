@@ -29,10 +29,10 @@ def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "docs/awf-plans",
-        "docs/awf-plans/**",
         "docs/awf-plans/ws_123.md",
         "./docs/awf-plans/ws_123.conformance.json",
+        "docs/awf-plans/ws_*.md",
+        "docs/awf-plans/ws_*.conformance.json",
     ],
 )
 def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
@@ -47,7 +47,12 @@ def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
         "docs/**",
         "docs/runbooks/**",
         "plans/**",
+        "docs/awf-plans",
+        "docs/awf-plans/**",
+        "docs/awf-plans/README.md",
         "docs/awf-plans-other/**",
+        "docs/awf-plans/ws_123.notes.md",
+        "docs/awf-plans/nested/ws_123.md",
     ],
 )
 def test_real_docs_and_repo_plan_paths_are_not_internal_plan_artifacts(path: str) -> None:
@@ -61,9 +66,17 @@ def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> No
     assert interworkspace_owned_paths(
         [
             "",
+            "docs/awf-plans/ws_*.md",
+            "docs/awf-plans/ws_123.conformance.json",
             "docs/awf-plans/**",
+            "docs/awf-plans/README.md",
             "src/awf/**",
             "docs/runbooks/**",
-            "./docs/awf-plans/ws.md",
+            "./docs/awf-plans/ws_456.md",
         ]
-    ) == ("src/awf/**", "docs/runbooks/**")
+    ) == (
+        "docs/awf-plans/**",
+        "docs/awf-plans/README.md",
+        "src/awf/**",
+        "docs/runbooks/**",
+    )

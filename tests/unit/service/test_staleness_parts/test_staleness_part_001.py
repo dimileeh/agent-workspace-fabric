@@ -374,6 +374,37 @@ class TestEvaluateStaleness:
         assert findings[0].trigger_ref == "docs/awf-plans/ws_other.conformance.json"
 
     @pytest.mark.unit
+    def test_awf_plans_readme_overlap_blocks_as_real_docs_path(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("docs/awf-plans/**",),
+            task_class="docs_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("docs/awf-plans/README.md",),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        assert [(f.reason_code, f.trigger_ref, f.blocks_merge) for f in findings] == [
+            ("STALE_OVERLAP", "docs/awf-plans/README.md", True)
+        ]
+
+    @pytest.mark.unit
     def test_mixed_plan_artifact_and_source_overlap_blocks_on_source(self) -> None:
         from awf.service.staleness import (
             DEFAULT_STALE_POLICY,
