@@ -37,6 +37,10 @@ def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
         "./docs/awf-plans/ws_0123456789abcdef01234567.conformance.json",
         "docs/awf-plans/ws_123.json",
         "docs/awf-plans/ws_0123456789abcdef01234567.json",
+        "docs/awf-plans/ws_other.md",
+        "docs/awf-plans/ws_other.conformance.json",
+        "docs/awf-plans/ws_protocol.md",
+        "docs/awf-plans/ws_v2.md",
         "docs/awf-plans/ws_*.md",
         "docs/awf-plans/ws_*.conformance.json",
         "docs/awf-plans/ws_*.json",
@@ -58,10 +62,6 @@ def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
         "plans/**",
         "docs/awf-plans",
         "docs/awf-plans/README.md",
-        "docs/awf-plans/ws_protocol.md",
-        "docs/awf-plans/ws_protocol.json",
-        "docs/awf-plans/ws_protocol.conformance.json",
-        "docs/awf-plans/ws_v2.md",
         "docs/awf-plans-other/**",
         "docs/awf-plans/ws_123.notes.md",
         "docs/awf-plans/ws_123.notes.json",
@@ -92,7 +92,6 @@ def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> No
         ]
     ) == (
         "docs/awf-plans/README.md",
-        "docs/awf-plans/ws_protocol.md",
         "src/awf/**",
         "docs/runbooks/**",
     )

@@ -11,12 +11,13 @@ INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = "ws_*"
-# Keep these suffix patterns in sync with workspace ID generation in awf.common.ids.
+# The reserved default AWF plan directory treats direct ``ws_*`` markdown/JSON
+# files as generated artifacts. Configured custom paths below still use the
+# stricter workspace-id glob matcher.
 _WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
 _WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN: Final = r"[0-9]+"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
-    rf"^ws_(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|"
-    rf"{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN}|\*)"
+    r"^ws_(?:[A-Za-z0-9][A-Za-z0-9_]*|\*)"
     r"(?:\.md|(?:\.conformance)?\.json)$"
 )
 
