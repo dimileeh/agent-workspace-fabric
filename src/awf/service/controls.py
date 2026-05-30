@@ -28,7 +28,7 @@ from awf.runtime.operator_hints import (
     arm_operator_hint_freeze,
     build_pending_operator_hint_payload,
     persist_operator_hint,
-    remonitor_has_elapsed_settle,
+    remonitor_elapsed_settle_head_shas,
     utcnow,
 )
 from awf.runtime.pr_monitor import OperatorHint
@@ -553,11 +553,12 @@ class WorkspaceControlService:
         reason_text = (reason or "").strip()
         if reason_text:
             monitor_state = dict(workspace.monitor_threads_addressed or {})
-            past_settle = remonitor_has_elapsed_settle(
+            settle_head_shas = remonitor_elapsed_settle_head_shas(
                 monitor_state,
                 pr_number=workspace.pr_number,
-                head_sha=workspace.monitor_last_commit_sha,
+                preferred_head_sha=workspace.monitor_last_commit_sha,
             )
+            past_settle = bool(settle_head_shas)
             requested_at = utcnow()
             hint = OperatorHint(
                 reason=reason_text,
@@ -566,17 +567,14 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_REMONITOR_REASON_CODE,
             )
             persist_operator_hint(monitor_state, hint)
-            if (
-                past_settle
-                and workspace.pr_number is not None
-                and workspace.monitor_last_commit_sha
-            ):
-                arm_operator_hint_freeze(
-                    monitor_state,
-                    pr_number=workspace.pr_number,
-                    head_sha=workspace.monitor_last_commit_sha,
-                    now=requested_at,
-                )
+            if past_settle and workspace.pr_number is not None:
+                for settle_head_sha in settle_head_shas:
+                    arm_operator_hint_freeze(
+                        monitor_state,
+                        pr_number=workspace.pr_number,
+                        head_sha=settle_head_sha,
+                        now=requested_at,
+                    )
                 warnings.append(
                     {
                         "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,

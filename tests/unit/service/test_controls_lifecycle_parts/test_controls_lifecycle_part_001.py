@@ -1151,6 +1151,73 @@ async def test_remonitor_failed_workspace_past_settle_persists_operator_hint_and
 
 
 @pytest.mark.unit
+async def test_remonitor_failed_workspace_past_settle_uses_elapsed_marker_when_last_sha_stale(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    hint = "fix the reviewer-requested release note before merge"
+    stale_head_sha = "e" * 40
+    live_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(46)
+    initial_started_key = _initial_review_grace_started_key(46)
+    live_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=46,
+        head_sha=live_head_sha,
+    )
+    live_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=live_head_sha,
+    )
+    stale_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=46,
+        head_sha=stale_head_sha,
+    )
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/46"
+    workspace.pr_number = 46
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = stale_head_sha
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old monitor failed after reviewer settle"
+    workspace.monitor_iter_count = 3
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        live_settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=hint,
+        idempotency_key="remonitor-failed-stale-sha-past-settle-hint",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert initial_done_key not in monitor_state
+    assert live_settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[live_settle_started_key]) >= 1_000_000_000
+    assert stale_settle_started_key not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].payload["warnings"] == warnings
+
+
+@pytest.mark.unit
 async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

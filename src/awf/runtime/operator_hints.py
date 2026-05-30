@@ -127,6 +127,35 @@ def remonitor_has_elapsed_settle(
     )
 
 
+def remonitor_elapsed_settle_head_shas(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int | None,
+    preferred_head_sha: str | None,
+) -> tuple[str, ...]:
+    """Return PR head SHAs with elapsed reviewer-settle state for remonitor."""
+    if pr_number is None:
+        return ()
+    head_shas: list[str] = []
+    if remonitor_has_elapsed_settle(
+        threads_addressed,
+        pr_number=pr_number,
+        head_sha=preferred_head_sha,
+    ):
+        head_shas.append(cast(str, preferred_head_sha))
+    done_prefix = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha="",
+    )
+    for key, value in threads_addressed.items():
+        if value != "elapsed" or not key.startswith(done_prefix):
+            continue
+        head_sha = key.removeprefix(done_prefix).split(":", 1)[0]
+        if head_sha and head_sha not in head_shas:
+            head_shas.append(head_sha)
+    return tuple(head_shas)
+
+
 def arm_operator_hint_freeze(
     threads_addressed: dict[str, str],
     *,
