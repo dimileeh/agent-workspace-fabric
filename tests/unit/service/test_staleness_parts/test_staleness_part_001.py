@@ -357,7 +357,7 @@ class TestEvaluateStaleness:
         target = TargetBranchState(
             branch="development",
             head_sha="b" * 40,
-            changed_paths=("docs/awf-plans/ws_other.conformance.json",),
+            changed_paths=("docs/awf-plans/ws_bbbbbbbbbbbbbbbbbbbbbbbb.conformance.json",),
             advanced_commits=1,
         )
 
@@ -371,7 +371,9 @@ class TestEvaluateStaleness:
             ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
         ]
         assert findings[0].trigger_type == "plan_artifact_overlap"
-        assert findings[0].trigger_ref == "docs/awf-plans/ws_other.conformance.json"
+        assert (
+            findings[0].trigger_ref == "docs/awf-plans/ws_bbbbbbbbbbbbbbbbbbbbbbbb.conformance.json"
+        )
 
     @pytest.mark.unit
     def test_awf_plans_readme_overlap_blocks_as_real_docs_path(self) -> None:
@@ -423,7 +425,7 @@ class TestEvaluateStaleness:
             branch="development",
             head_sha="b" * 40,
             changed_paths=(
-                "docs/awf-plans/ws_other.md",
+                "docs/awf-plans/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
                 "src/awf/service/staleness.py",
             ),
             advanced_commits=1,
@@ -438,7 +440,7 @@ class TestEvaluateStaleness:
         assert {(f.reason_code, f.trigger_ref, f.blocks_merge, f.severity) for f in findings} == {
             (
                 "ADVISORY_PLAN_ARTIFACT_OVERLAP",
-                "docs/awf-plans/ws_other.md",
+                "docs/awf-plans/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
                 False,
                 "advisory",
             ),

@@ -43,6 +43,7 @@ async def _seed_open_candidate(
     owned_paths: list[str],
     task_class: str | None = None,
     base_sha: str = "a" * 40,
+    resolved_profile: dict[str, Any] | None = None,
 ) -> tuple[str, str, str]:
     """Build a workspace + task + canonical attempt + open merge candidate."""
     async with factory() as session:
@@ -57,6 +58,7 @@ async def _seed_open_candidate(
             test_commands=[],
             owned_paths=owned_paths,
             task_class=task_class,
+            resolved_profile=resolved_profile,
         )
         task = await TaskRepository(session).create_or_get(
             repo_url=workspace.repo_url,
@@ -199,7 +201,63 @@ class TestStalenessRefreshService:
                 target=TargetBranchState(
                     branch="development",
                     head_sha="b" * 40,
-                    changed_paths=("docs/awf-plans/ws_other.md",),
+                    changed_paths=("docs/awf-plans/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            active = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert result.stale is False
+        assert [(f.reason_code, f.blocks_merge, f.severity) for f in result.findings] == [
+            ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
+        ]
+        assert candidate is not None
+        assert candidate.stale is False
+        assert candidate.stale_reason is None
+        assert [(r.reason_code, r.blocks_merge, r.severity) for r in active] == [
+            ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
+        ]
+
+    @pytest.mark.unit
+    async def test_custom_sibling_plan_artifact_refresh_is_advisory_without_stale_candidate(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/alternate/**"],
+            task_class="test_task",
+            resolved_profile={
+                "planning": {
+                    "plan_path": "docs/alternate/{workspace_id}.md",
+                    "conformance_report_path": "docs/alternate/{workspace_id}.json",
+                },
+            },
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            result = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",),
                     advanced_commits=1,
                 ),
             )

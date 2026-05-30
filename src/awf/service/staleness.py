@@ -649,13 +649,21 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
     workspace: Workspace = candidate.workspace
     attempt: TaskAttempt = candidate.attempt
     owned = tuple(workspace.owned_paths) if workspace.owned_paths else tuple(attempt.owned_paths)
+    profile = workspace.resolved_profile
+    concrete_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(
+        profile,
+        workspace_id=workspace.id,
+    )
+    wildcard_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(profile)
     return CandidateSnapshot(
         owned_paths=owned,
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
-        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-            workspace.resolved_profile,
-            workspace_id=workspace.id,
+        # Target changes may contain sibling workspace artifacts rendered from the
+        # same profile template, so staleness classification needs the wildcard
+        # shape in addition to this workspace's concrete artifact path.
+        internal_plan_artifact_paths=tuple(
+            dict.fromkeys(concrete_plan_artifacts + wildcard_plan_artifacts)
         ),
     )
 
