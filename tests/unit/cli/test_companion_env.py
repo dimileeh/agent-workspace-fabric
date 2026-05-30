@@ -192,7 +192,14 @@ def test_warning_never_leaks_value(tmp_path: Path, capsys: pytest.CaptureFixture
     """Warnings about overlapping keys never include the actual secret value."""
     env_file = tmp_path / ".env"
     env_file.write_text("SECRET_KEY=$DB_PASSWORD/my-secret-12345\n")
-    companions = _c(("app", {"environment_secrets": {"SECRET_KEY": "s3cret"}}))
+    companions = [
+        {
+            "name": "app",
+            "repo_url": "git@x:app.git",
+            "environment": {},
+            "environment_secrets": {"SECRET_KEY": "s3cret"},
+        },
+    ]
     merge_companion_env(
         companions,
         env_from=[("app", str(env_file))],
