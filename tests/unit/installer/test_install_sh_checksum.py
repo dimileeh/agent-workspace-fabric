@@ -37,3 +37,7 @@ def test_checksum_mismatch_aborts_even_in_dry_run(harness: InstallerHarness) -> 
 
     assert result.returncode != 0
     assert "CHECKSUM_MISMATCH" in result.stderr
+    # Dry-run still aborts before any install mutation once the checksum fails.
+    joined = "\n".join(harness.calls())
+    assert "uv tool install" not in joined
+    assert "pipx install" not in joined
