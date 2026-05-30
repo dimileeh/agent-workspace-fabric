@@ -150,7 +150,9 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         reason = awf_match.group("reason").strip() or None
         if label == "false positive":
             return VerdictResult(verdict="false_positive", reason=reason)
-        if label == "needs_human":
+        # The label is whitespace-collapsed but underscores survive, so both
+        # ``NEEDS_HUMAN`` ("needs_human") and ``NEEDS HUMAN`` ("needs human") land here.
+        if label in {"needs_human", "needs human"}:
             return VerdictResult(verdict="needs_human", reason=reason)
         if label == "defer":
             return VerdictResult(verdict="defer", reason=reason)

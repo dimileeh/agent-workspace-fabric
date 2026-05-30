@@ -193,7 +193,10 @@ _VERDICT_DEFER = re.compile(r"\bDEFER\s*:", re.IGNORECASE)
 
 _AWF_VERDICT = re.compile(
     r"\bAWF-VERDICT\s*:\s*"
-    r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS_HUMAN)"
+    # NEEDS[\s_]+HUMAN mirrors FALSE\s+POSITIVE so ``NEEDS HUMAN`` (space) also
+    # matches the primary regex and its reason is extracted cleanly instead of
+    # falling through to the bare fallback (which garbles the reason).
+    r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS[\s_]+HUMAN)"
     r"\s*:\s*(?P<reason>[^\n\r]+)",
     re.IGNORECASE,
 )

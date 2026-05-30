@@ -1261,6 +1261,16 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_space_variant_preserves_reason(self) -> None:
+        # The primary _AWF_VERDICT regex tolerates "NEEDS HUMAN" (space) like
+        # "FALSE POSITIVE", so the reason is extracted cleanly instead of being
+        # garbled by the bare fallback (which splits on the AWF-VERDICT colon).
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS HUMAN: maintainer decision")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 

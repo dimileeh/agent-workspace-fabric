@@ -133,6 +133,12 @@ async def _run_fix_cycle(
                     ),
                 )
             except _MonitorPolicyBlockedError as exc:
+                # Roll back like the other early-exit paths: a captured defer in
+                # this cycle is in publish_dependent_ids, and leaving it marked
+                # addressed-but-unresolved would wedge the merge gate (the next
+                # poll skips re-addressing it). The filed-issue marker survives.
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
                 return _GitPushResult(
                     pushed=False,
                     failed=True,
@@ -205,6 +211,12 @@ async def _run_fix_cycle(
                     ),
                 )
             except _MonitorPolicyBlockedError as exc:
+                # Roll back like the other early-exit paths: a captured defer in
+                # this cycle is in publish_dependent_ids, and leaving it marked
+                # addressed-but-unresolved would wedge the merge gate (the next
+                # poll skips re-addressing it). The filed-issue marker survives.
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
                 return _GitPushResult(
                     pushed=False,
                     failed=True,
