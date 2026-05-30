@@ -177,6 +177,31 @@ def test_workspace_create_builds_minimal_development_payload(
         fmt=OutputFormat.json,
     )
 
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v1/workspaces"
+    assert captured["json"] == {
+        "repo": {
+            "url": "git@example.com:repo/app.git",
+            "base_branch": "development",
+        },
+        "task": {
+            "title": "title",
+            "prompt": "prompt",
+            "agent": "codex",
+            "kind": "feature_branch_pr",
+            "auto_merge": True,
+            "initial_review_grace_period_seconds": None,
+        },
+        "workspace": {"profile_ref": "auto", "profile": None},
+        "validation": {"commands": [], "requested_tier": 1},
+        "resources": {},
+        "preflight": {
+            "provider_readiness_override": False,
+            "provider_readiness_override_reason": None,
+        },
+        "companions": [],
+    }
+
 
 @pytest.mark.unit
 def test_workspace_create_merges_env_from_into_companion(

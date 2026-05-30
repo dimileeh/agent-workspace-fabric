@@ -308,3 +308,62 @@ def test_none_environment_treated_as_empty() -> None:
     companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": None}]
     result = merge_companion_env(companions, env_from=[], env_exclude=[])
     assert result[0]["environment"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Overlap with environment_secrets → warn and skip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_env_from_skips_keys_overlapping_environment_secrets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("DB_PASSWORD=hunter2\nAPI_KEY=fromfile\nSAFE_KEY=yes\n")
+    companions = [
+        {
+            "name": "app",
+            "repo_url": "git@x:app.git",
+            "environment": {},
+            "environment_secrets": {
+                "DB_PASSWORD": {"value_from": "secret_ref"},
+                "API_KEY": {"value_from": "another_ref"},
+            },
+        },
+    ]
+    result = merge_companion_env(
+        companions,
+        env_from=[("app", str(env_file))],
+        env_exclude=[],
+    )
+    assert "DB_PASSWORD" not in result[0]["environment"]
+    assert "API_KEY" not in result[0]["environment"]
+    assert result[0]["environment"] == {"SAFE_KEY": "yes"}
+    captured = capsys.readouterr()
+    assert "DB_PASSWORD" in captured.err
+    assert "API_KEY" in captured.err
+
+
+@pytest.mark.unit
+def test_env_from_overlap_value_never_leaked_in_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("SECRET_KEY=top-secret-value-999\n")
+    companions = [
+        {
+            "name": "app",
+            "repo_url": "git@x:app.git",
+            "environment": {},
+            "environment_secrets": {"SECRET_KEY": {"value_from": "ref"}},
+        },
+    ]
+    merge_companion_env(
+        companions,
+        env_from=[("app", str(env_file))],
+        env_exclude=[],
+    )
+    captured = capsys.readouterr()
+    assert "top-secret-value-999" not in captured.err
+    assert "top-secret-value-999" not in captured.out
