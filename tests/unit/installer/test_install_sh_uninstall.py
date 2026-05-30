@@ -90,3 +90,26 @@ def test_uninstall_ignores_pipx_substring_fork(harness: InstallerHarness) -> Non
 
     assert result.returncode == 0, result.stderr
     assert f"pipx uninstall {PACKAGE}" not in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_uninstall_aborts_on_unsupported_platform_before_mutation(
+    harness: InstallerHarness,
+) -> None:
+    """``--uninstall`` honours the platform guard before touching any install.
+
+    The trust contract promises an unsupported platform aborts before any
+    mutation. A managed uv install is present, so without the guard the
+    uninstall path would invoke ``uv tool uninstall`` instead of aborting.
+    """
+    harness.add_uname("Windows_NT", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+
+    result = harness.run(["--uninstall"])
+
+    assert result.returncode != 0
+    assert "UNSUPPORTED_PLATFORM" in result.stderr
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined

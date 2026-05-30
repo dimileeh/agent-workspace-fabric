@@ -619,7 +619,6 @@ uninstall_awf() {
 # --------------------------------------------------------------------------
 
 run_install() {
-    detect_platform
     setup_workdir
 
     plan "resolve install manifest"
@@ -653,6 +652,10 @@ run_install() {
 
 main() {
     parse_args "$@"
+
+    # The platform guard precedes every mutation path: an unsupported OS/arch
+    # aborts with UNSUPPORTED_PLATFORM before install or uninstall touches uv/pipx.
+    detect_platform
 
     if [ "$DO_UNINSTALL" -eq 1 ]; then
         uninstall_awf
