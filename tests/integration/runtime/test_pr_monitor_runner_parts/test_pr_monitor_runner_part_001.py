@@ -260,6 +260,7 @@ def _make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
+    max_fix_cycle_passes: int = 3,
     initial_review_grace_period_seconds: float = 0,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
@@ -276,7 +277,8 @@ def _make_runner(
             non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
-            max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=max_fix_cycle_passes,
         ),
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
@@ -1288,3 +1290,98 @@ class TestSyncBase:
             assert all(r.resolved_at is None for r in scope_rows)
             assert candidate.stale is True
             assert candidate.stale_reason == "docs_task_scope_violation"
+
+
+class TestResolveStaleGuard:
+    @pytest.mark.unit
+    async def test_resolve_skipped_when_body_changes_at_pass_limit(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A reviewer reply that lands during the final settle poll (after the
+        fix-cycle pass limit) changes a captured-defer thread's body but we never
+        re-address it. The resolve guard must skip it — not resolve a thread with
+        fresh unhandled feedback — so auto-merge can't proceed past it (#305)."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        t_v1 = {
+            "id": "T_pl",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "nit", "author": {"login": "cr"}}]},
+        }
+        t_v2 = {
+            "id": "T_pl",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {
+                "nodes": [
+                    {"bodyText": "nit", "author": {"login": "cr"}},
+                    {"bodyText": "also handle the empty case", "author": {"login": "cr"}},
+                ]
+            },
+        }
+        # iter1 fix cycle (max_fix_cycle_passes=1): capture defer, then the settle
+        # poll shows a changed body -> pass limit -> fall through to push/resolve.
+        cmd.queue_result(returncode=0)  # git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v1]))  # PR state
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up nit")
+        cmd.queue_result(
+            returncode=0, stdout="https://github.com/o/r/issues/77\n"
+        )  # gh issue create
+        cmd.queue_result(returncode=0)  # gh pr comment
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle: body CHANGED
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
+        # No resolve queued — the stale-body guard must skip T_pl.
+        # iter2: body changed -> re-addressed; agent now says NEEDS_HUMAN (blocks).
+        cmd.queue_result(returncode=0)  # git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))
+        adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: needs a human")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle quiet
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse HEAD
+        # iter3: unresolved needs_human -> NotifyHuman.
+        cmd.queue_result(returncode=0)  # git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))
+        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        # iter4: externally merged.
+        cmd.queue_result(returncode=0)  # git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[t_v2]))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            max_fix_cycle_passes=1,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The thread carried a fresh reply at the pass limit, so it was never
+        # resolved (skipped in cycle 1, then re-judged needs_human) and merge
+        # was blocked — the new reply was not swept under the rug.
+        for c in cmd.calls:
+            assert not any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args), (
+                "a thread with a fresh reply at the pass limit must not be resolved"
+            )
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value

@@ -21,6 +21,7 @@ from awf.common.github_client import (
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
+    PRStatus,
     ReviewComment,
     ReviewThread,
     _agent_can_triage_review_comment,
@@ -89,6 +90,9 @@ async def _run_fix_cycle(
     """
     threads_to_resolve: list[str] = []
     publish_dependent_ids: list[str] = []
+    # Last settle-poll status; used after the loop to skip resolving threads that
+    # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
+    status: PRStatus | None = None
     fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
     threads = list(initial_threads)
     reviews = list(initial_reviews)
@@ -383,7 +387,23 @@ async def _run_fix_cycle(
     # resolve via the GraphQL mutation; review-level comments are
     # marked addressed in state and the reviewer's re-read usually
     # clears them.
+    # Threads that the latest settle poll flagged as still needing attention —
+    # e.g. a reviewer reply landed during the final settle poll after we hit
+    # max_fix_cycle_passes, so its body changed but we never re-addressed it.
+    # Resolving such a thread would let auto-merge proceed past fresh unhandled
+    # feedback and leave the filed issue missing that reply (the #305 mode).
+    stale_thread_ids = (
+        {
+            t.thread_id
+            for t in status.unresolved_inline_threads
+            if _review_thread_needs_attention(state, t)
+        }
+        if status is not None
+        else set()
+    )
     for tid in threads_to_resolve:
+        if tid in stale_thread_ids:
+            continue
         # A later pass in this fix cycle may have re-addressed the thread (a new
         # reviewer reply landed during the settle window) and downgraded its
         # verdict to one that must keep the thread open. Resolve only when the

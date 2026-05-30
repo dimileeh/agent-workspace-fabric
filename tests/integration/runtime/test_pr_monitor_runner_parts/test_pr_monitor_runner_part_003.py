@@ -258,6 +258,7 @@ def _make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
+    max_fix_cycle_passes: int = 3,
     initial_review_grace_period_seconds: float = 0,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
@@ -274,7 +275,8 @@ def _make_runner(
             non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
-            max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=max_fix_cycle_passes,
         ),
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
