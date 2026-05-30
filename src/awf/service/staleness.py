@@ -168,8 +168,6 @@ TRIGGER_DEPENDENCY_CHANGED: Final[str] = "dependency_changed"
 TRIGGER_BUILD_CONFIG_CHANGED: Final[str] = "build_config_changed"
 TRIGGER_PLAN_ARTIFACT_OVERLAP: Final[str] = "plan_artifact_overlap"
 
-PLAN_ARTIFACT_PATH_PATTERN: Final[str] = "docs/awf-plans/**"
-
 DEFAULT_STALE_POLICY: Final[StalePolicy] = StalePolicy(
     schema_paths=(
         "migrations/",
