@@ -375,6 +375,7 @@ class TestEvaluateStaleness:
 
     @pytest.mark.unit
     def test_awf_plans_readme_overlap_blocks_as_real_docs_path(self) -> None:
+        """The awf-plans README is treated as blocking repository docs."""
         from awf.service.staleness import (
             DEFAULT_STALE_POLICY,
             CandidateSnapshot,
