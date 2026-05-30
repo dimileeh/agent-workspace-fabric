@@ -253,9 +253,22 @@ class MonitorState:
     # reserved "__review_*_body_hash__:<id>" keys track addressed evidence.
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
+    pending_operator_hint: OperatorHint | None = None
 
     def mark_addressed(self, thread_id: str, verdict: str) -> None:
         self.threads_addressed_ids[thread_id] = verdict
+
+
+@dataclass(frozen=True)
+class OperatorHint:
+    """Operator-provided remonitor hint that must be processed before merge."""
+
+    reason: str
+    operation_id: str | None = None
+    requested_at: str | None = None
+    reason_code: str = "OPERATOR_REMONITOR"
+    status: Literal["pending", "needs_human", "agent_failed"] = "pending"
+    status_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +357,13 @@ class AddressComments:
 
 
 @dataclass(frozen=True)
+class AddressOperatorHint:
+    """Run one repair pass for a pending operator remonitor hint."""
+
+    hint: OperatorHint
+
+
+@dataclass(frozen=True)
 class ReportCiFailure:
     """Re-invoke the CLI with logs of the failing checks."""
 
@@ -400,6 +420,7 @@ class Abort:
 
 MonitorAction = (
     AddressComments
+    | AddressOperatorHint
     | ReportCiFailure
     | RerunTransientCI
     | SyncBase
@@ -777,6 +798,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ShortCircuitCompleted()
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
+
+    if state.pending_operator_hint is not None:
+        if state.pending_operator_hint.status == "pending":
+            return AddressOperatorHint(hint=state.pending_operator_hint)
+        return NotifyHuman(
+            message=(
+                "An operator remonitor hint still requires human attention before "
+                "this PR can merge."
+            )
+        )
 
     # Pre-compute actionable comments so a no-progress DIRTY loop can break
     # back to review repair instead of starving new feedback forever.

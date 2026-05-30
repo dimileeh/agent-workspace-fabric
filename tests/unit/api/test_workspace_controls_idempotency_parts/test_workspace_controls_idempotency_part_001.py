@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,13 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY
+from awf.runtime.pr_monitor_runner.helpers import (
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_key,
+)
 
 _BODY = {
     "repo_url": "git@github.com:example/controls.git",
@@ -692,6 +700,91 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
         },
         "expected_version": 7,
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_past_settle_persists_operator_hint_and_warns(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    hint = "the docs CTA URL 404s; correct URL is https://example.test/docs"
+    head_sha = "b" * 40
+    initial_done_key = _initial_review_grace_done_key(42)
+    initial_started_key = _initial_review_grace_started_key(42)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            initial_done_key: "elapsed",
+            settle_done_key: "elapsed",
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": hint},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "remonitor-past-settle"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["warnings"] == [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is frozen "
+                "until the operator hint is processed."
+            ),
+        }
+    ]
+
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        operation = await session.get(Operation, payload["operation_id"])
+        event = (
+            (
+                await session.execute(
+                    select(WorkspaceEvent)
+                    .where(
+                        WorkspaceEvent.workspace_id == workspace_id,
+                        WorkspaceEvent.reason_code == "OPERATOR_REMONITOR",
+                    )
+                    .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    assert workspace is not None
+    state = workspace.monitor_threads_addressed
+    assert initial_done_key not in state
+    assert settle_done_key not in state
+    assert float(state[initial_started_key]) >= 1_000_000_000
+    assert float(state[settle_started_key]) >= 1_000_000_000
+    stored_hint = json.loads(state[OPERATOR_HINT_STATE_KEY])
+    assert stored_hint["reason"] == hint
+    assert stored_hint["status"] == "pending"
+    assert stored_hint["operation_id"] == payload["operation_id"]
+    assert stored_hint["reason_code"] == "OPERATOR_REMONITOR"
+    assert operation is not None
+    assert operation.result is not None
+    assert operation.result["warnings"] == payload["warnings"]
+    assert event is not None
+    assert event.payload["pending_operator_hint"]["operation_id"] == payload["operation_id"]
+    assert event.payload["pending_operator_hint"]["reason"] == hint
+    assert event.payload["warnings"] == payload["warnings"]
 
 
 @pytest.mark.unit

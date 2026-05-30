@@ -25,6 +25,10 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
+from awf.runtime.operator_hints import (
+    operator_hint_from_threads,
+    persist_operator_hint,
+)
 from awf.runtime.pr_monitor import (
     AbortReason,
     MonitorState,
@@ -87,6 +91,7 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
         sync_base_no_progress_count = int(sync_base_no_progress_count_raw)
     except (TypeError, ValueError):
         sync_base_no_progress_count = 0
+    pending_operator_hint = operator_hint_from_threads(threads_addressed)
     if ws.pr_number is not None:
         threads_addressed = _initial_review_grace_state_for_runtime(
             threads_addressed,
@@ -108,6 +113,7 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
         sync_base_no_progress_count=sync_base_no_progress_count,
         threads_addressed_ids=threads_addressed,
         started_at=started_at,
+        pending_operator_hint=pending_operator_hint,
     )
 
 
@@ -132,6 +138,7 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
                 now_monotonic=now_monotonic,
                 now_wall_seconds=now_wall.timestamp(),
             )
+        threads_addressed = persist_operator_hint(threads_addressed, state.pending_operator_hint)
         if (
             state.sync_base_no_progress_signature is not None
             and state.sync_base_no_progress_count > 0

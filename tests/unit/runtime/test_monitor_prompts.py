@@ -11,6 +11,7 @@ from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     fix_ci_prompt,
+    operator_hint_prompt,
     ready_to_merge_comment,
     sync_base_conflict_prompt,
 )
@@ -455,6 +456,33 @@ class TestSyncBaseConflictPrompt:
             "- Sidecar services are running.\n\n"
             "Resolve each conflict" in prompt
         )
+
+
+class TestOperatorHintPrompt:
+    @pytest.mark.unit
+    def test_operator_hint_is_injected_as_untrusted_repair_evidence(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=307,
+            repo_slug="dimileeh/awf",
+            reason="the docs CTA URL 404s; correct URL is https://example.test/docs",
+            operation_id="op_rehint",
+            workspace_runtime_context="Workspace runtime context\n- Service `postgres`: use postgres:5432.",
+        )
+
+        assert (
+            "An operator manually requested re-monitoring this PR with the following hint:"
+            in prompt
+        )
+        assert "Address what the hint says, push a fix commit" in prompt
+        assert "reply to any relevant unresolved review threads" in prompt
+        assert "op_rehint" in prompt
+        assert "Workspace runtime context" in prompt
+        assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
+        assert "source_kind: operator_remonitor_hint" in prompt
+        assert (
+            "AWF-EVIDENCE> the docs CTA URL 404s; correct URL is https://example.test/docs"
+        ) in prompt
+        assert "Do NOT push" in prompt
 
 
 class TestFixCiPrompt:

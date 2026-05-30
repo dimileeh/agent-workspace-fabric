@@ -24,6 +24,14 @@ from awf.db.repositories import (
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
 )
+from awf.runtime.operator_hints import (
+    arm_operator_hint_freeze,
+    build_pending_operator_hint_payload,
+    persist_operator_hint,
+    remonitor_has_elapsed_settle,
+    utcnow,
+)
+from awf.runtime.pr_monitor import OperatorHint
 from awf.service.failure_causality import (
     PRIMARY_FAILURE_KEY,
     SECONDARY_FAILURE_KEY,
@@ -79,6 +87,7 @@ _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
+_REMONITOR_PAST_SETTLE_WARNING_CODE = "REMONITOR_PAST_SETTLE"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
@@ -538,6 +547,48 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
+        warnings: list[dict[str, object]] = []
+        pending_operator_hint: dict[str, object] | None = None
+        hint_state_changed = False
+        reason_text = (reason or "").strip()
+        if current == WorkspaceStatus.monitoring_pr and reason_text:
+            monitor_state = dict(workspace.monitor_threads_addressed or {})
+            past_settle = remonitor_has_elapsed_settle(
+                monitor_state,
+                pr_number=workspace.pr_number,
+                head_sha=workspace.monitor_last_commit_sha,
+            )
+            if (
+                past_settle
+                and workspace.pr_number is not None
+                and workspace.monitor_last_commit_sha
+            ):
+                requested_at = utcnow()
+                hint = OperatorHint(
+                    reason=reason_text,
+                    operation_id=operation.id,
+                    requested_at=requested_at.isoformat(),
+                    reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+                )
+                persist_operator_hint(monitor_state, hint)
+                arm_operator_hint_freeze(
+                    monitor_state,
+                    pr_number=workspace.pr_number,
+                    head_sha=workspace.monitor_last_commit_sha,
+                    now=requested_at,
+                )
+                workspace.monitor_threads_addressed = monitor_state
+                hint_state_changed = True
+                pending_operator_hint = build_pending_operator_hint_payload(hint)
+                warnings.append(
+                    {
+                        "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,
+                        "message": (
+                            "Workspace is past reviewer-settle window; auto-merge is frozen "
+                            "until the operator hint is processed."
+                        ),
+                    }
+                )
         claims_reset = _claim_reset_snapshot(workspace)
         claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(
@@ -552,7 +603,7 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        if state_reset is None and claims_will_reset:
+        if state_reset is None and (claims_will_reset or hint_state_changed):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
@@ -566,6 +617,10 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
+        if pending_operator_hint is not None:
+            event_payload["pending_operator_hint"] = pending_operator_hint
+        if warnings:
+            event_payload["warnings"] = warnings
         if state_reset is not None:
             await repo.add_event_with_states(
                 workspace,
@@ -591,6 +646,8 @@ class WorkspaceControlService:
             result["state_reset"] = state_reset
         if cancelled_recovery_operations:
             result["cancelled_recovery_operations"] = cancelled_recovery_operations
+        if warnings:
+            result["warnings"] = warnings
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -600,6 +657,7 @@ class WorkspaceControlService:
             workspace=workspace,
             operation=operation,
             message="workspace PR monitor recovery requested",
+            warnings=warnings,
         )
 
     async def request_refresh_workspace(

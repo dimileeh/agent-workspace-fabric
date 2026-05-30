@@ -253,6 +253,7 @@ def _control_response(
     workspace: Workspace,
     operation: Operation,
     message: str,
+    warnings: list[dict[str, object]] | None = None,
 ) -> WorkspaceControlResponse:
     return WorkspaceControlResponse(
         workspace_id=workspace.id,
@@ -260,7 +261,18 @@ def _control_response(
         operation_status=operation.status,
         status=WorkspaceStatus(workspace.status),
         message=message,
+        warnings=warnings if warnings is not None else _operation_result_warnings(operation),
     )
+
+
+def _operation_result_warnings(operation: Operation) -> list[dict[str, object]]:
+    result = operation.result
+    if not isinstance(result, Mapping):
+        return []
+    warnings = result.get("warnings")
+    if not isinstance(warnings, Sequence) or isinstance(warnings, str):
+        return []
+    return [dict(warning) for warning in warnings if isinstance(warning, Mapping)]
 
 
 def _operator_operation_payload(
