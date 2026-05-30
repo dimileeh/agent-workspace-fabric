@@ -13,8 +13,8 @@
 # stderr (it does not depend on the Python first-run error catalog):
 #
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY MANIFEST_UNAVAILABLE MANIFEST_INVALID
-#   DOWNLOAD_FAILED CHECKSUM_MISMATCH INSTALL_METHOD_FAILED AWF_NOT_REACHABLE
-#   UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
+#   CHANNEL_MISMATCH DOWNLOAD_FAILED CHECKSUM_MISMATCH INSTALL_METHOD_FAILED
+#   AWF_NOT_REACHABLE UNINSTALL_REFUSED_UNMANAGED BAD_USAGE
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
 #   AWF_INSTALL_MANIFEST   path or file:// URL to a local manifest JSON.
@@ -42,6 +42,7 @@ PLATFORM_OS=""
 PLATFORM_ARCH=""
 MANIFEST_SOURCE=""
 MANIFEST_FILE=""
+MANIFEST_CHANNEL=""
 ARTIFACT_NAME=""
 ARTIFACT_SHA256=""
 ARTIFACT_URL=""
@@ -85,8 +86,9 @@ Usage:
 
 Options:
   --version <X.Y.Z>     Install a specific package version (pins manifest/tag).
-  --channel <name>      stable | prerelease (default: stable). Used when --version
-                        is omitted.
+  --channel <name>      stable | prerelease (default: stable). When --version is
+                        omitted, the resolved latest-release manifest must be on
+                        this channel; pin --version to install a prerelease.
   --method <name>       uv | pipx (default: uv). pipx is the configured fallback.
   --install-dir <path>  Bin directory used for awf reachability and PATH advice.
   --dry-run             Resolve, download, and verify only; explain the planned
@@ -332,6 +334,28 @@ parse_manifest() {
     fi
 }
 
+# Extract the manifest's top-level "channel" string (jq-free). The T11 manifest
+# is pretty-printed with sorted keys and no artifact carries a "channel" key, so
+# the first match is the authoritative release channel.
+extract_manifest_channel() {
+    sed -n 's/.*"channel"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST_FILE" \
+        | head -n 1
+}
+
+# When no explicit --version pins the release, the resolved manifest's channel
+# must match the requested --channel. Version/tag pinning is the trust boundary
+# (RELEASING.md), so a pinned --version selects the manifest directly and the
+# channel field is then informational only. A manifest without a channel field
+# (legacy/hand-authored) is not enforced here; parse_manifest still guards shape.
+verify_channel() {
+    [ -z "$VERSION" ] || return 0
+    MANIFEST_CHANNEL="$(extract_manifest_channel)"
+    [ -n "$MANIFEST_CHANNEL" ] || return 0
+    if [ "$MANIFEST_CHANNEL" != "$CHANNEL" ]; then
+        fail CHANNEL_MISMATCH "requested channel ${CHANNEL} but the resolved manifest is on the ${MANIFEST_CHANNEL} channel (${MANIFEST_SOURCE}); pass --version <X.Y.Z> to install a specific ${CHANNEL} release"
+    fi
+}
+
 download_artifact() {
     ARTIFACT_FILE="${WORK_DIR}/${ARTIFACT_NAME}"
     fetch "$ARTIFACT_URL" "$ARTIFACT_FILE" || fail DOWNLOAD_FAILED "could not download artifact: $ARTIFACT_URL"
@@ -543,6 +567,7 @@ run_install() {
     plan "resolve install manifest"
     resolve_manifest
     parse_manifest
+    verify_channel
     say "Resolved manifest: ${MANIFEST_SOURCE}"
 
     plan "download artifact: ${ARTIFACT_URL}"
