@@ -45,6 +45,41 @@ def test_path_advice_matches_shell(
 
 
 @pytest.mark.unit
+def test_bash_path_advice_includes_login_profile_when_present(
+    harness: InstallerHarness,
+) -> None:
+    """Bash advice also points at an existing login profile, not just ~/.bashrc.
+
+    Login bash shells (macOS Terminal, SSH) read the first existing login
+    profile (~/.bash_profile, ~/.bash_login, ~/.profile) and may not source
+    ~/.bashrc, so a user following ~/.bashrc-only advice could still miss awf on
+    PATH. When such a file exists, surface it alongside ~/.bashrc so both
+    login and non-login shells pick up the export.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    (harness.home / ".bash_profile").write_text("# login profile\n", encoding="utf-8")
+    install_dir = harness.root / "bin-install"
+    install_dir.mkdir()
+    harness.add_awf(directory=install_dir)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(
+        ["--install-dir", str(install_dir), "--shell", "bash"],
+        manifest=manifest,
+    )
+
+    assert result.returncode == 0, result.stderr
+    advice = result.stdout + result.stderr
+    # Both the login profile and ~/.bashrc are surfaced, plus the export line.
+    assert ".bash_profile" in advice
+    assert ".bashrc" in advice
+    assert "export PATH=" in advice
+    assert str(install_dir) in advice
+
+
+@pytest.mark.unit
 def test_no_path_advice_when_awf_already_on_path(harness: InstallerHarness) -> None:
     """When awf resolves on PATH, no PATH remediation advice is emitted."""
     harness.add_uname("Linux", "x86_64")

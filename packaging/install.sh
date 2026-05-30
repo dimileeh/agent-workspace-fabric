@@ -460,7 +460,7 @@ detect_shell() {
 }
 
 print_path_advice() {
-    local bindir shell rc line
+    local bindir shell rc line login_rc="" candidate
     bindir="$(default_bin_dir)"
     shell="$(detect_shell)"
     case "$shell" in
@@ -475,6 +475,16 @@ print_path_advice() {
         bash)
             rc="${HOME}/.bashrc"
             line="export PATH=\"${bindir}:\$PATH\""
+            # Interactive non-login bash reads ~/.bashrc, but login shells (macOS
+            # Terminal, SSH) read the first existing login profile and may not
+            # source ~/.bashrc. Surface that file too so both shell types pick up
+            # the export instead of only non-login shells.
+            for candidate in "${HOME}/.bash_profile" "${HOME}/.bash_login" "${HOME}/.profile"; do
+                if [ -f "$candidate" ]; then
+                    login_rc="$candidate"
+                    break
+                fi
+            done
             ;;
         *)
             rc="${HOME}/.profile"
@@ -484,6 +494,9 @@ print_path_advice() {
     warn "awf is installed in ${bindir}, which is not on your PATH."
     warn "Add it by appending this line to ${rc}:"
     warn "    ${line}"
+    if [ -n "$login_rc" ]; then
+        warn "Your login shell may read ${login_rc} instead of ${rc}; add the same line there too."
+    fi
     warn "Then restart your shell or 'source ${rc}'."
 }
 
