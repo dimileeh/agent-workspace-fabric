@@ -308,6 +308,17 @@ async def create_workspace(
     if not disk_check.ok:
         return _insufficient_disk_response(disk_check)
 
+    host_ports = [hp for c in payload.companions for _, hp in c.ports]
+    if host_ports:
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=host_ports,
+        )
+        if conflicts:
+            raise WorkspaceCreateHostPortConflictError(
+                host_port=conflicts[0].host_port,
+                conflicting_workspace_id=conflicts[0].workspace_id,
+            )
+
     try:
         ws = await create_workspace_row(
             session,
