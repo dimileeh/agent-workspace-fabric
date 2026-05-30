@@ -33,7 +33,10 @@ RUN apt-get update \
         "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
         "docker-buildx-plugin=${DOCKER_BUILDX_PLUGIN_VERSION}" \
         gh \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version \
+    && docker compose version \
+    && docker buildx version
 
 WORKDIR /app
 
