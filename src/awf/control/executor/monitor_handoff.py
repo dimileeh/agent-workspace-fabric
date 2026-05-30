@@ -257,6 +257,10 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             worktree_path=self._config.worktrees_root / workspace_id,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
+        await self._persist_resolved_profile_snapshot_if_missing(
+            workspace_id=workspace_id,
+            profile=profile,
+        )
         # Keep the profile timeout as the fallback if stored companion policy
         # cannot be parsed during monitor recovery.
         compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
@@ -348,6 +352,10 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                     ws,
                     worktree_path=self._config.worktrees_root / workspace_id,
                     planning_max_iterations_default=self._config.planning_max_iterations_default,
+                )
+                await self._persist_resolved_profile_snapshot_if_missing(
+                    workspace_id=workspace_id,
+                    profile=profile,
                 )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
@@ -981,6 +989,10 @@ async def _build_handoff_pr_monitor(
                 workspace,
                 worktree_path=worktree_path,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+            await self._persist_resolved_profile_snapshot_if_missing(
+                workspace_id=workspace_id,
+                profile=profile,
             )
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,

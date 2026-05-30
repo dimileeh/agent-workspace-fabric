@@ -30,12 +30,29 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
     async with self._session_factory() as session:
         return await WorkspaceRepository(session).get(workspace_id)
+
+
+async def _persist_resolved_profile_snapshot_if_missing(
+    self: Any,
+    *,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+) -> None:
+    """Freeze the runtime-resolved profile snapshot if the row lacks one."""
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+    async with self._session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None or workspace.resolved_profile is not None:
+            return
+        workspace.resolved_profile = snapshot
+        await session.commit()
 
 
 async def _claim_ready(

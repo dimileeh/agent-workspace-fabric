@@ -242,6 +242,10 @@ async def execute(
             worktree_path=worktree_path,
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
+        await self._persist_resolved_profile_snapshot_if_missing(
+            workspace_id=workspace_id,
+            profile=profile,
+        )
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,

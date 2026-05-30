@@ -422,11 +422,13 @@ def _profile_for_workspace(
         profile_ref=ws.profile_ref or ws.env_profile or "auto",
         validation_commands=list(ws.test_commands),
     ).profile
-    return _profile_with_planning_iteration_default(
+    profile = _profile_with_planning_iteration_default(
         profile,
         planning_max_iterations_default,
         raw_profile=ws.requested_profile,
     )
+    ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
+    return profile
 
 
 def _profile_with_planning_iteration_default(
