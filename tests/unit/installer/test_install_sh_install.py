@@ -91,6 +91,58 @@ def test_default_install_bin_off_path_is_reachable_with_advice(
 
 
 @pytest.mark.unit
+def test_default_install_verifies_installed_binary_not_path_shadow(
+    harness: InstallerHarness,
+) -> None:
+    """A default install must not let an older PATH awf shadow verification.
+
+    With no ``--install-dir``, uv/pipx install into ``~/.local/bin``. When an
+    unrelated awf sits earlier on PATH, verification must inspect the freshly
+    installed binary in the default bin dir and still surface PATH advice for it,
+    not silently pass on the shadowing binary and report success without advice.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()  # older, unrelated awf earlier on PATH (stub bin dir)
+    default_bin = harness.home / ".local" / "bin"
+    default_bin.mkdir(parents=True)
+    harness.add_awf(directory=default_bin)  # freshly installed binary, off PATH
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    advice = result.stdout + result.stderr
+    assert "export PATH=" in advice
+    assert str(default_bin) in advice
+
+
+@pytest.mark.unit
+def test_default_install_binary_verified_even_when_path_awf_is_broken(
+    harness: InstallerHarness,
+) -> None:
+    """The default-bin binary is verified, not a broken awf earlier on PATH.
+
+    A non-runnable awf on PATH must not make verification fail when the freshly
+    installed ``~/.local/bin/awf`` is itself runnable.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf(rc=1)  # broken awf earlier on PATH
+    default_bin = harness.home / ".local" / "bin"
+    default_bin.mkdir(parents=True)
+    harness.add_awf(directory=default_bin)  # runnable freshly installed binary
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+
+
+@pytest.mark.unit
 def test_install_dir_verifies_installed_binary_not_path_shadow(
     harness: InstallerHarness,
 ) -> None:

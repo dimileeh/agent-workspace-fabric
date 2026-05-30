@@ -485,22 +485,26 @@ dir_on_path() {
 verify_awf() {
     local resolved="" on_path=0 bindir
     bindir="$(default_bin_dir)"
-    if [ -n "$INSTALL_DIR" ]; then
-        # An explicit --install-dir pins exactly where the binary landed. Verify
-        # that file directly instead of whatever `command -v awf` resolves to,
-        # which could be an older, unrelated awf earlier on PATH that would
-        # falsely pass and suppress PATH advice for the new install location.
+    if [ -x "${bindir}/awf" ]; then
+        # Prefer the binary at the directory we just installed into (INSTALL_DIR
+        # when given, else ~/.local/bin). Verifying that file directly — instead
+        # of whatever `command -v awf` resolves to — avoids falsely passing on an
+        # older, unrelated awf earlier on PATH that would shadow the new install
+        # and suppress PATH advice for the location we actually wrote to.
         resolved="${bindir}/awf"
-        if [ ! -x "$resolved" ]; then
-            resolved=""
-        elif [ "$(command -v awf 2>/dev/null)" = "$resolved" ]; then
+        if [ "$(command -v awf 2>/dev/null)" = "$resolved" ]; then
             on_path=1
         fi
+    elif [ -n "$INSTALL_DIR" ]; then
+        # An explicit --install-dir pins exactly where the binary must land. If
+        # it is absent there, the install did not place it; do not fall back to a
+        # shadowing awf elsewhere on PATH and report a false success.
+        resolved=""
     elif command -v awf >/dev/null 2>&1; then
+        # Default install with nothing in ~/.local/bin: uv/pipx may have placed
+        # the binary elsewhere on PATH, so trust a reachable awf as a last resort.
         resolved="$(command -v awf)"
         on_path=1
-    elif [ -x "${bindir}/awf" ]; then
-        resolved="${bindir}/awf"
     fi
 
     if [ -z "$resolved" ]; then
