@@ -1329,6 +1329,22 @@ def test_min_free_disk_threshold_flows_from_settings_to_service_settings() -> No
 
 
 @pytest.mark.unit
+def test_service_startup_log_tail_lines_defaults_into_service_settings() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+
+    assert settings.service_startup_log_tail_lines == 200
+
+
+@pytest.mark.unit
+def test_service_startup_log_tail_lines_flows_from_settings_to_service_settings() -> None:
+    base = Settings(_env_file=None, worker_service_startup_log_tail_lines=75)
+
+    settings = resolve_service_settings(base, environ={})
+
+    assert settings.service_startup_log_tail_lines == 75
+
+
+@pytest.mark.unit
 def test_local_service_work_dir_defaults_to_compose_host_state_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

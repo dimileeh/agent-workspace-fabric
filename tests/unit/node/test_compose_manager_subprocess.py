@@ -8,13 +8,18 @@ a docker socket is present.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from awf.node.compose_manager import (
     COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS,
+    DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES,
+    SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
     ComposeManager,
     ComposeOperationError,
     WorkspaceComposeSpec,
@@ -354,3 +359,454 @@ class TestDown:
         assert resource_ids.call_count == 2
         docker.assert_any_await(["rm", "-f", "container"], operation="rm")
         docker.assert_any_await(["network", "rm", "net"], operation="network rm")
+
+
+# ── Companion startup diagnostics (issue #299) ───────────────────────────────
+
+# Known secret bodies planted into companion logs / healthcheck output. The
+# headline regression for #299 is that NONE of these raw bodies may appear in
+# the persisted, redacted diagnostics payload.
+_SECRET_URL_PW = "S3CRETPW"
+_SECRET_ASSIGNMENT = "topsecretvalue"
+_SECRET_BEARER = "bearersecretbody123456"
+_SECRET_PROVIDER_TOKEN = "ghp_exampletokenABCDEF0123456789"
+
+_BACKEND_LOGS = (
+    "backend boot sequence start\n"
+    f"AWF_API_TOKEN={_SECRET_ASSIGNMENT}\n"
+    f"Authorization: Bearer {_SECRET_BEARER}\n"
+    f"using provider token {_SECRET_PROVIDER_TOKEN}\n"
+    f"connecting to postgres://appuser:{_SECRET_URL_PW}@db/awf\n"
+)
+
+
+def _inspect_entry(
+    *,
+    container_id: str | None,
+    service: str | None,
+    status: str = "running",
+    exit_code: int = 0,
+    health_status: str | None = None,
+    health_log: list[dict[str, Any]] | None = None,
+    healthcheck_test: list[str] | None = None,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    if service is not None:
+        config["Labels"] = {"com.docker.compose.service": service}
+    if healthcheck_test is not None:
+        config["Healthcheck"] = {"Test": healthcheck_test}
+    state: dict[str, Any] = {"Status": status, "ExitCode": exit_code}
+    if health_status is not None:
+        state["Health"] = {"Status": health_status, "Log": health_log or []}
+    entry: dict[str, Any] = {"Config": config, "State": state}
+    if container_id is not None:
+        entry["Id"] = container_id
+    return entry
+
+
+def _docker_dispatch(
+    *,
+    ps_ids: list[str] | None = None,
+    ps_returncode: int = 0,
+    ps_stderr: bytes = b"",
+    inspect_stdout: bytes | None = None,
+    inspect_returncode: int = 0,
+    inspect_stderr: bytes = b"",
+    logs_by_container: dict[str, bytes] | None = None,
+) -> Callable[..., AsyncMock]:
+    """Build a ``create_subprocess_exec`` side effect dispatching on subcommand."""
+
+    def _fake(*cmd: str, **_kwargs: Any) -> AsyncMock:
+        subcommand = cmd[1]
+        if subcommand == "ps":
+            stdout = "\n".join(ps_ids or []).encode() if ps_ids else b""
+            return _mock_proc(returncode=ps_returncode, stdout=stdout, stderr=ps_stderr)
+        if subcommand == "inspect":
+            return _mock_proc(
+                returncode=inspect_returncode,
+                stdout=inspect_stdout or b"",
+                stderr=inspect_stderr,
+            )
+        if subcommand == "logs":
+            container_id = cmd[-1]
+            body = (logs_by_container or {}).get(container_id)
+            if body is None:
+                return _mock_proc(returncode=1, stderr=b"Error: No such container")
+            # docker logs combines stderr into stdout (combine_stderr=True), so
+            # the captured process yields ``None`` for the stderr stream.
+            return _mock_proc(returncode=0, stdout=body, stderr=None)
+        raise AssertionError(f"unexpected docker subcommand: {subcommand}")
+
+    return _fake
+
+
+class TestCaptureCompanionDiagnostics:
+    @pytest.mark.unit
+    async def test_happy_path_captures_unhealthy_only_and_excludes_healthy(
+        self, manager: ComposeManager
+    ) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_postgres",
+                    service="postgres",
+                    health_status="healthy",
+                    healthcheck_test=["CMD-SHELL", "pg_isready -U awf"],
+                ),
+                _inspect_entry(
+                    container_id="c_backend",
+                    service="backend",
+                    health_status="unhealthy",
+                    health_log=[{"ExitCode": 1, "Output": "probe failed: connection refused"}],
+                    healthcheck_test=["CMD-SHELL", "curl -f http://localhost:8000/health"],
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_postgres", "c_backend"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_backend": _BACKEND_LOGS.encode()},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_diag",
+                workspace_id="ws_diag",
+                tail_lines=50,
+            )
+
+        assert payload["schema"] == SERVICE_STARTUP_DIAGNOSTICS_SCHEMA
+        assert payload["compose_project"] == "awf_ws_diag"
+        assert payload["compose_file"].endswith("ws_diag/compose.yml")
+        assert payload["tail_lines"] == 50
+        assert payload["containers_inspected"] == 2
+        # Healthy postgres excluded; unhealthy backend captured.
+        assert set(payload["companion_health"]) == {"backend"}
+        assert payload["companion_health"]["backend"]["health_status"] == "unhealthy"
+        assert payload["companion_health"]["backend"]["health_log"][0]["ExitCode"] == 1
+        assert payload["healthcheck_test"]["backend"] == [
+            "CMD-SHELL",
+            "curl -f http://localhost:8000/health",
+        ]
+        assert "backend" in payload["companion_logs"]
+        assert isinstance(payload["companion_logs"]["backend"], list)
+        assert "postgres" not in payload["companion_logs"]
+
+    @pytest.mark.unit
+    async def test_redacts_planted_secrets_in_logs_and_health_output(
+        self, manager: ComposeManager
+    ) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_backend",
+                    service="backend",
+                    health_status="unhealthy",
+                    health_log=[
+                        {
+                            "ExitCode": 1,
+                            "Output": f"db url postgres://appuser:{_SECRET_URL_PW}@db/awf",
+                        }
+                    ],
+                    healthcheck_test=["CMD-SHELL", "check"],
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_backend"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_backend": _BACKEND_LOGS.encode()},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_secret",
+                workspace_id="ws_secret",
+            )
+
+        blob = json.dumps(payload)
+        for raw_secret in (
+            _SECRET_URL_PW,
+            _SECRET_ASSIGNMENT,
+            _SECRET_BEARER,
+            _SECRET_PROVIDER_TOKEN,
+        ):
+            assert raw_secret not in blob, f"raw secret leaked: {raw_secret}"
+        assert "[redacted]" in blob
+
+    @pytest.mark.unit
+    async def test_default_tail_lines_used_when_unspecified(self, manager: ComposeManager) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_backend",
+                    service="backend",
+                    health_status="unhealthy",
+                    healthcheck_test=["CMD", "true"],
+                ),
+            ]
+        ).encode()
+        seen_logs_cmds: list[tuple[str, ...]] = []
+
+        def _spy(*cmd: str, **kwargs: Any) -> AsyncMock:
+            if cmd[1] == "logs":
+                seen_logs_cmds.append(cmd)
+            return _docker_dispatch(
+                ps_ids=["c_backend"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_backend": b"line\n"},
+            )(*cmd, **kwargs)
+
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_spy,
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_default",
+                workspace_id="ws_default",
+            )
+
+        assert payload["tail_lines"] == DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
+        assert seen_logs_cmds
+        assert str(DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES) in seen_logs_cmds[0]
+
+    @pytest.mark.unit
+    async def test_exited_container_without_healthcheck_keyed_by_id_fallback(
+        self, manager: ComposeManager
+    ) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_orphan",
+                    service=None,  # no compose-service label → fall back to id
+                    status="exited",
+                    exit_code=2,
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_orphan"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_orphan": b"crashed early\n"},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_exit",
+                workspace_id="ws_exit",
+            )
+
+        assert "c_orphan" in payload["companion_health"]
+        assert payload["companion_health"]["c_orphan"]["exit_code"] == 2
+        assert payload["companion_health"]["c_orphan"]["health_status"] is None
+        # No healthcheck declared → no test array recorded for this service.
+        assert "healthcheck_test" not in payload or "c_orphan" not in payload["healthcheck_test"]
+        assert payload["companion_logs"]["c_orphan"] == ["crashed early"]
+
+    @pytest.mark.unit
+    async def test_unhealthy_container_without_id_skips_logs(self, manager: ComposeManager) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id=None,
+                    service="ghost",
+                    health_status="unhealthy",
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["whatever"],
+                inspect_stdout=inspect,
+                logs_by_container={},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_noid",
+                workspace_id="ws_noid",
+            )
+
+        assert "ghost" in payload["companion_health"]
+        assert "companion_logs" not in payload or "ghost" not in payload["companion_logs"]
+
+    @pytest.mark.unit
+    async def test_per_container_logs_error_records_marker_and_continues(
+        self, manager: ComposeManager
+    ) -> None:
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_gone",
+                    service="backend",
+                    health_status="unhealthy",
+                    healthcheck_test=["CMD", "x"],
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_gone"],
+                inspect_stdout=inspect,
+                logs_by_container={},  # logs call fails → container gone race
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_gone",
+                workspace_id="ws_gone",
+            )
+
+        assert "backend" in payload["companion_logs_capture_error"]
+        # Health + healthcheck still captured despite the logs failure.
+        assert "backend" in payload["companion_health"]
+        assert payload["healthcheck_test"]["backend"] == ["CMD", "x"]
+
+    @pytest.mark.unit
+    async def test_top_level_ps_error_returns_partial_payload(
+        self, manager: ComposeManager
+    ) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(ps_returncode=1, ps_stderr=b"docker ps boom"),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_psfail",
+                workspace_id="ws_psfail",
+            )
+
+        assert isinstance(payload, dict)
+        assert isinstance(payload["companion_logs_capture_error"], str)
+        assert "companion_health" not in payload
+
+    @pytest.mark.unit
+    async def test_inspect_error_returns_partial_payload(self, manager: ComposeManager) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_backend"],
+                inspect_returncode=1,
+                inspect_stderr=b"docker inspect boom",
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_inspectfail",
+                workspace_id="ws_inspectfail",
+            )
+
+        assert isinstance(payload["companion_logs_capture_error"], str)
+        assert "companion_health" not in payload
+
+    @pytest.mark.unit
+    async def test_unparseable_inspect_json_returns_partial_payload(
+        self, manager: ComposeManager
+    ) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_backend"],
+                inspect_stdout=b"not json at all",
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_badjson",
+                workspace_id="ws_badjson",
+            )
+
+        assert isinstance(payload["companion_logs_capture_error"], str)
+        assert "companion_health" not in payload
+
+    @pytest.mark.unit
+    async def test_non_list_inspect_json_yields_no_companions(
+        self, manager: ComposeManager
+    ) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_backend"],
+                inspect_stdout=b"{}",
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_dict",
+                workspace_id="ws_dict",
+            )
+
+        assert payload["containers_inspected"] == 0
+        assert "companion_health" not in payload
+
+    @pytest.mark.unit
+    async def test_malformed_inspect_entries_are_skipped_defensively(
+        self, manager: ComposeManager
+    ) -> None:
+        inspect = json.dumps(
+            [
+                "not-a-container-mapping",  # non-Mapping list element
+                {"Id": "c_badstate", "State": "not-a-mapping"},  # State not a Mapping
+                {
+                    # No Id (logs skipped); malformed health-log entry skipped.
+                    "Config": {"Labels": {"com.docker.compose.service": "svc"}},
+                    "State": {
+                        "Status": "running",
+                        "Health": {
+                            "Status": "unhealthy",
+                            "Log": ["bad-entry", {"ExitCode": 9, "Output": "real"}],
+                        },
+                    },
+                },
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["a", "b", "c"],
+                inspect_stdout=inspect,
+                logs_by_container={},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_malformed",
+                workspace_id="ws_malformed",
+            )
+
+        assert payload["containers_inspected"] == 3
+        # Only the well-formed unhealthy service is captured.
+        assert set(payload["companion_health"]) == {"svc"}
+        assert payload["companion_health"]["svc"]["health_log"] == [
+            {"ExitCode": 9, "Output": "real"}
+        ]
+        assert "companion_logs" not in payload
+
+    @pytest.mark.unit
+    async def test_no_containers_skips_inspect_and_logs(self, manager: ComposeManager) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(ps_ids=[]),
+        ) as mock_exec:
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_empty",
+                workspace_id="ws_empty",
+            )
+
+        assert payload["containers_inspected"] == 0
+        assert "companion_health" not in payload
+        # Only the ``docker ps`` call ran; no inspect/logs.
+        assert mock_exec.call_count == 1
+
+    @pytest.mark.unit
+    async def test_capture_never_raises_on_docker_unavailable(
+        self, manager: ComposeManager
+    ) -> None:
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=FileNotFoundError("docker not installed"),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_nodocker",
+                workspace_id="ws_nodocker",
+            )
+
+        assert isinstance(payload["companion_logs_capture_error"], str)

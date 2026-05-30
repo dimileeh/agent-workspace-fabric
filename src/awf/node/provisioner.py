@@ -19,13 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_value
 from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
@@ -41,7 +42,12 @@ from awf.node.companion_services import (
     companion_specs_from_task_policy,
     validate_companion_service_graph,
 )
-from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.compose_manager import (
+    DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES,
+    SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
+    ComposeOperationError,
+    ComposeProjectPaths,
+)
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
@@ -57,6 +63,25 @@ from awf.service.secret_leases import (
 _log = get_logger(__name__)
 
 
+class ServiceStartupDiagnosticsCapturer(Protocol):
+    """Best-effort capturer of companion diagnostics on a service-startup failure.
+
+    Consumer-side structural protocol: ``ComposeManager`` satisfies it without
+    importing this module. The implementation must never raise and must return
+    an already-redacted payload safe to persist into a ``WorkspaceEvent``.
+    """
+
+    async def capture_companion_diagnostics(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        tail_lines: int = ...,
+    ) -> dict[str, Any]:
+        """Return redacted diagnostics for unhealthy companions in a project."""
+        ...
+
+
 @dataclass(frozen=True)
 class ProvisionerConfig:
     """Configuration the provisioner needs that isn't per-workspace state."""
@@ -66,6 +91,9 @@ class ProvisionerConfig:
 
     branch_prefix: str = "awf"
     """Prefix for feature branches; full branch = ``<prefix>/<workspace_id>``."""
+
+    service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
+    """How many companion log lines to capture on a service-startup failure."""
 
 
 class Provisioner:
@@ -82,12 +110,14 @@ class Provisioner:
         git: GitManager,
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
+        service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
         self._git = git
         self._config = config
         self._stack_launcher = stack_launcher
+        self._service_diagnostics = service_diagnostics
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -270,6 +300,10 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
+            # Capture companion logs/healthcheck state BEFORE marking failed and
+            # before any later teardown — the failed containers still exist now.
+            # Best-effort and must never mask the original ComposeOperationError.
+            diagnostics = await self._capture_service_startup_diagnostics(workspace_id)
             if (
                 egress_plan is not None
                 and egress_decision is not None
@@ -293,6 +327,7 @@ class Provisioner:
                 failure_reason=FailureReason.service_startup_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                event_payload=diagnostics,
             )
             raise
         except Exception as exc:
@@ -448,6 +483,43 @@ class Provisioner:
         )
         return None
 
+    async def _capture_service_startup_diagnostics(
+        self, workspace_id: str
+    ) -> dict[str, Any] | None:
+        """Capture redacted companion diagnostics for a service-startup failure.
+
+        Returns ``None`` when no capturer is wired (preserving the historical
+        null-payload behavior). The capturer is already best-effort; this guard
+        is belt-and-suspenders so a capturer that nonetheless raises a docker
+        error cannot mask the original ``ComposeOperationError``.
+        """
+        if self._service_diagnostics is None:
+            return None
+        project_name = f"awf_{workspace_id}"
+        try:
+            return await self._service_diagnostics.capture_companion_diagnostics(
+                project_name=project_name,
+                workspace_id=workspace_id,
+                tail_lines=self._config.service_startup_log_tail_lines,
+            )
+        except ComposeOperationError as exc:
+            _log.warning(
+                "provisioner.service_diagnostics_capture_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                error=redact_secrets(str(exc)),
+            )
+            return cast(
+                "dict[str, Any]",
+                redact_audit_value(
+                    {
+                        "schema": SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
+                        "compose_project": project_name,
+                        "companion_logs_capture_error": f"{exc.reason_code}: {exc}",
+                    }
+                ),
+            )
+
     async def _mark_failed(
         self,
         *,
@@ -456,6 +528,7 @@ class Provisioner:
         message: str,
         from_status: WorkspaceStatus,
         reason_code: str | None = None,
+        event_payload: dict[str, Any] | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -501,6 +574,7 @@ class Provisioner:
                     ws,
                     to=WorkspaceStatus.failed,
                     reason_code=reason_code or failure_reason.value.upper(),
+                    payload=event_payload,
                 )
                 await session.commit()
         except Exception:  # pragma: no cover - defensive

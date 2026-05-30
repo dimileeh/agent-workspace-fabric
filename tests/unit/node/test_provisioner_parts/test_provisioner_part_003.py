@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -17,12 +18,20 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.compose_manager import (
+    ComposeManager,
+    ComposeOperationError,
+    ComposeProjectPaths,
+)
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.resolver import ProfileResolutionError
 from tests.postgres import postgres_test_engine
+
+_COMPOSE_TEMPLATE = (
+    Path(__file__).resolve().parents[4] / "docker" / "compose" / "workspace.base.yml.j2"
+)
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -403,3 +412,292 @@ class TestFailureHandling:
                 and event.new_state == WorkspaceStatus.failed.value
             ]
             assert failed_events[-1].reason_code == "PROFILE_RESOLUTION_FAILURE"
+
+
+class _FailingComposeLauncher:
+    """Stack launcher that fails exactly like a companion healthcheck timeout."""
+
+    async def launch(self, request: Any) -> object:
+        del request
+        raise ComposeOperationError(
+            operation="up",
+            returncode=1,
+            stdout="",
+            stderr="dependency failed to start: container backend is unhealthy",
+            reason_code="COMPOSE_COMMAND_FAILED",
+        )
+
+
+class _FakeDiagnostics:
+    """Best-effort capturer stub returning a fixed already-redacted payload."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        self.calls: list[dict[str, Any]] = []
+
+    async def capture_companion_diagnostics(
+        self,
+        *,
+        project_name: str,
+        workspace_id: str,
+        tail_lines: int = 200,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "project_name": project_name,
+                "workspace_id": workspace_id,
+                "tail_lines": tail_lines,
+            }
+        )
+        return self.payload
+
+
+async def _create_failing_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> str:
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await s.commit()
+        return ws.id
+
+
+def _latest_failed_event(events: list[Any]) -> Any:
+    failed = [
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.failed.value
+    ]
+    assert failed, "expected a state_changed -> failed event"
+    return failed[-1]
+
+
+class TestServiceStartupDiagnostics:
+    @pytest.mark.unit
+    async def test_failure_event_payload_carries_captured_diagnostics(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        diagnostics = {
+            "schema": "service_startup_diagnostics.v1",
+            "containers_inspected": 1,
+            "companion_logs": {"backend": ["boot failed"]},
+        }
+        capturer = _FakeDiagnostics(diagnostics)
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=capturer,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert failed_event.payload == diagnostics
+        # Capturer addressed the workspace's compose project with the configured tail.
+        assert capturer.calls == [
+            {
+                "project_name": f"awf_{ws_id}",
+                "workspace_id": ws_id,
+                "tail_lines": 200,
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_capture_runs_before_mark_failed_teardown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        order: list[str] = []
+
+        class _OrderingDiagnostics:
+            async def capture_companion_diagnostics(
+                self, *, project_name: str, workspace_id: str, tail_lines: int = 200
+            ) -> dict[str, Any]:
+                del project_name, workspace_id, tail_lines
+                order.append("capture")
+                return {"schema": "service_startup_diagnostics.v1", "companion_logs": {}}
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=_OrderingDiagnostics(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        original_mark_failed = provisioner._mark_failed
+
+        async def _record_mark_failed(**kwargs: Any) -> None:
+            order.append("mark_failed")
+            await original_mark_failed(**kwargs)
+
+        monkeypatch.setattr(provisioner, "_mark_failed", _record_mark_failed)
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        assert order == ["capture", "mark_failed"]
+
+    @pytest.mark.unit
+    async def test_capture_failure_does_not_mask_original_error(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RaisingDiagnostics:
+            async def capture_companion_diagnostics(
+                self, *, project_name: str, workspace_id: str, tail_lines: int = 200
+            ) -> dict[str, Any]:
+                del project_name, workspace_id, tail_lines
+                raise ComposeOperationError(
+                    operation="logs",
+                    returncode=124,
+                    stdout="",
+                    stderr="docker logs timed out",
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=_RaisingDiagnostics(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await provisioner.provision(ws_id)
+
+        # The ORIGINAL compose failure propagates, not the capturer's error.
+        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert failed_event.payload is not None
+            assert "companion_logs_capture_error" in failed_event.payload
+
+    @pytest.mark.unit
+    async def test_no_capturer_keeps_failure_event_payload_null(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert failed_event.payload is None
+
+    @pytest.mark.unit
+    async def test_end_to_end_real_capturer_redacts_planted_secret(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        secret = "S3CRETPW_in_companion_logs"
+        compose = ComposeManager(
+            work_dir=tmp_path / "compose-work",
+            template_path=_COMPOSE_TEMPLATE,
+        )
+        inspect_json = json.dumps(
+            [
+                {
+                    "Id": "c_backend",
+                    "Config": {
+                        "Labels": {"com.docker.compose.service": "backend"},
+                        "Healthcheck": {"Test": ["CMD-SHELL", "curl -f http://localhost:8000"]},
+                    },
+                    "State": {
+                        "Status": "running",
+                        "ExitCode": 0,
+                        "Health": {"Status": "unhealthy", "Log": []},
+                    },
+                }
+            ]
+        )
+        companion_logs = f"connecting to postgres://appuser:{secret}@db/awf\n"
+
+        async def _fake_resource_ids(args: list[str], *, operation: str) -> list[str]:
+            del args, operation
+            return ["c_backend"]
+
+        async def _fake_capture(
+            args: list[str], *, operation: str, combine_stderr: bool = False
+        ) -> str:
+            del operation, combine_stderr
+            if args[0] == "inspect":
+                return inspect_json
+            if args[0] == "logs":
+                return companion_logs
+            raise AssertionError(f"unexpected docker args: {args}")
+
+        monkeypatch.setattr(compose, "_docker_resource_ids", _fake_resource_ids)
+        monkeypatch.setattr(compose, "_docker_capture", _fake_capture)
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=compose,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.payload is not None
+            blob = json.dumps(failed_event.payload)
+            assert secret not in blob
+            assert "[redacted]" in blob

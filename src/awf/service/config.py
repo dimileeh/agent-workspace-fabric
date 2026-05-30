@@ -90,6 +90,7 @@ class ServiceSettings:
     host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
+    service_startup_log_tail_lines: int = 200
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
     completed_workspace_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS
     workspace_cleanup_enabled: bool = True
@@ -206,6 +207,7 @@ def resolve_service_settings(
         planning_max_iterations_default=settings.planning_max_iterations_default,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
+        service_startup_log_tail_lines=settings.worker_service_startup_log_tail_lines,
         completed_workspace_retention_hours=settings.completed_workspace_retention_hours,
         workspace_cleanup_enabled=settings.workspace_cleanup_enabled,
         workspace_cleanup_scan_interval_seconds=settings.workspace_cleanup_scan_interval_seconds,
