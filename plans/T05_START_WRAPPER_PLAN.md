@@ -22,7 +22,7 @@ source-checkout asset model, and the first-run error contract/rendering helpers 
 
 ## Public interface
 
-```
+```text
 awf start [--rebuild] [--skip-agent-runtime-build] [--timeout-seconds N]
           [--source-checkout PATH] [--format json|pretty]
 ```
