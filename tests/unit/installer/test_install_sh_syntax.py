@@ -16,6 +16,7 @@ DOCUMENTED_FLAGS = (
     "--install-dir",
     "--dry-run",
     "--uninstall",
+    "--shell",
     "--help",
 )
 
