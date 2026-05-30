@@ -146,13 +146,16 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         return VerdictResult(verdict="needs_human")
     awf_match = _AWF_VERDICT.search(stdout)
     if awf_match is not None:
-        label = re.sub(r"\s+", " ", awf_match.group("label").strip().lower())
+        # Canonicalize any run of whitespace/underscores to a single space, so
+        # every separator variant the label regex accepts (NEEDS_HUMAN,
+        # NEEDS HUMAN, NEEDS_ HUMAN, ...) maps to one label. The regex and this
+        # normalization must stay equally permissive, or a matched NEEDS_HUMAN
+        # could silently fall through to fix_committed — the unsafe dir (#305).
+        label = re.sub(r"[\s_]+", " ", awf_match.group("label").strip().lower())
         reason = awf_match.group("reason").strip() or None
         if label == "false positive":
             return VerdictResult(verdict="false_positive", reason=reason)
-        # The label is whitespace-collapsed but underscores survive, so both
-        # ``NEEDS_HUMAN`` ("needs_human") and ``NEEDS HUMAN`` ("needs human") land here.
-        if label in {"needs_human", "needs human"}:
+        if label == "needs human":
             return VerdictResult(verdict="needs_human", reason=reason)
         if label == "defer":
             return VerdictResult(verdict="defer", reason=reason)

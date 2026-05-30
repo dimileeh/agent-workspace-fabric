@@ -1096,3 +1096,61 @@ async def test_deferred_capture_transient_failure_requeues_instead_of_downgradin
     # verdict is cleared so the thread is re-addressed next poll.
     assert result is None
     assert state.threads_addressed_ids.get("T_defer") is None
+
+
+@pytest.mark.unit
+async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When _capture_deferred_review_thread returns None (transient), the fix
+    # cycle must not downgrade the thread and must move on to the next item.
+    from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
+    from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    t1 = ReviewThread(
+        thread_id="T_transient", path="src/a.py", line=1, body_excerpt="nit", author="rev"
+    )
+    t2 = ReviewThread(
+        thread_id="T_block", path="src/b.py", line=2, body_excerpt="blocks", author="rev"
+    )
+    state = MonitorState()
+
+    async def _address(**kwargs: object) -> str:
+        thread = kwargs["thread"]
+        assert isinstance(thread, ReviewThread)
+        if thread.thread_id == t1.thread_id:
+            return "defer"
+        raise _MonitorPolicyBlockedError("policy blocked second thread")
+
+    async def _capture_none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(fix_cycle_module, "_capture_deferred_review_thread", _capture_none)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_transient_continue",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(t1, t2),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_transient_continue",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The cycle moved past the transient thread to the second (which policy-blocks)
+    # and never downgraded the transient thread to needs_human.
+    assert result.failed is True
+    assert state.threads_addressed_ids.get("T_transient") != "needs_human"

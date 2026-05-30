@@ -1271,6 +1271,26 @@ class TestParseVerdict:
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "NEEDS_HUMAN",
+            "NEEDS HUMAN",
+            "NEEDS_ HUMAN",
+            "NEEDS _HUMAN",
+            "NEEDS__HUMAN",
+            "needs_human",
+        ],
+    )
+    def test_private_awf_verdict_needs_human_separator_variants(self, label: str) -> None:
+        # Any separator the NEEDS[\s_]+HUMAN regex accepts must normalize to
+        # needs_human — never silently fall through to fix_committed (#305).
+        result = _parse_verdict_result(f"AWF-VERDICT: {label}: maintainer decision")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
     def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
         result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
 
