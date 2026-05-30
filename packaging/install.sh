@@ -433,15 +433,28 @@ default_bin_dir() {
         return 0
     fi
     # With no --install-dir override, ask the active tool where it actually links
-    # executables. uv derives that directory from UV_TOOL_BIN_DIR / XDG_BIN_HOME /
-    # XDG_DATA_HOME (defaulting to ~/.local/bin), so a hard-coded ~/.local/bin
-    # would mis-report a configured uv install as AWF_NOT_REACHABLE and print PATH
-    # advice for the wrong directory. `uv tool dir --bin` resolves the real path.
+    # executables instead of hard-coding ~/.local/bin, which would mis-report a
+    # tool configured to install elsewhere as AWF_NOT_REACHABLE and print PATH
+    # advice for the wrong directory.
+    #
+    # uv derives its bin dir from UV_TOOL_BIN_DIR / XDG_BIN_HOME / XDG_DATA_HOME
+    # (defaulting to ~/.local/bin); `uv tool dir --bin` resolves the real path.
     if [ "$METHOD" = "uv" ] && command -v uv >/dev/null 2>&1; then
         local uv_bin
         uv_bin="$(uv tool dir --bin 2>/dev/null || true)"
         if [ -n "$uv_bin" ]; then
             printf '%s' "$uv_bin"
+            return 0
+        fi
+    fi
+    # pipx links console scripts into PIPX_BIN_DIR (also defaulting to
+    # ~/.local/bin); `pipx environment --value PIPX_BIN_DIR` resolves the real
+    # path so a configured PIPX_BIN_DIR is honored rather than silently ignored.
+    if [ "$METHOD" = "pipx" ] && command -v pipx >/dev/null 2>&1; then
+        local pipx_bin
+        pipx_bin="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+        if [ -n "$pipx_bin" ]; then
+            printf '%s' "$pipx_bin"
             return 0
         fi
     fi

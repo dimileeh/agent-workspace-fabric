@@ -114,8 +114,16 @@ class InstallerHarness:
         install_rc: int = 0,
         uninstall_rc: int = 0,
         list_output: str = "",
+        bin_dir: str | None = None,
     ) -> None:
-        """Stub the ``pipx`` CLI subcommands the installer uses."""
+        """Stub the ``pipx`` CLI subcommands the installer uses.
+
+        ``pipx environment --value PIPX_BIN_DIR`` reports the directory pipx
+        links console scripts into, which pipx derives from ``PIPX_BIN_DIR`` and
+        defaults to ``~/.local/bin``. ``bin_dir`` overrides that to simulate a
+        pipx configured to install elsewhere.
+        """
+        bin_dir_expr = json.dumps(bin_dir) if bin_dir is not None else '"$HOME/.local/bin"'
         behavior = (
             'case "$1" in\n'
             "  install)\n"
@@ -128,6 +136,12 @@ class InstallerHarness:
             f"    exit {uninstall_rc} ;;\n"
             "  list)\n"
             f"    printf '%b' {json.dumps(list_output)}\n"
+            "    exit 0 ;;\n"
+            "  environment)\n"
+            '    case "$*" in\n'
+            f"      *PIPX_BIN_DIR*) printf '%s\\n' {bin_dir_expr} ;;\n"
+            "      *) printf '%s\\n' \"\" ;;\n"
+            "    esac\n"
             "    exit 0 ;;\n"
             "  *) exit 0 ;;\n"
             "esac"

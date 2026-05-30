@@ -172,6 +172,36 @@ def test_uv_install_uses_uv_tool_bin_dir_for_reachability(harness: InstallerHarn
 
 
 @pytest.mark.unit
+def test_pipx_install_uses_pipx_bin_dir_for_reachability(harness: InstallerHarness) -> None:
+    """A pipx configured to link scripts elsewhere is honored, not mis-reported.
+
+    pipx installs console scripts into ``PIPX_BIN_DIR`` (defaulting to
+    ``~/.local/bin``). When that is configured to a non-default directory,
+    reachability must consult ``pipx environment --value PIPX_BIN_DIR`` rather
+    than a hard-coded ``~/.local/bin``; otherwise a successful pipx install is
+    falsely reported ``AWF_NOT_REACHABLE`` and PATH advice points at the wrong
+    directory (the uv path resolves its bin dir, so pipx must too).
+    """
+    harness.add_uname("Linux", "x86_64")
+    pipx_bin = harness.root / "pipx-bin"
+    pipx_bin.mkdir()
+    harness.add_pipx(bin_dir=str(pipx_bin))
+    # awf landed in pipx's configured bin dir, which is not on PATH nor ~/.local/bin.
+    harness.add_awf(directory=pipx_bin)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--method", "pipx", "--shell", "bash"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+    # PATH advice (the dir is off-PATH) points at pipx's real bin dir, not ~/.local/bin.
+    advice = result.stdout + result.stderr
+    assert str(pipx_bin) in advice
+    assert "/.local/bin" not in advice
+
+
+@pytest.mark.unit
 def test_install_dir_verifies_installed_binary_not_path_shadow(
     harness: InstallerHarness,
 ) -> None:
