@@ -630,6 +630,7 @@ async def test_execution_validation_returns_stop_when_start_transition_is_stale(
 
 @pytest.mark.unit
 async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     executor = SimpleNamespace(
@@ -648,6 +649,17 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
         test_commands=[],
         task_class=None,
         operations=[],
+    )
+
+    async def _sync_profile_passthrough(*_args: object, **kwargs: object) -> WorkspaceProfile:
+        profile = kwargs["profile"]
+        assert isinstance(profile, WorkspaceProfile)
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_profile_passthrough,
     )
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(

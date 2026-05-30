@@ -71,6 +71,7 @@ from awf.control.executor.quality_gates import (
     _log,
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
+from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
@@ -252,9 +253,16 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         )
 
     try:
-        profile = _profile_for_workspace(
+        resolved_profile = _profile_for_workspace(
             ws,
             worktree_path=self._config.worktrees_root / workspace_id,
+            planning_max_iterations_default=self._config.planning_max_iterations_default,
+        )
+        profile = await _sync_resolved_profile(
+            self,
+            ws=ws,
+            workspace_id=workspace_id,
+            profile=resolved_profile,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
         # Keep the profile timeout as the fallback if stored companion policy
@@ -347,6 +355,13 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                 profile = _profile_for_workspace(
                     ws,
                     worktree_path=self._config.worktrees_root / workspace_id,
+                    planning_max_iterations_default=self._config.planning_max_iterations_default,
+                )
+                profile = await _sync_resolved_profile(
+                    self,
+                    ws=ws,
+                    workspace_id=workspace_id,
+                    profile=profile,
                     planning_max_iterations_default=self._config.planning_max_iterations_default,
                 )
             monitor = _call_pr_monitor_factory(
@@ -980,6 +995,13 @@ async def _build_handoff_pr_monitor(
             profile = _profile_for_workspace(
                 workspace,
                 worktree_path=worktree_path,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+            profile = await _sync_resolved_profile(
+                self,
+                ws=workspace,
+                workspace_id=workspace_id,
+                profile=profile,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
             monitor = _call_pr_monitor_factory(

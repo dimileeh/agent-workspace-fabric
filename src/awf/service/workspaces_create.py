@@ -12,6 +12,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import awf.db.repositories as repositories
 from awf.api.schemas import (
     PUBLIC_DIRECT_CREATE_TASK_KINDS,
     OwnedPathOverlapResponse,
@@ -97,10 +98,13 @@ async def create_workspace_row(
         http_get=http_get,
     )
     _raise_if_provider_preflight_blocks(preflight)
+    workspace_id = repositories.new_workspace_id()
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
         owned_paths=payload.task.owned_paths,
+        resolved_profile=resolved_profile,
+        workspace_id=workspace_id,
     )
     task_policy = task_policy_with_coordination_warnings(
         {
@@ -130,6 +134,7 @@ async def create_workspace_row(
         requires_database=payload.requires_database,
         idempotency_key=idempotency_key,
         task_kind=payload.task.kind,
+        workspace_id=workspace_id,
     )
     task = await TaskRepository(session).create_or_get(
         repo_url=payload.repo.url,

@@ -37,6 +37,7 @@ from awf.common.callback_events import (
     CALLBACK_EVENT_WILDCARDS,
     PUBLIC_CALLBACK_EVENT_TYPES,
 )
+from awf.common.owned_paths import normalize_owned_path
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import (
     FailureReason,
@@ -1270,16 +1271,8 @@ def owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | N
 
 
 def _normalize_owned_path(path: str) -> str:
-    segments: list[str] = []
-    for segment in path.strip().replace("\\", "/").split("/"):
-        if segment in {"", "."}:
-            continue
-        if segment == "..":
-            if segments:
-                segments.pop()
-            continue
-        segments.append(segment)
-    return "/".join(segments)
+    """Normalize repository owned-path entries through the shared classifier."""
+    return normalize_owned_path(path)
 
 
 def _literal_paths_overlap(left: str, right: str) -> bool:

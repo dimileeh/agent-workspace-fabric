@@ -409,6 +409,12 @@ def _profile_for_workspace(
     worktree_path: Path,
     planning_max_iterations_default: int = 3,
 ) -> WorkspaceProfile:
+    """Resolve the profile without stamping a runtime snapshot on the workspace.
+
+    Executor paths that execute against a runtime-resolved profile must call the
+    async resolved-profile sync before planning commands so the DB snapshot keeps
+    first-write-wins semantics.
+    """
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
@@ -416,16 +422,39 @@ def _profile_for_workspace(
             planning_max_iterations_default,
             raw_profile=ws.resolved_profile,
         )
-    profile = resolve_workspace_profile(
-        worktree_path=worktree_path,
-        inline_profile=ws.requested_profile,
-        profile_ref=ws.profile_ref or ws.env_profile or "auto",
-        validation_commands=list(ws.test_commands),
-    ).profile
+    return _profile_with_planning_iteration_default(
+        resolve_workspace_profile(
+            worktree_path=worktree_path,
+            inline_profile=ws.requested_profile,
+            profile_ref=ws.profile_ref or ws.env_profile or "auto",
+            validation_commands=list(ws.test_commands),
+        ).profile,
+        planning_max_iterations_default,
+        raw_profile=ws.requested_profile,
+    )
+
+
+def _realign_profile_from_resolved_profile_snapshot(
+    ws: Workspace,
+    snapshot: dict[str, Any] | None,
+    *,
+    planning_max_iterations_default: int = 3,
+) -> WorkspaceProfile | None:
+    """Realign executor profile state from the persisted snapshot winner.
+
+    This mutates the executor's detached ``Workspace`` object only for
+    in-memory reads in the current flow. Do not pass the mutated object to
+    ``session.add()`` or ``session.merge()`` afterward; SQLAlchemy would treat
+    ``resolved_profile`` as dirty and could overwrite a newer database value.
+    """
+    if snapshot is None:
+        return None
+    ws.resolved_profile = snapshot
+    profile = WorkspaceProfile.model_validate(snapshot)
     return _profile_with_planning_iteration_default(
         profile,
         planning_max_iterations_default,
-        raw_profile=ws.requested_profile,
+        raw_profile=snapshot,
     )
 
 

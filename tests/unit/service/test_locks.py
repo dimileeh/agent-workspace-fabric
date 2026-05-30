@@ -19,6 +19,7 @@ from awf.db.session import make_session_factory
 async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory bound to the test engine."""
     yield make_session_factory(engine)
 
 
@@ -56,6 +57,7 @@ async def _workspace(
 async def test_list_workspace_locks_defaults_to_active_non_terminal_workspaces(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify default lock listing includes active non-terminal workspaces."""
     from awf.service.locks import list_workspace_locks
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -110,6 +112,7 @@ async def test_list_workspace_locks_defaults_to_active_non_terminal_workspaces(
 async def test_list_workspace_locks_for_session_returns_page_items(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify session-scoped lock listing returns page items."""
     from awf.service.locks import list_workspace_locks_for_session
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -131,6 +134,7 @@ async def test_list_workspace_locks_for_session_returns_page_items(
 async def test_list_workspace_locks_for_session_uses_same_page_projection(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify session-scoped lock listing uses the same projection."""
     from awf.service.locks import list_workspace_locks_for_session
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -157,6 +161,7 @@ async def test_list_workspace_locks_for_session_uses_same_page_projection(
 async def test_list_workspace_locks_applies_repo_task_class_status_and_limit_filters(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify lock listing applies repo, task class, status, and limit filters."""
     from awf.service.locks import list_workspace_locks
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -212,6 +217,7 @@ async def test_list_workspace_locks_applies_repo_task_class_status_and_limit_fil
 async def test_list_workspace_lock_page_reports_more_rows_and_uses_next_cursor(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify lock pages report more rows and expose the next cursor."""
     from awf.service.locks import list_workspace_lock_page
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -260,6 +266,7 @@ async def test_list_workspace_lock_page_reports_more_rows_and_uses_next_cursor(
 async def test_list_workspace_locks_includes_overlap_risk_metadata(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Verify lock listing includes advisory overlap risk metadata."""
     from awf.service.locks import WorkspaceLockOverlapRisk, list_workspace_locks
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
@@ -304,6 +311,7 @@ async def test_list_workspace_locks_offloads_overlap_risk_calculation(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify overlap risk calculation is offloaded from the event loop."""
     from awf.service import locks as locks_service
 
     offloaded = False
@@ -339,6 +347,7 @@ async def test_list_workspace_locks_offloads_overlap_risk_calculation(
 
 @pytest.mark.unit
 async def test_lock_helpers_short_circuit_empty_overlap_inputs() -> None:
+    """Verify empty overlap inputs avoid database and worker calls."""
     from awf.service.locks import (
         _active_overlap_candidates,
         _workspace_overlap_risks_for_page,
@@ -353,7 +362,76 @@ async def test_lock_helpers_short_circuit_empty_overlap_inputs() -> None:
 
 
 @pytest.mark.unit
+def test_overlap_risks_prefilters_candidate_owned_paths_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate owned paths are filtered once before pairwise risk checks."""
+    from awf.common.owned_paths import interworkspace_owned_paths as real_interworkspace_owned_paths
+    from awf.service import locks as locks_service
+
+    calls_by_paths: dict[tuple[str, ...], int] = {}
+
+    def counting_interworkspace_owned_paths(
+        paths: tuple[str, ...],
+        *,
+        internal_plan_artifact_paths: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        """Count filter invocations while preserving real filtering behavior."""
+        del internal_plan_artifact_paths
+        calls_by_paths[paths] = calls_by_paths.get(paths, 0) + 1
+        return real_interworkspace_owned_paths(paths)
+
+    monkeypatch.setattr(
+        locks_service,
+        "interworkspace_owned_paths",
+        counting_interworkspace_owned_paths,
+    )
+
+    risks_by_workspace = locks_service._workspace_overlap_risks_by_id(
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="page-src",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("src/awf/service/locks.py",),
+                internal_plan_artifact_paths=(),
+            ),
+            locks_service._OverlapWorkspace(
+                workspace_id="page-docs",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("docs/usage.md",),
+                internal_plan_artifact_paths=(),
+            ),
+        ),
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="candidate-src",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("src/awf/service/**",),
+                internal_plan_artifact_paths=(),
+            ),
+            locks_service._OverlapWorkspace(
+                workspace_id="candidate-docs",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("docs/**",),
+                internal_plan_artifact_paths=(),
+            ),
+        ),
+    )
+
+    assert set(risks_by_workspace) == {"page-src", "page-docs"}
+    assert calls_by_paths[("src/awf/service/**",)] == 1
+    assert calls_by_paths[("docs/**",)] == 1
+    assert calls_by_paths[("src/awf/service/locks.py",)] == 1
+    assert calls_by_paths[("docs/usage.md",)] == 1
+
+
+@pytest.mark.unit
 def test_lock_cursor_rejects_empty_workspace_id() -> None:
+    """Verify lock cursors reject empty workspace IDs."""
     from awf.service.locks import InvalidWorkspaceLockCursorError, _decode_cursor
 
     payload = {"created_at": datetime(2026, 4, 27, tzinfo=UTC).isoformat(), "workspace_id": ""}

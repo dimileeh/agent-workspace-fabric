@@ -12,6 +12,10 @@ from datetime import datetime
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -22,6 +26,8 @@ from awf.db.repositories import (
 
 @dataclass(frozen=True)
 class WorkspaceLockOverlapRisk:
+    """Advisory owned-path overlap from another active workspace."""
+
     overlapping_workspace_id: str
     overlapping_owned_path: str
     owned_path: str
@@ -29,6 +35,8 @@ class WorkspaceLockOverlapRisk:
 
 @dataclass(frozen=True)
 class WorkspaceLock:
+    """Operator-facing view of one workspace owned-path reservation."""
+
     workspace_id: str
     title: str
     agent: str
@@ -48,6 +56,8 @@ class WorkspaceLock:
 
 @dataclass(frozen=True)
 class WorkspaceLockPage:
+    """Cursor page of workspace lock rows."""
+
     items: list[WorkspaceLock]
     next_cursor: str | None
     has_more: bool
@@ -65,6 +75,7 @@ class _OverlapWorkspace:
     repo_url: str
     branch_base: str
     owned_paths: tuple[str, ...]
+    internal_plan_artifact_paths: tuple[str, ...]
 
 
 class InvalidWorkspaceLockCursorError(ValueError):
@@ -126,6 +137,7 @@ async def list_workspace_locks_for_session(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[WorkspaceLock]:
+    """List workspace owned-path reservations using an existing session."""
     page = await list_workspace_lock_page_for_session(
         session,
         repo_url=repo_url,
@@ -146,6 +158,7 @@ async def list_workspace_lock_page_for_session(
     limit: int = 50,
     cursor: str | None = None,
 ) -> WorkspaceLockPage:
+    """List one workspace-lock page using an existing session."""
     status_value = _status_value(status)
     task_class_value = _task_class_value(task_class)
     decoded_cursor = _decode_cursor(cursor)
@@ -257,6 +270,10 @@ def _overlap_workspace(workspace: Workspace) -> _OverlapWorkspace:
         repo_url=workspace.repo_url,
         branch_base=workspace.branch_base,
         owned_paths=tuple(workspace.owned_paths),
+        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+            workspace.resolved_profile,
+            workspace_id=workspace.id,
+        ),
     )
 
 
@@ -264,20 +281,38 @@ def _workspace_overlap_risks_by_id(
     workspaces: tuple[_OverlapWorkspace, ...],
     overlap_candidates: tuple[_OverlapWorkspace, ...],
 ) -> dict[str, tuple[WorkspaceLockOverlapRisk, ...]]:
-    candidates_by_repo_base: dict[tuple[str, str], list[_OverlapWorkspace]] = {}
+    """Group advisory overlap risks by workspace using inter-workspace paths."""
+    candidates_by_repo_base: dict[
+        tuple[str, str],
+        list[tuple[_OverlapWorkspace, tuple[str, ...]]],
+    ] = {}
     for candidate in overlap_candidates:
         key = (candidate.repo_url, candidate.branch_base)
-        candidates_by_repo_base.setdefault(key, []).append(candidate)
+        candidates_by_repo_base.setdefault(key, []).append(
+            (
+                candidate,
+                interworkspace_owned_paths(
+                    candidate.owned_paths,
+                    internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+                ),
+            )
+        )
 
     risks_by_workspace: dict[str, tuple[WorkspaceLockOverlapRisk, ...]] = {}
     for workspace in workspaces:
         risks: list[WorkspaceLockOverlapRisk] = []
-        owned_paths = workspace.owned_paths
+        owned_paths = interworkspace_owned_paths(
+            workspace.owned_paths,
+            internal_plan_artifact_paths=workspace.internal_plan_artifact_paths,
+        )
         key = (workspace.repo_url, workspace.branch_base)
-        for other in candidates_by_repo_base.get(key, ()):
+        candidate_entries = candidates_by_repo_base.get(key)
+        if candidate_entries is None:
+            continue
+        for other, overlapping_owned_paths in candidate_entries:
             if other.workspace_id == workspace.workspace_id:
                 continue
-            for overlapping_owned_path in other.owned_paths:
+            for overlapping_owned_path in overlapping_owned_paths:
                 for owned_path in owned_paths:
                     if owned_paths_overlap(overlapping_owned_path, owned_path):
                         risks.append(

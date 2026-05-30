@@ -11,6 +11,10 @@ from typing import Final, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import owned_path_overlap_match
@@ -40,6 +44,8 @@ ACTIVE_OVERLAP_GRAPH_STATUSES: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True)
 class WorkspaceOverlapNode:
+    """Workspace node included in the advisory overlap graph."""
+
     workspace_id: str
     title: str
     status: str
@@ -54,6 +60,8 @@ class WorkspaceOverlapNode:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapPathMatch:
+    """One owned-path match explaining an overlap edge."""
+
     left_workspace_id: str
     left_owned_path: str
     right_workspace_id: str
@@ -64,6 +72,8 @@ class WorkspaceOverlapPathMatch:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapEdge:
+    """Advisory overlap edge between two active workspaces."""
+
     left_workspace_id: str
     right_workspace_id: str
     repo_url: str
@@ -79,6 +89,8 @@ class WorkspaceOverlapEdge:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapGraphSummary:
+    """Aggregate counts for an overlap graph page."""
+
     node_count: int
     queued_count: int
     running_count: int
@@ -89,6 +101,8 @@ class WorkspaceOverlapGraphSummary:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapGraph:
+    """Advisory graph of active workspace owned-path overlaps."""
+
     nodes: tuple[WorkspaceOverlapNode, ...]
     edges: tuple[WorkspaceOverlapEdge, ...]
     summary: WorkspaceOverlapGraphSummary
@@ -104,6 +118,7 @@ class _GraphWorkspace:
     branch_base: str
     task_class: str | None
     owned_paths: tuple[str, ...]
+    internal_plan_artifact_paths: tuple[str, ...]
     created_at: datetime
     updated_at: datetime
 
@@ -127,6 +142,7 @@ async def build_workspace_overlap_graph(
     queue_state: OverlapGraphQueueState = "all",
     limit: int = 100,
 ) -> WorkspaceOverlapGraph:
+    """Build an advisory overlap graph from a session factory."""
     async with session_factory() as session:
         return await build_workspace_overlap_graph_for_session(
             session,
@@ -147,6 +163,7 @@ async def build_workspace_overlap_graph_for_session(
     queue_state: OverlapGraphQueueState = "all",
     limit: int = 100,
 ) -> WorkspaceOverlapGraph:
+    """Build an advisory overlap graph using an existing session."""
     stmt = select(Workspace).where(
         Workspace.status.in_(_status_values_for_queue_state(queue_state))
     )
@@ -236,10 +253,23 @@ def _workspace_overlap_path_matches(
     left: _GraphWorkspace,
     right: _GraphWorkspace,
 ) -> _WorkspaceOverlapPathMatches:
+    """Build bounded path-match details for an advisory workspace edge."""
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
-    for left_owned_path in sorted(dict.fromkeys(left.owned_paths)):
-        for right_owned_path in sorted(dict.fromkeys(right.owned_paths)):
+    left_paths = sorted(
+        interworkspace_owned_paths(
+            left.owned_paths,
+            internal_plan_artifact_paths=left.internal_plan_artifact_paths,
+        )
+    )
+    right_paths = sorted(
+        interworkspace_owned_paths(
+            right.owned_paths,
+            internal_plan_artifact_paths=right.internal_plan_artifact_paths,
+        )
+    )
+    for left_owned_path in left_paths:
+        for right_owned_path in right_paths:
             overlap = owned_path_overlap_match(left_owned_path, right_owned_path)
             if overlap is None:
                 continue
@@ -280,6 +310,10 @@ def _graph_workspace(workspace: Workspace) -> _GraphWorkspace:
         branch_base=workspace.branch_base,
         task_class=workspace.task_class,
         owned_paths=tuple(workspace.owned_paths),
+        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+            workspace.resolved_profile,
+            workspace_id=workspace.id,
+        ),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
     )

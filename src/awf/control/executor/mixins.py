@@ -120,6 +120,9 @@ class ExecutorDelegatesMixin:
     _prepare_provider_recovery = _quality_methods._prepare_provider_recovery
 
     _load_workspace = _state_ops._load_workspace
+    _persist_resolved_profile_snapshot_if_missing = (
+        _state_ops._persist_resolved_profile_snapshot_if_missing
+    )
     _claim_ready = _state_ops._claim_ready
     _update_subphase = _state_ops._update_subphase
     _recheck_status = _state_ops._recheck_status

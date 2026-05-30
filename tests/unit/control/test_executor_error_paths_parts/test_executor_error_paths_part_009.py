@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.control.executor import monitor_handoff as executor_monitor_handoff
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.profiles.models import ProfileDocker, WorkspaceProfile
@@ -85,6 +86,91 @@ class TestExecutorCoverageEdgesPart003:
 
         assert captured["workspace_id"] == ws_id
         assert captured["compose_up_timeout_seconds"] == 720
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_retries_profile_sync_before_monitor_factory(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime_profile = WorkspaceProfile(name="runtime-unsynced")
+        synced_profile = WorkspaceProfile(name="db-synced")
+        sync_attempts: list[str] = []
+        factory_profile_names: list[str] = []
+        monitor_calls: list[str] = []
+
+        def _profile_for_workspace(*_args: Any, **_kwargs: Any) -> WorkspaceProfile:
+            return runtime_profile
+
+        async def _sync_resolved_profile(
+            self: Any,
+            *,
+            ws: Any,
+            workspace_id: str,
+            profile: WorkspaceProfile,
+            planning_max_iterations_default: int,
+        ) -> WorkspaceProfile:
+            del planning_max_iterations_default
+            sync_attempts.append(profile.name)
+            if len(sync_attempts) == 1:
+                raise RuntimeError("transient profile sync failure")
+            snapshot = synced_profile.model_dump(mode="json", by_alias=True)
+            async with self._session_factory() as session:
+                stored = await WorkspaceRepository(session).get(workspace_id)
+                assert stored is not None
+                stored.resolved_profile = snapshot
+                await session.commit()
+            ws.resolved_profile = snapshot
+            return synced_profile
+
+        def _get_adapter(*_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        class _Monitor:
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        def _monitor_factory(
+            _adapter: Any,
+            profile: WorkspaceProfile,
+            _workspace: Any,
+        ) -> _Monitor:
+            factory_profile_names.append(profile.name)
+            return _Monitor()
+
+        monkeypatch.setattr(
+            executor_monitor_handoff,
+            "_profile_for_workspace",
+            _profile_for_workspace,
+        )
+        monkeypatch.setattr(
+            executor_monitor_handoff,
+            "_sync_resolved_profile",
+            _sync_resolved_profile,
+        )
+        monkeypatch.setattr(executor_monitor_handoff, "get_adapter", _get_adapter)
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert sync_attempts == ["runtime-unsynced", "runtime-unsynced"]
+        assert factory_profile_names == ["db-synced"]
+        assert monitor_calls == [ws_id]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.resolved_profile == synced_profile.model_dump(mode="json", by_alias=True)
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(

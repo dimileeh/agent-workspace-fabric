@@ -7,11 +7,18 @@ that need sortable IDs should use ULIDs in a later phase.
 
 from __future__ import annotations
 
+import re
+from typing import Final
 from uuid import uuid4
+
+WORKSPACE_ID_PREFIX: Final = "ws_"
+WORKSPACE_ID_HEX_LENGTH: Final = 24
+WORKSPACE_ID_SUFFIX_PATTERN: Final = rf"[0-9a-f]{{{WORKSPACE_ID_HEX_LENGTH}}}"
+WORKSPACE_ID_PATTERN: Final = rf"{re.escape(WORKSPACE_ID_PREFIX)}{WORKSPACE_ID_SUFFIX_PATTERN}"
 
 
 def new_workspace_id() -> str:
-    return f"ws_{uuid4().hex[:24]}"
+    return f"{WORKSPACE_ID_PREFIX}{uuid4().hex[:WORKSPACE_ID_HEX_LENGTH]}"
 
 
 def new_task_id() -> str:

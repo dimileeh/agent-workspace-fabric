@@ -97,6 +97,106 @@ async def test_overlap_graph_builds_advisory_edges_for_same_repo_base(
 
 
 @pytest.mark.unit
+async def test_overlap_graph_ignores_internal_plan_artifact_only_edges(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Plan-artifact-only path matches do not create overlap graph edges."""
+    from awf.service.overlap_graph import build_workspace_overlap_graph
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    running_id = await _workspace(
+        session_factory,
+        title="Running source A",
+        owned_paths=["src/feature-a/**", "docs/awf-plans/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    queued_id = await _workspace(
+        session_factory,
+        title="Queued source B",
+        owned_paths=["src/feature-b/**", "docs/awf-plans/**"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    graph = await build_workspace_overlap_graph(session_factory)
+
+    assert {node.workspace_id for node in graph.nodes} == {running_id, queued_id}
+    node_paths = {node.workspace_id: node.owned_paths for node in graph.nodes}
+    assert node_paths[running_id] == ("src/feature-a/**", "docs/awf-plans/**")
+    assert node_paths[queued_id] == ("src/feature-b/**", "docs/awf-plans/**")
+    assert graph.summary.edge_count == 0
+    assert graph.edges == ()
+
+
+@pytest.mark.unit
+async def test_overlap_graph_ignores_plan_artifact_matches_but_keeps_real_edge(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Plan artifact matches are dropped while real overlap edges remain."""
+    from awf.service.overlap_graph import build_workspace_overlap_graph
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    running_id = await _workspace(
+        session_factory,
+        title="Running shared source",
+        owned_paths=["src/shared/**", "docs/awf-plans/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    queued_id = await _workspace(
+        session_factory,
+        title="Queued shared source",
+        owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    graph = await build_workspace_overlap_graph(session_factory)
+
+    assert len(graph.edges) == 1
+    edge = graph.edges[0]
+    assert edge.affected_workspace_ids == tuple(sorted([running_id, queued_id]))
+    assert edge.path_match_count == 1
+    assert {
+        frozenset([match.left_owned_path, match.right_owned_path]) for match in edge.path_matches
+    } == {frozenset(["src/shared/**", "src/shared/module.py"])}
+
+
+@pytest.mark.unit
+async def test_overlap_graph_keeps_awf_plans_readme_overlap(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The tracked awf-plans README is ordinary docs, not an internal artifact."""
+    from awf.service.overlap_graph import build_workspace_overlap_graph
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    running_id = await _workspace(
+        session_factory,
+        title="Running awf-plans docs",
+        owned_paths=["docs/awf-plans/README.md"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    queued_id = await _workspace(
+        session_factory,
+        title="Queued awf-plans README",
+        owned_paths=["docs/awf-plans/README.md"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    graph = await build_workspace_overlap_graph(session_factory)
+
+    assert len(graph.edges) == 1
+    edge = graph.edges[0]
+    assert edge.affected_workspace_ids == tuple(sorted([running_id, queued_id]))
+    assert {
+        frozenset([match.left_owned_path, match.right_owned_path]) for match in edge.path_matches
+    } == {frozenset(["docs/awf-plans/README.md"])}
+
+
+@pytest.mark.unit
 async def test_overlap_graph_filters_to_running_and_queued_workspaces(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

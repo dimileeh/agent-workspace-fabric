@@ -32,9 +32,9 @@ Reason codes:
 * ``STALE_BUILD_CONFIG``    — a build-config file (``Dockerfile``,
   ``docker-compose``, CI workflows) changed while policy marks the candidate's
   task class build-config-sensitive.
-* ``ADVISORY_PLAN_ARTIFACT_OVERLAP`` — workspace-specific AWF plan/conformance
-  artifacts under ``docs/awf-plans/**`` overlapped. Visible to operators, but
-  does not block merge by itself.
+* ``ADVISORY_PLAN_ARTIFACT_OVERLAP`` — workspace-specific AWF ``ws_*``
+  plan/conformance artifacts under ``docs/awf-plans/`` overlapped. Visible to
+  operators, but does not block merge by itself.
 """
 
 from __future__ import annotations
@@ -49,6 +49,12 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
+from awf.common.owned_paths import (
+    has_wildcard,
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+    is_internal_plan_artifact_owned_path,
+)
 from awf.db.models import (
     ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
     MergeCandidate,
@@ -85,6 +91,7 @@ class CandidateSnapshot:
     owned_paths: tuple[str, ...]
     task_class: str | None
     base_sha: str | None
+    internal_plan_artifact_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -167,8 +174,6 @@ TRIGGER_DEPENDENCY_CHANGED: Final[str] = "dependency_changed"
 TRIGGER_BUILD_CONFIG_CHANGED: Final[str] = "build_config_changed"
 TRIGGER_PLAN_ARTIFACT_OVERLAP: Final[str] = "plan_artifact_overlap"
 
-PLAN_ARTIFACT_PATH_PATTERN: Final[str] = "docs/awf-plans/**"
-
 DEFAULT_STALE_POLICY: Final[StalePolicy] = StalePolicy(
     schema_paths=(
         "migrations/",
@@ -244,8 +249,16 @@ def evaluate_staleness(
     dep_changes = _matched(target.changed_paths, policy.dependency_paths)
     build_changes = _matched(target.changed_paths, policy.build_config_paths)
     overlap = _matched(target.changed_paths, candidate.owned_paths)
-    plan_artifact_overlap = [path for path in overlap if _is_plan_artifact_path(path)]
-    blocking_overlap = [path for path in overlap if not _is_plan_artifact_path(path)]
+    plan_artifact_overlap: list[str] = []
+    blocking_overlap: list[str] = []
+    for path in overlap:
+        if _is_plan_artifact_path(
+            path,
+            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+        ):
+            plan_artifact_overlap.append(path)
+        else:
+            blocking_overlap.append(path)
 
     if _is_sensitive_task_class(
         candidate.task_class,
@@ -331,7 +344,10 @@ def evaluate_staleness(
         not any(finding.blocks_merge for finding in findings)
         and target.advanced_commits > 0
         and candidate.task_class not in policy.lenient_task_classes
-        and not _target_changes_are_only_plan_artifacts(target.changed_paths)
+        and not _target_changes_are_only_plan_artifacts(
+            target.changed_paths,
+            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+        )
     ):
         findings.append(
             StalenessFinding(
@@ -383,30 +399,44 @@ def _path_matches(path: str, pattern: str) -> bool:
         return False
     if path == pattern:
         return True
-    if pattern.endswith("/**") and not _has_wildcard(pattern[: -len("/**")]):
+    if pattern.endswith("/**") and not has_wildcard(pattern[: -len("/**")]):
         prefix = pattern[: -len("**")]
         return path.startswith(prefix) or path == prefix.rstrip("/")
-    if pattern.endswith("/*") and not _has_wildcard(pattern[: -len("/*")]):
+    if pattern.endswith("/*") and not has_wildcard(pattern[: -len("/*")]):
         prefix = pattern[: -len("*")]
         return path.startswith(prefix) and "/" not in path[len(prefix) :]
     if pattern.endswith("/"):
         return path.startswith(pattern)
-    if _has_wildcard(pattern):
+    if has_wildcard(pattern):
         return fnmatchcase(path, pattern)
     return path.startswith(pattern + "/")
 
 
-def _is_plan_artifact_path(path: str) -> bool:
-    normalized = path.strip().replace("\\", "/").removeprefix("./")
-    return _path_matches(normalized, PLAN_ARTIFACT_PATH_PATTERN)
+def _is_plan_artifact_path(
+    path: str,
+    *,
+    internal_plan_artifact_paths: Iterable[str] = (),
+) -> bool:
+    """Return true when a changed path is an AWF internal plan artifact."""
+    return is_internal_plan_artifact_owned_path(
+        path,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    )
 
 
-def _target_changes_are_only_plan_artifacts(changed_paths: Sequence[str]) -> bool:
-    return bool(changed_paths) and all(_is_plan_artifact_path(path) for path in changed_paths)
-
-
-def _has_wildcard(pattern: str) -> bool:
-    return "*" in pattern or "?" in pattern or "[" in pattern
+def _target_changes_are_only_plan_artifacts(
+    changed_paths: Sequence[str],
+    *,
+    internal_plan_artifact_paths: Iterable[str] = (),
+) -> bool:
+    """Return true when all target changes are advisory planning artifacts."""
+    return bool(changed_paths) and all(
+        _is_plan_artifact_path(
+            path,
+            internal_plan_artifact_paths=internal_plan_artifact_paths,
+        )
+        for path in changed_paths
+    )
 
 
 # ── Service layer ──────────────────────────────────────────────────────────
@@ -426,7 +456,9 @@ class TargetBranchStateProvider(ABC):
         repo_url: str,
         branch: str,
         base_sha: str,
-    ) -> TargetBranchState: ...
+    ) -> TargetBranchState:
+        """Fetch target-branch changes relative to a candidate base SHA."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -451,6 +483,7 @@ class StalenessRefreshService:
         target_state_provider: TargetBranchStateProvider | None = None,
         policy: StalePolicy = DEFAULT_STALE_POLICY,
     ) -> None:
+        """Initialize the refresh service with persistence and policy hooks."""
         self._session = session
         self._provider = target_state_provider
         self._policy = policy
@@ -461,6 +494,7 @@ class StalenessRefreshService:
         *,
         target: TargetBranchState | None = None,
     ) -> StalenessRefreshResult:
+        """Refresh persisted stale reasons for one merge candidate."""
         candidate = await _load_candidate(self._session, candidate_id)
         if candidate is None:
             raise StalenessRefreshError(
@@ -606,12 +640,56 @@ class StalenessRefreshError(RuntimeError):
 def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
     workspace: Workspace = candidate.workspace
     attempt: TaskAttempt = candidate.attempt
-    owned = tuple(workspace.owned_paths) if workspace.owned_paths else tuple(attempt.owned_paths)
+    profile = workspace.resolved_profile
+    concrete_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(
+        profile,
+        workspace_id=workspace.id,
+    )
+    wildcard_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(profile)
+    internal_plan_artifact_paths = tuple(
+        dict.fromkeys(concrete_plan_artifacts + wildcard_plan_artifacts)
+    )
     return CandidateSnapshot(
-        owned_paths=owned,
+        owned_paths=_snapshot_owned_paths(
+            workspace,
+            attempt,
+            internal_plan_artifact_paths=internal_plan_artifact_paths,
+        ),
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
+        # Target changes may contain sibling workspace artifacts rendered from the
+        # same profile template, so staleness classification needs the wildcard
+        # shape in addition to this workspace's concrete artifact path.
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
     )
+
+
+def _snapshot_owned_paths(
+    workspace: Workspace,
+    attempt: TaskAttempt,
+    *,
+    internal_plan_artifact_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    workspace_owned = tuple(path for path in workspace.owned_paths if path)
+    if not workspace_owned:
+        return tuple(path for path in attempt.owned_paths if path)
+
+    if interworkspace_owned_paths(
+        workspace_owned,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    ):
+        return workspace_owned
+
+    attempt_owned = tuple(path for path in attempt.owned_paths if path)
+    if not attempt_owned:
+        return workspace_owned
+    attempt_interworkspace_owned = interworkspace_owned_paths(
+        attempt_owned,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    )
+    if attempt_interworkspace_owned:
+        return attempt_interworkspace_owned
+    return workspace_owned
 
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:

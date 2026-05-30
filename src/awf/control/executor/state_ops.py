@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import (
     UTC,
@@ -12,8 +13,17 @@ from datetime import (
 )
 from typing import Any
 
+from sqlalchemy import (
+    String,
+    cast,
+    or_,
+    select,
+    update,
+)
+
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.control.executor.helpers import _realign_profile_from_resolved_profile_snapshot
 from awf.control.executor.metadata import (
     _metadata_int,
     _metadata_number,
@@ -30,12 +40,86 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
+
+
+def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
     async with self._session_factory() as session:
         return await WorkspaceRepository(session).get(workspace_id)
+
+
+async def _persist_resolved_profile_snapshot_if_missing(
+    self: Any,
+    *,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+) -> dict[str, Any] | None:
+    """Freeze the runtime-resolved profile snapshot and return the stored snapshot."""
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+    async with self._session_factory() as session:
+        result = await session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                or_(
+                    Workspace.resolved_profile.is_(None),
+                    cast(Workspace.resolved_profile, String) == "null",
+                ),
+            )
+            .values(resolved_profile=snapshot)
+            .returning(Workspace.resolved_profile)
+            .execution_options(synchronize_session=False)
+        )
+        returned_snapshot = result.scalar_one_or_none()
+        persisted_snapshot = _resolved_profile_snapshot_from_db_value(returned_snapshot)
+        if returned_snapshot is not None:
+            if persisted_snapshot is None:
+                _log.warning(
+                    "executor.resolved_profile_returning_unparseable",
+                    workspace_id=workspace_id,
+                    returned_type=type(returned_snapshot).__name__,
+                )
+            await session.commit()
+            return persisted_snapshot if persisted_snapshot is not None else snapshot
+        frozen_snapshot = await session.scalar(
+            select(Workspace.resolved_profile).where(Workspace.id == workspace_id)
+        )
+        return _resolved_profile_snapshot_from_db_value(frozen_snapshot)
+
+
+async def _sync_resolved_profile(
+    self: Any,
+    *,
+    ws: Workspace,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+    planning_max_iterations_default: int = 3,
+) -> WorkspaceProfile:
+    """Freeze the resolved profile snapshot and align the active profile to the winner."""
+    persisted_profile_snapshot = await _persist_resolved_profile_snapshot_if_missing(
+        self,
+        workspace_id=workspace_id,
+        profile=profile,
+    )
+    persisted_profile = _realign_profile_from_resolved_profile_snapshot(
+        ws,
+        persisted_profile_snapshot,
+        planning_max_iterations_default=planning_max_iterations_default,
+    )
+    return persisted_profile if persisted_profile is not None else profile
 
 
 async def _claim_ready(
