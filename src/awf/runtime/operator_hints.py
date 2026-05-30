@@ -20,8 +20,8 @@ OPERATOR_HINT_PROCESSED_KEY_PREFIX = "__awf_operator_hint_processed__:"
 
 
 def operator_hint_from_threads(threads_addressed: dict[str, str]) -> OperatorHint | None:
-    """Extract a pending operator hint from persisted monitor state."""
-    raw = threads_addressed.pop(OPERATOR_HINT_STATE_KEY, None)
+    """Read a pending operator hint from persisted monitor state."""
+    raw = threads_addressed.get(OPERATOR_HINT_STATE_KEY)
     if raw is None:
         return None
     try:

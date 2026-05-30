@@ -26,6 +26,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.operator_hints import (
+    OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
     persist_operator_hint,
 )
@@ -92,6 +93,7 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
     except (TypeError, ValueError):
         sync_base_no_progress_count = 0
     pending_operator_hint = operator_hint_from_threads(threads_addressed)
+    threads_addressed.pop(OPERATOR_HINT_STATE_KEY, None)
     if ws.pr_number is not None:
         threads_addressed = _initial_review_grace_state_for_runtime(
             threads_addressed,

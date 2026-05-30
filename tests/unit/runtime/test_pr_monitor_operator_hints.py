@@ -65,6 +65,22 @@ def _ready_status(*, head_sha: str = "abc1234567890def") -> PRStatus:
 
 
 @pytest.mark.unit
+def test_operator_hint_from_threads_does_not_mutate_threads_addressed() -> None:
+    hint = OperatorHint(
+        reason="fix the stale docs CTA",
+        operation_id="op_hint_parse",
+        requested_at="2026-05-30T12:00:00+00:00",
+    )
+    threads_addressed = persist_operator_hint({"review-thread": "fix_committed"}, hint)
+
+    parsed = operator_hints.operator_hint_from_threads(threads_addressed)
+
+    assert parsed == hint
+    assert threads_addressed["review-thread"] == "fix_committed"
+    assert OPERATOR_HINT_STATE_KEY in threads_addressed
+
+
+@pytest.mark.unit
 def test_operator_hint_freeze_uses_canonical_runtime_state_key_helpers() -> None:
     assert (
         operator_hints._initial_review_grace_started_key
