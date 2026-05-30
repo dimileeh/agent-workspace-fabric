@@ -688,3 +688,124 @@ def test_start_failure_payload_classifies_and_preserves(
     assert payload.status == "failed"
     assert payload.reason_code == expected
     assert payload.issues[0].details["bootstrap"] == error.to_dict()
+
+
+# --------------------------------------------------------------------------- #
+# 6. Helper branch coverage (classification, source-checkout, summaries)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_classify_returns_none_for_unrecognized_reason_code() -> None:
+    """A bootstrap reason code outside the known set stays unclassified."""
+    error = ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_DOCKER_UNAVAILABLE",
+        message="docker daemon is unreachable",
+    )
+
+    assert start_commands._classify_start_failure(error) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_unclassified_failure_without_stage_uses_generic_cause() -> None:
+    """An unclassified, stage-less failure echoes the reason code with a generic cause."""
+    error = ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_DOCKER_UNAVAILABLE",
+        message="docker daemon is unreachable",
+    )
+
+    payload = start_commands._start_failure_payload(error)  # noqa: SLF001
+
+    assert payload.status == "failed"
+    assert payload.reason_code == "SERVICE_BOOTSTRAP_DOCKER_UNAVAILABLE"
+    issue = payload.issues[0]
+    assert issue.remediation.cause == "Local Core bootstrap failed before completing startup."
+    assert issue.details["bootstrap"] == error.to_dict()
+
+
+@pytest.mark.unit
+def test_port_conflict_without_stage_omits_stage_detail() -> None:
+    """A stage-less port-bind failure still classifies and surfaces the port only."""
+    error = ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+        message="compose up failed",
+        stderr="Error: bind for 0.0.0.0:8000 failed: port is already allocated",
+    )
+
+    payload = start_commands._start_failure_payload(error)  # noqa: SLF001
+
+    assert payload.reason_code == "START_PORT_CONFLICT"
+    details = payload.issues[0].details
+    assert "stage" not in details
+    assert details["port"] == 8000
+
+
+@pytest.mark.unit
+def test_source_checkout_failure_without_markers_embeds_details() -> None:
+    """A stale checkout with detail metadata but no missing markers preserves details."""
+    from awf.host_setup.source_assets import SOURCE_CHECKOUT_ASSETS_STALE, SourceCheckoutError
+
+    error = SourceCheckoutError(
+        reason_code=SOURCE_CHECKOUT_ASSETS_STALE,
+        message="source checkout assets are stale",
+        root=Path("/srv/awf"),
+        details={"expected_digest": "abc123", "actual_digest": "def456"},
+    )
+
+    payload = start_commands._source_checkout_failure_payload(error)  # noqa: SLF001
+
+    assert payload.reason_code == "SOURCE_CHECKOUT_ASSETS_STALE"
+    details = payload.issues[0].details
+    assert "missing_markers" not in details
+    assert details["source_checkout"] == {
+        "expected_digest": "abc123",
+        "actual_digest": "def456",
+    }
+    assert details["root"] == "/srv/awf"
+
+
+@pytest.mark.unit
+def test_normalize_local_url_returns_input_on_invalid_url() -> None:
+    """An unparseable URL is returned unchanged rather than raising."""
+    assert start_commands._normalize_local_url("http://[::1") == "http://[::1"  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_normalize_local_url_handles_local_host_without_port() -> None:
+    """A local-alias host without a port is rewritten to the loopback display host."""
+    assert (
+        start_commands._normalize_local_url("http://localhost/v1")  # noqa: SLF001
+        == "http://127.0.0.1/v1"
+    )
+
+
+@pytest.mark.unit
+def test_docker_summary_unknown_for_non_mapping() -> None:
+    """A non-mapping docker check degrades to an unknown-status summary."""
+    assert start_commands._docker_summary(None) == {"status": "unknown"}  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_docker_summary_includes_reason_and_skips_absent_version() -> None:
+    """The docker summary surfaces a reason and omits a missing version."""
+    summary = start_commands._docker_summary(  # noqa: SLF001
+        {"ok": False, "status": "degraded", "reason": "daemon slow"}
+    )
+
+    assert summary == {"ok": False, "status": "degraded", "reason": "daemon slow"}
+
+
+@pytest.mark.unit
+def test_providers_summary_unknown_for_non_mapping() -> None:
+    """A non-mapping agent-readiness payload degrades to an unknown-status summary."""
+    assert start_commands._providers_summary(None) == {"status": "unknown"}  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_providers_summary_skips_non_mapping_providers() -> None:
+    """Provider summary omits the providers map when it is not a mapping."""
+    summary = start_commands._providers_summary(  # noqa: SLF001
+        {"status": "ready", "providers": None}
+    )
+
+    assert summary == {"status": "ready"}
