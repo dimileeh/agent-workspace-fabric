@@ -50,6 +50,7 @@ from awf.control.executor.helpers import (
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _profile_for_workspace,
+    _profile_from_resolved_profile_snapshot,
 )
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -242,10 +243,17 @@ async def execute(
             worktree_path=worktree_path,
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
-        await self._persist_resolved_profile_snapshot_if_missing(
+        persisted_profile_snapshot = await self._persist_resolved_profile_snapshot_if_missing(
             workspace_id=workspace_id,
             profile=profile,
         )
+        persisted_profile = _profile_from_resolved_profile_snapshot(
+            ws,
+            persisted_profile_snapshot,
+            planning_max_iterations_default=(self._config.planning_max_iterations_default),
+        )
+        if persisted_profile is not None:
+            profile = persisted_profile
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,

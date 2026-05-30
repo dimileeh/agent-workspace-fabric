@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     cast,
     or_,
+    select,
     update,
 )
 
@@ -51,8 +52,8 @@ async def _persist_resolved_profile_snapshot_if_missing(
     *,
     workspace_id: str,
     profile: WorkspaceProfile,
-) -> None:
-    """Freeze the runtime-resolved profile snapshot if the row lacks one."""
+) -> dict[str, Any] | None:
+    """Freeze the runtime-resolved profile snapshot and return the stored snapshot."""
     snapshot = profile.model_dump(mode="json", by_alias=True)
     async with self._session_factory() as session:
         result = await session.execute(
@@ -65,11 +66,19 @@ async def _persist_resolved_profile_snapshot_if_missing(
                 ),
             )
             .values(resolved_profile=snapshot)
-            .returning(Workspace.id)
+            .returning(Workspace.resolved_profile)
             .execution_options(synchronize_session=False)
         )
-        if result.scalar_one_or_none() is not None:
+        persisted_snapshot = result.scalar_one_or_none()
+        if isinstance(persisted_snapshot, dict):
             await session.commit()
+            return persisted_snapshot
+        frozen_snapshot = await session.scalar(
+            select(Workspace.resolved_profile).where(Workspace.id == workspace_id)
+        )
+        if isinstance(frozen_snapshot, dict):
+            return frozen_snapshot
+        return None
 
 
 async def _claim_ready(

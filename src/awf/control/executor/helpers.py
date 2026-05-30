@@ -431,6 +431,23 @@ def _profile_for_workspace(
     return profile
 
 
+def _profile_from_resolved_profile_snapshot(
+    ws: Workspace,
+    snapshot: dict[str, Any] | None,
+    *,
+    planning_max_iterations_default: int = 3,
+) -> WorkspaceProfile | None:
+    if snapshot is None:
+        return None
+    ws.resolved_profile = snapshot
+    profile = WorkspaceProfile.model_validate(snapshot)
+    return _profile_with_planning_iteration_default(
+        profile,
+        planning_max_iterations_default,
+        raw_profile=snapshot,
+    )
+
+
 def _profile_with_planning_iteration_default(
     profile: WorkspaceProfile,
     planning_max_iterations_default: int,

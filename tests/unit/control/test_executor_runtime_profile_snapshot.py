@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.control.executor.helpers import _profile_for_workspace
+from awf.control.executor.helpers import (
+    _profile_for_workspace,
+    _profile_from_resolved_profile_snapshot,
+)
 from awf.control.executor.state_ops import _persist_resolved_profile_snapshot_if_missing
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
@@ -109,6 +112,34 @@ async def test_runtime_profile_snapshot_does_not_replace_existing_snapshot(
 
 
 @pytest.mark.unit
+async def test_runtime_profile_snapshot_returns_competing_snapshot_for_realigning_loser(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    competing_snapshot = _custom_planning_profile("first-worker").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    stale_worker_profile = _custom_planning_profile("stale-worker")
+    async with factory() as session:
+        workspace = await _create_workspace(session, resolved_profile=competing_snapshot)
+        workspace_id = workspace.id
+
+    executor = SimpleNamespace(_session_factory=factory)
+    frozen_snapshot = await _persist_resolved_profile_snapshot_if_missing(
+        executor,
+        workspace_id=workspace_id,
+        profile=stale_worker_profile,
+    )
+
+    async with factory() as session:
+        reloaded = await WorkspaceRepository(session).get(workspace_id)
+
+    assert reloaded is not None
+    assert reloaded.resolved_profile == competing_snapshot
+    assert frozen_snapshot == competing_snapshot
+
+
+@pytest.mark.unit
 async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapshot() -> None:
     competing_snapshot = _custom_planning_profile("first-worker").model_dump(
         mode="json",
@@ -127,6 +158,7 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
             self.bind = None
             self.commits = 0
             self.execute_calls = 0
+            self.scalar_calls = 0
             self.loaded_workspace: SimpleNamespace | None = None
 
         async def __aenter__(self) -> RaceAwareSession:
@@ -152,6 +184,13 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
             store["resolved_profile"] = competing_snapshot
             return FakeUpdateResult()
 
+        async def scalar(self, statement: object) -> dict | None:
+            self.scalar_calls += 1
+            compiled = str(statement)
+            assert "SELECT workspaces.resolved_profile" in compiled
+            assert "workspaces.id" in compiled
+            return store["resolved_profile"]
+
         async def commit(self) -> None:
             self.commits += 1
             if self.loaded_workspace is not None:
@@ -169,7 +208,7 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
     session_factory = RaceAwareSessionFactory()
     executor = SimpleNamespace(_session_factory=session_factory)
 
-    await _persist_resolved_profile_snapshot_if_missing(
+    frozen_snapshot = await _persist_resolved_profile_snapshot_if_missing(
         executor,
         workspace_id="ws_profile_race",
         profile=stale_worker_profile,
@@ -177,8 +216,10 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
 
     session = session_factory.sessions[0]
     assert session.execute_calls == 1
+    assert session.scalar_calls == 1
     assert session.commits == 0
     assert store["resolved_profile"] == competing_snapshot
+    assert frozen_snapshot == competing_snapshot
 
 
 @pytest.mark.unit
@@ -222,3 +263,37 @@ def test_profile_for_workspace_attaches_runtime_snapshot_to_workspace(
     assert workspace.resolved_profile["planning"]["plan_path"] == (
         "docs/alternate/{workspace_id}.md"
     )
+
+
+@pytest.mark.unit
+def test_profile_from_resolved_snapshot_realigns_workspace_and_active_profile() -> None:
+    stale_snapshot = _custom_planning_profile("stale-worker").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    competing_snapshot = _custom_planning_profile("first-worker").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    workspace = Workspace(
+        id="ws_runtime",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the repo profile.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=stale_snapshot,
+    )
+
+    profile = _profile_from_resolved_profile_snapshot(
+        workspace,
+        competing_snapshot,
+    )
+
+    assert profile is not None
+    assert profile.name == "first-worker"
+    assert workspace.resolved_profile == competing_snapshot

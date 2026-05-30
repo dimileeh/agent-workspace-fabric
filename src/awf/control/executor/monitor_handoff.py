@@ -53,6 +53,7 @@ from awf.control.executor.helpers import (
     _missing_monitor_recovery_metadata,
     _missing_sync_feature_pr_adoption_metadata,
     _profile_for_workspace,
+    _profile_from_resolved_profile_snapshot,
     _redacted_exception_traceback,
     _release_sync_source_branch,
     _release_sync_target_branch,
@@ -257,10 +258,17 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             worktree_path=self._config.worktrees_root / workspace_id,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
-        await self._persist_resolved_profile_snapshot_if_missing(
+        persisted_profile_snapshot = await self._persist_resolved_profile_snapshot_if_missing(
             workspace_id=workspace_id,
             profile=profile,
         )
+        persisted_profile = _profile_from_resolved_profile_snapshot(
+            ws,
+            persisted_profile_snapshot,
+            planning_max_iterations_default=self._config.planning_max_iterations_default,
+        )
+        if persisted_profile is not None:
+            profile = persisted_profile
         # Keep the profile timeout as the fallback if stored companion policy
         # cannot be parsed during monitor recovery.
         compose_up_timeout_seconds = profile.docker.startup_timeout_seconds
@@ -353,10 +361,19 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
                     worktree_path=self._config.worktrees_root / workspace_id,
                     planning_max_iterations_default=self._config.planning_max_iterations_default,
                 )
-                await self._persist_resolved_profile_snapshot_if_missing(
-                    workspace_id=workspace_id,
-                    profile=profile,
+                persisted_profile_snapshot = (
+                    await self._persist_resolved_profile_snapshot_if_missing(
+                        workspace_id=workspace_id,
+                        profile=profile,
+                    )
                 )
+                persisted_profile = _profile_from_resolved_profile_snapshot(
+                    ws,
+                    persisted_profile_snapshot,
+                    planning_max_iterations_default=self._config.planning_max_iterations_default,
+                )
+                if persisted_profile is not None:
+                    profile = persisted_profile
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,
@@ -990,10 +1007,17 @@ async def _build_handoff_pr_monitor(
                 worktree_path=worktree_path,
                 planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
-            await self._persist_resolved_profile_snapshot_if_missing(
+            persisted_profile_snapshot = await self._persist_resolved_profile_snapshot_if_missing(
                 workspace_id=workspace_id,
                 profile=profile,
             )
+            persisted_profile = _profile_from_resolved_profile_snapshot(
+                workspace,
+                persisted_profile_snapshot,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
+            if persisted_profile is not None:
+                profile = persisted_profile
             monitor = _call_pr_monitor_factory(
                 self._pr_monitor_factory,
                 adapter=adapter,
