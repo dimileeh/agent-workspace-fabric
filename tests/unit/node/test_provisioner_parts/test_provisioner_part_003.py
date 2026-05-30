@@ -750,3 +750,23 @@ class TestServiceStartupDiagnostics:
             blob = json.dumps(failed_event.payload)
             assert secret not in blob
             assert "[redacted]" in blob
+
+
+class TestProvisionerConfigValidation:
+    """``ProvisionerConfig`` mirrors the ``gt=0`` guard pydantic Settings enforces."""
+
+    @pytest.mark.unit
+    def test_default_tail_lines_is_accepted(self) -> None:
+        config = ProvisionerConfig(node_id="test-node-01")
+        assert config.service_startup_log_tail_lines > 0
+
+    @pytest.mark.unit
+    def test_positive_tail_lines_is_accepted(self) -> None:
+        config = ProvisionerConfig(node_id="test-node-01", service_startup_log_tail_lines=1)
+        assert config.service_startup_log_tail_lines == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_non_positive_tail_lines_is_rejected(self, bad_value: int) -> None:
+        with pytest.raises(ValueError, match="service_startup_log_tail_lines must be > 0"):
+            ProvisionerConfig(node_id="test-node-01", service_startup_log_tail_lines=bad_value)

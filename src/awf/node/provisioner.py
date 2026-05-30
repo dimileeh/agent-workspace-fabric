@@ -93,7 +93,20 @@ class ProvisionerConfig:
     """Prefix for feature branches; full branch = ``<prefix>/<workspace_id>``."""
 
     service_startup_log_tail_lines: int = DEFAULT_SERVICE_STARTUP_LOG_TAIL_LINES
-    """How many companion log lines to capture on a service-startup failure."""
+    """How many companion log lines to capture on a service-startup failure (must be > 0)."""
+
+    def __post_init__(self) -> None:
+        """Enforce the ``gt=0`` guard pydantic Settings applies on the env-var path.
+
+        Direct callers (tests, other code) bypass ``Settings`` validation, so a
+        zero/negative tail would otherwise reach ``docker logs --tail N`` and
+        produce empty output (``--tail 0``) or a CLI error (``--tail -1``).
+        """
+        if self.service_startup_log_tail_lines <= 0:
+            raise ValueError(
+                "service_startup_log_tail_lines must be > 0, "
+                f"got {self.service_startup_log_tail_lines}"
+            )
 
 
 class Provisioner:
