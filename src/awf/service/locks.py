@@ -265,20 +265,28 @@ def _workspace_overlap_risks_by_id(
     workspaces: tuple[_OverlapWorkspace, ...],
     overlap_candidates: tuple[_OverlapWorkspace, ...],
 ) -> dict[str, tuple[WorkspaceLockOverlapRisk, ...]]:
-    candidates_by_repo_base: dict[tuple[str, str], list[_OverlapWorkspace]] = {}
+    candidates_by_repo_base: dict[
+        tuple[str, str],
+        list[tuple[_OverlapWorkspace, tuple[str, ...]]],
+    ] = {}
     for candidate in overlap_candidates:
         key = (candidate.repo_url, candidate.branch_base)
-        candidates_by_repo_base.setdefault(key, []).append(candidate)
+        candidates_by_repo_base.setdefault(key, []).append(
+            (candidate, interworkspace_owned_paths(candidate.owned_paths))
+        )
 
     risks_by_workspace: dict[str, tuple[WorkspaceLockOverlapRisk, ...]] = {}
     for workspace in workspaces:
         risks: list[WorkspaceLockOverlapRisk] = []
         owned_paths = interworkspace_owned_paths(workspace.owned_paths)
         key = (workspace.repo_url, workspace.branch_base)
-        for other in candidates_by_repo_base.get(key, ()):
+        candidate_entries = candidates_by_repo_base.get(key)
+        if candidate_entries is None:
+            continue
+        for other, overlapping_owned_paths in candidate_entries:
             if other.workspace_id == workspace.workspace_id:
                 continue
-            for overlapping_owned_path in interworkspace_owned_paths(other.owned_paths):
+            for overlapping_owned_path in overlapping_owned_paths:
                 for owned_path in owned_paths:
                     if owned_paths_overlap(overlapping_owned_path, owned_path):
                         risks.append(

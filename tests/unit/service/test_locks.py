@@ -353,6 +353,63 @@ async def test_lock_helpers_short_circuit_empty_overlap_inputs() -> None:
 
 
 @pytest.mark.unit
+def test_overlap_risks_prefilters_candidate_owned_paths_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.common.owned_paths import interworkspace_owned_paths as real_interworkspace_owned_paths
+    from awf.service import locks as locks_service
+
+    calls_by_paths: dict[tuple[str, ...], int] = {}
+
+    def counting_interworkspace_owned_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+        calls_by_paths[paths] = calls_by_paths.get(paths, 0) + 1
+        return real_interworkspace_owned_paths(paths)
+
+    monkeypatch.setattr(
+        locks_service,
+        "interworkspace_owned_paths",
+        counting_interworkspace_owned_paths,
+    )
+
+    risks_by_workspace = locks_service._workspace_overlap_risks_by_id(
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="page-src",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("src/awf/service/locks.py",),
+            ),
+            locks_service._OverlapWorkspace(
+                workspace_id="page-docs",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("docs/usage.md",),
+            ),
+        ),
+        (
+            locks_service._OverlapWorkspace(
+                workspace_id="candidate-src",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("src/awf/service/**",),
+            ),
+            locks_service._OverlapWorkspace(
+                workspace_id="candidate-docs",
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                owned_paths=("docs/**",),
+            ),
+        ),
+    )
+
+    assert set(risks_by_workspace) == {"page-src", "page-docs"}
+    assert calls_by_paths[("src/awf/service/**",)] == 1
+    assert calls_by_paths[("docs/**",)] == 1
+    assert calls_by_paths[("src/awf/service/locks.py",)] == 1
+    assert calls_by_paths[("docs/usage.md",)] == 1
+
+
+@pytest.mark.unit
 def test_lock_cursor_rejects_empty_workspace_id() -> None:
     from awf.service.locks import InvalidWorkspaceLockCursorError, _decode_cursor
 
