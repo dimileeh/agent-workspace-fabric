@@ -324,7 +324,7 @@ def test_workspace_create_env_from_missing_companion_raises(
     )
     monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(ValueError, match="--companion-env-from names companion"):
+    with pytest.raises(typer.Exit) as raised:
         workspace_commands.workspace_create(
             repo_url="git@example.com:repo/app.git",
             task_title="title",
@@ -364,6 +364,7 @@ def test_workspace_create_env_from_missing_companion_raises(
             base_url=None,
             fmt=OutputFormat.json,
         )
+    assert raised.value.exit_code == 2
 
 
 @pytest.mark.unit

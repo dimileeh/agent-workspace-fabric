@@ -231,19 +231,23 @@ def workspace_create(
         ]
 
     if companion_env_from is not None or companion_env_exclude is not None:
-        env_from_pairs: list[tuple[str, str]] = []
-        if companion_env_from:
-            for arg in companion_env_from:
-                env_from_pairs.append(parse_env_from_arg(arg))
-        env_exclude_parsed: list[tuple[str, set[str]]] = []
-        if companion_env_exclude:
-            for arg in companion_env_exclude:
-                env_exclude_parsed.append(parse_env_exclude_arg(arg))
-        body["companions"] = merge_companion_env(
-            body.get("companions", []),
-            env_from=env_from_pairs,
-            env_exclude=env_exclude_parsed,
-        )
+        try:
+            env_from_pairs: list[tuple[str, str]] = []
+            if companion_env_from:
+                for arg in companion_env_from:
+                    env_from_pairs.append(parse_env_from_arg(arg))
+            env_exclude_parsed: list[tuple[str, set[str]]] = []
+            if companion_env_exclude:
+                for arg in companion_env_exclude:
+                    env_exclude_parsed.append(parse_env_exclude_arg(arg))
+            body["companions"] = merge_companion_env(
+                body.get("companions", []),
+                env_from=env_from_pairs,
+                env_exclude=env_exclude_parsed,
+            )
+        except (ValueError, FileNotFoundError, PermissionError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     headers = _api_token_headers(api_token)
     if idempotency_key:
