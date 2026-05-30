@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, ReviewThread
-from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
 from awf.runtime.pr_monitor_runner.fix_cycle import _mark_publish_dependent_items_needs_human
 from awf.runtime.pr_monitor_runner.helpers import _notify_human_reason
 from tests.postgres import postgres_test_engine
@@ -98,6 +98,87 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
     assert ".github/workflows/publish.yml" in result.error_message
     assert "`workflow` scope" in result.error_message
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    for _ in range(4):
+        adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: operator decision required")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    load_count = 0
+
+    async def _load_owned_paths(
+        loaded_runner: PullRequestMonitorRunner,
+        loaded_workspace_id: str,
+    ) -> list[str]:
+        nonlocal load_count
+        assert loaded_runner is runner
+        assert loaded_workspace_id == workspace_id
+        load_count += 1
+        return [".github/workflows/publish.yml"]
+
+    monkeypatch.setattr(fix_cycle, "_owned_paths_for_prompt", _load_owned_paths)
+    threads = (
+        ReviewThread(
+            thread_id="T_one",
+            path=".github/workflows/publish.yml",
+            line=12,
+            body_excerpt="please update workflow publishing",
+            author="reviewer",
+        ),
+        ReviewThread(
+            thread_id="T_two",
+            path="src/awf/runtime/example.py",
+            line=3,
+            body_excerpt="please check runtime behavior",
+            author="reviewer",
+        ),
+    )
+    reviews = (
+        ReviewComment(
+            comment_id="issue:1",
+            body_excerpt="review-level workflow concern",
+            author="reviewer",
+        ),
+        ReviewComment(
+            comment_id="issue:2",
+            body_excerpt="review-level runtime concern",
+            author="reviewer",
+        ),
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=threads,
+        initial_reviews=reviews,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert load_count == 1
+    assert len(adapter.calls) == 4
+    assert all(".github/workflows/publish.yml" in prompt for prompt in adapter.calls)
 
 
 @pytest.mark.unit

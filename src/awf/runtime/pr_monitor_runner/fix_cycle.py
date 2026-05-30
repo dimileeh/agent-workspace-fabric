@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
+    _owned_paths_for_prompt,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -114,6 +115,7 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    owned_paths = await _owned_paths_for_prompt(self, workspace_id)
 
     for _pass_num in range(self._runner_config.max_fix_cycle_passes):
         # 1) Address each item in the current batch.
@@ -127,6 +129,7 @@ async def _run_fix_cycle(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     state=state,
+                    owned_paths=owned_paths,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -219,6 +222,7 @@ async def _run_fix_cycle(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     state=state,
+                    owned_paths=owned_paths,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:

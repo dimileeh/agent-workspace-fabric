@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -57,16 +58,21 @@ async def _address_thread(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
 
-    owned_paths = await _owned_paths_for_prompt(runner, workspace_id)
+    prompt_owned_paths = (
+        list(owned_paths)
+        if owned_paths is not None
+        else await _owned_paths_for_prompt(runner, workspace_id)
+    )
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
-        owned_paths=owned_paths,
+        owned_paths=prompt_owned_paths,
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -99,6 +105,7 @@ async def _address_review_comment(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -108,6 +115,7 @@ async def _address_review_comment(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
+        owned_paths=owned_paths,
     )
     return result.verdict
 
@@ -122,14 +130,19 @@ async def _address_review_comment_result(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    owned_paths: Sequence[str] | None = None,
 ) -> VerdictResult:
-    owned_paths = await _owned_paths_for_prompt(runner, workspace_id)
+    prompt_owned_paths = (
+        list(owned_paths)
+        if owned_paths is not None
+        else await _owned_paths_for_prompt(runner, workspace_id)
+    )
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
-        owned_paths=owned_paths,
+        owned_paths=prompt_owned_paths,
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
