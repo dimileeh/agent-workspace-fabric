@@ -78,7 +78,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
     assert "ARG CODEX_VERSION=0.130.0" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.143" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.158" in dockerfile
     assert "ARG GEMINI_VERSION=0.42.0" in dockerfile
     assert "ARG OPENCODE_VERSION=1.15.2" in dockerfile
     assert "ARG CODEX_VERSION=latest" not in dockerfile
