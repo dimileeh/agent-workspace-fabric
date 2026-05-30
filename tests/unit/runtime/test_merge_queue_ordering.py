@@ -33,22 +33,26 @@ REPO_URL = "git@github.com:dimileeh/aira-web.git"
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory backed by an isolated Postgres engine."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
 
 @pytest.fixture
 def cmd() -> FakeCommandRunner:
+    """Return a fake command runner for monitor executions."""
     return FakeCommandRunner()
 
 
 @pytest.fixture
 def adapter() -> FakeAdapter:
+    """Return a fake GitHub adapter for monitor executions."""
     return FakeAdapter()
 
 
 @pytest.fixture
 def sleep_fn() -> RecordedSleep:
+    """Return a sleep recorder for monitor retry timing."""
     return RecordedSleep()
 
 
@@ -340,6 +344,7 @@ async def test_monitor_waits_for_older_candidate_without_notify_human(
     older_status: WorkspaceStatus,
     recovery_operation: bool,
 ) -> None:
+    """Verify merge monitor waits for older blockers without human comments."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_monitoring_candidate(
         factory,
@@ -425,6 +430,7 @@ async def test_later_eligible_candidate_still_waits_for_older_candidate(
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
+    """Verify a later eligible candidate still waits behind an older one."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_monitoring_candidate(
         factory,
@@ -492,6 +498,7 @@ async def test_monitor_merges_once_older_candidate_stops_blocking(
     tmp_path: Path,
     clearing_state: str,
 ) -> None:
+    """Verify the monitor merges once the older candidate no longer blocks."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     older_workspace_id, older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
         factory,

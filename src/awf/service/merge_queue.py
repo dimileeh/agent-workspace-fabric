@@ -91,6 +91,8 @@ class InvalidMergeQueueCursorError(ValueError):
 
 @dataclass(frozen=True)
 class MergeQueueBlocker:
+    """Older merge candidate that currently blocks a candidate from merging."""
+
     candidate_id: str
     workspace_id: str
     attempt_id: str
@@ -103,6 +105,7 @@ class MergeQueueBlocker:
     reason_code: str = MERGE_QUEUE_WAIT_REASON_CODE
 
     def event_payload(self, *, repo_url: str, base_branch: str) -> dict[str, object]:
+        """Return a workspace-event payload describing this blocker."""
         return {
             "reason_code": self.reason_code,
             "repo_url": repo_url,
@@ -126,6 +129,7 @@ async def list_merge_queue_response(
     limit: int = 50,
     cursor: str | None = None,
 ) -> MergeQueueListResponse:
+    """Return one operator-facing merge queue page."""
     decoded_cursor = _decode_cursor(cursor)
     candidate_rows = await MergeCandidateRepository(session).list_queue(
         repo_url=repo_url,
@@ -186,7 +190,6 @@ async def list_merge_queue_blockers_for_candidate(
     candidate_id: str,
 ) -> list[MergeQueueBlocker]:
     """Return older same repo/base candidates that must integrate first."""
-
     candidate = await _load_candidate(session, candidate_id)
     if candidate is None or not _is_merge_ready_candidate(candidate):
         return []
@@ -209,7 +212,6 @@ async def list_merge_queue_blockers_for_candidates(
     candidate_ids: Iterable[str],
 ) -> dict[str, list[MergeQueueBlocker]]:
     """Return older same repo/base blockers for a batch of candidates."""
-
     candidate_id_list = list(dict.fromkeys(candidate_ids))
     blockers_by_candidate: dict[str, list[MergeQueueBlocker]] = {
         candidate_id: [] for candidate_id in candidate_id_list
@@ -253,6 +255,7 @@ async def list_merge_queue_blockers_for_workspace(
     *,
     workspace_id: str,
 ) -> list[MergeQueueBlocker]:
+    """Return merge blockers for a workspace's open merge candidate."""
     candidate = await _load_open_candidate_for_workspace(session, workspace_id)
     if candidate is None:
         return []

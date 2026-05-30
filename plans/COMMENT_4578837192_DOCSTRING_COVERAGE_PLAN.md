@@ -23,6 +23,11 @@ PR's plan-artifact nonblocking overlap work.
 - A later custom plan-artifact follow-up added profile-derived planning helpers
   in `src/awf/common/owned_paths.py`; include those helpers in this
   comment's diff-scoped docstring cleanup without changing behavior.
+- The latest CodeRabbit review-level summary still reports docstring coverage
+  after the earlier diff-scoped pass. For this iteration, use a focused
+  `ruff --select D` check over the Python files changed in the review-cycle
+  range from the comment (`36c589f4..HEAD`) and document the public
+  classes/functions it reports, without touching broad repo policy.
 
 ## Requirements Checklist
 
@@ -33,6 +38,8 @@ PR's plan-artifact nonblocking overlap work.
       weakened.
 - [x] Focused validation evidence is recorded without running broad AWF-owned
       validation.
+- [x] Focused public-docstring lint passes for the Python files changed in the
+      review-cycle range from the comment.
 
 ## Implementation Steps
 
@@ -43,10 +50,13 @@ PR's plan-artifact nonblocking overlap work.
 3. Run focused docstring/style checks and targeted tests covering the touched
    behavior.
 4. Record validation results in a matching validation document.
+5. Add concise public docstrings for any remaining `ruff --select D` failures in
+   the review-cycle Python files and re-run focused docstring/style checks.
 
 ## Verification Commands
 
 - `uv run --python 3.12 --extra dev ruff check <changed python files>`
+- `uv run --python 3.12 --extra dev ruff check --select D <changed python files>`
 - `uv run --python 3.12 --extra dev pytest <targeted test files> -q`
 
 Full AWF/GitHub validation is intentionally not run in the agent phase.

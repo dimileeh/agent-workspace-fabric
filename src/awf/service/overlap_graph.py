@@ -44,6 +44,8 @@ ACTIVE_OVERLAP_GRAPH_STATUSES: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True)
 class WorkspaceOverlapNode:
+    """Workspace node included in the advisory overlap graph."""
+
     workspace_id: str
     title: str
     status: str
@@ -58,6 +60,8 @@ class WorkspaceOverlapNode:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapPathMatch:
+    """One owned-path match explaining an overlap edge."""
+
     left_workspace_id: str
     left_owned_path: str
     right_workspace_id: str
@@ -68,6 +72,8 @@ class WorkspaceOverlapPathMatch:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapEdge:
+    """Advisory overlap edge between two active workspaces."""
+
     left_workspace_id: str
     right_workspace_id: str
     repo_url: str
@@ -83,6 +89,8 @@ class WorkspaceOverlapEdge:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapGraphSummary:
+    """Aggregate counts for an overlap graph page."""
+
     node_count: int
     queued_count: int
     running_count: int
@@ -93,6 +101,8 @@ class WorkspaceOverlapGraphSummary:
 
 @dataclass(frozen=True)
 class WorkspaceOverlapGraph:
+    """Advisory graph of active workspace owned-path overlaps."""
+
     nodes: tuple[WorkspaceOverlapNode, ...]
     edges: tuple[WorkspaceOverlapEdge, ...]
     summary: WorkspaceOverlapGraphSummary
@@ -132,6 +142,7 @@ async def build_workspace_overlap_graph(
     queue_state: OverlapGraphQueueState = "all",
     limit: int = 100,
 ) -> WorkspaceOverlapGraph:
+    """Build an advisory overlap graph from a session factory."""
     async with session_factory() as session:
         return await build_workspace_overlap_graph_for_session(
             session,
@@ -152,6 +163,7 @@ async def build_workspace_overlap_graph_for_session(
     queue_state: OverlapGraphQueueState = "all",
     limit: int = 100,
 ) -> WorkspaceOverlapGraph:
+    """Build an advisory overlap graph using an existing session."""
     stmt = select(Workspace).where(
         Workspace.status.in_(_status_values_for_queue_state(queue_state))
     )

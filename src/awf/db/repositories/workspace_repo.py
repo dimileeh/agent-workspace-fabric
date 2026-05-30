@@ -95,10 +95,12 @@ _repo_proxy = _RepositoriesProxy()
 
 
 def set_committed_value(instance: object, key: str, value: Any) -> None:
+    """Proxy SQLAlchemy committed-value updates for test patching."""
     _repo_proxy.set_committed_value(instance, key, value)
 
 
 def new_workspace_id() -> str:
+    """Return a fresh workspace identifier through the repository proxy."""
     return cast(str, _repo_proxy.new_workspace_id())
 
 
@@ -110,11 +112,13 @@ class WorkspaceRepository:
     """
 
     def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        """Initialize the repository with a session and resolved dialect name."""
         self._session = session
         self._dialect_name = resolve_session_dialect_name(session, dialect_name)
 
     @property
     def dialect_name(self) -> str | None:
+        """Return the SQL dialect name used by this repository."""
         return self._dialect_name
 
     async def create(
@@ -228,6 +232,7 @@ class WorkspaceRepository:
         )
 
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
+        """Stamp recent workspace activity and optionally update its subphase."""
         stmt = (
             update(Workspace)
             .where(Workspace.id == workspace_id)
@@ -241,9 +246,11 @@ class WorkspaceRepository:
         await self._session.flush()
 
     async def get(self, workspace_id: str) -> Workspace | None:
+        """Return a workspace by primary key, if it exists."""
         return await self._session.get(Workspace, workspace_id)
 
     async def get_with_secret_leases(self, workspace_id: str) -> Workspace | None:
+        """Return a workspace with secret leases and operations loaded."""
         stmt = (
             select(Workspace)
             .where(Workspace.id == workspace_id)
@@ -253,6 +260,7 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def get_with_operations(self, workspace_id: str) -> Workspace | None:
+        """Return a workspace with operations eagerly loaded."""
         stmt = (
             select(Workspace)
             .where(Workspace.id == workspace_id)
@@ -261,6 +269,7 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def get_with_validation_runs(self, workspace_id: str) -> Workspace | None:
+        """Return a workspace with validation runs eagerly loaded."""
         stmt = (
             select(Workspace)
             .where(Workspace.id == workspace_id)
@@ -286,10 +295,12 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def exists(self, workspace_id: str) -> bool:
+        """Return whether a workspace row exists."""
         stmt = select(Workspace.id).where(Workspace.id == workspace_id).limit(1)
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
     async def get_by_idempotency_key(self, key: str) -> Workspace | None:
+        """Return a workspace created for an idempotency key."""
         stmt = (
             select(Workspace)
             .where(Workspace.idempotency_key == key)
@@ -298,6 +309,7 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def has_idempotency_key(self, key: str) -> bool:
+        """Return whether an idempotency key already has a workspace."""
         stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
@@ -322,6 +334,7 @@ class WorkspaceRepository:
         return [key for key in (await self._session.execute(stmt)).scalars().all() if key]
 
     async def list_idempotency_key_family(self, logical_key: str) -> builtins.list[str]:
+        """Return the logical idempotency key and any generation-suffixed keys."""
         from awf.db.utils import escape_like_pattern as _escape_like_pattern
 
         generation_pattern = f"{_escape_like_pattern(logical_key)}:g%"
@@ -418,6 +431,7 @@ class WorkspaceRepository:
         owned_paths: list[str],
         resolved_profile: Mapping[str, object] | None = None,
     ) -> list[OwnedPathConflict]:
+        """Return active owned-path overlaps in the legacy conflict shape."""
         overlaps = await self.find_active_owned_path_overlaps(
             repo_url=repo_url,
             branch_base=branch_base,
@@ -497,6 +511,7 @@ class WorkspaceRepository:
         before_workspace_id: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
+        """List workspaces with optional status, agent, repo, and cursor filters."""
         stmt = select(Workspace)
         if status is not None:
             if isinstance(status, builtins.list):
@@ -536,6 +551,7 @@ class WorkspaceRepository:
         repo_url: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
+        """List workspaces that do not yet have task attempts."""
         stmt = (
             select(Workspace)
             .outerjoin(TaskAttempt, TaskAttempt.workspace_id == Workspace.id)
@@ -564,6 +580,7 @@ class WorkspaceRepository:
         before_workspace_id: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
+        """List legacy PR workspaces visible in the merge queue."""
         stmt = (
             select(Workspace)
             .where(
@@ -607,6 +624,7 @@ class WorkspaceRepository:
         before_workspace_id: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
+        """List legacy merge-queue workspaces not backed by merge candidates."""
         stmt = (
             select(Workspace)
             .outerjoin(MergeCandidate, MergeCandidate.workspace_id == Workspace.id)
@@ -652,6 +670,7 @@ class WorkspaceRepository:
         after: Any | None = None,
         scoring_at: datetime | None = None,
     ) -> builtins.list[str]:
+        """Return schedulable workspace IDs in scheduler priority order."""
         if limit <= 0:
             return []
 
@@ -683,6 +702,7 @@ class WorkspaceRepository:
         after: Any | None = None,
         scoring_at: datetime | None = None,
     ) -> builtins.list[Workspace]:
+        """Return schedulable workspaces in scheduler priority order."""
         if limit <= 0:
             return []
 
@@ -1228,6 +1248,7 @@ class WorkspaceRepository:
         reason_code: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> WorkspaceEvent:
+        """Append one event to a workspace timeline."""
         events = await self.add_events(
             workspace,
             events=[
@@ -1250,6 +1271,7 @@ class WorkspaceRepository:
         reason_code: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> WorkspaceEvent:
+        """Append one state-transition event to a workspace timeline."""
         event_order = await self._reserve_workspace_event_orders(workspace, count=1)
         event = WorkspaceEvent(
             id=new_event_id(),
@@ -1287,6 +1309,7 @@ class WorkspaceRepository:
         evidence: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> WorkspaceEvent:
+        """Append an audit-shaped workspace event."""
         return await self.add_event(
             workspace,
             event_type=event_type,
@@ -1322,6 +1345,7 @@ class WorkspaceRepository:
         operation_id: str | None = None,
         reason_code: str | None = None,
     ) -> WorkspaceEvent:
+        """Record that a stale asynchronous callback was ignored."""
         expected_status_value = (
             expected_status.value
             if isinstance(expected_status, WorkspaceStatus)

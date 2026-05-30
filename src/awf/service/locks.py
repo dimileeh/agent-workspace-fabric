@@ -26,6 +26,8 @@ from awf.db.repositories import (
 
 @dataclass(frozen=True)
 class WorkspaceLockOverlapRisk:
+    """Advisory owned-path overlap from another active workspace."""
+
     overlapping_workspace_id: str
     overlapping_owned_path: str
     owned_path: str
@@ -33,6 +35,8 @@ class WorkspaceLockOverlapRisk:
 
 @dataclass(frozen=True)
 class WorkspaceLock:
+    """Operator-facing view of one workspace owned-path reservation."""
+
     workspace_id: str
     title: str
     agent: str
@@ -52,6 +56,8 @@ class WorkspaceLock:
 
 @dataclass(frozen=True)
 class WorkspaceLockPage:
+    """Cursor page of workspace lock rows."""
+
     items: list[WorkspaceLock]
     next_cursor: str | None
     has_more: bool
@@ -131,6 +137,7 @@ async def list_workspace_locks_for_session(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[WorkspaceLock]:
+    """List workspace owned-path reservations using an existing session."""
     page = await list_workspace_lock_page_for_session(
         session,
         repo_url=repo_url,
@@ -151,6 +158,7 @@ async def list_workspace_lock_page_for_session(
     limit: int = 50,
     cursor: str | None = None,
 ) -> WorkspaceLockPage:
+    """List one workspace-lock page using an existing session."""
     status_value = _status_value(status)
     task_class_value = _task_class_value(task_class)
     decoded_cursor = _decode_cursor(cursor)

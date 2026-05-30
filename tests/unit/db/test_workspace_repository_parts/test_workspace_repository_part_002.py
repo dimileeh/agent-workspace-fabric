@@ -33,6 +33,7 @@ from tests.postgres import (
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
+    """Yield an isolated PostgreSQL test session."""
     async with postgres_test_session() as s:
         yield s
 
@@ -123,6 +124,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify scheduler ordering combines class, score, and age priority."""
         repo = WorkspaceRepository(session)
         now = datetime.now(UTC)
         docs = await repo.create(
@@ -183,6 +185,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify integer-valued decimal policy strings affect ordering."""
         repo = WorkspaceRepository(session)
         scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         decimal_string = await repo.create(
@@ -222,6 +225,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify oversized scheduler strings are bounded before integer casts."""
         repo = WorkspaceRepository(session)
         scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         oversized_high = await repo.create(
@@ -276,6 +280,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify scheduler scoring ignores strings beyond Python's int limit."""
         repo = WorkspaceRepository(session)
         scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         previous_limit = sys.get_int_max_str_digits()
@@ -319,6 +324,7 @@ class TestOwnedPathOverlapLookup:
     def test_sqlite_scheduler_ignores_policy_strings_above_python_int_limit_before_limit(
         self,
     ) -> None:
+        """Verify SQLite scheduling avoids parsing oversized priority strings."""
         engine = create_engine("sqlite:///:memory:", future=True)
         scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         previous_limit = sys.get_int_max_str_digits()
@@ -381,6 +387,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify cursor pagination recomputes database-side scheduler scores."""
         repo = WorkspaceRepository(session)
         scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         before_cursor = await repo.create(
@@ -439,6 +446,7 @@ class TestOwnedPathOverlapLookup:
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify scheduler cursors break equal score and age ties by ID."""
         ids = iter(("ws_scheduler_tie_001", "ws_scheduler_tie_002", "ws_scheduler_tie_003"))
         monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(ids))
         repo = WorkspaceRepository(session)
@@ -505,6 +513,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Verify owned-path overlap does not block scheduler admission."""
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,
@@ -550,6 +559,7 @@ class TestOwnedPathOverlapLookup:
         self,
         status: WorkspaceStatus,
     ) -> None:
+        """Verify Postgres scheduler queries use skip-locked row claims."""
         session = _RecordingSchedulerSession(
             "postgresql",
             values=[_recorded_workspace_row("ws_claimed", status=status)],
@@ -578,6 +588,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_postgres_scheduler_workspace_rows_apply_candidate_limit(self) -> None:
+        """Verify schedulable workspace rows honor the candidate limit."""
         session = _RecordingSchedulerSession(
             "postgresql",
             values=[
@@ -608,6 +619,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_postgres_scheduler_workspace_rows_can_scope_to_node_id(self) -> None:
+        """Verify schedulable workspace rows can be scoped to a node."""
         session = _RecordingSchedulerSession(
             "postgresql",
             values=[_recorded_workspace_row("ws_local", status=WorkspaceStatus.requested)],
@@ -635,6 +647,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_list_schedulable_workspaces_returns_empty_for_non_positive_limit(self) -> None:
+        """Verify non-positive scheduler limits avoid database execution."""
         session = _RecordingSchedulerSession("postgresql", values=[])
         repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
 
@@ -650,6 +663,7 @@ class TestOwnedPathOverlapLookup:
     async def test_postgres_scheduler_cursor_uses_scheduler_order_keyset_without_offset(
         self,
     ) -> None:
+        """Verify scheduler cursor pagination uses keysets instead of offsets."""
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         session = _RecordingSchedulerSession(
             "postgresql",
@@ -693,6 +707,7 @@ class TestOwnedPathOverlapLookup:
     async def test_postgres_scheduler_cursor_age_boost_uses_timestamp_thresholds(
         self,
     ) -> None:
+        """Verify scheduler age boost uses timestamp thresholds."""
         session = _RecordingSchedulerSession(
             "postgresql",
             values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
@@ -733,6 +748,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     def test_postgres_scheduler_age_boost_does_not_use_raw_interval_text(self) -> None:
+        """Verify Postgres age boost construction avoids raw interval text."""
         source = "\n".join(
             inspect.getsource(function)
             for function in (
@@ -751,6 +767,7 @@ class TestOwnedPathOverlapLookup:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify scheduler JSON integer expressions handle safe fallbacks."""
         monkeypatch.setattr(repositories.sys, "get_int_max_str_digits", lambda: 0)
 
         postgres_expr = repositories._scheduler_json_int_expr(  # noqa: SLF001
@@ -779,6 +796,7 @@ class TestOwnedPathOverlapLookup:
     async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
         self,
     ) -> None:
+        """Verify workspace cursor queries reuse the cursor scoring timestamp."""
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         session = _RecordingSchedulerSession(
@@ -810,6 +828,7 @@ class TestOwnedPathOverlapLookup:
     async def test_postgres_scheduler_id_cursor_reuses_cursor_scoring_timestamp(
         self,
     ) -> None:
+        """Verify ID cursor queries reuse the cursor scoring timestamp."""
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         session = _RecordingSchedulerSession(
@@ -841,6 +860,7 @@ class TestOwnedPathOverlapLookup:
     async def test_postgres_scheduler_cursor_rejects_mismatched_scoring_timestamp(
         self,
     ) -> None:
+        """Verify scheduler cursor queries reject mismatched scoring times."""
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
         session = _RecordingSchedulerSession(
@@ -867,6 +887,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
+        """Verify Postgres get-for-update locks the workspace row."""
         session = _RecordingSchedulerSession("postgresql", values=["ws_locked"])
         repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
 
@@ -885,6 +906,7 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_session_info_dialect_drives_scheduler_locking(self) -> None:
+        """Verify session dialect metadata enables scheduler locking."""
         session = _RecordingSchedulerSession(
             "postgresql",
             values=[_recorded_workspace_row("ws_claimed")],
@@ -911,6 +933,7 @@ class TestOwnedPathOverlapLookup:
     async def test_empty_requested_owned_paths_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
+        """Verify empty requested owned paths produce no overlap."""
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
 
@@ -926,6 +949,7 @@ class TestOwnedPathOverlapLookup:
     async def test_non_overlapping_owned_paths_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
+        """Verify non-overlapping requested paths produce no overlap."""
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
 
@@ -1072,6 +1096,7 @@ class TestOwnedPathOverlapLookup:
     async def test_same_paths_on_different_repo_or_base_branch_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
+        """Verify overlap checks are scoped by repository and base branch."""
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(
             session,
@@ -1112,6 +1137,7 @@ class TestOwnedPathOverlapLookup:
         session: AsyncSession,
         status: WorkspaceStatus,
     ) -> None:
+        """Verify terminal and teardown workspaces do not overlap."""
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(
             session,
@@ -1186,6 +1212,7 @@ class TestOwnedPathOverlapLookup:
         existing_path: str,
         requested_path: str,
     ) -> None:
+        """Verify active exact, ancestor, and wildcard paths report overlap."""
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,
@@ -1207,10 +1234,13 @@ class TestOwnedPathOverlapLookup:
 
 
 class TestTransition:
+    """Workspace transition repository tests."""
+
     @pytest.mark.unit
     async def test_valid_transition_updates_status_and_bumps_version(
         self, session: AsyncSession
     ) -> None:
+        """Verify valid transitions update status, version, and events."""
         repo = WorkspaceRepository(session)
         ws = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1236,6 +1266,7 @@ class TestTransition:
     async def test_transition_to_monitoring_pr_stamps_monitor_start(
         self, session: AsyncSession
     ) -> None:
+        """Verify transitions into PR monitoring stamp monitor start time."""
         repo = WorkspaceRepository(session)
         ws = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1262,6 +1293,7 @@ class TestTransition:
     async def test_atomic_transition_to_monitoring_pr_stamps_monitor_start(
         self, session: AsyncSession
     ) -> None:
+        """Verify atomic PR-monitoring transitions stamp monitor start time."""
         repo = WorkspaceRepository(session)
         ws = await repo.create(
             repo_url="git@github.com:example/atomic.git",
@@ -1299,6 +1331,7 @@ class TestTransition:
     async def test_invalid_transition_raises_and_does_not_mutate(
         self, session: AsyncSession
     ) -> None:
+        """Verify invalid transitions fail without mutating the workspace."""
         repo = WorkspaceRepository(session)
         ws = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1319,12 +1352,15 @@ class TestTransition:
 
 
 class TestAddEvents:
+    """Workspace event append and ordering tests."""
+
     @pytest.mark.unit
     async def test_transition_if_current_reserves_event_order_through_shared_helper(
         self,
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify guarded transitions reserve event order through the helper."""
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1376,6 +1412,8 @@ class TestAddEvents:
     async def test_transition_if_current_non_postgres_claim_uses_status_guarded_update(
         self,
     ) -> None:
+        """Verify non-Postgres guarded transitions use a status-guarded update."""
+
         class EmptyResult:
             def one_or_none(self) -> None:
                 return None
@@ -1420,6 +1458,7 @@ class TestAddEvents:
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Verify batch event appends reserve order without bumping version."""
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1484,6 +1523,7 @@ class TestAddEvents:
     async def test_add_event_with_states_reserves_order_and_uses_explicit_states(
         self, session: AsyncSession
     ) -> None:
+        """Verify stateful events reserve order and preserve explicit states."""
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
             repo_url="git@github.com:example/a.git",
@@ -1515,10 +1555,13 @@ class TestAddEvents:
 
 
 class TestListEvents:
+    """Workspace event listing repository tests."""
+
     @pytest.mark.unit
     async def test_uses_event_id_as_stable_timestamp_tie_breaker(
         self, session: AsyncSession
     ) -> None:
+        """Verify event listing uses event ID as a stable timestamp tie breaker."""
         workspace_repo = WorkspaceRepository(session)
         workspace = await workspace_repo.create(
             repo_url="git@github.com:example/a.git",

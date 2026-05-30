@@ -10,6 +10,7 @@ Plan reference: `plans/COMMENT_4578837192_DOCSTRING_COVERAGE_PLAN.md`
 | Diff-added regression tests and test helpers have concise docstrings. | Complete | Added docstrings in `tests/unit/api/test_locks.py`, `tests/unit/common/test_owned_paths.py`, `tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py`, `tests/unit/runtime/test_merge_queue_ordering.py`, `tests/unit/service/test_locks.py`, and `tests/unit/service/test_overlap_graph.py`. |
 | No runtime behavior, assertions, or reviewer-safety regression tests are weakened. | Complete | The patch adds docstrings only; no assertions or control flow were changed. |
 | Focused validation evidence is recorded without running broad AWF-owned validation. | Complete | Ran focused AST audit, Ruff on changed Python files, and targeted unit tests only. |
+| Focused public-docstring lint passes for the Python files changed in the review-cycle range from the comment. | Complete | Added public docstrings for remaining `ruff --select D` findings in the review-cycle Python files; the focused docstring lint now passes. |
 
 ## Validation Evidence
 
@@ -58,6 +59,21 @@ Follow-up after later custom plan-artifact profile commit:
   passed.
 - `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py::test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_paths tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_plan_artifact_only_overlap_is_advisory_without_target_advanced -q`:
   2 passed.
+
+Follow-up after the latest review-level docstring coverage warning:
+
+- Added behavior-neutral public docstrings for the remaining focused
+  `ruff --select D` findings in the review-cycle Python files from
+  `36c589f4..HEAD`.
+- `uv run --python 3.12 --extra dev ruff check --select D src/awf/common/owned_paths.py src/awf/db/repositories/workspace_repo.py src/awf/service/locks.py src/awf/service/merge_queue.py src/awf/service/overlap_graph.py src/awf/service/staleness.py src/awf/service/workspaces_create.py src/awf/service/workspaces_retry.py tests/unit/common/test_owned_paths.py tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py tests/unit/runtime/test_merge_queue_ordering.py tests/unit/service/test_locks.py`:
+  passed.
+- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/db/repositories/workspace_repo.py src/awf/service/locks.py src/awf/service/merge_queue.py src/awf/service/overlap_graph.py src/awf/service/staleness.py src/awf/service/workspaces_create.py src/awf/service/workspaces_retry.py tests/unit/common/test_owned_paths.py tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py tests/unit/runtime/test_merge_queue_ordering.py tests/unit/service/test_locks.py`:
+  passed.
+- `uv run --python 3.12 --extra dev ruff format --check src/awf/db/repositories/workspace_repo.py src/awf/service/locks.py src/awf/service/merge_queue.py src/awf/service/overlap_graph.py src/awf/service/staleness.py tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py tests/unit/runtime/test_merge_queue_ordering.py tests/unit/service/test_locks.py`:
+  passed after formatting `tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py`.
+- `git diff --check`: passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/db/test_workspace_repository_parts/test_workspace_repository_part_002.py tests/unit/runtime/test_merge_queue_ordering.py tests/unit/service/test_locks.py -q`:
+  76 passed.
 
 Full AWF/GitHub validation, coverage gates, and any broad external docstring
 coverage check are intentionally left to AWF after agent completion.

@@ -464,7 +464,9 @@ class TargetBranchStateProvider(ABC):
         repo_url: str,
         branch: str,
         base_sha: str,
-    ) -> TargetBranchState: ...
+    ) -> TargetBranchState:
+        """Fetch target-branch changes relative to a candidate base SHA."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -489,6 +491,7 @@ class StalenessRefreshService:
         target_state_provider: TargetBranchStateProvider | None = None,
         policy: StalePolicy = DEFAULT_STALE_POLICY,
     ) -> None:
+        """Initialize the refresh service with persistence and policy hooks."""
         self._session = session
         self._provider = target_state_provider
         self._policy = policy
@@ -499,6 +502,7 @@ class StalenessRefreshService:
         *,
         target: TargetBranchState | None = None,
     ) -> StalenessRefreshResult:
+        """Refresh persisted stale reasons for one merge candidate."""
         candidate = await _load_candidate(self._session, candidate_id)
         if candidate is None:
             raise StalenessRefreshError(
