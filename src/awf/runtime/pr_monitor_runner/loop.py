@@ -104,6 +104,7 @@ async def _execute(
     # compose_teardown_ok fired.
     review_feedback = len(status.unresolved_review_comments)
     pending_review_feedback = _pending_review_feedback_count(status, state)
+    unresolved_reviews = pending_review_feedback
     _log.info(
         "monitor.action",
         workspace_id=workspace_id,
@@ -114,9 +115,10 @@ async def _execute(
         base_behind=status.base_behind_count,
         merge_state=(status.merge_state_status.value if status.merge_state_status else None),
         unresolved_threads=len(status.unresolved_inline_threads),
-        # compatibility alias retained for downstream consumers of
-        # historical monitor logs.
-        unresolved_reviews=review_feedback,
+        # Keep the historical field name, but report only review feedback
+        # still needing attention. The raw retained inbox count lives in
+        # ``review_feedback``.
+        unresolved_reviews=unresolved_reviews,
         review_feedback=review_feedback,
         pending_review_feedback=pending_review_feedback,
         blocking_reviews=len(status.blocking_reviews),
@@ -133,7 +135,7 @@ async def _execute(
             "base_behind": status.base_behind_count,
             "merge_state": (status.merge_state_status.value if status.merge_state_status else None),
             "unresolved_threads": len(status.unresolved_inline_threads),
-            "unresolved_reviews": review_feedback,
+            "unresolved_reviews": unresolved_reviews,
             "review_feedback": review_feedback,
             "pending_review_feedback": pending_review_feedback,
             "blocking_reviews": len(status.blocking_reviews),

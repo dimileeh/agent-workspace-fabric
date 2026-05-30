@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 
+from awf.common.token_patterns import compile_known_token_re, compile_token_assignment_re
+
+# Runtime logs intentionally use angle brackets; audit and first-run JSON use
+# ``awf.common.audit.REDACTION_MARKER`` as their separate stable contract.
 REDACTION_MARKER = "<redacted>"
 
 _URL_CREDENTIAL_RE = re.compile(r"(\bhttps?://)([^/\s:@]+(?::[^/\s@]+)?@)", re.IGNORECASE)
@@ -12,29 +16,10 @@ _AUTHORIZATION_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
-_TOKEN_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<key>"
-    r"(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API_TOKEN|AUTH_TOKEN|GITHUB_TOKEN)"
-    r"|GH_TOKEN"
-    r")\b"
-    r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
-    r"(?P=quote)",
-    re.IGNORECASE,
-)
-_KNOWN_TOKEN_RE = re.compile(
-    # Python's regex alternation is left-to-right: keep provider-specific
-    # ``sk-`` prefixes before the generic ``sk-`` catch-all.
-    r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{6,}|"
-    r"github_pat_[A-Za-z0-9_]{6,}|"
-    r"sk-ant-[A-Za-z0-9_-]{8,}|"
-    r"sk-proj-[A-Za-z0-9_-]{8,}|"
-    r"sk-[A-Za-z0-9_-]{8,}|"
-    r"AIza[A-Za-z0-9_-]{12,}"
-    r")(?![A-Za-z0-9_])"
-)
+_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
+# Runtime logs use the same explicit truncated-token policy as audit records:
+# prefer a visible false positive over leaking rejected credential fragments.
+_KNOWN_TOKEN_RE = compile_known_token_re(match_truncated_provider_tokens=True)
 
 
 def redact_secrets(text: str) -> str:

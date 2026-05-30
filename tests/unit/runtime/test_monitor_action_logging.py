@@ -109,7 +109,7 @@ class TestMonitorActionLogging:
         assert entry["unresolved_reviews"] == 0
         assert entry["review_feedback"] == 0
         assert entry["pending_review_feedback"] == 0
-        assert entry["unresolved_reviews"] == entry["review_feedback"]
+        assert entry["unresolved_reviews"] == entry["pending_review_feedback"]
         assert entry["blocking_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
         async with factory() as s:
@@ -548,6 +548,13 @@ class TestMonitorActionLogging:
 
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["AddressComments", "AddressComments", "ShortCircuitCompleted"]
+        first_address, second_address = _action_entries(captured)[:2]
+        assert first_address["review_feedback"] == 1
+        assert first_address["pending_review_feedback"] == 1
+        assert first_address["unresolved_reviews"] == 1
+        assert second_address["review_feedback"] == 1
+        assert second_address["pending_review_feedback"] == 0
+        assert second_address["unresolved_reviews"] == 0
         assert len(adapter.calls) == 2
         assert "Trigger review before merging" in adapter.calls[0]
         assert "new review feedback after AWF notified human" in adapter.calls[1]
@@ -954,7 +961,7 @@ class TestMonitorActionLogging:
         assert merge_action["blocking_reviews"] == 0
         assert address_action["review_feedback"] == 1
         assert address_action["pending_review_feedback"] == 1
-        assert address_action["unresolved_reviews"] == address_action["review_feedback"]
+        assert address_action["unresolved_reviews"] == address_action["pending_review_feedback"]
         changed_action = next(
             r
             for r in captured
@@ -963,7 +970,7 @@ class TestMonitorActionLogging:
         )
         assert changed_action["review_feedback"] == 1
         assert changed_action["pending_review_feedback"] == 1
-        assert changed_action["unresolved_reviews"] == changed_action["review_feedback"]
+        assert changed_action["unresolved_reviews"] == changed_action["pending_review_feedback"]
         assert changed_action["blocking_reviews"] == 0
 
 

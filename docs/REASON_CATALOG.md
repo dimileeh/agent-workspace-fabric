@@ -37,6 +37,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#artifact_oversized](#artifact_oversized)
 
+### AWF_SETUP_PLACEHOLDER
+**Problem:** `awf setup` is registered but the first-run setup implementation is not active yet.
+**Likely Cause:** This build contains the stable command surface before the setup checks are implemented.
+**Operator Fix:** Use the current service bootstrap path for local Core startup, then use project init for repository onboarding until the setup slice lands.
+**Related Command:** `awf service bootstrap`
+**Docs Link:** [docs/REASON_CATALOG.md#awf_setup_placeholder](#awf_setup_placeholder)
+
+### AWF_START_PLACEHOLDER
+**Problem:** `awf start` is registered but the local Core start wrapper is not active yet.
+**Likely Cause:** This build contains the stable command surface before the start wrapper is implemented.
+**Operator Fix:** Use the current service bootstrap path for local Core startup, then use project init for repository onboarding until the start slice lands.
+**Related Command:** `awf service bootstrap`
+**Docs Link:** [docs/REASON_CATALOG.md#awf_start_placeholder](#awf_start_placeholder)
+
 ### CALLBACK_DELIVERY_BUDGET_EXCEEDED
 **Problem:** AWF could not send an outbound callback because target validation consumed the full delivery timeout budget before the POST could start.
 **Likely Cause:** DNS resolution or target validation completed too slowly for the subscription's configured timeout.
@@ -86,6 +100,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#claude_auth_missing](#claude_auth_missing)
 
+### CLIENT_CONFIG_CONFLICT
+**Problem:** AWF found a client MCP configuration conflict.
+**Likely Cause:** A Claude or Codex MCP config already contains incompatible AWF server settings.
+**Operator Fix:** Review the proposed diff or existing client config, resolve the conflicting server entry, then rerun setup for that client.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#client_config_conflict](#client_config_conflict)
+
+### CLIENT_CONFIG_WRITE_FAILED
+**Problem:** AWF could not write a client MCP configuration file.
+**Likely Cause:** The client config path is missing, read-only, locked by another process, or failed atomic write.
+**Operator Fix:** Check file permissions and parent directories, preserve any backup, then rerun setup for the selected client.
+**Related Command:** `awf setup --client <client>`
+**Docs Link:** [docs/REASON_CATALOG.md#client_config_write_failed](#client_config_write_failed)
+
 ### CODEX_AUTH_MISSING
 **Problem:** No Codex auth signal was visible.
 **Likely Cause:** Missing Codex API credentials.
@@ -113,6 +141,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Let AWF run validation and rerun conformance against the persisted validation provenance and log stream references.
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#conformance_requires_awf_validation](#conformance_requires_awf_validation)
+
+### CREDENTIAL_BACKEND_UNAVAILABLE
+**Problem:** AWF could not access a usable credential storage backend.
+**Likely Cause:** The preferred keychain backend is unavailable and no safe fallback was selected.
+**Operator Fix:** Configure the OS keychain backend, provide env refs, or explicitly choose the approved plain-file fallback when that policy applies.
+**Related Command:** `awf setup --provider <provider>`
+**Docs Link:** [docs/REASON_CATALOG.md#credential_backend_unavailable](#credential_backend_unavailable)
+
+### CREDENTIAL_PLAIN_FILE_CONSENT_REQUIRED
+**Problem:** AWF refused to store a provider credential in a plain file without explicit consent.
+**Likely Cause:** Plain-file provider secrets are an opt-in fallback and cannot be selected silently.
+**Operator Fix:** Use keyring or env refs, or rerun setup with the explicit plain-file consent flag only on an approved headless Linux path.
+**Related Command:** `awf setup --allow-plain-secrets`
+**Docs Link:** [docs/REASON_CATALOG.md#credential_plain_file_consent_required](#credential_plain_file_consent_required)
+
+### CREDENTIAL_REF_INVALID
+**Problem:** AWF rejected a malformed provider credential reference.
+**Likely Cause:** The credential reference uses an unsupported scheme, unsafe path, or raw secret value.
+**Operator Fix:** Use a `keyring://`, `env://`, or approved `plain-file://` reference and keep raw token values out of config and JSON payloads.
+**Related Command:** `awf setup --provider <provider>`
+**Docs Link:** [docs/REASON_CATALOG.md#credential_ref_invalid](#credential_ref_invalid)
 
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
@@ -191,6 +240,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#git_fetch_base_failed](#git_fetch_base_failed)
 
+### HOST_SETUP_CONFIG_CORRUPT
+**Problem:** AWF could not read the host setup config.
+**Likely Cause:** The config file is malformed, has duplicate keys, uses unsupported schema versions, or cannot be interpreted safely.
+**Operator Fix:** Inspect `~/.awf/config.yml`, remove invalid YAML or unsupported fields, then rerun `awf setup`.
+**Related Command:** `awf setup`
+**Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_corrupt](#host_setup_config_corrupt)
+
+### HOST_SETUP_CONFIG_SECRET_VALUE
+**Problem:** AWF rejected a host setup config value that looks like a secret.
+**Likely Cause:** Host setup config stores references and metadata only, never raw provider credentials.
+**Operator Fix:** Replace raw credentials in `~/.awf/config.yml` with keyring, env, or approved plain-file refs, then rerun setup.
+**Related Command:** `awf setup --provider <provider>`
+**Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_secret_value](#host_setup_config_secret_value)
+
+### HOST_SETUP_CONFIG_WRITE_FAILED
+**Problem:** AWF could not write the host setup config.
+**Likely Cause:** The host config path or parent directory is missing, read-only, or refused atomic writes.
+**Operator Fix:** Verify the `~/.awf` directory exists, is writable by your user, and is not blocked by filesystem permissions, then rerun setup.
+**Related Command:** `awf setup`
+**Docs Link:** [docs/REASON_CATALOG.md#host_setup_config_write_failed](#host_setup_config_write_failed)
+
 ### IDEMPOTENCY_REPLAY_UNAVAILABLE
 **Problem:** AWF recognized an idempotency key as a replay key, but the original durable response could not be reconstructed.
 **Likely Cause:** The in-memory replay response was evicted and the durable workspace or callback subscription record is no longer available.
@@ -198,12 +268,54 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs`
 **Docs Link:** [docs/REASON_CATALOG.md#idempotency_replay_unavailable](#idempotency_replay_unavailable)
 
+### INSTALLER_CHECKSUM_MISMATCH
+**Problem:** The AWF installer refused an artifact whose checksum did not match the manifest.
+**Likely Cause:** The downloaded wheel or source artifact differs from the manifest-pinned sha256.
+**Operator Fix:** Do not run the downloaded artifact; retry against the canonical release manifest or choose a different pinned version.
+**Related Command:** `awf --version`
+**Docs Link:** [docs/REASON_CATALOG.md#installer_checksum_mismatch](#installer_checksum_mismatch)
+
+### INSTALLER_DEPENDENCY_MISSING
+**Problem:** The AWF installer is missing a required host dependency.
+**Likely Cause:** The selected install method depends on a host tool that is not available on PATH.
+**Operator Fix:** Install the reported dependency such as `curl`, `tar`, `sh`, `uv`, or `pipx`, then rerun the installer.
+**Related Command:** `awf --help`
+**Docs Link:** [docs/REASON_CATALOG.md#installer_dependency_missing](#installer_dependency_missing)
+
+### INSTALLER_METHOD_FAILED
+**Problem:** The AWF installer method failed before AWF was installed.
+**Likely Cause:** The selected uv, pipx, or manual install command exited non-zero.
+**Operator Fix:** Inspect the reported method output, fix package-manager or network issues, and retry the same pinned install method.
+**Related Command:** `uv tool install agent-workspace-fabric`
+**Docs Link:** [docs/REASON_CATALOG.md#installer_method_failed](#installer_method_failed)
+
+### INSTALLER_PATH_NOT_REACHABLE
+**Problem:** The AWF installer completed but the `awf` executable is not reachable on PATH.
+**Likely Cause:** The tool install location is not visible to the current shell environment.
+**Operator Fix:** Open a new shell or update PATH using the installer-provided shell hint, then verify with `awf --version`.
+**Related Command:** `awf --version`
+**Docs Link:** [docs/REASON_CATALOG.md#installer_path_not_reachable](#installer_path_not_reachable)
+
+### INSTALLER_UNSUPPORTED_PLATFORM
+**Problem:** The AWF installer does not support this operating system or architecture.
+**Likely Cause:** The installer detected an OS or CPU architecture outside the supported first release matrix.
+**Operator Fix:** Use a supported macOS/Linux platform, WSL where documented, or the manual Python tool install path for this environment.
+**Related Command:** `uv tool install agent-workspace-fabric`
+**Docs Link:** [docs/REASON_CATALOG.md#installer_unsupported_platform](#installer_unsupported_platform)
+
 ### INSUFFICIENT_DISK
 **Problem:** Free disk is below the configured AWF threshold.
 **Likely Cause:** Too many stopped containers, volumes, or large workspaces.
 **Operator Fix:** Free disk before creating new workspaces or intentionally lower AWF_MIN_FREE_DISK_BYTES.
 **Related Command:** `docker system prune`
 **Docs Link:** [docs/REASON_CATALOG.md#insufficient_disk](#insufficient_disk)
+
+### INTERACTIVE_INPUT_REQUIRED
+**Problem:** AWF setup needs interactive input that is unavailable in this run.
+**Likely Cause:** A non-interactive setup path reached a prompt that would collect required settings or credentials.
+**Operator Fix:** Run setup interactively, or provide safe env/keychain references for the requested provider before retrying non-interactive setup.
+**Related Command:** `awf setup --non-interactive`
+**Docs Link:** [docs/REASON_CATALOG.md#interactive_input_required](#interactive_input_required)
 
 ### INVALID_GITHUB_REPO
 **Problem:** A GitHub repository identifier or URL could not be parsed.
@@ -331,6 +443,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
 
+### PROVIDER_SETUP_AUTH_INVALID
+**Problem:** AWF could not authenticate one provider during setup.
+**Likely Cause:** The provider token, CLI login, or credential reference is missing, expired, or rejected.
+**Operator Fix:** Refresh that provider's credential or login state, then rerun setup for the provider; other providers may remain usable.
+**Related Command:** `awf setup --provider <provider>`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_setup_auth_invalid](#provider_setup_auth_invalid)
+
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.
 **Likely Cause:** The request did not include enough repository or PR information to identify the PR.
@@ -386,6 +505,62 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Fix the reported local configuration error and re-run doctor.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#service_status_collection_failed](#service_status_collection_failed)
+
+### SETUP_PROVIDER_UNKNOWN
+**Problem:** AWF setup was asked to configure an unsupported provider.
+**Likely Cause:** The provider selector does not match a provider known to this AWF build.
+**Operator Fix:** Use a supported provider name from setup help, or omit `--provider` to evaluate all configured providers.
+**Related Command:** `awf setup --help`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_provider_unknown](#setup_provider_unknown)
+
+### SETUP_READINESS_FAILED
+**Problem:** AWF setup found one or more machine readiness blockers.
+**Likely Cause:** The local machine does not currently satisfy the prerequisites for first-run AWF Core.
+**Operator Fix:** Fix the reported blockers such as Docker, Compose, Git, disk, port, or PATH issues, then rerun `awf setup --dry-run`.
+**Related Command:** `awf setup --dry-run`
+**Docs Link:** [docs/REASON_CATALOG.md#setup_readiness_failed](#setup_readiness_failed)
+
+### SOURCE_CHECKOUT_ASSETS_STALE
+**Problem:** AWF source checkout metadata is stale or no longer matches the current asset contract.
+**Likely Cause:** A previously recorded source checkout was moved, changed, or verified against an older asset list.
+**Operator Fix:** Re-run setup with the current checkout path so AWF can verify and record fresh source asset metadata.
+**Related Command:** `awf setup --source-checkout .`
+**Docs Link:** [docs/REASON_CATALOG.md#source_checkout_assets_stale](#source_checkout_assets_stale)
+
+### SOURCE_CHECKOUT_INVALID
+**Problem:** AWF could not verify the source checkout assets needed for first-run setup/start.
+**Likely Cause:** The selected path is missing required AWF source markers or contains unreadable assets.
+**Operator Fix:** Run from the AWF repository root or pass `--source-checkout` pointing at a complete checkout with pyproject, docs, migrations, and Docker assets.
+**Related Command:** `awf setup --source-checkout .`
+**Docs Link:** [docs/REASON_CATALOG.md#source_checkout_invalid](#source_checkout_invalid)
+
+### START_COMPOSE_ASSETS_MISSING
+**Problem:** AWF start could not locate the Compose or runtime assets needed to start local Core.
+**Likely Cause:** The selected package/source asset lane does not contain required bootstrap files.
+**Operator Fix:** Use a valid package install or pass a verified `--source-checkout` path that contains AWF Docker and Compose assets.
+**Related Command:** `awf start --source-checkout .`
+**Docs Link:** [docs/REASON_CATALOG.md#start_compose_assets_missing](#start_compose_assets_missing)
+
+### START_HEALTH_TIMEOUT
+**Problem:** AWF start timed out waiting for local Core health checks.
+**Likely Cause:** One or more local Core services did not become healthy before the start timeout.
+**Operator Fix:** Inspect API, worker, and Postgres logs, fix the failing service, then rerun start with an appropriate timeout.
+**Related Command:** `awf service status`
+**Docs Link:** [docs/REASON_CATALOG.md#start_health_timeout](#start_health_timeout)
+
+### START_MIGRATION_FAILED
+**Problem:** AWF start could not complete local Core database migrations.
+**Likely Cause:** The local control-plane database rejected or failed a required schema migration.
+**Operator Fix:** Inspect migration and Postgres logs, fix the database state, then retry `awf start` or use expert service commands for recovery.
+**Related Command:** `awf service logs --service api`
+**Docs Link:** [docs/REASON_CATALOG.md#start_migration_failed](#start_migration_failed)
+
+### START_PORT_CONFLICT
+**Problem:** AWF start found a local port conflict.
+**Likely Cause:** A local service is already bound to a port needed by AWF Core.
+**Operator Fix:** Stop the process using the reported port or configure a different AWF API/console port before retrying start.
+**Related Command:** `awf start`
+**Docs Link:** [docs/REASON_CATALOG.md#start_port_conflict](#start_port_conflict)
 
 ### STRANDED_WORKSPACES_PRESENT
 **Problem:** Stale or exited AWF workspace containers need operator review.
