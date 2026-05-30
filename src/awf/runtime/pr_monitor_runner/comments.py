@@ -10,6 +10,7 @@ from awf.adapters.base import AgentRunError
 from awf.common.command_evidence import append_command_evidence
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -59,11 +60,13 @@ async def _address_thread(
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
 
+    owned_paths = await _owned_paths_for_prompt(runner, workspace_id)
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
+        owned_paths=owned_paths,
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -120,11 +123,13 @@ async def _address_review_comment_result(
     compose_file: Path,
     state: MonitorState | None = None,
 ) -> VerdictResult:
+    owned_paths = await _owned_paths_for_prompt(runner, workspace_id)
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
+        owned_paths=owned_paths,
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -134,6 +139,20 @@ async def _address_review_comment_result(
         compose_file=compose_file,
         state=state,
     )
+
+
+async def _owned_paths_for_prompt(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+) -> list[str]:
+    session_factory = runner._deps.session_factory
+    try:
+        session_context = session_factory()
+    except TypeError:
+        return []
+    async with session_context as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        return list(workspace.owned_paths) if workspace is not None else []
 
 
 async def _invoke_cli_for_verdict(

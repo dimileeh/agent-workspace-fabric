@@ -369,11 +369,15 @@ def requires_protected_file_diff(path: str) -> bool:
     return normalized == "pyproject.toml" or _is_workflow_yaml_path(normalized)
 
 
-def diff_classified_protected_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
+def diff_classified_protected_paths(
+    changed_paths: Sequence[str],
+    *,
+    owned_paths: Sequence[str] = (),
+) -> tuple[str, ...]:
     paths: list[str] = []
     for raw_path in changed_paths:
         path = _normalize_path(raw_path)
-        if path and requires_protected_file_diff(path):
+        if path and requires_protected_file_diff(path) and not _is_owned(path, owned_paths):
             paths.append(path)
     return tuple(dict.fromkeys(paths))
 
@@ -422,7 +426,7 @@ def _is_workflow_yaml_path(path: str) -> bool:
     return path.startswith(_WORKFLOW_PREFIX) and path.endswith((".yml", ".yaml"))
 
 
-def _is_owned(path: str, owned_paths: list[str] | tuple[str, ...]) -> bool:
+def _is_owned(path: str, owned_paths: Sequence[str]) -> bool:
     return any(owned_paths_overlap(path, owned_path) for owned_path in owned_paths)
 
 

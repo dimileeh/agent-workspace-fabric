@@ -197,6 +197,10 @@ def _defer_reason_state_key(thread_id: str) -> str:
     return f"__defer_reason__:{thread_id}"
 
 
+def _needs_human_reason_state_key(item_id: str) -> str:
+    return f"__needs_human_reason__:{item_id}"
+
+
 def _review_comment_body_hash(comment: ReviewComment) -> str:
     return pr_feedback_body_hash(_review_comment_resolution_body(comment))
 
@@ -217,6 +221,7 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(
@@ -391,6 +396,8 @@ def _stale_pending_check_warning_key(
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
     if status.blocking_reviews:
         return "a merge-blocking changes-requested review remains unresolved"
+    if reason := _first_needs_human_reason(status, state):
+        return reason
     bot_items, human_deferred = _collect_defer_items(status, state)
     if human_deferred:
         return "human review feedback was deferred by the agent and remains unresolved"
@@ -405,6 +412,17 @@ def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
             f"GitHub reports merge state {status.merge_state_status.value}; "
             "required protection or review hooks need a human"
         )
+    return None
+
+
+def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | None:
+    for item_id in [t.thread_id for t in status.unresolved_inline_threads] + [
+        c.comment_id for c in status.unresolved_review_comments
+    ]:
+        if state.threads_addressed_ids.get(item_id) == "needs_human" and (
+            reason := state.threads_addressed_ids.get(_needs_human_reason_state_key(item_id))
+        ):
+            return reason
     return None
 
 
@@ -1250,7 +1268,9 @@ def _collect_defer_items(
                 "line": t.line,
                 "body": t.body_excerpt,
                 "verdict": verdict,
-                "agent_verdict_reason": None,
+                "agent_verdict_reason": state.threads_addressed_ids.get(
+                    _needs_human_reason_state_key(t.thread_id)
+                ),
             }
         )
     for c in status.unresolved_review_comments:
@@ -1267,7 +1287,9 @@ def _collect_defer_items(
                 "line": None,
                 "body": c.body_excerpt,
                 "verdict": verdict,
-                "agent_verdict_reason": None,
+                "agent_verdict_reason": state.threads_addressed_ids.get(
+                    _needs_human_reason_state_key(c.comment_id)
+                ),
             }
         )
     return bot_items, human_items

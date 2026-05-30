@@ -18,6 +18,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -41,6 +42,11 @@ _log = get_logger(__name__)
 
 # Constants
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+_WORKFLOW_FILE_PATH_RE = re.compile(r"\.github/workflows/[^\s`'\"()]+")
+_MISSING_WORKFLOW_SCOPE_RE = re.compile(
+    r"without\s+`?workflows?`?\s+(?:scope|permission)",
+    re.IGNORECASE,
+)
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
@@ -91,6 +97,11 @@ class _GitPushResult:
         return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 
     @property
+    def workflow_scope_required(self) -> bool:
+        """Return whether GitHub rejected a workflow-file push for missing scope."""
+        return self.failed and self.reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON
+
+    @property
     def terminal_monitor_failure(self: Any) -> bool:
         """Return whether the push failure should end monitor recovery."""
         return self.failed and (
@@ -136,6 +147,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     }:
         return "pre_push_validation_failed"
+    if push_result.workflow_scope_required:
+        return "github_workflow_scope_required"
     if push_result.protected_scope_diff_unavailable:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:
@@ -441,6 +454,28 @@ async def _git_push_result(
             stderr=r.stderr,
         )
 
+    workflow_scope_block = _workflow_scope_push_block(r.stderr or r.stdout)
+    if workflow_scope_block is not None:
+        message, paths = workflow_scope_block
+        _log.warning(
+            "monitor.push_failed_missing_workflow_scope",
+            paths=list(paths),
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=r.returncode,
+            stdout=r.stdout,
+            stderr=message,
+            reason_code=_GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+            details={
+                "phase": "git_push",
+                "permission": "workflow_scope",
+                "paths": list(paths),
+                "pushed": False,
+            },
+        )
+
     stderr_lower = (r.stderr or "").lower()
     is_rejection = (
         "[rejected]" in stderr_lower
@@ -511,6 +546,27 @@ async def _git_push_result(
         stderr=r.stderr,
         recovered_by_resync=True,
     )
+
+
+def _workflow_scope_push_block(output: str) -> tuple[str, tuple[str, ...]] | None:
+    normalized = " ".join(output.split())
+    lower = normalized.lower()
+    if "refusing to allow" not in lower or "workflow" not in lower:
+        return None
+    if _MISSING_WORKFLOW_SCOPE_RE.search(normalized) is None:
+        return None
+    paths = tuple(
+        dict.fromkeys(
+            match.group(0).rstrip(".,;:") for match in _WORKFLOW_FILE_PATH_RE.finditer(normalized)
+        )
+    )
+    path_suffix = f" for {', '.join(paths)}" if paths else ""
+    message = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        f"`workflow` scope{path_suffix}. Grant a GitHub token with workflow "
+        "push permission, then rerun the monitor repair."
+    )
+    return message, paths
 
 
 async def _run_sync_base(

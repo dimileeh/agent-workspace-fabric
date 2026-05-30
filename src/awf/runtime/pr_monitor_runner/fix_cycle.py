@@ -36,11 +36,13 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _AUDIT_GIT_PUSH_EVENT,
     _GITHUB_TRANSIENT_RETRY_REASON,
+    _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
     _mark_review_comment_addressed,
+    _needs_human_reason_state_key,
     _redact_and_truncate_github_error,
     _review_comment_needs_attention,
 )
@@ -342,8 +344,15 @@ async def _run_fix_cycle(
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
-        for item_id in publish_dependent_ids:
-            _clear_addressed_state_by_id(state, item_id)
+        if reason_code == _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON:
+            _mark_publish_dependent_items_needs_human(
+                state,
+                publish_dependent_ids,
+                push_result.error_message or reason_code,
+            )
+        else:
+            for item_id in publish_dependent_ids:
+                _clear_addressed_state_by_id(state, item_id)
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_GIT_PUSH_EVENT,
@@ -509,6 +518,16 @@ async def _run_fix_cycle(
                 },
             )
     return cast(_GitPushResult, push_result)
+
+
+def _mark_publish_dependent_items_needs_human(
+    state: MonitorState,
+    item_ids: list[str],
+    reason: str,
+) -> None:
+    for item_id in item_ids:
+        state.mark_addressed(item_id, "needs_human")
+        state.mark_addressed(_needs_human_reason_state_key(item_id), reason)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

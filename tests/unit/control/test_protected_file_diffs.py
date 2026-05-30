@@ -141,6 +141,29 @@ async def test_protected_file_diffs_for_committed_paths_loads_only_classified_pa
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_protected_file_diffs_for_committed_paths_skips_owned_protected_paths(
+    tmp_path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo"\n')
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout='[project]\nname = "demo2"\n')
+
+    diffs = await protected_file_diffs_for_committed_paths(
+        runner,
+        worktree_path=tmp_path,
+        base_ref="origin/main",
+        changed_paths=[".github/workflows/publish.yml", "pyproject.toml"],
+        owned_paths=[".github/workflows/publish.yml"],
+    )
+
+    assert set(diffs) == {"pyproject.toml"}
+    assert all(".github/workflows/publish.yml" not in call.args for call in runner.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_git_show_text_returns_none_for_missing_path(
     tmp_path,
 ) -> None:

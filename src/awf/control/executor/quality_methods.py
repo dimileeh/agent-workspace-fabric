@@ -198,6 +198,7 @@ async def _verify_recovered_post_agent_commit(
         worktree_path=worktree_path,
         base_ref=base_commit,
         changed_paths=changed_paths,
+        owned_paths=owned_paths,
     )
     violations = find_protected_quality_gate_changes(
         changed_paths=changed_paths,
@@ -344,6 +345,7 @@ async def _fail_if_protected_quality_gate_committed_output(
         worktree_path=worktree_path,
         base_ref=base_commit,
         changed_paths=changed_paths,
+        owned_paths=owned_paths,
     )
     violations = find_protected_quality_gate_changes(
         changed_paths=changed_paths,
@@ -935,6 +937,7 @@ async def _run_post_agent_semantic_precommit_repair(
             worktree_path=worktree_path,
             base_ref=base_commit,
             changed_paths=repair_staged_paths,
+            owned_paths=list(ws.owned_paths),
         ),
     )
     if violations:

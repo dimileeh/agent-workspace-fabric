@@ -117,6 +117,26 @@ class TestAddressThread:
         assert "python" not in prompt.lower()
 
     @pytest.mark.unit
+    def test_thread_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        thread = ReviewThread(
+            thread_id="T",
+            path=".github/workflows/publish.yml",
+            line=7,
+            body_excerpt="fix the publish workflow",
+        )
+        prompt = address_thread_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            thread=thread,
+            owned_paths=[".github/workflows/publish.yml"],
+        )
+
+        assert "Declared owned_paths:" in prompt
+        assert "  - .github/workflows/publish.yml" in prompt
+        assert "owned protected paths are editable" in prompt
+        assert "unowned protected file" in prompt
+
+    @pytest.mark.unit
     def test_handles_missing_file_anchor_gracefully(self) -> None:
         thread = ReviewThread(thread_id="T", path=None, line=None, body_excerpt="x")
         prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
@@ -331,6 +351,21 @@ class TestAddressReviewComment:
         assert "owned paths" in prompt
         assert "protected file approval required" in prompt
         assert "python" not in prompt.lower()
+
+    @pytest.mark.unit
+    def test_review_comment_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        c = ReviewComment(comment_id="C", body_excerpt="update publish workflow")
+        prompt = address_review_comment_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            comment=c,
+            owned_paths=[".github/workflows/publish.yml"],
+        )
+
+        assert "Declared owned_paths:" in prompt
+        assert "  - .github/workflows/publish.yml" in prompt
+        assert "owned protected paths are editable" in prompt
+        assert "unowned protected file" in prompt
 
     @pytest.mark.unit
     def test_review_comment_adversarial_body_is_quoted_evidence_not_policy(self) -> None:
@@ -604,6 +639,27 @@ class TestFixCiPrompt:
         assert "Combined line+branch coverage 98.87% is below required 99.00%" in prompt
         assert "source_kind: github_check_failure_summary" in prompt
         assert "source_kind: github_check_log" in prompt
+
+    @pytest.mark.unit
+    def test_ci_prompt_renders_owned_protected_paths_as_editable(self) -> None:
+        failures = (
+            CheckFailure(
+                name="publish",
+                conclusion="FAILURE",
+                log_excerpt="workflow lint failed",
+            ),
+        )
+
+        prompt = fix_ci_prompt(
+            pr_number=238,
+            repo_slug="dimileeh/awf",
+            failures=failures,
+            owned_paths=[".github/workflows/publish.yml"],
+        )
+
+        assert "Declared owned_paths:" in prompt
+        assert "  - .github/workflows/publish.yml" in prompt
+        assert "owned protected paths are editable" in prompt
 
     @pytest.mark.unit
     def test_command_only_ci_evidence_is_not_labeled_as_focused_repro(self) -> None:
