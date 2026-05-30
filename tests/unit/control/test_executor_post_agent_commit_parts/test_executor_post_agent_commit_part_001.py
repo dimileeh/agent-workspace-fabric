@@ -708,6 +708,9 @@ async def test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_
         stdout=_precommit_autofixable_ruff_check_output("src/awf/mcp/server.py"),
     )  # semantic hook, but every diagnostic is tool-marked fixable
     fake.queue_result(returncode=0)  # ruff check --fix src/awf/mcp/server.py
+    fake.queue_result(
+        returncode=0
+    )  # ruff format src/awf/mcp/server.py (union of format_repair + repair paths)
     fake.queue_result(returncode=0)  # git add -- original staged paths
     fake.queue_result(returncode=0)  # git commit retry ok
     fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
@@ -740,6 +743,16 @@ async def test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_
     assert "src/awf/mcp/server.py" in ruff_fix_calls[0].args
     assert ruff_fix_calls[0].cwd is not None
     assert ruff_fix_calls[0].cwd.endswith(ws_id)
+
+    ruff_format_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "format" in call.args and "--check" not in call.args
+    ]
+    assert len(ruff_format_calls) == 1
+    assert "src/awf/mcp/server.py" in ruff_format_calls[0].args
+    assert ruff_format_calls[0].cwd is not None
+    assert ruff_format_calls[0].cwd.endswith(ws_id)
 
     agent_repair_calls = [
         call
