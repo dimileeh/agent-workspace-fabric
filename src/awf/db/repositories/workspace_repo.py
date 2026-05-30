@@ -435,6 +435,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathOverlap]:
+        """Return active inter-workspace owned-path overlaps for merge safety."""
         requested_paths = list(interworkspace_owned_paths(owned_paths))
         if not requested_paths:
             return []

@@ -100,6 +100,7 @@ async def test_overlap_graph_builds_advisory_edges_for_same_repo_base(
 async def test_overlap_graph_ignores_internal_plan_artifact_only_edges(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Plan-artifact-only path matches do not create overlap graph edges."""
     from awf.service.overlap_graph import build_workspace_overlap_graph
 
     now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
@@ -132,6 +133,7 @@ async def test_overlap_graph_ignores_internal_plan_artifact_only_edges(
 async def test_overlap_graph_ignores_plan_artifact_matches_but_keeps_real_edge(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Plan artifact matches are dropped while real overlap edges remain."""
     from awf.service.overlap_graph import build_workspace_overlap_graph
 
     now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)

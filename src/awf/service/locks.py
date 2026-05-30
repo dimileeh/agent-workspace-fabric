@@ -265,6 +265,7 @@ def _workspace_overlap_risks_by_id(
     workspaces: tuple[_OverlapWorkspace, ...],
     overlap_candidates: tuple[_OverlapWorkspace, ...],
 ) -> dict[str, tuple[WorkspaceLockOverlapRisk, ...]]:
+    """Group advisory overlap risks by workspace using inter-workspace paths."""
     candidates_by_repo_base: dict[
         tuple[str, str],
         list[tuple[_OverlapWorkspace, tuple[str, ...]]],

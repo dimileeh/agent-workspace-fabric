@@ -237,6 +237,7 @@ def _workspace_overlap_path_matches(
     left: _GraphWorkspace,
     right: _GraphWorkspace,
 ) -> _WorkspaceOverlapPathMatches:
+    """Build bounded path-match details for an advisory workspace edge."""
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
     left_paths = sorted(dict.fromkeys(interworkspace_owned_paths(left.owned_paths)))

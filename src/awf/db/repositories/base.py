@@ -1271,6 +1271,7 @@ def owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | N
 
 
 def _normalize_owned_path(path: str) -> str:
+    """Normalize repository owned-path entries through the shared classifier."""
     return normalize_owned_path(path)
 
 

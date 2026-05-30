@@ -278,6 +278,7 @@ async def test_get_locks_exposes_owned_path_overlap_risks(
 async def test_get_locks_ignores_internal_plan_artifact_only_overlap_risks(
     client: AsyncClient,
 ) -> None:
+    """Plan-artifact-only path matches stay out of lock overlap risks."""
     existing_id = await _create_lock_workspace(
         client,
         title="Existing source work",

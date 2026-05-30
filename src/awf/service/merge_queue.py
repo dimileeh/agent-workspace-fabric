@@ -759,6 +759,7 @@ def _candidate_blocks_target(
 
 
 def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
+    """Return candidate owned paths that can block other merge candidates."""
     paths = tuple(path for path in candidate.workspace.owned_paths if path)
     if paths:
         return interworkspace_owned_paths(paths)

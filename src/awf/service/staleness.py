@@ -396,6 +396,7 @@ def _path_matches(path: str, pattern: str) -> bool:
 
 
 def _is_plan_artifact_path(path: str) -> bool:
+    """Return true when a changed path is an AWF internal plan artifact."""
     return is_internal_plan_artifact_owned_path(path)
 
 

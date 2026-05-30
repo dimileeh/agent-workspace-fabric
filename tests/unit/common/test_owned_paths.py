@@ -21,6 +21,7 @@ from awf.common.owned_paths import (
     ],
 )
 def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
+    """Owned path normalization removes shell-ish path noise."""
     assert normalize_owned_path(raw_path) == normalized
 
 
@@ -35,6 +36,7 @@ def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
     ],
 )
 def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
+    """AWF internal plan artifact paths are classified as nonblocking."""
     assert is_internal_plan_artifact_owned_path(path) is True
 
 
@@ -49,11 +51,13 @@ def test_internal_plan_artifact_owned_paths_are_classified(path: str) -> None:
     ],
 )
 def test_real_docs_and_repo_plan_paths_are_not_internal_plan_artifacts(path: str) -> None:
+    """Nearby repository documentation paths remain ordinary owned paths."""
     assert is_internal_plan_artifact_owned_path(path) is False
 
 
 @pytest.mark.unit
 def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> None:
+    """Inter-workspace filtering drops only internal plan artifact paths."""
     assert interworkspace_owned_paths(
         [
             "",

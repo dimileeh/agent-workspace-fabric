@@ -356,12 +356,14 @@ async def test_lock_helpers_short_circuit_empty_overlap_inputs() -> None:
 def test_overlap_risks_prefilters_candidate_owned_paths_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Candidate owned paths are filtered once before pairwise risk checks."""
     from awf.common.owned_paths import interworkspace_owned_paths as real_interworkspace_owned_paths
     from awf.service import locks as locks_service
 
     calls_by_paths: dict[tuple[str, ...], int] = {}
 
     def counting_interworkspace_owned_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+        """Count filter invocations while preserving real filtering behavior."""
         calls_by_paths[paths] = calls_by_paths.get(paths, 0) + 1
         return real_interworkspace_owned_paths(paths)
 

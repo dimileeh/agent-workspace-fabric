@@ -114,6 +114,8 @@ def _recorded_workspace_row(
 
 
 class TestOwnedPathOverlapLookup:
+    """Owned-path overlap lookup scheduling and repository behavior tests."""
+
     @pytest.mark.unit
     async def test_scheduler_orders_by_class_priority_then_score_then_age(
         self,
@@ -938,6 +940,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Plan-artifact-only matches are excluded from repository overlaps."""
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(
             session,
@@ -958,6 +961,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Real source overlaps are preserved when plan artifacts also match."""
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,
@@ -984,6 +988,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
+        """Repository documentation paths outside AWF internals still overlap."""
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,

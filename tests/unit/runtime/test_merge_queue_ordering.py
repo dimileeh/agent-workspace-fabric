@@ -61,6 +61,7 @@ async def _seed_monitoring_candidate(
     status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
     owned_paths: list[str] | None = None,
 ) -> tuple[str, str, str]:
+    """Seed a merge-ready candidate with optional owned paths."""
     resolved_owned_paths = ["src/shared/**"] if owned_paths is None else list(owned_paths)
     async with factory() as session:
         workspace_repo = WorkspaceRepository(session)
@@ -137,6 +138,7 @@ async def _seed_monitoring_candidate(
 async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Plan-artifact-only overlaps do not block merge queue progression."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     await _seed_monitoring_candidate(
         factory,
@@ -166,6 +168,7 @@ async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
 async def test_plan_artifact_overlap_does_not_hide_real_merge_queue_overlap(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Real source overlaps still block when plan artifacts also overlap."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
         factory,
@@ -195,6 +198,7 @@ async def test_plan_artifact_overlap_does_not_hide_real_merge_queue_overlap(
 async def test_candidate_with_only_plan_artifact_path_does_not_block_merge_queue(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Candidates owning only internal plan artifacts block no merge target."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     await _seed_monitoring_candidate(
         factory,
@@ -224,6 +228,7 @@ async def test_candidate_with_only_plan_artifact_path_does_not_block_merge_queue
 async def test_candidate_with_explicit_empty_owned_paths_does_not_use_default(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Explicit empty owned paths do not fall back to the source default."""
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     await _seed_monitoring_candidate(
         factory,
