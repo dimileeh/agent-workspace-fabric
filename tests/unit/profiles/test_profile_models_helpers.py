@@ -32,6 +32,7 @@ def test_url_healthcheck_target_redacts_userinfo() -> None:
     check = ProfileHealthCheck(name="api", url="http://user:secret@api:8080/health")
 
     assert check.target() == "http://api:8080/health"
+    assert check.display_command() == "GET http://api:8080/health expected 200"
 
 
 @pytest.mark.unit
