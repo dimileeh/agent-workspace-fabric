@@ -701,43 +701,42 @@ async def _run_post_agent_autofixable_precommit_repair(
         )
 
     format_paths = sorted(set(format_repair_paths) | set(repair_paths))
-    if format_paths:
-        format_result = await self._runner.run(
-            [
-                "uv",
-                "run",
-                "--python",
-                "3.12",
-                "--extra",
-                "dev",
-                "ruff",
-                "format",
-                "--",
-                *format_paths,
-            ],
-            cwd=str(worktree_path),
+    format_result = await self._runner.run(
+        [
+            "uv",
+            "run",
+            "--python",
+            "3.12",
+            "--extra",
+            "dev",
+            "ruff",
+            "format",
+            "--",
+            *format_paths,
+        ],
+        cwd=str(worktree_path),
+    )
+    if not format_result.ok:
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=repair_paths,
+            restaged_paths=[],
+            formatter_paths=format_paths,
+            normalizer_paths=classification.normalizer_repair_files,
+            failed_hooks=classification.failed_hooks,
+            repair_strategy="deterministic_autofix",
+            retry_outcome="error",
+            reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
         )
-        if not format_result.ok:
-            await self._record_post_agent_commit_format_repair(
-                workspace_id=workspace_id,
-                repaired_paths=repair_paths,
-                restaged_paths=[],
-                formatter_paths=format_paths,
-                normalizer_paths=classification.normalizer_repair_files,
-                failed_hooks=classification.failed_hooks,
-                repair_strategy="deterministic_autofix",
-                retry_outcome="error",
-                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
-            )
-            raise _PostAgentCommitStepError(
-                stage="ruff format",
-                result=format_result,
-                classification=classification,
-                format_repair_attempted=True,
-                precommit_repair_attempted=True,
-                repair_strategy="deterministic_autofix",
-                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
-            )
+        raise _PostAgentCommitStepError(
+            stage="ruff format",
+            result=format_result,
+            classification=classification,
+            format_repair_attempted=True,
+            precommit_repair_attempted=True,
+            repair_strategy="deterministic_autofix",
+            reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+        )
 
     restage_paths = list(staged_paths)
     add_again = await git_in_worktree(["add", "--", *restage_paths])
