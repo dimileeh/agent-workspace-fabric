@@ -583,7 +583,7 @@ class TestClaudeCodeAdapter:
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
         assert "--model" in args and "sonnet" in args
-        assert "--effort" in args and "max" in args
+        assert "--effort" in args and "xhigh" in args
 
     @pytest.mark.unit
     async def test_auth_failure_gets_structured_reason_code(self) -> None:
@@ -655,8 +655,17 @@ class TestClaudeCodeAdapter:
         assert provider_recovery["model"] == "gpt-5.3-codex-spark"
 
     @pytest.mark.unit
-    def test_effort_mapper_preserves_non_top_effort_values(self) -> None:
+    def test_effort_mapper_propagates_effort_unchanged_to_claude_cli(self) -> None:
+        # The claude CLI accepts low/medium/high/xhigh/max natively, so AWF
+        # propagates the requested effort as-is. xhigh must NOT collapse to max.
         assert _claude_effort_for_awf_effort("low") == "low"
+        assert _claude_effort_for_awf_effort("medium") == "medium"
+        assert _claude_effort_for_awf_effort("high") == "high"
+        assert _claude_effort_for_awf_effort("xhigh") == "xhigh"
+        assert _claude_effort_for_awf_effort("max") == "max"
+        # Mixed-case input is normalized to lowercase, never remapped.
+        assert _claude_effort_for_awf_effort("XHigh") == "xhigh"
+        assert _claude_effort_for_awf_effort("MAX") == "max"
 
 
 class TestGeminiAdapter:
@@ -994,7 +1003,7 @@ class TestCentralDefaults:
 
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-8"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"

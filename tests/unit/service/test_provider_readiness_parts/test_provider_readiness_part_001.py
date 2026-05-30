@@ -249,7 +249,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
 
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
-        ("claude_code", "claude_code", "claude-opus-4-7", "ok"),
+        ("claude_code", "claude_code", "claude-opus-4-8", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
     ]
