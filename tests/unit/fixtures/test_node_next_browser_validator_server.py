@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -23,6 +24,7 @@ _FIXTURE_ROOT = (
     / "node_next_browser_app"
 )
 _VALIDATOR_SERVER = _FIXTURE_ROOT / "browser" / "validator-server.mjs"
+_BROWSER_DOCKERFILE = _FIXTURE_ROOT / "Dockerfile.playwright"
 _HEALTHCHECK_PROCESS_TIMEOUT_SECONDS = 10
 _VALIDATOR_START_ATTEMPTS = 10
 
@@ -97,7 +99,7 @@ def _start_validator_server(
 
 
 def _write_playwright_stub(node_modules: Path) -> Path:
-    package_dir = node_modules / "playwright-core"
+    package_dir = node_modules / "playwright"
     package_dir.mkdir(parents=True)
     (package_dir / "package.json").write_text(
         '{"type":"module","main":"index.js"}',
@@ -128,8 +130,15 @@ def _write_playwright_stub(node_modules: Path) -> Path:
             }
 
             export const chromium = {
-              async launch() {
+              async launch(options = {}) {
                 appendFileSync(process.env.PLAYWRIGHT_STUB_LOG, "launch\\n", "utf8");
+                if (process.env.PLAYWRIGHT_STUB_OPTIONS_LOG) {
+                  appendFileSync(
+                    process.env.PLAYWRIGHT_STUB_OPTIONS_LOG,
+                    `${JSON.stringify(options)}\\n`,
+                    "utf8",
+                  );
+                }
                 await delay(100);
                 return {
                   isConnected() {
@@ -155,6 +164,38 @@ def _write_playwright_stub(node_modules: Path) -> Path:
         encoding="utf-8",
     )
     return package_dir
+
+
+def test_browser_sidecar_dockerfile_uses_bundled_playwright_browser_contract() -> None:
+    """The Docker smoke fixture should install a matching browser without MCR images."""
+    dockerfile = _BROWSER_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "mcr.microsoft.com/playwright" not in dockerfile
+    assert "FROM node:22-bookworm-slim" in dockerfile
+    assert "playwright@1.49.1" in dockerfile
+    assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install" in dockerfile
+    assert "npm --prefix /app/browser exec -- playwright install --with-deps chromium" in dockerfile
+    assert "ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
+    assert "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" not in dockerfile
+
+
+def test_browser_sidecar_dockerfile_runs_validator_as_non_root_user() -> None:
+    """The browser validator fixture should not run as root."""
+    dockerfile = _BROWSER_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "useradd --create-home --uid 10001 awf" in dockerfile
+    assert "mkdir -p /home/awf/.cache /home/awf/.config" in dockerfile
+    assert "chown -R awf:awf /app /home/awf /ms-playwright" in dockerfile
+    assert "chown -R awf:awf /app" in dockerfile
+    assert "COPY --chown=awf:awf browser/validator-server.mjs" in dockerfile
+    assert "COPY --chown=awf:awf scripts/container-healthcheck.mjs" in dockerfile
+    assert "ENV HOME=/home/awf" in dockerfile
+    assert "ENV XDG_CACHE_HOME=/home/awf/.cache" in dockerfile
+    assert "ENV XDG_CONFIG_HOME=/home/awf/.config" in dockerfile
+    assert "USER awf" in dockerfile
+    assert dockerfile.index("USER awf") < dockerfile.index(
+        'CMD ["node", "/app/browser/validator-server.mjs"]'
+    )
 
 
 class _HangingHealthHandler(BaseHTTPRequestHandler):
@@ -293,5 +334,42 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
 
         assert responses == ["browser validated awf-node-profile-fixture\n"] * 6
         assert launch_log.read_text(encoding="utf-8").splitlines() == ["launch"]
+    finally:
+        _terminate_process(process)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_validator_server_uses_configured_chromium_executable_path(
+    tmp_path: Path,
+) -> None:
+    """The validator still supports an explicit Chromium executable override."""
+    launch_log = tmp_path / "launches.log"
+    options_log = tmp_path / "launch-options.log"
+    browser_dir = tmp_path / "browser"
+    browser_dir.mkdir()
+    validator_server = browser_dir / "validator-server.mjs"
+    validator_server.write_text(_VALIDATOR_SERVER.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_playwright_stub(tmp_path / "node_modules")
+
+    env = {
+        **os.environ,
+        "APP_BASE_URL": "http://fixture-app.invalid",
+        "AWF_VALIDATOR_HOST": "127.0.0.1",
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": "/usr/bin/chromium",
+        "PLAYWRIGHT_STUB_LOG": str(launch_log),
+        "PLAYWRIGHT_STUB_OPTIONS_LOG": str(options_log),
+    }
+    port, process = _start_validator_server(validator_server, env)
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/validate", timeout=10) as response:
+            assert response.read().decode("utf-8") == (
+                "browser validated awf-node-profile-fixture\n"
+            )
+
+        launch_options = json.loads(options_log.read_text(encoding="utf-8"))
+        assert launch_options["executablePath"] == "/usr/bin/chromium"
+        assert launch_options["headless"] is True
+        assert "--no-sandbox" in launch_options["args"]
     finally:
         _terminate_process(process)
