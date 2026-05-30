@@ -20,6 +20,7 @@ def _c(*names_envs: tuple[str, dict[str, str]]) -> list[dict]:
 
 @pytest.mark.unit
 def test_payload_wins_over_file(tmp_path: Path) -> None:
+    """Payload environment value takes precedence over .env file value."""
     env_file = tmp_path / ".env"
     env_file.write_text("DB_HOST=localhost\nDB_PORT=5432\n")
     companions = _c(("aira-agent", {"DB_HOST": "postgres:5432"}))
@@ -34,6 +35,7 @@ def test_payload_wins_over_file(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_file_fills_gaps(tmp_path: Path) -> None:
+    """.env file values fill in keys missing from the payload."""
     env_file = tmp_path / ".env"
     env_file.write_text("A=1\nB=2\n")
     companions = _c(("app", {"A": "from-payload"}))
@@ -53,6 +55,7 @@ def test_file_fills_gaps(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_exclude_drops_keys(tmp_path: Path) -> None:
+    """Excluded keys are removed from the merged environment."""
     env_file = tmp_path / ".env"
     env_file.write_text("KEEP=this\nDROP=that\n")
     companions = _c(("app", {}))
@@ -66,6 +69,7 @@ def test_exclude_drops_keys(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_exclude_applies_after_merge(tmp_path: Path) -> None:
+    """Exclusion removes keys after merge, so payload values survive exclusion of overlapping file keys."""
     env_file = tmp_path / ".env"
     env_file.write_text("OVERRIDE=val\nDROP=dropped\n")
     companions = _c(("app", {"OVERRIDE": "from-payload"}))
@@ -84,6 +88,7 @@ def test_exclude_applies_after_merge(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_missing_companion_raises(tmp_path: Path) -> None:
+    """Referencing a companion name not in the payload raises ValueError."""
     env_file = tmp_path / ".env"
     env_file.write_text("A=1\n")
     companions = _c(("other-app", {}))
@@ -102,6 +107,7 @@ def test_missing_companion_raises(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_missing_env_file_raises() -> None:
+    """A missing .env file path raises FileNotFoundError."""
     companions = _c(("app", {}))
     with pytest.raises(FileNotFoundError, match="--companion-env-from"):
         merge_companion_env(
@@ -113,6 +119,7 @@ def test_missing_env_file_raises() -> None:
 
 @pytest.mark.unit
 def test_unreadable_env_file_raises(tmp_path: Path) -> None:
+    """An unreadable .env file (permission denied) raises PermissionError."""
     env_file = tmp_path / ".env"
     env_file.write_text("KEY=val\n")
     env_file.chmod(0o000)
@@ -137,6 +144,7 @@ def test_unreadable_env_file_raises(tmp_path: Path) -> None:
 def test_bad_key_name_warned_and_skipped(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Keys that fail validation (e.g. starting with digit) are skipped with a warning."""
     env_file = tmp_path / ".env"
     env_file.write_text("GOOD_KEY=val\n1bad-start=num\n")
     companions = _c(("app", {}))
@@ -160,6 +168,7 @@ def test_bad_key_name_warned_and_skipped(
 def test_interpolation_value_warned_and_skipped(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Docker Compose interpolation values ($VAR / ${VAR}) are skipped with a warning."""
     env_file = tmp_path / ".env"
     env_file.write_text("GOOD=val\nINTERP=${OTHER_VAR}\n")
     companions = _c(("app", {}))
@@ -180,6 +189,7 @@ def test_interpolation_value_warned_and_skipped(
 
 @pytest.mark.unit
 def test_warning_never_leaks_value(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Warnings about keys never include the actual secret value."""
     env_file = tmp_path / ".env"
     env_file.write_text("SECRET_KEY=super-secret-value-12345\n")
     companions = _c(("app", {}))
@@ -200,6 +210,7 @@ def test_warning_never_leaks_value(tmp_path: Path, capsys: pytest.CaptureFixture
 
 @pytest.mark.unit
 def test_merge_targets_correct_companion(tmp_path: Path) -> None:
+    """Each .env file is merged only into its matching companion by name."""
     env_a = tmp_path / "a.env"
     env_a.write_text("X=1\n")
     env_b = tmp_path / "b.env"
@@ -226,6 +237,7 @@ def test_merge_targets_correct_companion(tmp_path: Path) -> None:
 def test_key_too_long_warned_and_skipped(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Environment keys exceeding ENV_KEY_MAX_LENGTH are skipped with a warning."""
     long_key = "A" * 300
     env_file = tmp_path / ".env"
     env_file.write_text(f"GOOD=val\n{long_key}=val2\n")
@@ -247,6 +259,7 @@ def test_key_too_long_warned_and_skipped(
 
 @pytest.mark.unit
 def test_escaped_dollar_in_value(tmp_path: Path) -> None:
+    """Escaped dollar signs ($$) are preserved in values as-is."""
     env_file = tmp_path / ".env"
     env_file.write_text("PRICE=$$10\n")
     companions = _c(("app", {}))
@@ -265,6 +278,7 @@ def test_escaped_dollar_in_value(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_exclude_for_missing_companion_raises() -> None:
+    """Excluding keys for a companion not in the payload raises ValueError."""
     companions = _c(("app", {}))
     with pytest.raises(ValueError, match="--companion-env-exclude names companion"):
         merge_companion_env(
@@ -291,6 +305,7 @@ def test_exclude_for_missing_companion_raises() -> None:
     ids=["string", "list", "bool-true", "int"],
 )
 def test_non_object_environment_raises(bad_env: object) -> None:
+    """A non-dict environment field (string, list, int) raises ValueError."""
     companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": bad_env}]
     with pytest.raises(ValueError, match="non-object 'environment' field"):
         merge_companion_env(companions, env_from=[], env_exclude=[])
@@ -298,6 +313,7 @@ def test_non_object_environment_raises(bad_env: object) -> None:
 
 @pytest.mark.unit
 def test_false_environment_also_raises() -> None:
+    """A boolean False environment field raises ValueError."""
     companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": False}]
     with pytest.raises(ValueError, match="non-object 'environment' field"):
         merge_companion_env(companions, env_from=[], env_exclude=[])
@@ -305,6 +321,7 @@ def test_false_environment_also_raises() -> None:
 
 @pytest.mark.unit
 def test_none_environment_treated_as_empty() -> None:
+    """A None environment field is treated as an empty dict."""
     companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": None}]
     result = merge_companion_env(companions, env_from=[], env_exclude=[])
     assert result[0]["environment"] == {}
@@ -319,6 +336,7 @@ def test_none_environment_treated_as_empty() -> None:
 def test_env_from_skips_keys_overlapping_environment_secrets(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Keys already present in environment_secrets are skipped from .env with a warning."""
     env_file = tmp_path / ".env"
     env_file.write_text("DB_PASSWORD=hunter2\nAPI_KEY=fromfile\nSAFE_KEY=yes\n")
     companions = [
@@ -349,6 +367,7 @@ def test_env_from_skips_keys_overlapping_environment_secrets(
 def test_env_from_overlap_value_never_leaked_in_warning(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """When a .env key overlaps an environment_secrets key, the .env value is never shown in the warning."""
     env_file = tmp_path / ".env"
     env_file.write_text("SECRET_KEY=top-secret-value-999\n")
     companions = [

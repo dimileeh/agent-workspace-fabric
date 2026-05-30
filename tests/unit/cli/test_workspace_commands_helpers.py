@@ -15,6 +15,7 @@ from awf.db.enums import TaskClass, TaskKind
 
 @pytest.mark.unit
 def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify workspace_create assembles the full v1 API payload with all optional fields."""
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -123,9 +124,11 @@ def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.unit
+@pytest.mark.unit
 def test_workspace_create_builds_minimal_development_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify workspace_create produces a minimal payload when only required fields are provided."""
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -204,10 +207,12 @@ def test_workspace_create_builds_minimal_development_payload(
 
 
 @pytest.mark.unit
+@pytest.mark.unit
 def test_workspace_create_merges_env_from_into_companion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify --companion-env-from merges .env entries into the companion environment, with payload values winning on conflict."""
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -274,10 +279,12 @@ def test_workspace_create_merges_env_from_into_companion(
 
 
 @pytest.mark.unit
+@pytest.mark.unit
 def test_workspace_create_env_exclude_drops_keys(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify --companion-env-exclude drops specified keys from the merged companion environment."""
     captured: dict[str, object] = {}
 
     def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
@@ -339,9 +346,11 @@ def test_workspace_create_env_exclude_drops_keys(
 
 
 @pytest.mark.unit
+@pytest.mark.unit
 def test_workspace_create_env_from_missing_companion_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify --companion-env-from referencing a nonexistent companion name exits with code 2."""
     monkeypatch.setattr(
         workspace_commands,
         "_call",
@@ -393,9 +402,11 @@ def test_workspace_create_env_from_missing_companion_raises(
 
 
 @pytest.mark.unit
+@pytest.mark.unit
 def test_workspace_create_rejects_non_object_companion_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify workspace_create rejects a companion JSON that is not a JSON object (e.g. an array)."""
     monkeypatch.setattr(workspace_commands, "_call", lambda *_args, **_kwargs: None)
 
     with pytest.raises(typer.Exit) as raised:
@@ -454,6 +465,7 @@ def test_workspace_create_rejects_non_object_companion_json(
 def test_workspace_adopt_pr_requires_exactly_one_selector(
     kwargs: dict[str, object],
 ) -> None:
+    """Verify workspace_adopt_pr raises BadParameter when zero or multiple selectors are provided."""
     with pytest.raises(typer.BadParameter, match="exactly one selector"):
         workspace_commands.workspace_adopt_pr(
             repo=kwargs["repo"],  # type: ignore[arg-type]
