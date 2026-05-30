@@ -146,10 +146,7 @@ async def _owned_paths_for_prompt(
     workspace_id: str,
 ) -> list[str]:
     session_factory = runner._deps.session_factory
-    try:
-        session_context = session_factory()
-    except TypeError:
-        return []
+    session_context = session_factory()
     async with session_context as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         return list(workspace.owned_paths) if workspace is not None else []

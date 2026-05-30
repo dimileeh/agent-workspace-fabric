@@ -1157,18 +1157,24 @@ async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
 
 
 @pytest.mark.unit
-async def test_address_thread_stashes_only_defer_reason() -> None:
+async def test_address_thread_stashes_only_defer_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     # _address_thread stashes the agent's DEFER reason in state (for the
     # deferred-capture issue) only when there is a reason, the verdict is defer,
     # and state is present — never otherwise.
     from types import SimpleNamespace
 
     from awf.common.github_client import RepoRef
+    from awf.runtime.pr_monitor_runner import comments
     from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
     from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
 
     thread = ReviewThread(thread_id="T1", path="x", line=1, body_excerpt="?")
     reason_key = _defer_reason_state_key("T1")
+
+    async def _empty_owned_paths(_runner: object, _workspace_id: str) -> list[str]:
+        return []
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _empty_owned_paths)
 
     def _runner(result: VerdictResult) -> object:
         async def _invoke(**_kwargs: object) -> VerdictResult:

@@ -53,7 +53,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
-from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.comments import VerdictResult, _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_transient_rerun_attempt,
     _initial_review_grace_started_key,
@@ -171,6 +171,17 @@ class _CommandIterable:
 
 def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
     return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
+
+
+@pytest.mark.unit
+async def test_owned_paths_for_prompt_propagates_session_factory_type_error() -> None:
+    def _broken_session_factory() -> object:
+        raise TypeError("session factory contract changed")
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=_broken_session_factory))
+
+    with pytest.raises(TypeError, match="session factory contract changed"):
+        await _owned_paths_for_prompt(runner, "ws_1")  # type: ignore[arg-type]
 
 
 class _CapturingGH:
@@ -560,6 +571,7 @@ async def test_protected_status_diff_for_unreadable_file_fails_closed(
 
 @pytest.mark.unit
 async def test_address_review_comment_prompt_receives_workspace_runtime_context(
+    factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -567,6 +579,7 @@ async def test_address_review_comment_prompt_receives_workspace_runtime_context(
     runner = _monitor_runner(
         tmp_path,
         FakeCommandRunner(),
+        session_factory=factory,
         workspace_runtime_context=context,
     )
     captured: dict[str, str] = {}
