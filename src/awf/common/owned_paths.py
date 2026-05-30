@@ -115,11 +115,17 @@ def _matches_configured_internal_plan_artifact_path(
             continue
         if normalized == artifact_path:
             return True
-        # "/**"-suffix entries are matched only via exact equality above.
-        # Sub-path matching relies on the companion workspace-id filename
-        # patterns that _internal_plan_artifact_paths_from_template always
-        # generates alongside every "/**" entry. Do not add standalone "/**"
-        # entries without them.
+        if _WORKSPACE_ID_GLOB in normalized and _workspace_id_glob_path_matches(
+            artifact_path,
+            normalized,
+        ):
+            return True
+        # Apart from persisted workspace-id wildcard scopes matched above,
+        # "/**"-suffix entries are exact-only. Sub-path matching relies on the
+        # companion workspace-id filename patterns that
+        # _internal_plan_artifact_paths_from_template always generates
+        # alongside every "/**" entry. Do not add standalone "/**" entries
+        # without them.
         if artifact_path.endswith("/**"):
             continue
         if _WORKSPACE_ID_GLOB in artifact_path:

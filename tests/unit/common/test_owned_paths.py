@@ -153,6 +153,26 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
 
 
 @pytest.mark.unit
+def test_known_workspace_custom_plan_template_preserves_artifact_wildcards() -> None:
+    """Known custom templates still filter persisted generated artifact globs."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "docs/alternate/{workspace_id}.md"}},
+        workspace_id="ws_123",
+    )
+
+    assert internal_paths == ("docs/alternate/ws_123.md",)
+    assert interworkspace_owned_paths(
+        [
+            "docs/alternate/ws_*.md",
+            "docs/alternate/ws_123.md",
+            "docs/alternate/ws_456.md",
+            "docs/alternate/ws_protocol.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/alternate/ws_456.md", "docs/alternate/ws_protocol.md")
+
+
+@pytest.mark.unit
 def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None:
     """Real files in a custom plan artifact parent directory keep overlap checks."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
