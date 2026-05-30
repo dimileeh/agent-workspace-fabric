@@ -199,19 +199,22 @@ def test_known_workspace_custom_plan_template_preserves_artifact_wildcards() -> 
     """Known custom templates still filter persisted generated artifact globs."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
         {"planning": {"required": True, "plan_path": "docs/alternate/{workspace_id}.md"}},
-        workspace_id="ws_123",
+        workspace_id="ws_0123456789abcdef01234567",
     )
 
-    assert internal_paths == ("docs/alternate/ws_123.md",)
+    assert internal_paths == ("docs/alternate/ws_0123456789abcdef01234567.md",)
     assert interworkspace_owned_paths(
         [
             "docs/alternate/ws_*.md",
-            "docs/alternate/ws_123.md",
-            "docs/alternate/ws_456.md",
+            "docs/alternate/ws_0123456789abcdef01234567.md",
+            "docs/alternate/ws_76543210fedcba76543210fe.md",
             "docs/alternate/ws_protocol.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/alternate/ws_456.md", "docs/alternate/ws_protocol.md")
+    ) == (
+        "docs/alternate/ws_76543210fedcba76543210fe.md",
+        "docs/alternate/ws_protocol.md",
+    )
 
 
 @pytest.mark.unit
@@ -272,8 +275,8 @@ def test_unknown_custom_plan_template_keeps_real_ws_docs() -> None:
 
 
 @pytest.mark.unit
-def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
-    """Unknown custom artifact paths use the same shorthand ids as default paths."""
+def test_unknown_custom_plan_template_does_not_filter_shorthand_workspace_ids() -> None:
+    """Unknown custom artifact paths only match generated workspace IDs."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
         {
             "planning": {
@@ -286,22 +289,56 @@ def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
 
     assert internal_paths == ("docs/alternate/ws_*.md", "docs/alternate/ws_*.json")
     assert is_internal_plan_artifact_owned_path(
-        "docs/alternate/ws_123.md",
+        "docs/alternate/ws_0123456789abcdef01234567.md",
         internal_plan_artifact_paths=internal_paths,
     )
     assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_0123456789abcdef01234567.json",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_123.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
         "docs/alternate/ws_123.json",
         internal_plan_artifact_paths=internal_paths,
     )
     assert interworkspace_owned_paths(
         [
+            "docs/alternate/ws_0123456789abcdef01234567.md",
+            "docs/alternate/ws_0123456789abcdef01234567.json",
             "docs/alternate/ws_123.md",
             "docs/alternate/ws_123.json",
             "docs/alternate/ws_protocol.md",
             "docs/alternate/README.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/alternate/ws_protocol.md", "docs/alternate/README.md")
+    ) == (
+        "docs/alternate/ws_123.md",
+        "docs/alternate/ws_123.json",
+        "docs/alternate/ws_protocol.md",
+        "docs/alternate/README.md",
+    )
+
+
+@pytest.mark.unit
+def test_default_reserved_plan_paths_still_filter_shorthand_workspace_ids() -> None:
+    """The reserved default AWF plan directory keeps broad legacy matching."""
+    assert is_internal_plan_artifact_owned_path(
+        "docs/awf-plans/ws_123.md",
+    )
+    assert is_internal_plan_artifact_owned_path(
+        "docs/awf-plans/ws_123.json",
+    )
+    assert interworkspace_owned_paths(
+        [
+            "docs/awf-plans/ws_123.md",
+            "docs/awf-plans/ws_123.json",
+            "docs/awf-plans/ws_protocol.md",
+            "docs/alternate/README.md",
+        ]
+    ) == ("docs/alternate/README.md",)
 
 
 @pytest.mark.unit
@@ -316,8 +353,12 @@ def test_repeated_workspace_id_placeholders_require_the_same_id() -> None:
         },
     )
 
-    same_workspace_path = "ws_123/archive/ws_123_report.md"
-    mixed_workspace_path = "ws_123/archive/ws_456_report.md"
+    same_workspace_path = (
+        "ws_0123456789abcdef01234567/archive/ws_0123456789abcdef01234567_report.md"
+    )
+    mixed_workspace_path = (
+        "ws_0123456789abcdef01234567/archive/ws_76543210fedcba76543210fe_report.md"
+    )
 
     assert internal_paths == ("ws_*/archive/ws_*_report.md", "ws_*/archive/**")
     assert is_internal_plan_artifact_owned_path(
@@ -346,30 +387,33 @@ def test_custom_profile_parent_scope_filters_concrete_workspace_scope() -> None:
 
     assert internal_paths == ("ws_*/plans/ws_*.md", "ws_*/plans/**")
     assert is_internal_plan_artifact_owned_path(
-        "ws_123/plans/**",
+        "ws_0123456789abcdef01234567/plans/**",
         internal_plan_artifact_paths=internal_paths,
     )
     assert is_internal_plan_artifact_owned_path(
-        "ws_123/plans/ws_123.md",
+        "ws_0123456789abcdef01234567/plans/ws_0123456789abcdef01234567.md",
         internal_plan_artifact_paths=internal_paths,
     )
     assert not is_internal_plan_artifact_owned_path(
-        "ws_123/plans/ws_456.md",
+        "ws_0123456789abcdef01234567/plans/ws_76543210fedcba76543210fe.md",
         internal_plan_artifact_paths=internal_paths,
     )
     assert not is_internal_plan_artifact_owned_path(
-        "ws_123/plans/README.md",
+        "ws_0123456789abcdef01234567/plans/README.md",
         internal_plan_artifact_paths=internal_paths,
     )
     assert interworkspace_owned_paths(
         [
-            "ws_123/plans/**",
-            "ws_123/plans/ws_123.md",
-            "ws_123/plans/ws_456.md",
-            "ws_123/plans/README.md",
+            "ws_0123456789abcdef01234567/plans/**",
+            "ws_0123456789abcdef01234567/plans/ws_0123456789abcdef01234567.md",
+            "ws_0123456789abcdef01234567/plans/ws_76543210fedcba76543210fe.md",
+            "ws_0123456789abcdef01234567/plans/README.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("ws_123/plans/ws_456.md", "ws_123/plans/README.md")
+    ) == (
+        "ws_0123456789abcdef01234567/plans/ws_76543210fedcba76543210fe.md",
+        "ws_0123456789abcdef01234567/plans/README.md",
+    )
 
 
 @pytest.mark.unit

@@ -15,7 +15,6 @@ _WORKSPACE_ID_GLOB: Final = "ws_*"
 # files as generated artifacts. Configured custom paths below still use the
 # stricter workspace-id glob matcher.
 _WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
-_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN: Final = r"[0-9]+"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
     r"^ws_(?:[A-Za-z0-9][A-Za-z0-9_]*|\*)"
     r"(?:\.md|(?:\.conformance)?\.json)$"
@@ -164,11 +163,8 @@ def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
     # intentionally match only concrete AWF workspace IDs. The default
     # `docs/awf-plans/ws_*` filename classifier is broader so legacy/manual AWF
     # artifact names in the reserved directory remain nonblocking.
-    workspace_id_suffix_pattern = (
-        rf"(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN})"
-    )
     first_workspace_id_pattern = (
-        rf"{re.escape(glob_prefix)}(?P<workspace_id>{workspace_id_suffix_pattern})"
+        rf"{re.escape(glob_prefix)}(?P<workspace_id>{_WORKSPACE_ID_SUFFIX_PATTERN})"
     )
     repeated_workspace_id_pattern = rf"{re.escape(glob_prefix)}(?P=workspace_id)"
 

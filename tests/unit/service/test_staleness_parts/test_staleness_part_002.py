@@ -344,6 +344,63 @@ class TestStalenessRefreshService:
         ]
 
     @pytest.mark.unit
+    async def test_custom_plan_path_shorthand_target_change_is_blocking_overlap(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/**"],
+            task_class="test_task",
+            resolved_profile={
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/{workspace_id}.md",
+                    "conformance_report_path": "docs/{workspace_id}.json",
+                },
+            },
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            result = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("docs/ws_123.md",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            active = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert result.stale is True
+        assert [(f.reason_code, f.trigger_ref, f.blocks_merge) for f in result.findings] == [
+            ("STALE_OVERLAP", "docs/ws_123.md", True)
+        ]
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "STALE_OVERLAP"
+        assert [(r.reason_code, r.trigger_ref, r.blocks_merge) for r in active] == [
+            ("STALE_OVERLAP", "docs/ws_123.md", True)
+        ]
+
+    @pytest.mark.unit
     async def test_fetch_target_requires_provider_and_candidate_base_sha(
         self,
         factory: async_sessionmaker[AsyncSession],
