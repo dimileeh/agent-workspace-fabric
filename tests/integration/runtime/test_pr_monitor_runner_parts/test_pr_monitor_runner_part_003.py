@@ -1094,8 +1094,11 @@ class TestDeferredThreadCapture:
             compose_file=tmp_path / "compose.yml",
         )
         # The deferred work was captured as a tracking issue ...
-        assert any(c.args[:3] == ["gh", "issue", "create"] for c in cmd.calls), (
-            "a follow-up defer must file a tracking issue"
+        issue_creates = [c for c in cmd.calls if c.args[:3] == ["gh", "issue", "create"]]
+        assert issue_creates, "a follow-up defer must file a tracking issue"
+        # ... and the issue preserves the agent's DEFER reason, not just the thread.
+        assert any("follow-up styling nit" in a for a in issue_creates[0].args), (
+            "the filed issue must include the agent's defer reason"
         )
         # ... and only then was the thread resolved, clearing the merge gate.
         assert any(

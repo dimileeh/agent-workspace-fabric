@@ -1154,3 +1154,61 @@ async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
     # and never downgraded the transient thread to needs_human.
     assert result.failed is True
     assert state.threads_addressed_ids.get("T_transient") != "needs_human"
+
+
+async def test_address_thread_stashes_only_defer_reason() -> None:
+    # _address_thread stashes the agent's DEFER reason in state (for the
+    # deferred-capture issue) only when there is a reason, the verdict is defer,
+    # and state is present — never otherwise.
+    from types import SimpleNamespace
+
+    from awf.common.github_client import RepoRef
+    from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
+    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+
+    thread = ReviewThread(thread_id="T1", path="x", line=1, body_excerpt="?")
+    reason_key = _defer_reason_state_key("T1")
+
+    def _runner(result: VerdictResult) -> object:
+        async def _invoke(**_kwargs: object) -> VerdictResult:
+            return result
+
+        return SimpleNamespace(
+            _workspace_runtime_context="", _invoke_cli_for_verdict_result=_invoke
+        )
+
+    async def _call(runner: object, state: MonitorState | None) -> str:
+        return await _address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="p",
+            compose_file=Path("/tmp/c.yml"),
+            state=state,
+        )
+
+    # defer + reason + state -> stashed.
+    state = MonitorState()
+    assert (
+        await _call(_runner(VerdictResult(verdict="defer", reason="track refactor")), state)
+        == "defer"
+    )
+    assert state.threads_addressed_ids[reason_key] == "track refactor"
+
+    # state is None -> no crash, nothing stashed.
+    assert await _call(_runner(VerdictResult(verdict="defer", reason="x")), None) == "defer"
+
+    # non-defer verdict -> not stashed.
+    s2 = MonitorState()
+    assert (
+        await _call(_runner(VerdictResult(verdict="fix_committed", reason="done")), s2)
+        == "fix_committed"
+    )
+    assert reason_key not in s2.threads_addressed_ids
+
+    # defer without a reason -> not stashed.
+    s3 = MonitorState()
+    assert await _call(_runner(VerdictResult(verdict="defer", reason=None)), s3) == "defer"
+    assert reason_key not in s3.threads_addressed_ids

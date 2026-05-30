@@ -186,6 +186,17 @@ def _review_comment_body_state_key(comment_id: str) -> str:
     return f"__review_comment_body_hash__:{comment_id}"
 
 
+def _defer_reason_state_key(thread_id: str) -> str:
+    """State key holding the agent's ``DEFER: <reason>`` text for a thread.
+
+    ``_address_thread`` only returns the verdict, so the reason is stashed here
+    when the agent defers and read back by ``_capture_deferred_review_thread`` so
+    the filed tracking issue preserves the agent's specific follow-up, not just
+    the GitHub thread conversation.
+    """
+    return f"__defer_reason__:{thread_id}"
+
+
 def _review_comment_body_hash(comment: ReviewComment) -> str:
     return pr_feedback_body_hash(_review_comment_resolution_body(comment))
 

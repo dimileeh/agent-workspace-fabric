@@ -57,13 +57,15 @@ async def _address_thread(
     compose_file: Path,
     state: MonitorState | None = None,
 ) -> Verdict:
+    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
     )
-    return await runner._invoke_cli_for_verdict(
+    result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
         prompt=prompt,
         commit_message=f"fix: address PR review thread {thread.thread_id}",
@@ -71,6 +73,11 @@ async def _address_thread(
         compose_file=compose_file,
         state=state,
     )
+    # Stash the agent's defer reason so the deferred-capture path can preserve it
+    # in the filed tracking issue (the verdict alone loses that follow-up detail).
+    if state is not None and result.verdict == "defer" and result.reason:
+        state.mark_addressed(_defer_reason_state_key(thread.thread_id), result.reason)
+    return result.verdict
 
 
 async def _address_review_comment(

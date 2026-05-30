@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
+    _defer_reason_state_key,
     _mark_review_comment_addressed,
     _redact_and_truncate_github_error,
     _review_comment_needs_attention,
@@ -545,10 +546,15 @@ async def _capture_deferred_review_thread(
     location = thread.path or "the PR diff"
     thread_ref = thread.url or f"PR #{pr_number}"
     issue_title = f"Deferred from PR #{pr_number}: {location}"
+    agent_reason = state.threads_addressed_ids.get(_defer_reason_state_key(thread.thread_id))
+    agent_reason_section = (
+        f"Agent's deferral reason:\n\n> {agent_reason}\n\n" if agent_reason else ""
+    )
     issue_body = (
         f"AWF deferred a review thread while monitoring PR #{pr_number}.\n\n"
         f"- Path: {location}\n"
         f"- Thread: {thread_ref}\n\n"
+        f"{agent_reason_section}"
         f"Review thread (full history):\n\n{_deferred_thread_conversation(thread)}\n\n"
         "This issue tracks the deferred follow-up so the PR thread could be "
         "resolved without losing the work."
