@@ -624,8 +624,8 @@ async def test_compose_stack_launcher_resolves_profile_services_in_thread(
             "docker_mode": profile.docker.mode,
         },
     )
-    assert calls[2][1] == ()
-    assert calls[2][2] == {}
+    # No companions in this profile, so no per-companion build runs off-thread.
+    assert len(calls) == 2
     assert compose.specs[0].services[0].name == "sidecar"
 
 
@@ -1417,7 +1417,8 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     )
     await launcher.launch(request)
 
-    assert len(calls) == 4
+    # No companions in this profile, so no per-companion build runs off-thread.
+    assert len(calls) == 3
     func, args, kwargs = calls[0]
     assert func == auth_mount_resolver.resolve
     assert args == ()
@@ -1438,5 +1439,3 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
         "companions": (),
         "docker_mode": request.profile.docker.mode,
     }
-    assert calls[3][1] == ()
-    assert calls[3][2] == {}

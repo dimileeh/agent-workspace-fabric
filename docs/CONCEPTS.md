@@ -963,6 +963,19 @@ with normal destroy/GC cleanup, and classifies
 `<workspace_id>__companion__<name>` worktrees as belonging to the parent during
 orphan-resource scans.
 
+Companion images are cached across workspaces. Companion services build on the
+shared host Docker daemon (the control plane runs `docker compose` against the
+host socket), so at provision time AWF pre-builds each companion image once per
+`(name, commit sha)` and tags it `awf-companion-<name>:<short_sha>`. Subsequent
+workspaces — including a concurrent dispatch wave for the same companion commit —
+reference the existing tag via `image:` and skip the build entirely. An
+in-process per-tag lock collapses a concurrent wave to a single build; a build
+failure falls back to an inline `build:` so provisioning stays correct. Cached
+images carry an `awf.managed-companion=true` label, and `awf service gc` prunes
+unused ones older than `companion_image_retention_hours` (Docker never removes an
+image backing a live container, so active workspaces are protected). Set
+`companion_image_cache_enabled=false` to disable caching and always build inline.
+
 ## Observability
 
 AWF includes a local Next.js console under `apps/console`. It talks to AWF

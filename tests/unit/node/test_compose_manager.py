@@ -303,6 +303,42 @@ class TestRender:
         assert "raw-secret-value" not in rendered
 
     @pytest.mark.unit
+    def test_companion_with_prebuilt_image_renders_image_not_build(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    image="awf-companion-backend:abc123def456",
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["image"] == "awf-companion-backend:abc123def456"
+        assert "build" not in backend
+
+    @pytest.mark.unit
+    def test_companion_without_image_still_renders_build(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            companions=(CompanionService(name="backend", build_context="/host/backend"),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        backend = parsed["services"]["backend"]
+        assert backend["build"] == {"context": "/host/backend", "dockerfile": "Dockerfile"}
+        assert "image" not in backend
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
@@ -929,3 +965,136 @@ class TestRender:
         assert exc.value.returncode == 124
         assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
         assert "exceeded" in exc.value.stderr
+
+
+class TestCompanionImageCommands:
+    @pytest.mark.unit
+    async def test_companion_image_exists_true_on_zero_exit(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0, stdout=b"sha256:abc\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_exists("awf-companion-backend:abc") is True
+        assert calls[0] == ("docker", "image", "inspect", "awf-companion-backend:abc")
+
+    @pytest.mark.unit
+    async def test_companion_image_exists_false_when_inspect_fails(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=b"No such image")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        assert await manager.companion_image_exists("missing:tag") is False
+
+    @pytest.mark.unit
+    async def test_build_companion_image_passes_tag_dockerfile_and_labels(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/backend",
+            dockerfile="Dockerfile",
+            labels={"awf.managed-companion": "true", "awf.companion.name": "backend"},
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "Dockerfile",
+            "--label",
+            "awf.managed-companion=true",
+            "--label",
+            "awf.companion.name=backend",
+            "/host/backend",
+        )
+
+    @pytest.mark.unit
+    async def test_build_companion_image_without_labels_omits_label_flags(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0)
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager.build_companion_image(
+            tag="awf-companion-backend:abc",
+            build_context="/host/backend",
+            dockerfile="Dockerfile",
+        )
+
+        assert calls[0] == (
+            "docker",
+            "build",
+            "-t",
+            "awf-companion-backend:abc",
+            "-f",
+            "Dockerfile",
+            "/host/backend",
+        )
+        assert "--label" not in calls[0]
+
+    @pytest.mark.unit
+    async def test_build_companion_image_raises_on_failure(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _spawn(*_args: object, **_kwargs: object) -> _FakeProcess:
+            return _FakeProcess(returncode=1, stderr=b"build failed")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError):
+            await manager.build_companion_image(
+                tag="awf-companion-backend:abc",
+                build_context="/host/backend",
+                dockerfile="Dockerfile",
+            )
+
+    @pytest.mark.unit
+    async def test_prune_companion_images_filters_by_label_and_age(
+        self, manager: ComposeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def _spawn(*args: object, **_kwargs: object) -> _FakeProcess:
+            calls.append(args)
+            return _FakeProcess(returncode=0, stdout=b"Total reclaimed space: 1.2GB\n")
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        output = await manager.prune_companion_images(retention_hours=168)
+
+        assert "reclaimed" in output
+        assert calls[0] == (
+            "docker",
+            "image",
+            "prune",
+            "--all",
+            "--force",
+            "--filter",
+            "label=awf.managed-companion=true",
+            "--filter",
+            "until=168h",
+        )

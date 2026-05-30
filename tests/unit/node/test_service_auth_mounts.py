@@ -8,6 +8,7 @@ import pytest
 
 from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import ServiceAuthMountResolver, resolve_service_auth_mounts
+from awf.node.compose_manager import AuthMount
 
 
 @pytest.mark.unit
@@ -620,3 +621,14 @@ def test_service_auth_mounts_skip_missing_paths(tmp_path: Path) -> None:
     )
 
     assert mounts == ()
+
+
+@pytest.mark.unit
+def test_chown_workspace_auth_sources_skips_read_only_mounts() -> None:
+    # Read-only mounts are skipped: no chown is attempted on the source, so a
+    # non-existent path is safe and the call returns without raising.
+    auth_mounts_mod._chown_workspace_auth_sources(  # noqa: SLF001
+        [AuthMount(source="/nonexistent/ro-source", target="/agent/ro", mode="ro")],
+        uid=1000,
+        gid=1000,
+    )

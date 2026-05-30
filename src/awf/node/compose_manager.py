@@ -35,7 +35,13 @@ _log = get_logger(__name__)
 DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
 COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
 COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS = 60.0
+COMPANION_BUILD_CAPTURE_TIMEOUT_SECONDS = 1800.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
+
+# Labels stamped on pre-built companion images so image GC can scope its prune
+# to AWF-managed companion builds without touching unrelated images.
+COMPANION_IMAGE_MANAGED_LABEL = "awf.managed-companion"
+COMPANION_IMAGE_NAME_LABEL = "awf.companion.name"
 _COMPOSE_DISPATCH_RETRY_MARKERS = (
     "unknown shorthand flag: 'd' in -d",
     "unknown flag: --remove-orphans",
@@ -106,6 +112,11 @@ class CompanionService:
 
     dockerfile: str = "Dockerfile"
     """Relative path inside ``build_context`` to the Dockerfile."""
+
+    image: str | None = None
+    """Pre-built image tag to reference via ``image:`` instead of building
+    inline. When ``None`` the service renders ``build:`` from ``build_context``
+    (the default, build-on-up behavior)."""
 
     env_file: str | None = None
     """Absolute host path to a ``.env`` file (read-only)."""
@@ -271,7 +282,7 @@ class ComposeManager:
         companions: list[dict[str, object]] = [
             {
                 "name": c.name,
-                "image": None,
+                "image": c.image,
                 "build_context": c.build_context,
                 "dockerfile": c.dockerfile,
                 "env_file": c.env_file,
@@ -452,6 +463,61 @@ class ComposeManager:
             volumes=len(volume_names),
         )
 
+    async def companion_image_exists(self, tag: str) -> bool:
+        """Return whether a companion image tag is already present locally.
+
+        Any inspect failure (missing image, daemon error) is treated as "not
+        present" so the caller falls back to building it.
+        """
+        try:
+            await self._docker_capture(["image", "inspect", tag], operation="image inspect")
+        except ComposeOperationError:
+            return False
+        return True
+
+    async def build_companion_image(
+        self,
+        *,
+        tag: str,
+        build_context: str,
+        dockerfile: str,
+        labels: Mapping[str, str] | None = None,
+        capture_timeout_seconds: float = COMPANION_BUILD_CAPTURE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Build and tag a companion image on the host daemon.
+
+        Raises :class:`ComposeOperationError` on failure so callers can fall
+        back to an inline ``build:`` service and keep provisioning correct.
+        """
+        args = ["build", "-t", tag, "-f", dockerfile]
+        for key, value in (labels or {}).items():
+            args.extend(["--label", f"{key}={value}"])
+        args.append(build_context)
+        await self._docker_capture(
+            args,
+            operation="build",
+            capture_timeout_seconds=capture_timeout_seconds,
+        )
+
+    async def prune_companion_images(self, *, retention_hours: int) -> str:
+        """Prune unused managed companion images older than the retention window.
+
+        ``docker image prune`` never removes an image backing a live container,
+        so images for active workspaces are protected automatically; only
+        unreferenced companion builds past the retention window are removed.
+        """
+        args = [
+            "image",
+            "prune",
+            "--all",
+            "--force",
+            "--filter",
+            f"label={COMPANION_IMAGE_MANAGED_LABEL}=true",
+            "--filter",
+            f"until={retention_hours}h",
+        ]
+        return await self._docker_capture(args, operation="image prune")
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _paths_for(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
@@ -555,7 +621,20 @@ class ComposeManager:
     async def _docker(self, args: list[str], *, operation: str) -> None:
         await self._docker_capture(args, operation=operation)
 
-    async def _docker_capture(self, args: list[str], *, operation: str) -> str:
+    async def _docker_capture(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+        capture_timeout_seconds: float | None = None,
+    ) -> str:
+        # Resolve the default at call time (not at def time) so tests that
+        # monkeypatch the module-level DOCKER_CAPTURE_TIMEOUT_SECONDS keep working.
+        timeout_seconds = (
+            capture_timeout_seconds
+            if capture_timeout_seconds is not None
+            else DOCKER_CAPTURE_TIMEOUT_SECONDS
+        )
         cmd = ["docker", *args]
         _log.debug("docker.exec", operation=operation, cmd=cmd)
         try:
@@ -566,7 +645,7 @@ class ComposeManager:
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except FileNotFoundError as e:
             raise ComposeOperationError(
@@ -588,7 +667,7 @@ class ComposeManager:
                 operation=operation,
                 returncode=124,
                 stdout="",
-                stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
+                stderr=(f"docker {operation} exceeded {timeout_seconds:g}s timeout"),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
 

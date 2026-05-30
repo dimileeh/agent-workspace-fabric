@@ -66,6 +66,9 @@ class MaterializedCompanionService:
 
     spec: WorkspaceCompanionSpec
     layout: WorktreeLayout
+    commit_sha: str = ""
+    """Resolved HEAD sha of the companion worktree, used as the cache key for
+    pre-built companion images. Empty when unresolved (caching is skipped)."""
 
 
 CompanionGraphInput = WorkspaceCompanionSpec | MaterializedCompanionService
@@ -84,8 +87,13 @@ def companion_service_from_materialized(
     companion: MaterializedCompanionService,
     *,
     host_env: Mapping[str, str] | None = None,
+    image: str | None = None,
 ) -> CompanionService:
-    """Convert a materialized companion checkout into a Compose service."""
+    """Convert a materialized companion checkout into a Compose service.
+
+    When ``image`` is provided the service references that pre-built tag via
+    ``image:``; otherwise it renders ``build:`` from the resolved context.
+    """
     spec = companion.spec
     root = companion.layout.worktree_path
     build_context = _resolve_repo_path(spec.build_context, root=root)
@@ -95,6 +103,7 @@ def companion_service_from_materialized(
     )
     return CompanionService(
         name=spec.name,
+        image=image,
         build_context=build_context,
         dockerfile=_resolve_companion_dockerfile(
             spec.dockerfile,

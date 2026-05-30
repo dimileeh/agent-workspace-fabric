@@ -25,6 +25,7 @@ from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.cleanup import WorkspaceCleaner
+from awf.node.companion_images import CompanionImageBuilder
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID, GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -132,11 +133,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         work_dir=work_dir,
         host_env=os.environ,
     )
+    companion_image_builder = _companion_image_builder_for(settings, compose)
     stack_launcher = ComposeStackLauncher(
         compose=compose,
         agent_runtime_image=settings.agent_runtime_image,
         auth_mount_resolver=auth_mount_resolver,
         secret_lease_resolver=secret_lease_resolver,
+        companion_image_builder=companion_image_builder,
     )
     node_id = settings.node_id or socket.gethostname()
     provisioner = Provisioner(
@@ -234,6 +237,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)
+
+
+def _companion_image_builder_for(
+    settings: ServiceSettings, compose: ComposeManager
+) -> CompanionImageBuilder | None:
+    """Return a companion image builder unless caching is disabled by config."""
+    if not settings.companion_image_cache_enabled:
+        return None
+    return CompanionImageBuilder(compose)
 
 
 def _merge_coordinator_for_database_url(

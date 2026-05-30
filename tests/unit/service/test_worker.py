@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import structlog
 
 from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
+from awf.node.companion_images import CompanionImageBuilder
 from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
@@ -51,6 +53,18 @@ def _in_process_merge_coordinator(
 ) -> InProcessMergeCoordinator:
     del engine
     return InProcessMergeCoordinator()
+
+
+@pytest.mark.unit
+def test_companion_image_builder_enabled_by_default(tmp_path: Path) -> None:
+    builder = worker_mod._companion_image_builder_for(_settings(tmp_path), object())  # type: ignore[arg-type]
+    assert isinstance(builder, CompanionImageBuilder)
+
+
+@pytest.mark.unit
+def test_companion_image_builder_disabled_returns_none(tmp_path: Path) -> None:
+    settings = dataclasses.replace(_settings(tmp_path), companion_image_cache_enabled=False)
+    assert worker_mod._companion_image_builder_for(settings, object()) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -128,11 +142,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             agent_runtime_image: str,
             auth_mount_resolver: object,
             secret_lease_resolver: object,
+            companion_image_builder: object = None,
         ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
             created["stack_auth_mount_resolver"] = auth_mount_resolver
             created["stack_secret_lease_resolver"] = secret_lease_resolver
+            created["stack_companion_image_builder"] = companion_image_builder
 
     class _Provisioner:
         def __init__(
@@ -259,6 +275,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["stack_auth_mount_resolver"].workspace_owner_uid == 1000
     assert created["stack_auth_mount_resolver"].workspace_owner_gid == 1000
     assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
+    assert isinstance(created["stack_companion_image_builder"], CompanionImageBuilder)
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["executor_usage_sampler"].__class__ is worker_mod.CcusageCollector
     assert created["executor_usage_sampler"]._runner is created["executor_runner"]

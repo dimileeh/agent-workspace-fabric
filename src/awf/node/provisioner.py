@@ -414,7 +414,14 @@ class Provisioner:
                     companion_name=companion.name,
                 ),
             )
-            materialized.append(MaterializedCompanionService(spec=companion, layout=layout))
+            commit_sha = await self._git.head_sha(workspace_id=companion_id)
+            materialized.append(
+                MaterializedCompanionService(
+                    spec=companion,
+                    layout=layout,
+                    commit_sha=commit_sha,
+                )
+            )
         return tuple(materialized)
 
     async def _load_and_claim(self, session: AsyncSession, workspace_id: str) -> Workspace | None:

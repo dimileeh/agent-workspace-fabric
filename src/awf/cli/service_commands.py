@@ -11,6 +11,7 @@ import typer
 from awf.cli.common import (
     OutputFormat,
     _emit,
+    _run_companion_image_prune,
     _run_terminal_workspace_compose_teardown,
     _run_terminal_workspace_worktree_remove,
 )
@@ -470,6 +471,14 @@ def service_gc(
                 worktree_remover=partial(
                     _run_terminal_workspace_worktree_remove,
                     session_factory=session_factory,
+                ),
+                companion_image_prune=(
+                    partial(
+                        _run_companion_image_prune,
+                        settings.companion_image_retention_hours,
+                    )
+                    if settings.companion_image_cache_enabled
+                    else None
                 ),
             )
             return result.to_dict()

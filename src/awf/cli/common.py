@@ -209,6 +209,49 @@ def _run_terminal_workspace_compose_teardown(
     )
 
 
+async def _run_companion_image_prune(retention_hours: int) -> dict[str, object]:
+    """Prune stale cached companion images during ``service gc``.
+
+    ``docker image prune`` never removes an image backing a live container, so
+    active workspaces' companion images are protected automatically; only
+    unreferenced managed companion builds older than the retention window go.
+    """
+    from awf.node.companion_images import companion_image_prune_command
+
+    command = companion_image_prune_command(retention_hours)
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed",
+            "reason_code": "COMPANION_IMAGE_PRUNE_FAILED",
+            "error": "docker image prune timed out after 120s",
+        }
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "reason_code": "COMPANION_IMAGE_PRUNE_FAILED",
+            "error": str(exc),
+        }
+    if result.returncode == 0:
+        return {
+            "status": "succeeded",
+            "reason_code": "COMPANION_IMAGE_PRUNE_SUCCEEDED",
+            "output": (result.stdout or "").strip(),
+        }
+    return {
+        "status": "failed",
+        "reason_code": "COMPANION_IMAGE_PRUNE_FAILED",
+        "error": (result.stderr or result.stdout or "docker image prune failed")[:1000],
+    }
+
+
 async def _run_terminal_workspace_worktree_remove(
     candidate: Any,
     *,
