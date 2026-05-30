@@ -18,6 +18,7 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_issue_from_reason_code,
     first_run_remediation_from_reason_code,
+    first_run_report_payload,
     first_run_success_payload,
     first_run_warning_payload,
     redact_first_run_value,
@@ -176,6 +177,49 @@ def test_first_run_pretty_renders_issue_with_missing_optional_fields(
     assert "Problem:" not in rendered_pretty
     assert "Details:" in rendered_pretty
     assert "  config_path: /tmp/config.yml" in rendered_pretty
+
+
+@pytest.mark.unit
+def test_first_run_report_payload_blocked_when_any_blocking_issue() -> None:
+    """Verify a report with a blocked issue derives blocked status + first reason."""
+    blocked = first_run_issue_from_reason_code("SETUP_READINESS_FAILED", severity="blocked")
+    warning = first_run_issue_from_reason_code("SETUP_READINESS_FAILED", severity="warning")
+    payload = first_run_report_payload(
+        command="awf setup",
+        summary="AWF setup found blockers.",
+        issues=(warning, blocked),
+        next_steps=("fix things",),
+    )
+    assert payload.status == "blocked"
+    assert payload.reason_code == "SETUP_READINESS_FAILED"
+    assert payload.issues == (warning, blocked)
+
+
+@pytest.mark.unit
+def test_first_run_report_payload_warning_when_only_warnings() -> None:
+    """Verify a warnings-only report derives a warning status."""
+    warning = first_run_issue_from_reason_code("SETUP_READINESS_FAILED", severity="warning")
+    payload = first_run_report_payload(
+        command="awf setup",
+        summary="AWF setup passed with warnings.",
+        issues=(warning,),
+    )
+    assert payload.status == "warning"
+    assert payload.reason_code == "SETUP_READINESS_FAILED"
+
+
+@pytest.mark.unit
+def test_first_run_report_payload_success_when_no_issues() -> None:
+    """Verify a report with no issues is a success with no reason code."""
+    payload = first_run_report_payload(
+        command="awf setup",
+        summary="AWF setup host readiness checks passed.",
+        issues=(),
+        details={"dry_run": True},
+    )
+    assert payload.status == "success"
+    assert payload.reason_code is None
+    assert payload.details == {"dry_run": True}
 
 
 @pytest.mark.unit
