@@ -987,7 +987,7 @@ class TestOwnedPathOverlapLookup:
         self,
         session: AsyncSession,
     ) -> None:
-        """Profile-configured planning roots are excluded from repository overlaps."""
+        """Profile-configured planning artifacts are excluded from repository overlaps."""
         custom_profile = {
             "planning": {
                 "plan_path": "docs/alternate/{workspace_id}.md",
@@ -998,14 +998,14 @@ class TestOwnedPathOverlapLookup:
         await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/existing/**", "docs/alternate/**"],
+            owned_paths=["src/existing/**", "docs/alternate/ws_existing.md"],
             resolved_profile=custom_profile,
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/requested/**", "docs/alternate/**"],
+            owned_paths=["src/requested/**", "docs/alternate/ws_existing.md"],
             resolved_profile=custom_profile,
         )
 
