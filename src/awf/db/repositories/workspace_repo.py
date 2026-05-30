@@ -547,7 +547,7 @@ class WorkspaceRepository:
                 if not ports or not isinstance(ports, list):
                     continue
                 for port_mapping in ports:
-                    if isinstance(port_mapping, list) and len(port_mapping) >= 2:
+                    if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
                         try:
                             hp = int(port_mapping[1])
                         except (ValueError, TypeError):
