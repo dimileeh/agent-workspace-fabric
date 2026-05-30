@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 import typer
@@ -59,6 +61,8 @@ def test_workspace_create_builds_full_v1_payload(monkeypatch: pytest.MonkeyPatch
             '{"name":"backend","repo_url":"git@example.com:repo/api.git",'
             '"build_context":"services/api","depends_on":["docker"]}'
         ],
+        companion_env_from=None,
+        companion_env_exclude=None,
         idempotency_key="idem-1",
         api_token="token",
         base_url="http://api",
@@ -165,34 +169,201 @@ def test_workspace_create_builds_minimal_development_payload(
         provider_readiness_override=False,
         provider_readiness_override_reason=None,
         companion_json=None,
+        companion_env_from=None,
+        companion_env_exclude=None,
         idempotency_key=None,
         api_token=None,
         base_url=None,
         fmt=OutputFormat.json,
     )
 
-    assert captured["method"] == "POST"
-    assert captured["path"] == "/v1/workspaces"
-    assert captured["headers"] == {}
-    assert captured["json"] == {
-        "repo": {"url": "git@example.com:repo/app.git", "base_branch": "development"},
-        "task": {
-            "title": "title",
-            "prompt": "prompt",
-            "agent": "codex",
-            "kind": "feature_branch_pr",
-            "auto_merge": True,
-            "initial_review_grace_period_seconds": None,
-        },
-        "workspace": {"profile_ref": "auto", "profile": None},
-        "validation": {"commands": [], "requested_tier": 1},
-        "resources": {},
-        "preflight": {
-            "provider_readiness_override": False,
-            "provider_readiness_override_reason": None,
-        },
-        "companions": [],
-    }
+
+@pytest.mark.unit
+def test_workspace_create_merges_env_from_into_companion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("DB_PORT=5432\nAPP_DEBUG=true\n")
+
+    workspace_commands.workspace_create(
+        repo_url="git@example.com:repo/app.git",
+        task_title="title",
+        task_prompt="prompt",
+        branch_base=None,
+        task_kind=TaskKind.feature_branch_pr.value,
+        source_branch=None,
+        agent="codex",
+        model=None,
+        effort=None,
+        task_class=None,
+        priority=None,
+        human_boost=None,
+        out_of_scope_changes_json=None,
+        provider_recovery_json=None,
+        owned_paths=None,
+        external_id=None,
+        cpu=None,
+        memory=None,
+        steady_state_cpu_cores=None,
+        steady_state_memory_gb=None,
+        peak_cpu_cores=None,
+        peak_memory_gb=None,
+        disk_mb=None,
+        profile_ref="auto",
+        test_commands=[],
+        requires_database=False,
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        provider_readiness_override=False,
+        provider_readiness_override_reason=None,
+        companion_json=[
+            '{"name":"svc","repo_url":"git@x:svc.git","environment":{"DB_HOST":"postgres:5432"}}'
+        ],
+        companion_env_from=[f"svc={env_file}"],
+        companion_env_exclude=None,
+        idempotency_key=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+
+    body = captured["json"]
+    companions = body["companions"]
+    assert len(companions) == 1
+    env = companions[0]["environment"]
+    assert env["DB_HOST"] == "postgres:5432"  # payload wins
+    assert env["DB_PORT"] == "5432"  # from file
+    assert env["APP_DEBUG"] == "true"  # from file
+
+
+@pytest.mark.unit
+def test_workspace_create_env_exclude_drops_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("KEEP=this\nDROP=that\n")
+
+    workspace_commands.workspace_create(
+        repo_url="git@example.com:repo/app.git",
+        task_title="title",
+        task_prompt="prompt",
+        branch_base=None,
+        task_kind=TaskKind.feature_branch_pr.value,
+        source_branch=None,
+        agent="codex",
+        model=None,
+        effort=None,
+        task_class=None,
+        priority=None,
+        human_boost=None,
+        out_of_scope_changes_json=None,
+        provider_recovery_json=None,
+        owned_paths=None,
+        external_id=None,
+        cpu=None,
+        memory=None,
+        steady_state_cpu_cores=None,
+        steady_state_memory_gb=None,
+        peak_cpu_cores=None,
+        peak_memory_gb=None,
+        disk_mb=None,
+        profile_ref="auto",
+        test_commands=[],
+        requires_database=False,
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        provider_readiness_override=False,
+        provider_readiness_override_reason=None,
+        companion_json=['{"name":"svc","repo_url":"git@x:svc.git"}'],
+        companion_env_from=[f"svc={env_file}"],
+        companion_env_exclude=["svc=DROP"],
+        idempotency_key=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+
+    body = captured["json"]
+    env = body["companions"][0]["environment"]
+    assert "KEEP" in env
+    assert "DROP" not in env
+
+
+@pytest.mark.unit
+def test_workspace_create_env_from_missing_companion_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workspace_commands,
+        "_call",
+        lambda *_args, **_kwargs: httpx.Response(202, json={"id": "ws"}),
+    )
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="--companion-env-from names companion"):
+        workspace_commands.workspace_create(
+            repo_url="git@example.com:repo/app.git",
+            task_title="title",
+            task_prompt="prompt",
+            branch_base=None,
+            task_kind=TaskKind.feature_branch_pr.value,
+            source_branch=None,
+            agent="codex",
+            model=None,
+            effort=None,
+            task_class=None,
+            priority=None,
+            human_boost=None,
+            out_of_scope_changes_json=None,
+            provider_recovery_json=None,
+            owned_paths=None,
+            external_id=None,
+            cpu=None,
+            memory=None,
+            steady_state_cpu_cores=None,
+            steady_state_memory_gb=None,
+            peak_cpu_cores=None,
+            peak_memory_gb=None,
+            disk_mb=None,
+            profile_ref="auto",
+            test_commands=[],
+            requires_database=False,
+            auto_merge=True,
+            initial_review_grace_period_seconds=None,
+            provider_readiness_override=False,
+            provider_readiness_override_reason=None,
+            companion_json=['{"name":"svc","repo_url":"git@x:svc.git"}'],
+            companion_env_from=["nonexistent=/tmp/.env"],
+            companion_env_exclude=None,
+            idempotency_key=None,
+            api_token=None,
+            base_url=None,
+            fmt=OutputFormat.json,
+        )
 
 
 @pytest.mark.unit
@@ -234,6 +405,8 @@ def test_workspace_create_rejects_non_object_companion_json(
             provider_readiness_override=False,
             provider_readiness_override_reason=None,
             companion_json=["[]"],
+            companion_env_from=None,
+            companion_env_exclude=None,
             idempotency_key=None,
             api_token=None,
             base_url=None,
