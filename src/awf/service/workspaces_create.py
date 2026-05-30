@@ -101,6 +101,7 @@ async def create_workspace_row(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
         owned_paths=payload.task.owned_paths,
+        resolved_profile=resolved_profile,
     )
     task_policy = task_policy_with_coordination_warnings(
         {

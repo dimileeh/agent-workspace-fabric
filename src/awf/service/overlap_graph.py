@@ -11,7 +11,10 @@ from typing import Final, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.owned_paths import interworkspace_owned_paths
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import owned_path_overlap_match
@@ -105,6 +108,7 @@ class _GraphWorkspace:
     branch_base: str
     task_class: str | None
     owned_paths: tuple[str, ...]
+    internal_plan_artifact_paths: tuple[str, ...]
     created_at: datetime
     updated_at: datetime
 
@@ -240,8 +244,22 @@ def _workspace_overlap_path_matches(
     """Build bounded path-match details for an advisory workspace edge."""
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
-    left_paths = sorted(dict.fromkeys(interworkspace_owned_paths(left.owned_paths)))
-    right_paths = sorted(dict.fromkeys(interworkspace_owned_paths(right.owned_paths)))
+    left_paths = sorted(
+        dict.fromkeys(
+            interworkspace_owned_paths(
+                left.owned_paths,
+                internal_plan_artifact_paths=left.internal_plan_artifact_paths,
+            )
+        )
+    )
+    right_paths = sorted(
+        dict.fromkeys(
+            interworkspace_owned_paths(
+                right.owned_paths,
+                internal_plan_artifact_paths=right.internal_plan_artifact_paths,
+            )
+        )
+    )
     for left_owned_path in left_paths:
         for right_owned_path in right_paths:
             overlap = owned_path_overlap_match(left_owned_path, right_owned_path)
@@ -284,6 +302,10 @@ def _graph_workspace(workspace: Workspace) -> _GraphWorkspace:
         branch_base=workspace.branch_base,
         task_class=workspace.task_class,
         owned_paths=tuple(workspace.owned_paths),
+        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+            workspace.resolved_profile,
+            workspace_id=workspace.id,
+        ),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
     )

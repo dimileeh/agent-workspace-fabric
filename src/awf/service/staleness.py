@@ -49,7 +49,10 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
-from awf.common.owned_paths import is_internal_plan_artifact_owned_path
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    is_internal_plan_artifact_owned_path,
+)
 from awf.db.models import (
     ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
     MergeCandidate,
@@ -86,6 +89,7 @@ class CandidateSnapshot:
     owned_paths: tuple[str, ...]
     task_class: str | None
     base_sha: str | None
+    internal_plan_artifact_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -243,8 +247,22 @@ def evaluate_staleness(
     dep_changes = _matched(target.changed_paths, policy.dependency_paths)
     build_changes = _matched(target.changed_paths, policy.build_config_paths)
     overlap = _matched(target.changed_paths, candidate.owned_paths)
-    plan_artifact_overlap = [path for path in overlap if _is_plan_artifact_path(path)]
-    blocking_overlap = [path for path in overlap if not _is_plan_artifact_path(path)]
+    plan_artifact_overlap = [
+        path
+        for path in overlap
+        if _is_plan_artifact_path(
+            path,
+            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+        )
+    ]
+    blocking_overlap = [
+        path
+        for path in overlap
+        if not _is_plan_artifact_path(
+            path,
+            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+        )
+    ]
 
     if _is_sensitive_task_class(
         candidate.task_class,
@@ -330,7 +348,10 @@ def evaluate_staleness(
         not any(finding.blocks_merge for finding in findings)
         and target.advanced_commits > 0
         and candidate.task_class not in policy.lenient_task_classes
-        and not _target_changes_are_only_plan_artifacts(target.changed_paths)
+        and not _target_changes_are_only_plan_artifacts(
+            target.changed_paths,
+            internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+        )
     ):
         findings.append(
             StalenessFinding(
@@ -395,13 +416,30 @@ def _path_matches(path: str, pattern: str) -> bool:
     return path.startswith(pattern + "/")
 
 
-def _is_plan_artifact_path(path: str) -> bool:
+def _is_plan_artifact_path(
+    path: str,
+    *,
+    internal_plan_artifact_paths: Iterable[str] = (),
+) -> bool:
     """Return true when a changed path is an AWF internal plan artifact."""
-    return is_internal_plan_artifact_owned_path(path)
+    return is_internal_plan_artifact_owned_path(
+        path,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    )
 
 
-def _target_changes_are_only_plan_artifacts(changed_paths: Sequence[str]) -> bool:
-    return bool(changed_paths) and all(_is_plan_artifact_path(path) for path in changed_paths)
+def _target_changes_are_only_plan_artifacts(
+    changed_paths: Sequence[str],
+    *,
+    internal_plan_artifact_paths: Iterable[str] = (),
+) -> bool:
+    return bool(changed_paths) and all(
+        _is_plan_artifact_path(
+            path,
+            internal_plan_artifact_paths=internal_plan_artifact_paths,
+        )
+        for path in changed_paths
+    )
 
 
 def _has_wildcard(pattern: str) -> bool:
@@ -610,6 +648,10 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
         owned_paths=owned,
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
+        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+            workspace.resolved_profile,
+            workspace_id=workspace.id,
+        ),
     )
 
 

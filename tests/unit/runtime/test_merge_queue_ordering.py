@@ -60,6 +60,7 @@ async def _seed_monitoring_candidate(
     created_at: datetime,
     status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
     owned_paths: list[str] | None = None,
+    resolved_profile: dict | None = None,
 ) -> tuple[str, str, str]:
     """Seed a merge-ready candidate with optional owned paths."""
     resolved_owned_paths = ["src/shared/**"] if owned_paths is None else list(owned_paths)
@@ -75,6 +76,7 @@ async def _seed_monitoring_candidate(
             auto_merge=True,
             agent=AgentRuntime.claude_code.value,
             test_commands=["pytest -q"],
+            resolved_profile=resolved_profile,
         )
         workspace.status = status.value
         workspace.branch_name = f"awf/{workspace.id}"
@@ -153,6 +155,44 @@ async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
         pr_number=82,
         created_at=now + timedelta(minutes=5),
         owned_paths=["src/feature-b/**", "docs/awf-plans/**"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
+async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Profile-configured artifact scopes do not block merge queue progression."""
+    custom_profile = {
+        "planning": {
+            "plan_path": "docs/alternate/{workspace_id}.md",
+            "conformance_report_path": "docs/alternate/{workspace_id}.json",
+        },
+    }
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _seed_monitoring_candidate(
+        factory,
+        title="Older custom plan artifact",
+        pr_number=281,
+        created_at=now,
+        owned_paths=["src/feature-a/**", "docs/alternate/**"],
+        resolved_profile=custom_profile,
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later custom plan artifact",
+        pr_number=282,
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["src/feature-b/**", "docs/alternate/**"],
+        resolved_profile=custom_profile,
     )
 
     async with factory() as session:

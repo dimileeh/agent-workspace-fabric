@@ -12,7 +12,10 @@ from datetime import datetime
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.owned_paths import interworkspace_owned_paths
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -66,6 +69,7 @@ class _OverlapWorkspace:
     repo_url: str
     branch_base: str
     owned_paths: tuple[str, ...]
+    internal_plan_artifact_paths: tuple[str, ...]
 
 
 class InvalidWorkspaceLockCursorError(ValueError):
@@ -258,6 +262,10 @@ def _overlap_workspace(workspace: Workspace) -> _OverlapWorkspace:
         repo_url=workspace.repo_url,
         branch_base=workspace.branch_base,
         owned_paths=tuple(workspace.owned_paths),
+        internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+            workspace.resolved_profile,
+            workspace_id=workspace.id,
+        ),
     )
 
 
@@ -273,13 +281,22 @@ def _workspace_overlap_risks_by_id(
     for candidate in overlap_candidates:
         key = (candidate.repo_url, candidate.branch_base)
         candidates_by_repo_base.setdefault(key, []).append(
-            (candidate, interworkspace_owned_paths(candidate.owned_paths))
+            (
+                candidate,
+                interworkspace_owned_paths(
+                    candidate.owned_paths,
+                    internal_plan_artifact_paths=candidate.internal_plan_artifact_paths,
+                ),
+            )
         )
 
     risks_by_workspace: dict[str, tuple[WorkspaceLockOverlapRisk, ...]] = {}
     for workspace in workspaces:
         risks: list[WorkspaceLockOverlapRisk] = []
-        owned_paths = interworkspace_owned_paths(workspace.owned_paths)
+        owned_paths = interworkspace_owned_paths(
+            workspace.owned_paths,
+            internal_plan_artifact_paths=workspace.internal_plan_artifact_paths,
+        )
         key = (workspace.repo_url, workspace.branch_base)
         candidate_entries = candidates_by_repo_base.get(key)
         if candidate_entries is None:

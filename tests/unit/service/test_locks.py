@@ -362,8 +362,13 @@ def test_overlap_risks_prefilters_candidate_owned_paths_once(
 
     calls_by_paths: dict[tuple[str, ...], int] = {}
 
-    def counting_interworkspace_owned_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    def counting_interworkspace_owned_paths(
+        paths: tuple[str, ...],
+        *,
+        internal_plan_artifact_paths: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
         """Count filter invocations while preserving real filtering behavior."""
+        del internal_plan_artifact_paths
         calls_by_paths[paths] = calls_by_paths.get(paths, 0) + 1
         return real_interworkspace_owned_paths(paths)
 
@@ -380,12 +385,14 @@ def test_overlap_risks_prefilters_candidate_owned_paths_once(
                 repo_url="git@github.com:example/app.git",
                 branch_base="main",
                 owned_paths=("src/awf/service/locks.py",),
+                internal_plan_artifact_paths=(),
             ),
             locks_service._OverlapWorkspace(
                 workspace_id="page-docs",
                 repo_url="git@github.com:example/app.git",
                 branch_base="main",
                 owned_paths=("docs/usage.md",),
+                internal_plan_artifact_paths=(),
             ),
         ),
         (
@@ -394,12 +401,14 @@ def test_overlap_risks_prefilters_candidate_owned_paths_once(
                 repo_url="git@github.com:example/app.git",
                 branch_base="main",
                 owned_paths=("src/awf/service/**",),
+                internal_plan_artifact_paths=(),
             ),
             locks_service._OverlapWorkspace(
                 workspace_id="candidate-docs",
                 repo_url="git@github.com:example/app.git",
                 branch_base="main",
                 owned_paths=("docs/**",),
+                internal_plan_artifact_paths=(),
             ),
         ),
     )

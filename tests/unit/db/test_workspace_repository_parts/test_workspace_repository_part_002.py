@@ -45,6 +45,7 @@ async def _create_policy_workspace(
     branch_base: str = "development",
     owned_paths: list[str] | None = None,
     status: WorkspaceStatus = WorkspaceStatus.requested,
+    resolved_profile: dict | None = None,
 ) -> Workspace:
     workspace = await repo.create(
         repo_url=repo_url,
@@ -54,6 +55,7 @@ async def _create_policy_workspace(
         agent=AgentRuntime.codex.value,
         test_commands=[],
         owned_paths=list(owned_paths or []),
+        resolved_profile=resolved_profile,
     )
     workspace.status = status.value
     await session.flush()
@@ -952,6 +954,35 @@ class TestOwnedPathOverlapLookup:
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=["src/requested/**", "docs/awf-plans/**"],
+        )
+
+        assert overlaps == []
+
+    @pytest.mark.unit
+    async def test_custom_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Profile-configured planning roots are excluded from repository overlaps."""
+        custom_profile = {
+            "planning": {
+                "plan_path": "docs/alternate/{workspace_id}.md",
+                "conformance_report_path": "docs/alternate/{workspace_id}.json",
+            },
+        }
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/existing/**", "docs/alternate/**"],
+            resolved_profile=custom_profile,
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/requested/**", "docs/alternate/**"],
+            resolved_profile=custom_profile,
         )
 
         assert overlaps == []

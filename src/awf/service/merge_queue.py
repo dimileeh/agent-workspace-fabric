@@ -28,7 +28,10 @@ from awf.api.schemas import (
     StaleReasonResponse,
     WorkspaceEventResponse,
 )
-from awf.common.owned_paths import interworkspace_owned_paths
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
     MergeCandidate,
@@ -761,9 +764,19 @@ def _candidate_blocks_target(
 def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
     """Return candidate owned paths that can block other merge candidates."""
     paths = tuple(path for path in candidate.workspace.owned_paths if path)
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        candidate.workspace.resolved_profile,
+        workspace_id=candidate.workspace.id,
+    )
     if paths:
-        return interworkspace_owned_paths(paths)
-    return interworkspace_owned_paths(path for path in candidate.attempt.owned_paths if path)
+        return interworkspace_owned_paths(
+            paths,
+            internal_plan_artifact_paths=internal_paths,
+        )
+    return interworkspace_owned_paths(
+        (path for path in candidate.attempt.owned_paths if path),
+        internal_plan_artifact_paths=internal_paths,
+    )
 
 
 def _is_merge_ready_candidate(candidate: MergeCandidate) -> bool:

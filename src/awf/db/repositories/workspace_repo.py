@@ -26,7 +26,10 @@ from awf.common.audit import build_audit_payload
 from awf.common.ids import (
     new_event_id,
 )
-from awf.common.owned_paths import interworkspace_owned_paths
+from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
+)
 from awf.db.enums import (
     AgentRuntime,
     OperationType,
@@ -413,11 +416,13 @@ class WorkspaceRepository:
         repo_url: str,
         branch_base: str,
         owned_paths: list[str],
+        resolved_profile: Mapping[str, object] | None = None,
     ) -> list[OwnedPathConflict]:
         overlaps = await self.find_active_owned_path_overlaps(
             repo_url=repo_url,
             branch_base=branch_base,
             owned_paths=owned_paths,
+            resolved_profile=resolved_profile,
         )
         return [
             OwnedPathConflict(
@@ -434,9 +439,17 @@ class WorkspaceRepository:
         repo_url: str,
         branch_base: str,
         owned_paths: list[str],
+        resolved_profile: Mapping[str, object] | None = None,
     ) -> list[OwnedPathOverlap]:
         """Return active inter-workspace owned-path overlaps for merge safety."""
-        requested_paths = list(interworkspace_owned_paths(owned_paths))
+        requested_paths = list(
+            interworkspace_owned_paths(
+                owned_paths,
+                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+                    resolved_profile
+                ),
+            )
+        )
         if not requested_paths:
             return []
 
@@ -452,7 +465,13 @@ class WorkspaceRepository:
         rows = list((await self._session.execute(stmt)).scalars())
         overlaps: list[OwnedPathOverlap] = []
         for workspace in rows:
-            for existing_path in interworkspace_owned_paths(workspace.owned_paths):
+            for existing_path in interworkspace_owned_paths(
+                workspace.owned_paths,
+                internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
+                    workspace.resolved_profile,
+                    workspace_id=workspace.id,
+                ),
+            ):
                 for requested_path in requested_paths:
                     if _owned_paths_overlap(existing_path, requested_path):
                         overlaps.append(

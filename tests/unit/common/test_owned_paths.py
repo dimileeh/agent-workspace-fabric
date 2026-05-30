@@ -6,6 +6,7 @@ import pytest
 
 from awf.common import owned_paths
 from awf.common.owned_paths import (
+    internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
     normalize_owned_path,
@@ -86,6 +87,48 @@ def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> No
         "src/awf/**",
         "docs/runbooks/**",
     )
+
+
+@pytest.mark.unit
+def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_paths() -> None:
+    """Resolved profile planning paths extend internal artifact classification."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {
+            "planning": {
+                "plan_path": "docs/alternate/{workspace_id}.md",
+                "conformance_report_path": "docs/alternate/{workspace_id}.json",
+            },
+        },
+        workspace_id="ws_custom",
+    )
+
+    assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_custom.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_*.json",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "docs/alternate/README.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_custom.notes.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert interworkspace_owned_paths(
+        [
+            "docs/alternate/**",
+            "docs/alternate/ws_custom.md",
+            "docs/alternate/ws_*.json",
+            "docs/alternate/README.md",
+            "docs/alternate/ws_custom.notes.md",
+            "src/awf/**",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/alternate/README.md", "docs/alternate/ws_custom.notes.md", "src/awf/**")
 
 
 @pytest.mark.unit
