@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _profile_from_resolved_profile_snapshot,
@@ -226,6 +229,65 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
 
 
 @pytest.mark.unit
+async def test_runtime_profile_snapshot_commits_json_string_returning_value() -> None:
+    profile = _custom_planning_profile("repo-auto")
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+
+    class FakeUpdateResult:
+        def scalar_one_or_none(self) -> str:
+            return json.dumps(snapshot)
+
+    class ReturningStringSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.execute_calls = 0
+            self.scalar_calls = 0
+
+        async def __aenter__(self) -> ReturningStringSession:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def execute(self, statement: object) -> FakeUpdateResult:
+            self.execute_calls += 1
+            compiled = str(statement)
+            assert "UPDATE workspaces" in compiled
+            assert "RETURNING workspaces.resolved_profile" in compiled
+            return FakeUpdateResult()
+
+        async def scalar(self, statement: object) -> None:
+            self.scalar_calls += 1
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class ReturningStringSessionFactory:
+        def __init__(self) -> None:
+            self.sessions: list[ReturningStringSession] = []
+
+        def __call__(self) -> ReturningStringSession:
+            session = ReturningStringSession()
+            self.sessions.append(session)
+            return session
+
+    session_factory = ReturningStringSessionFactory()
+    executor = SimpleNamespace(_session_factory=session_factory)
+
+    frozen_snapshot = await _persist_resolved_profile_snapshot_if_missing(
+        executor,
+        workspace_id="ws_profile_returning_string",
+        profile=profile,
+    )
+
+    session = session_factory.sessions[0]
+    assert session.execute_calls == 1
+    assert session.scalar_calls == 0
+    assert session.commits == 1
+    assert frozen_snapshot == snapshot
+
+
+@pytest.mark.unit
 async def test_sync_resolved_profile_returns_winning_snapshot_and_realigns_workspace(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -269,6 +331,138 @@ async def test_sync_resolved_profile_returns_winning_snapshot_and_realigns_works
     assert profile.name == "first-worker"
     assert profile.planning.max_iterations == 4
     assert in_memory_workspace.resolved_profile == competing_snapshot
+
+
+@pytest.mark.unit
+async def test_validation_cycle_syncs_profile_before_command_planning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    runtime_profile = _custom_planning_profile("runtime-auto")
+    frozen_profile = _custom_planning_profile("first-writer")
+    workspace = Workspace(
+        id="ws_validation_profile",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the repo profile.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=None,
+    )
+
+    class ValidationSyncExecutor:
+        _config = SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=6,
+        )
+
+        async def _transition_if_current(self, *args: object, **kwargs: object) -> bool:
+            events.append(("transition", kwargs["action"]))
+            return True
+
+        async def _recheck_status(self, *args: object, **kwargs: object) -> bool:
+            events.append(("recheck", kwargs["action"]))
+            return False
+
+    def fake_profile_for_workspace(
+        ws: Workspace,
+        *,
+        worktree_path: Path,
+        planning_max_iterations_default: int,
+    ) -> WorkspaceProfile:
+        assert worktree_path == tmp_path
+        ws.resolved_profile = runtime_profile.model_dump(mode="json", by_alias=True)
+        events.append(("resolve", planning_max_iterations_default))
+        return runtime_profile
+
+    async def fake_sync_resolved_profile(
+        self: object,
+        *,
+        ws: Workspace,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+        planning_max_iterations_default: int,
+    ) -> WorkspaceProfile:
+        assert workspace_id == workspace.id
+        assert profile.name == "runtime-auto"
+        ws.resolved_profile = frozen_profile.model_dump(mode="json", by_alias=True)
+        events.append(("sync", planning_max_iterations_default))
+        return frozen_profile
+
+    def fake_profile_phase_command_plan(
+        profile: WorkspaceProfile,
+        phase_names: tuple[str, ...],
+    ) -> list[object]:
+        events.append(("plan", profile.name))
+        assert phase_names == ("post_agent", "validate")
+        return []
+
+    def fake_validation_tier_for_workspace(
+        ws: Workspace,
+        profile: WorkspaceProfile,
+    ) -> int:
+        assert ws is workspace
+        events.append(("tier", profile.name))
+        return 1
+
+    async def unused_git_in_worktree(argv: list[str]) -> object:
+        raise AssertionError(f"git should not run after stale validation status: {argv}")
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        fake_profile_for_workspace,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        fake_sync_resolved_profile,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        fake_profile_phase_command_plan,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        fake_validation_tier_for_workspace,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        ValidationSyncExecutor(),
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=tmp_path,
+        compose_project="awf_ws_validation_profile",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="a" * 40,
+        expected_branch="awf/ws_validation_profile",
+        adapter=object(),
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        has_known_non_plan_output=False,
+        git_in_worktree=unused_git_in_worktree,
+    )
+
+    assert result.stop is True
+    assert events == [
+        ("transition", "start_validation"),
+        ("resolve", 6),
+        ("sync", 6),
+        ("plan", "first-writer"),
+        ("tier", "first-writer"),
+        ("recheck", "validate"),
+    ]
 
 
 @pytest.mark.unit

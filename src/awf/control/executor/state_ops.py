@@ -5,6 +5,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import (
     UTC,
@@ -43,6 +44,18 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
 
 
+def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
     async with self._session_factory() as session:
         return await WorkspaceRepository(session).get(workspace_id)
@@ -70,16 +83,15 @@ async def _persist_resolved_profile_snapshot_if_missing(
             .returning(Workspace.resolved_profile)
             .execution_options(synchronize_session=False)
         )
-        persisted_snapshot = result.scalar_one_or_none()
-        if isinstance(persisted_snapshot, dict):
+        returned_snapshot = result.scalar_one_or_none()
+        persisted_snapshot = _resolved_profile_snapshot_from_db_value(returned_snapshot)
+        if returned_snapshot is not None:
             await session.commit()
-            return persisted_snapshot
+            return persisted_snapshot if persisted_snapshot is not None else snapshot
         frozen_snapshot = await session.scalar(
             select(Workspace.resolved_profile).where(Workspace.id == workspace_id)
         )
-        if isinstance(frozen_snapshot, dict):
-            return frozen_snapshot
-        return None
+        return _resolved_profile_snapshot_from_db_value(frozen_snapshot)
 
 
 async def _sync_resolved_profile(

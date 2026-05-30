@@ -42,6 +42,7 @@ from awf.control.executor.quality_gates import (
     _post_validation_conformance_agent_failure_details,
     _post_validation_conformance_agent_failure_message,
 )
+from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
@@ -116,6 +117,13 @@ async def run_validation_and_fix_cycle(
     profile = _profile_for_workspace(
         ws,
         worktree_path=worktree_path,
+        planning_max_iterations_default=self._config.planning_max_iterations_default,
+    )
+    profile = await _sync_resolved_profile(
+        self,
+        ws=ws,
+        workspace_id=workspace_id,
+        profile=profile,
         planning_max_iterations_default=self._config.planning_max_iterations_default,
     )
     validation_commands = [
