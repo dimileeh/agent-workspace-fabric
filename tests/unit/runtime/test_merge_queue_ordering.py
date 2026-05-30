@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.db.repositories as repositories
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
@@ -173,8 +174,16 @@ async def test_plan_artifact_only_overlap_does_not_block_later_candidate(
 @pytest.mark.unit
 async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
     factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Profile-configured artifact scopes do not block merge queue progression."""
+    """Profile-configured artifact files do not block merge queue progression."""
+    workspace_ids = iter(
+        [
+            "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "ws_bbbbbbbbbbbbbbbbbbbbbbbb",
+        ]
+    )
+    monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(workspace_ids))
     custom_profile = {
         "planning": {
             "plan_path": "docs/alternate/{workspace_id}.md",
@@ -187,7 +196,10 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
         title="Older custom plan artifact",
         pr_number=281,
         created_at=now,
-        owned_paths=["src/feature-a/**", "docs/alternate/**"],
+        owned_paths=[
+            "src/feature-a/**",
+            "docs/alternate/ws_aaaaaaaaaaaaaaaaaaaaaaaa.md",
+        ],
         resolved_profile=custom_profile,
     )
     _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
@@ -195,7 +207,10 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
         title="Later custom plan artifact",
         pr_number=282,
         created_at=now + timedelta(minutes=5),
-        owned_paths=["src/feature-b/**", "docs/alternate/**"],
+        owned_paths=[
+            "src/feature-b/**",
+            "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
+        ],
         resolved_profile=custom_profile,
     )
 
