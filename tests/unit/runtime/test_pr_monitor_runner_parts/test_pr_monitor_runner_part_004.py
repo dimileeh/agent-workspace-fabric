@@ -1234,8 +1234,11 @@ async def test_run_handles_provider_recovery_before_state_is_loaded(
 
 class TestParseVerdict:
     @pytest.mark.unit
-    def test_empty_stdout_defers(self) -> None:
-        assert _parse_verdict("") == "defer"
+    def test_empty_stdout_needs_human(self) -> None:
+        # #305: empty agent output is a failure to produce, not a considered
+        # defer. Block the merge (needs_human) rather than auto-capturing a
+        # follow-up tracking issue on a thread the agent never addressed.
+        assert _parse_verdict("") == "needs_human"
 
     @pytest.mark.unit
     def test_false_positive_marker(self) -> None:
@@ -1249,10 +1252,42 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
-    def test_private_awf_verdict_defer_marker_preserves_reason(self) -> None:
+    def test_private_awf_verdict_needs_human_marker_preserves_reason(self) -> None:
+        # #305: NEEDS_HUMAN maps to its own needs_human verdict (blocks merge,
+        # never auto-resolved), distinct from a follow-up defer.
         result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN: maintainer decision")
 
-        assert result.verdict == "defer"
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_needs_human_space_variant_preserves_reason(self) -> None:
+        # The primary _AWF_VERDICT regex tolerates "NEEDS HUMAN" (space) like
+        # "FALSE POSITIVE", so the reason is extracted cleanly instead of being
+        # garbled by the bare fallback (which splits on the AWF-VERDICT colon).
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS HUMAN: maintainer decision")
+
+        assert result.verdict == "needs_human"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "NEEDS_HUMAN",
+            "NEEDS HUMAN",
+            "NEEDS_ HUMAN",
+            "NEEDS _HUMAN",
+            "NEEDS__HUMAN",
+            "needs_human",
+        ],
+    )
+    def test_private_awf_verdict_needs_human_separator_variants(self, label: str) -> None:
+        # Any separator the NEEDS[\s_]+HUMAN regex accepts must normalize to
+        # needs_human — never silently fall through to fix_committed (#305).
+        result = _parse_verdict_result(f"AWF-VERDICT: {label}: maintainer decision")
+
+        assert result.verdict == "needs_human"
         assert result.reason == "maintainer decision"
 
     @pytest.mark.unit
@@ -1282,7 +1317,8 @@ class TestParseVerdict:
 
     @pytest.mark.unit
     def test_monitor_state_verdict_normalizes_persisted_private_verdicts(self) -> None:
-        assert _monitor_state_verdict("NEEDS_HUMAN") == "defer"
+        # #305: needs_human is now its own verdict, no longer collapsed to defer.
+        assert _monitor_state_verdict("NEEDS_HUMAN") == "needs_human"
         assert _monitor_state_verdict("defer") == "defer"
         assert _monitor_state_verdict("agent_failed") == "agent_failed"
         assert _monitor_state_verdict("fixed") == "fix_committed"

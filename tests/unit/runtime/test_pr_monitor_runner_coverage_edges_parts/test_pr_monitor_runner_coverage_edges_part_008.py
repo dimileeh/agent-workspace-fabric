@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor_runner import (
 from awf.runtime.pr_monitor_runner import remote_repair as pr_monitor_runner_remote_repair
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.helpers import (
+    _is_protected_manual_ready_handoff,
     _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -977,3 +978,245 @@ async def test_feedback_refresh_drops_stale_review_comment_state(
     assert changed is True
     assert "review-1" not in state.threads_addressed_ids
     assert _review_comment_body_state_key("review-1") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_deferred_issue_filed_marker_is_body_aware() -> None:
+    # #305: the capture marker is keyed by thread id AND body hash so a same-body
+    # resolve-retry stays idempotent (no duplicate issue), while new reviewer
+    # replies (a changed body) re-capture into a fresh issue instead of being
+    # silently resolved under the stale one.
+    from awf.runtime.pr_monitor_runner.fix_cycle import _deferred_issue_filed_marker
+
+    assert _deferred_issue_filed_marker("T1", "hashA") == _deferred_issue_filed_marker(
+        "T1", "hashA"
+    )
+    assert _deferred_issue_filed_marker("T1", "hashA") != _deferred_issue_filed_marker(
+        "T1", "hashB"
+    )
+    assert "T1" in _deferred_issue_filed_marker("T1", "hashA")
+
+
+@pytest.mark.unit
+def test_deferred_thread_conversation_includes_all_replies() -> None:
+    # #305: a body-aware recapture fires because new reviewer replies changed the
+    # thread, so the tracking issue must carry the whole conversation — not just
+    # the truncated first-comment excerpt — or the new feedback is lost on resolve.
+    from awf.runtime.pr_monitor import ReviewThread, ReviewThreadComment
+    from awf.runtime.pr_monitor_runner.fix_cycle import _deferred_thread_conversation
+
+    thread = ReviewThread(
+        thread_id="T1",
+        path="x",
+        line=1,
+        body_excerpt="first finding",
+        comments=(
+            ReviewThreadComment(comment_id="c1", body="first finding", author="cr"),
+            ReviewThreadComment(
+                comment_id="c2", body="follow-up reply\nsecond line", author="alice"
+            ),
+            ReviewThreadComment(comment_id="c3", body="", author="bot"),
+        ),
+    )
+    body = _deferred_thread_conversation(thread)
+    assert "first finding" in body
+    assert "follow-up reply" in body and "second line" in body  # all replies, multi-line
+    assert "alice" in body
+    # Fallback to the excerpt when GitHub supplied no structured comments.
+    bare = ReviewThread(thread_id="T2", path="x", line=1, body_excerpt="only excerpt", comments=())
+    assert "only excerpt" in _deferred_thread_conversation(bare)
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_rejects_blocking_bot_thread() -> None:
+    # #305: a bot inline thread with needs_human/defer blocks in decide() gate 7
+    # but is not "human deferred"; the protected-merge handoff must NOT report
+    # ready-for-merge, mirroring the _notify_human_reason guard.
+    base = _status_for_helpers()
+    blocked = PRStatus(
+        number=base.number,
+        head_sha=base.head_sha,
+        mergeable=base.mergeable,
+        check_state=base.check_state,
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id="T_bot", path="x", line=1, body_excerpt="?", author="coderabbitai"
+            ),
+        ),
+        unresolved_review_comments=(),
+        base_behind_count=base.base_behind_count,
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+    state = MonitorState(threads_addressed_ids={"T_bot": "needs_human"})
+    assert _is_protected_manual_ready_handoff(blocked, state) is False
+
+
+@pytest.mark.unit
+async def test_deferred_capture_transient_failure_requeues_instead_of_downgrading(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # #305: a transient `gh issue create` failure (502) must NOT permanently
+    # downgrade a valid defer to needs_human. It clears the verdict so the next
+    # poll re-addresses and re-attempts capture once GitHub recovers.
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
+
+    ws_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")  # gh issue create (transient)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_defer", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "defer")
+
+    result = await _capture_deferred_review_thread(
+        runner,
+        workspace_id=ws_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    # None (requeue), not False (which would downgrade to needs_human); and the
+    # verdict is cleared so the thread is re-addressed next poll.
+    assert result is None
+    assert state.threads_addressed_ids.get("T_defer") is None
+
+
+@pytest.mark.unit
+async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When _capture_deferred_review_thread returns None (transient), the fix
+    # cycle must not downgrade the thread and must move on to the next item.
+    from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
+    from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    t1 = ReviewThread(
+        thread_id="T_transient", path="src/a.py", line=1, body_excerpt="nit", author="rev"
+    )
+    t2 = ReviewThread(
+        thread_id="T_block", path="src/b.py", line=2, body_excerpt="blocks", author="rev"
+    )
+    state = MonitorState()
+
+    async def _address(**kwargs: object) -> str:
+        thread = kwargs["thread"]
+        assert isinstance(thread, ReviewThread)
+        if thread.thread_id == t1.thread_id:
+            return "defer"
+        raise _MonitorPolicyBlockedError("policy blocked second thread")
+
+    async def _capture_none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(fix_cycle_module, "_capture_deferred_review_thread", _capture_none)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_transient_continue",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(t1, t2),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_transient_continue",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The cycle moved past the transient thread to the second (which policy-blocks)
+    # and never downgraded the transient thread to needs_human.
+    assert result.failed is True
+    assert state.threads_addressed_ids.get("T_transient") != "needs_human"
+
+
+@pytest.mark.unit
+async def test_address_thread_stashes_only_defer_reason() -> None:
+    # _address_thread stashes the agent's DEFER reason in state (for the
+    # deferred-capture issue) only when there is a reason, the verdict is defer,
+    # and state is present — never otherwise.
+    from types import SimpleNamespace
+
+    from awf.common.github_client import RepoRef
+    from awf.runtime.pr_monitor_runner.comments import VerdictResult, _address_thread
+    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+
+    thread = ReviewThread(thread_id="T1", path="x", line=1, body_excerpt="?")
+    reason_key = _defer_reason_state_key("T1")
+
+    def _runner(result: VerdictResult) -> object:
+        async def _invoke(**_kwargs: object) -> VerdictResult:
+            return result
+
+        return SimpleNamespace(
+            _workspace_runtime_context="", _invoke_cli_for_verdict_result=_invoke
+        )
+
+    async def _call(runner: object, state: MonitorState | None) -> str:
+        return await _address_thread(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws",
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            thread=thread,
+            compose_project="p",
+            compose_file=Path("/tmp/c.yml"),
+            state=state,
+        )
+
+    # defer + reason + state -> stashed.
+    state = MonitorState()
+    assert (
+        await _call(_runner(VerdictResult(verdict="defer", reason="track refactor")), state)
+        == "defer"
+    )
+    assert state.threads_addressed_ids[reason_key] == "track refactor"
+
+    # state is None -> no crash, nothing stashed.
+    assert await _call(_runner(VerdictResult(verdict="defer", reason="x")), None) == "defer"
+
+    # non-defer verdict -> not stashed.
+    s2 = MonitorState()
+    assert (
+        await _call(_runner(VerdictResult(verdict="fix_committed", reason="done")), s2)
+        == "fix_committed"
+    )
+    assert reason_key not in s2.threads_addressed_ids
+
+    # defer without a reason -> not stashed.
+    s3 = MonitorState()
+    assert await _call(_runner(VerdictResult(verdict="defer", reason=None)), s3) == "defer"
+    assert reason_key not in s3.threads_addressed_ids
+
+    # A re-triage with a bare defer CLEARS a stale reason from a prior pass.
+    s4 = MonitorState()
+    await _call(_runner(VerdictResult(verdict="defer", reason="old reason")), s4)
+    assert s4.threads_addressed_ids[reason_key] == "old reason"
+    await _call(_runner(VerdictResult(verdict="defer", reason=None)), s4)
+    assert reason_key not in s4.threads_addressed_ids

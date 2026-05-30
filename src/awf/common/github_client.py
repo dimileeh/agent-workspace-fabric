@@ -1110,6 +1110,36 @@ class GitHubClient:
                 stderr=result.stderr,
             )
 
+    async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
+        """Open a tracking issue and return its URL.
+
+        Used by the PR monitor to capture a follow-up ``defer`` verdict durably
+        before resolving the review thread. A token missing the ``issues``
+        scope surfaces here as a ``GitHubClientError``; the caller treats that
+        as a capture failure and leaves the thread unresolved so the merge gate
+        keeps blocking (fail safe).
+        """
+        result = await self._runner.run(
+            [
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                repo.slug(),
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
+        )
+        if not result.ok:
+            raise GitHubClientError(
+                operation="gh issue create",
+                returncode=result.returncode,
+                stderr=result.stderr,
+            )
+        return result.stdout.strip()
+
     async def create_pull_request(
         self,
         *,

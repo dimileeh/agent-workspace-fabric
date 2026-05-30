@@ -1033,6 +1033,32 @@ def test_pending_check_and_defer_helpers_cover_unknown_and_review_paths() -> Non
 
 
 @pytest.mark.unit
+def test_notify_human_reason_and_artifact_surface_bot_needs_human_thread() -> None:
+    # #305: a bot-authored ``needs_human`` inline thread blocks the merge in
+    # ``decide`` but is not "human deferred". ``_notify_human_reason`` must still
+    # return a reason (never None -> a false "ready to merge"), and the terminal
+    # artifact must include the item rather than silently dropping it.
+    bot_thread = ReviewThread(
+        thread_id="T_nh",
+        path="src/a.py",
+        line=3,
+        body_excerpt="the diff may be wrong",
+        author="coderabbitai",
+    )
+    state = MonitorState(threads_addressed_ids={"T_nh": "needs_human"})
+    status = _status_for_helpers(threads=(bot_thread,))
+
+    reason = _notify_human_reason(status, state)
+    assert reason is not None
+    assert "needs human input" in reason
+
+    bot_items, human_items = _collect_defer_items(status, state)
+    assert [item["id"] for item in bot_items] == ["T_nh"]
+    assert bot_items[0]["verdict"] == "needs_human"
+    assert human_items == []
+
+
+@pytest.mark.unit
 def test_target_reconcile_payload_supports_dict_to_dict_and_fallback() -> None:
     class _ToDict:
         def to_dict(self) -> dict[str, object]:

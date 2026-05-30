@@ -882,6 +882,110 @@ async def test_fix_cycle_clears_addressed_thread_state_on_protected_scope_early_
 
 
 @pytest.mark.unit
+async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #305: a _MonitorPolicyBlockedError on a later thread must roll back items
+    # already addressed this cycle (e.g. a captured defer in publish_dependent_ids),
+    # or they stay marked-addressed-but-unresolved and wedge the merge gate.
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fixed_thread = ReviewThread(
+        thread_id="T_fixed", path="src/foo.py", line=12, body_excerpt="fix me first", author="rev"
+    )
+    blocked_thread = ReviewThread(
+        thread_id="T_blocked",
+        path="src/foo.py",
+        line=24,
+        body_excerpt="then policy blocks",
+        author="rev",
+    )
+    state = MonitorState()
+
+    async def _address_thread(**kwargs: object) -> str:
+        thread = kwargs["thread"]
+        assert isinstance(thread, ReviewThread)
+        if thread.thread_id == fixed_thread.thread_id:
+            return "fix_committed"
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked thread fix.")
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_policy_thread",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(fixed_thread, blocked_thread),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_policy_thread",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert "Supply-chain policy blocked" in result.stderr
+    assert "T_fixed" not in state.threads_addressed_ids
+    assert _review_thread_body_state_key("T_fixed") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_review(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The review-comment loop's policy-blocked exit must also roll back the
+    # thread already addressed earlier in the same cycle.
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fixed_thread = ReviewThread(
+        thread_id="T_fixed", path="src/foo.py", line=12, body_excerpt="fix me first", author="rev"
+    )
+    blocked_comment = ReviewComment(comment_id="C_blocked", body_excerpt="policy blocks review")
+    state = MonitorState()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _address_review(**_kwargs: object) -> object:
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _address_review)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_policy_review",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(fixed_thread,),
+        initial_reviews=(blocked_comment,),
+        state=state,
+        remote_branch="awf/ws_policy_review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert "Supply-chain policy blocked" in result.stderr
+    assert "T_fixed" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unaddressed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

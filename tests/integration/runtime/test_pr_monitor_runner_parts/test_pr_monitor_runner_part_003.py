@@ -258,6 +258,7 @@ def _make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
+    max_fix_cycle_passes: int = 3,
     initial_review_grace_period_seconds: float = 0,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
@@ -274,7 +275,8 @@ def _make_runner(
             non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
-            max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=max_fix_cycle_passes,
         ),
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
@@ -1003,15 +1005,420 @@ class TestParseVerdict:
     @pytest.mark.parametrize(
         "stdout, expected",
         [
-            ("", "defer"),
+            # Empty agent output is a failure to produce, not a considered
+            # deferral — it blocks the merge (needs_human), never auto-captured (#305).
+            ("", "needs_human"),
+            # Whitespace-only output is also a failure to produce -> needs_human,
+            # never the fix_committed default that would clear blocking feedback.
+            ("\n", "needs_human"),
+            ("   \t  \n", "needs_human"),
             ("fixed in commit abc1234", "fix_committed"),
             ("FALSE POSITIVE: existing code is fine", "false_positive"),
             ("false positive: yep", "false_positive"),
             ("DEFER: need maintainer input", "defer"),
             ("DEFER : lowercase also fine", "defer"),
+            # A bare NEEDS_HUMAN: (no AWF-VERDICT: prefix) must be fail-safe —
+            # needs_human, never fix_committed (which would resolve + merge).
+            ("NEEDS_HUMAN: the diff may be wrong", "needs_human"),
+            ("NEEDS HUMAN: maintainer must decide", "needs_human"),
+            ("Some chatty prose\nNEEDS_HUMAN: ask a human", "needs_human"),
             ("Some chatty prose\nFALSE POSITIVE: ...", "false_positive"),
             ("Pushed fix. See commit.", "fix_committed"),
         ],
     )
     def test_parse_verdict_table(self, stdout: str, expected: str) -> None:
         assert _parse_verdict(stdout) == expected
+
+
+class TestDeferredThreadCapture:
+    """Two-kind defer (#305): a ``defer`` is a captured, resolvable
+    follow-up; a ``needs_human`` blocks the merge for a human decision.
+    """
+
+    @pytest.mark.unit
+    async def test_defer_verdict_captures_and_resolves_then_merges(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A follow-up ``DEFER`` is durably captured then resolved (#305).
+
+        Two-kind defer: a ``defer`` verdict is a capturable follow-up. The
+        runner files a tracking issue and posts an explanatory PR comment, and
+        only **then** resolves the thread — so the thread leaves GitHub's
+        unresolved set, the merge gate clears, and the deferred work survives in
+        the filed issue.
+        """
+        ws_id = await _seed_monitoring_workspace(factory)
+        thread = {
+            "id": "T_defer",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "nit", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up styling nit")
+        cmd.queue_result(  # gh issue create -> tracking issue URL (capture)
+            returncode=0, stdout="https://github.com/o/r/issues/77\n"
+        )
+        cmd.queue_result(returncode=0)  # gh pr comment (explanatory capture comment)
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
+        cmd.queue_result(  # resolve_thread mutation (after durable capture)
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"resolveReviewThread": {"thread": {"id": "T_defer", "isResolved": True}}}}
+            ),
+        )
+        cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean -> merge
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The deferred work was captured as a tracking issue ...
+        issue_creates = [c for c in cmd.calls if c.args[:3] == ["gh", "issue", "create"]]
+        assert issue_creates, "a follow-up defer must file a tracking issue"
+        # ... and the issue preserves the agent's DEFER reason, not just the thread.
+        assert any("follow-up styling nit" in a for a in issue_creates[0].args), (
+            "the filed issue must include the agent's defer reason"
+        )
+        # ... and only then was the thread resolved, clearing the merge gate.
+        assert any(
+            any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args)
+            for c in cmd.calls
+        ), "captured defer must resolve the thread"
+        assert any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "PR should merge once the captured defer thread is resolved"
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.monitor_threads_addressed.get("T_defer") == "defer"
+
+    @pytest.mark.unit
+    async def test_needs_human_verdict_does_not_resolve_thread_and_blocks_merge(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Two contracts around ``NEEDS_HUMAN``:
+
+        1. The thread is NOT resolved on GitHub — ``needs_human`` means the
+           diff may be wrong or needs access the agent lacks; a human must
+           decide. Resolving would sweep the question under the rug.
+        2. The merge gate MUST NOT fire while such a thread is still unresolved
+           on GitHub. A dedicated gate returns NotifyHuman instead — the
+           maintainer sees the "ready to review" comment AND the thread still
+           standing. (``defer`` is the *other* kind, captured + resolved; see
+           ``test_defer_verdict_captures_and_resolves_then_merges``.)
+        """
+        ws_id = await _seed_monitoring_workspace(factory)
+        thread = {
+            "id": "T_needs_human",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "a",
+            "line": 1,
+            "comments": {"nodes": [{"bodyText": "?", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
+        adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: need design input from maintainer")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
+        # No resolve_thread call queued — contract #1 (never auto-resolved).
+        # Second outer iteration: thread still unresolved on GitHub.
+        # decide() should hit the unresolved-thread gate and return
+        # NotifyHuman — queue the ``gh pr comment`` call, NOT a merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # still there
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # NotifyHuman is not terminal: the monitor stays alive and only
+        # completes after the PR is actually merged.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[thread]))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # Contract #1: no resolveReviewThread mutation fired.
+        for c in cmd.calls:
+            query_args = [a for a in c.args if a.startswith("query=")]
+            assert not any("resolveReviewThread" in q for q in query_args), (
+                "needs_human verdict must NOT resolve the thread"
+            )
+        # Contract #2: no merge call fired. The merge would look like
+        # ``gh pr merge ...``; the NotifyHuman path is ``gh pr comment``.
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "unresolved needs_human must block merge — maintainer-driven only"
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_defer_capture_failure_downgrades_to_needs_human_and_blocks(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """If durable capture fails (e.g. token lacks the ``issues`` scope), the
+        runner downgrades the verdict to ``needs_human`` so the thread is NOT
+        resolved and the merge gate keeps blocking — fail safe (#305)."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        thread = {
+            "id": "T_defer_fail",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "a",
+            "line": 1,
+            "comments": {"nodes": [{"bodyText": "?", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up styling nit")
+        cmd.queue_result(  # gh issue create FAILS (missing issues scope)
+            returncode=1, stderr="HTTP 403: Resource not accessible by integration"
+        )
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
+        cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # still there
+        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        cmd.queue_result(returncode=0)  # iter3 git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[thread]))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # Capture was attempted but failed; the thread must NOT be resolved.
+        assert any(c.args[:3] == ["gh", "issue", "create"] for c in cmd.calls)
+        for c in cmd.calls:
+            assert not any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args), (
+                "failed capture must NOT resolve the thread"
+            )
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "failed capture downgrades to needs_human and must block merge"
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.monitor_threads_addressed.get("T_defer_fail") == "needs_human"
+
+    @pytest.mark.unit
+    async def test_defer_capture_comment_failure_still_resolves(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Filing the tracking issue is the durable capture; the explanatory PR
+        comment is best-effort. If ``gh issue create`` succeeds but the comment
+        fails, capture still succeeds — the thread is resolved and the issue is
+        recorded as filed so a retry never opens a duplicate (idempotency on
+        partial success).
+        """
+        ws_id = await _seed_monitoring_workspace(factory)
+        thread = {
+            "id": "T_defer_partial",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "nit", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up styling nit")
+        cmd.queue_result(  # gh issue create succeeds (durable capture)
+            returncode=0, stdout="https://github.com/o/r/issues/88\n"
+        )
+        cmd.queue_result(returncode=1, stderr="HTTP 502")  # gh pr comment FAILS (best-effort)
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
+        cmd.queue_result(  # resolve_thread mutation (capture still succeeded)
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": "T_defer_partial", "isResolved": True}
+                        }
+                    }
+                }
+            ),
+        )
+        cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean -> merge
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # Exactly one tracking issue filed despite the comment failure.
+        issue_creates = [c for c in cmd.calls if c.args[:3] == ["gh", "issue", "create"]]
+        assert len(issue_creates) == 1, "comment failure must not re-file the issue"
+        # Capture succeeded → thread resolved → PR merged.
+        assert any(
+            any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args)
+            for c in cmd.calls
+        ), "a filed issue is durable capture; the thread should still resolve"
+        assert any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.monitor_threads_addressed.get("T_defer_partial") == "defer"
+
+    @pytest.mark.unit
+    async def test_stale_defer_resolve_skipped_when_readdressed_to_needs_human(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """If a captured-defer thread gains a new reviewer reply during the
+        settle window and a later pass re-addresses it as NEEDS_HUMAN, the
+        stale resolve queued by the first pass must NOT fire — the thread stays
+        open and the merge is blocked (#305 failure mode)."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        t_v1 = {
+            "id": "T_race",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "nit", "author": {"login": "cr"}}]},
+        }
+        t_v2 = {
+            "id": "T_race",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {
+                "nodes": [
+                    {"bodyText": "nit", "author": {"login": "cr"}},
+                    {
+                        "bodyText": "actually this needs a design decision",
+                        "author": {"login": "alice"},
+                    },
+                ]
+            },
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v1]))  # initial
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up styling nit")  # pass 1 -> capture
+        cmd.queue_result(
+            returncode=0, stdout="https://github.com/o/r/issues/91\n"
+        )  # gh issue create
+        cmd.queue_result(returncode=0)  # gh pr comment (capture)
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #1: new reply
+        adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: design decision required")  # pass 2
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #2: quiet
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
+        # No resolve queued — the guard must skip the stale resolve for T_race.
+        cmd.queue_result(returncode=0)  # iter2 git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # still open -> block
+        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        cmd.queue_result(returncode=0)  # iter3 git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[t_v2]))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The thread was re-judged needs_human, so the stale resolve must NOT fire.
+        for c in cmd.calls:
+            assert not any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args), (
+                "a thread re-addressed to needs_human must not be resolved"
+            )
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "an unresolved needs_human thread must block merge"
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.monitor_threads_addressed.get("T_race") == "needs_human"

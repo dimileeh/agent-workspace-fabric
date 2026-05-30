@@ -19,7 +19,7 @@ from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
+Verdict = Literal["fix_committed", "false_positive", "defer", "needs_human", "agent_failed"]
 
 
 @dataclass(frozen=True)
@@ -57,13 +57,15 @@ async def _address_thread(
     compose_file: Path,
     state: MonitorState | None = None,
 ) -> Verdict:
+    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
     )
-    return await runner._invoke_cli_for_verdict(
+    result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
         prompt=prompt,
         commit_message=f"fix: address PR review thread {thread.thread_id}",
@@ -71,6 +73,17 @@ async def _address_thread(
         compose_file=compose_file,
         state=state,
     )
+    # Stash the agent's defer reason so the deferred-capture path can preserve it
+    # in the filed tracking issue (the verdict alone loses that follow-up detail).
+    # On any defer, overwrite/clear the stored reason so a re-triage with a bare
+    # DEFER (no reason) can't leave a stale reason from a prior pass.
+    if state is not None and result.verdict == "defer":
+        reason_key = _defer_reason_state_key(thread.thread_id)
+        if result.reason:
+            state.mark_addressed(reason_key, result.reason)
+        else:
+            state.threads_addressed_ids.pop(reason_key, None)
+    return result.verdict
 
 
 async def _address_review_comment(
