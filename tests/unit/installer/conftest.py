@@ -95,7 +95,7 @@ class InstallerHarness:
             '  "tool uninstall")\n'
             f"    exit {uninstall_rc} ;;\n"
             '  "tool list")\n'
-            f"    printf '%s' {json.dumps(list_output)}\n"
+            f"    printf '%b' {json.dumps(list_output)}\n"
             "    exit 0 ;;\n"
             '  "tool dir")\n'
             '    case "$*" in\n'
@@ -127,7 +127,7 @@ class InstallerHarness:
             "  uninstall)\n"
             f"    exit {uninstall_rc} ;;\n"
             "  list)\n"
-            f"    printf '%s' {json.dumps(list_output)}\n"
+            f"    printf '%b' {json.dumps(list_output)}\n"
             "    exit 0 ;;\n"
             "  *) exit 0 ;;\n"
             "esac"
