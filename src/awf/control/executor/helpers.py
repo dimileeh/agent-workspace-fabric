@@ -409,6 +409,12 @@ def _profile_for_workspace(
     worktree_path: Path,
     planning_max_iterations_default: int = 3,
 ) -> WorkspaceProfile:
+    """Resolve the profile without stamping a runtime snapshot on the workspace.
+
+    Executor paths that execute against a runtime-resolved profile must call the
+    async resolved-profile sync before planning commands so the DB snapshot keeps
+    first-write-wins semantics.
+    """
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
         return _profile_with_planning_iteration_default(
@@ -416,22 +422,16 @@ def _profile_for_workspace(
             planning_max_iterations_default,
             raw_profile=ws.resolved_profile,
         )
-    profile = resolve_workspace_profile(
-        worktree_path=worktree_path,
-        inline_profile=ws.requested_profile,
-        profile_ref=ws.profile_ref or ws.env_profile or "auto",
-        validation_commands=list(ws.test_commands),
-    ).profile
-    profile = _profile_with_planning_iteration_default(
-        profile,
+    return _profile_with_planning_iteration_default(
+        resolve_workspace_profile(
+            worktree_path=worktree_path,
+            inline_profile=ws.requested_profile,
+            profile_ref=ws.profile_ref or ws.env_profile or "auto",
+            validation_commands=list(ws.test_commands),
+        ).profile,
         planning_max_iterations_default,
         raw_profile=ws.requested_profile,
     )
-    # Side effect: stamp the snapshot only when resolving from scratch. The
-    # persistence sync can then freeze it or realign this object if another
-    # executor won the first-write race.
-    ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
-    return profile
 
 
 def _profile_from_resolved_profile_snapshot(

@@ -683,7 +683,13 @@ def _snapshot_owned_paths(
     attempt_owned = tuple(path for path in attempt.owned_paths if path)
     if not attempt_owned:
         return workspace_owned
-    return tuple(dict.fromkeys(workspace_owned + attempt_owned))
+    attempt_interworkspace_owned = interworkspace_owned_paths(
+        attempt_owned,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    )
+    if attempt_interworkspace_owned:
+        return attempt_interworkspace_owned
+    return workspace_owned
 
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:

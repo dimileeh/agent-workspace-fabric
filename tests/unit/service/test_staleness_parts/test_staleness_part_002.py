@@ -236,6 +236,7 @@ class TestStalenessRefreshService:
         from awf.service.staleness import (
             StalenessRefreshService,
             TargetBranchState,
+            _snapshot_for,
         )
 
         workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
@@ -280,6 +281,7 @@ class TestStalenessRefreshService:
             for finding in result.findings
         ] == [("STALE_OVERLAP", "src/shared/module.py", True)]
         assert candidate is not None
+        assert _snapshot_for(candidate).owned_paths == ("src/shared/**",)
         assert candidate.stale is True
         assert candidate.stale_reason == "STALE_OVERLAP"
         assert [(r.reason_code, r.trigger_ref, r.blocks_merge) for r in active] == [

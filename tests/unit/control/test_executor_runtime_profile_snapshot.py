@@ -376,7 +376,6 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
         planning_max_iterations_default: int,
     ) -> WorkspaceProfile:
         assert worktree_path == tmp_path
-        ws.resolved_profile = runtime_profile.model_dump(mode="json", by_alias=True)
         events.append(("resolve", planning_max_iterations_default))
         return runtime_profile
 
@@ -466,7 +465,7 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
 
 
 @pytest.mark.unit
-def test_profile_for_workspace_attaches_runtime_snapshot_to_workspace(
+def test_profile_for_workspace_resolves_without_stamping_runtime_snapshot(
     tmp_path,
 ) -> None:
     profile_dir = tmp_path / ".awf"
@@ -502,10 +501,48 @@ def test_profile_for_workspace_attaches_runtime_snapshot_to_workspace(
     profile = _profile_for_workspace(workspace, worktree_path=tmp_path)
 
     assert profile.name == "repo-auto"
-    assert workspace.resolved_profile is not None
-    assert workspace.resolved_profile["planning"]["plan_path"] == (
-        "docs/alternate/{workspace_id}.md"
+    assert workspace.resolved_profile is None
+
+
+@pytest.mark.unit
+async def test_sync_resolved_profile_stamps_runtime_snapshot_when_missing(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime_profile = _custom_planning_profile("repo-auto")
+    async with factory() as session:
+        persisted_workspace = await _create_workspace(session)
+        workspace_id = persisted_workspace.id
+
+    in_memory_workspace = Workspace(
+        id=workspace_id,
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the repo profile.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=None,
     )
+    executor = SimpleNamespace(_session_factory=factory)
+
+    profile = await _sync_resolved_profile(
+        executor,
+        ws=in_memory_workspace,
+        workspace_id=workspace_id,
+        profile=runtime_profile,
+    )
+
+    async with factory() as session:
+        reloaded = await WorkspaceRepository(session).get(workspace_id)
+
+    expected_snapshot = runtime_profile.model_dump(mode="json", by_alias=True)
+    assert profile.name == "repo-auto"
+    assert in_memory_workspace.resolved_profile == expected_snapshot
+    assert reloaded is not None
+    assert reloaded.resolved_profile == expected_snapshot
 
 
 @pytest.mark.unit
