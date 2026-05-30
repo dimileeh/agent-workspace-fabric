@@ -83,8 +83,14 @@ class CompanionImageBuilder:
         commit_sha: str,
         build_context: str,
         dockerfile: str,
+        capture_timeout_seconds: float,
     ) -> str | None:
         """Return a ready-to-reference image tag, building it once if needed.
+
+        ``capture_timeout_seconds`` is the build's subprocess budget; callers pass
+        the same effective compose-up cap the inline ``docker compose up`` build
+        uses, so the cache pre-build can never time out earlier than the inline
+        build it replaces.
 
         Returns ``None`` when caching cannot be applied (no resolvable commit or
         a build failure); the caller falls back to an inline ``build:`` service
@@ -106,6 +112,7 @@ class CompanionImageBuilder:
                         COMPANION_IMAGE_MANAGED_LABEL: "true",
                         COMPANION_IMAGE_NAME_LABEL: name,
                     },
+                    capture_timeout_seconds=capture_timeout_seconds,
                 )
             except ComposeOperationError as exc:
                 _log.warning(

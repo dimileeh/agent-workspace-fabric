@@ -50,6 +50,24 @@ class _RecordingCompose:
         )
 
 
+class _RecordingCompanionImageBuilder:
+    def __init__(self) -> None:
+        self.capture_timeouts: list[float] = []
+
+    async def ensure(
+        self,
+        *,
+        name: str,
+        commit_sha: str,
+        build_context: str,
+        dockerfile: str,
+        capture_timeout_seconds: float,
+    ) -> str | None:
+        del name, commit_sha, build_context, dockerfile
+        self.capture_timeouts.append(capture_timeout_seconds)
+        return None  # fall back to build:, leaving the rest of launch() unchanged
+
+
 class _DockerUnavailableCompose:
     def __init__(self, *, reason_code: str = "DOCKER_UNAVAILABLE") -> None:
         self.reason_code = reason_code
@@ -322,6 +340,55 @@ async def test_compose_stack_launcher_uses_effective_companion_compose_timeout(
     )
 
     assert compose.specs[0].compose_up_timeout_seconds == expected
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_prebuilds_companion_with_effective_compose_budget(
+    tmp_path: Path,
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6F504S: the companion image pre-build must be
+    # budgeted with the same effective compose-up subprocess cap the inline
+    # `docker compose up` uses (2*effective + buffer), not the fixed 1800s default,
+    # so caching can never time out a build the inline path would have completed.
+    compose = _RecordingCompose()
+    builder = _RecordingCompanionImageBuilder()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        companion_image_builder=builder,  # type: ignore[arg-type]
+    )
+    companion_root = tmp_path / "backend"
+    companion_root.mkdir()
+    companion = MaterializedCompanionService(
+        spec=WorkspaceCompanionSpec(
+            name="backend",
+            repo_url="git@github.com:example/backend.git",
+            compose_up_timeout_seconds=900,
+        ),
+        layout=WorktreeLayout(
+            mirror_path=tmp_path / "backend.git",
+            worktree_path=companion_root,
+            branch_name="awf/ws_launcher/companion/backend",
+        ),
+        commit_sha="abc123def456",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(
+                name="serviceful",
+                docker=ProfileDocker(startup_timeout_seconds=300),
+            ),
+            companions=(companion,),
+            companion_graph_prevalidated=True,
+        )
+    )
+
+    # effective = max(300, 900) = 900; inline up(wait=True) cap = 2*900 + 60.
+    assert builder.capture_timeouts == [1860.0]
+    assert compose.specs[0].compose_up_timeout_seconds == 900
 
 
 @pytest.mark.unit

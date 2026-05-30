@@ -23,6 +23,7 @@ from awf.node.compose_manager import (
     ComposeOperationError,
     ComposeProjectPaths,
     WorkspaceComposeSpec,
+    _compose_up_capture_timeout_seconds,
 )
 from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
@@ -151,10 +152,18 @@ class ComposeStackLauncher:
                 companions=request.companions,
                 docker_mode=profile.docker.mode,
             )
-        companions = await self._build_companion_services(request.companions)
+        # Resolve the effective compose-up budget before pre-building companions so
+        # the cache pre-build shares the same subprocess cap the inline `docker
+        # compose up` build uses (see _build_companion_services).
         compose_up_timeout_seconds = effective_compose_up_timeout_seconds(
             profile=profile,
             companions=request.companions,
+        )
+        companions = await self._build_companion_services(
+            request.companions,
+            capture_timeout_seconds=_compose_up_capture_timeout_seconds(
+                compose_up_timeout_seconds, wait=True
+            ),
         )
         companion_secret_metadata = companion_env_secret_stack_metadata(companions)
         agent_environment = profile_agent_environment(profile)
@@ -209,6 +218,8 @@ class ComposeStackLauncher:
     async def _build_companion_services(
         self,
         companions: tuple[MaterializedCompanionService, ...],
+        *,
+        capture_timeout_seconds: float,
     ) -> tuple[CompanionService, ...]:
         """Render companions, pre-building a cached image per companion when possible.
 
@@ -216,6 +227,12 @@ class ComposeStackLauncher:
         configured it pre-builds (or reuses) a tagged image so the service can
         reference it via ``image:``. A failed or skipped pre-build leaves the
         service as ``build:`` -- identical to the prior behavior.
+
+        ``capture_timeout_seconds`` is the effective compose-up subprocess cap used
+        by the inline ``docker compose up`` build; passing it to the pre-build keeps
+        the cache path's build budget aligned with the configured
+        ``compose_up_timeout_seconds`` knob so it never times out earlier than the
+        inline build it replaces.
         """
         services: list[CompanionService] = []
         for companion in companions:
@@ -226,6 +243,7 @@ class ComposeStackLauncher:
                     commit_sha=companion.commit_sha,
                     build_context=service.build_context,
                     dockerfile=service.dockerfile,
+                    capture_timeout_seconds=capture_timeout_seconds,
                 )
                 if tag is not None:
                     service = replace(service, image=tag)

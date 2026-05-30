@@ -39,6 +39,7 @@ class _FakeCompose:
         build_context: str,
         dockerfile: str,
         labels: dict[str, str] | None = None,
+        capture_timeout_seconds: float | None = None,
     ) -> None:
         await asyncio.sleep(0)
         self.build_calls.append(
@@ -47,6 +48,7 @@ class _FakeCompose:
                 "build_context": build_context,
                 "dockerfile": dockerfile,
                 "labels": dict(labels or {}),
+                "capture_timeout_seconds": capture_timeout_seconds,
             }
         )
         if self.build_error is not None:
@@ -84,6 +86,7 @@ async def test_ensure_reuses_existing_image_without_building() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
     )
 
     assert tag == companion_image_tag("backend", "abc123def456")
@@ -100,6 +103,7 @@ async def test_ensure_builds_with_managed_labels_when_missing() -> None:
         commit_sha="abc123def456",
         build_context="/ctx",
         dockerfile="sub/Dockerfile",
+        capture_timeout_seconds=660.0,
     )
 
     assert tag == companion_image_tag("backend", "abc123def456")
@@ -123,6 +127,7 @@ async def test_ensure_skips_caching_without_commit_sha() -> None:
         commit_sha="   ",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
     )
 
     assert result is None
@@ -148,6 +153,7 @@ async def test_ensure_falls_back_to_none_on_build_failure() -> None:
         commit_sha="abc123",
         build_context="/ctx",
         dockerfile="Dockerfile",
+        capture_timeout_seconds=660.0,
     )
 
     assert result is None
@@ -166,6 +172,7 @@ async def test_ensure_deduplicates_concurrent_builds_for_same_tag() -> None:
                 commit_sha="abc123def456",
                 build_context="/ctx",
                 dockerfile="Dockerfile",
+                capture_timeout_seconds=660.0,
             )
             for _ in range(4)
         )
@@ -174,3 +181,22 @@ async def test_ensure_deduplicates_concurrent_builds_for_same_tag() -> None:
     expected = companion_image_tag("backend", "abc123def456")
     assert results == [expected, expected, expected, expected]
     assert len(compose.build_calls) == 1  # the per-tag lock collapses the wave
+
+
+@pytest.mark.unit
+async def test_ensure_forwards_capture_timeout_to_build() -> None:
+    # Regression for PRRT_kwDOSJAM6s6F504S: the pre-build must honor the caller's
+    # compose-up build budget rather than the fixed 1800s default, so the cache
+    # path can never time out earlier than the inline `docker compose up` build.
+    compose = _FakeCompose(exists=False)
+    builder = CompanionImageBuilder(compose)  # type: ignore[arg-type]
+
+    await builder.ensure(
+        name="backend",
+        commit_sha="abc123def456",
+        build_context="/ctx",
+        dockerfile="Dockerfile",
+        capture_timeout_seconds=1860.0,
+    )
+
+    assert compose.build_calls[0]["capture_timeout_seconds"] == 1860.0

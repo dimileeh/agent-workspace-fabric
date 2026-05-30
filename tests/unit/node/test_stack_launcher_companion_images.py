@@ -21,7 +21,7 @@ class _StubCompose:
 class _RecordingBuilder:
     def __init__(self, *, tag: str | None) -> None:
         self.tag = tag
-        self.calls: list[dict[str, str]] = []
+        self.calls: list[dict[str, object]] = []
 
     async def ensure(
         self,
@@ -30,6 +30,7 @@ class _RecordingBuilder:
         commit_sha: str,
         build_context: str,
         dockerfile: str,
+        capture_timeout_seconds: float,
     ) -> str | None:
         self.calls.append(
             {
@@ -37,6 +38,7 @@ class _RecordingBuilder:
                 "commit_sha": commit_sha,
                 "build_context": build_context,
                 "dockerfile": dockerfile,
+                "capture_timeout_seconds": capture_timeout_seconds,
             }
         )
         return self.tag
@@ -69,13 +71,16 @@ async def test_prebuilt_tag_is_applied_as_image(tmp_path: Path) -> None:
     launcher = _launcher(builder)
     materialized = _materialized(tmp_path / "backend")
 
-    services = await launcher._build_companion_services((materialized,))  # noqa: SLF001
+    services = await launcher._build_companion_services(  # noqa: SLF001
+        (materialized,), capture_timeout_seconds=660.0
+    )
 
     assert services[0].image == "awf-companion-backend:abc123def456"
     assert builder.calls[0]["name"] == "backend"
     assert builder.calls[0]["commit_sha"] == "abc123def456"
     assert builder.calls[0]["build_context"] == str((tmp_path / "backend").resolve())
     assert builder.calls[0]["dockerfile"] == "Dockerfile"
+    assert builder.calls[0]["capture_timeout_seconds"] == 660.0
 
 
 @pytest.mark.unit
@@ -84,7 +89,9 @@ async def test_failed_prebuild_falls_back_to_build(tmp_path: Path) -> None:
     launcher = _launcher(builder)
     materialized = _materialized(tmp_path / "backend")
 
-    services = await launcher._build_companion_services((materialized,))  # noqa: SLF001
+    services = await launcher._build_companion_services(  # noqa: SLF001
+        (materialized,), capture_timeout_seconds=660.0
+    )
 
     assert services[0].image is None
     assert builder.calls  # builder was consulted
@@ -95,6 +102,8 @@ async def test_no_builder_leaves_companion_as_build(tmp_path: Path) -> None:
     launcher = _launcher(None)
     materialized = _materialized(tmp_path / "backend")
 
-    services = await launcher._build_companion_services((materialized,))  # noqa: SLF001
+    services = await launcher._build_companion_services(  # noqa: SLF001
+        (materialized,), capture_timeout_seconds=660.0
+    )
 
     assert services[0].image is None

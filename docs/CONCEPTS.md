@@ -970,8 +970,12 @@ host socket), so at provision time AWF pre-builds each companion image once per
 workspaces — including a concurrent dispatch wave for the same companion commit —
 reference the existing tag via `image:` and skip the build entirely. An
 in-process per-tag lock collapses a concurrent wave to a single build; a build
-failure falls back to an inline `build:` so provisioning stays correct. Cached
-images carry an `awf.managed-companion=true` label, and `awf service gc` prunes
+failure falls back to an inline `build:` so provisioning stays correct. The
+pre-build is budgeted with the same effective `compose_up_timeout_seconds`
+subprocess cap the inline `docker compose up` build uses, so raising that knob for
+slow cold-cache builds raises both the cached and inline build allowances together
+and the pre-build never times out earlier than the inline build it would replace.
+Cached images carry an `awf.managed-companion=true` label, and `awf service gc` prunes
 unused ones older than `companion_image_retention_hours` (Docker never removes an
 image backing a live container, so active workspaces are protected). Set
 `companion_image_cache_enabled=false` to disable caching and always build inline.
