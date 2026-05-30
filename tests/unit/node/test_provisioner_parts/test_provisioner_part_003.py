@@ -608,6 +608,55 @@ class TestServiceStartupDiagnostics:
             assert "companion_logs_capture_error" in failed_event.payload
 
     @pytest.mark.unit
+    async def test_unexpected_capture_error_does_not_mask_original_error(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        # A capturer that raises something OTHER than ComposeOperationError
+        # (e.g. a wiring/signature bug surfacing as TypeError) must still be
+        # swallowed: the capture is best-effort and runs inside the
+        # ``except ComposeOperationError`` handler, so an escaping error would
+        # skip ``_mark_failed`` and mask the original stack-launch failure.
+        class _BuggyDiagnostics:
+            async def capture_companion_diagnostics(
+                self, *, project_name: str, workspace_id: str, tail_lines: int = 200
+            ) -> dict[str, Any]:
+                del project_name, workspace_id, tail_lines
+                raise TypeError("capturer wired with a stale signature")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=_BuggyDiagnostics(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        ws_id = await _create_failing_workspace(session_factory, origin_repo)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await provisioner.provision(ws_id)
+
+        # The ORIGINAL compose failure propagates, not the capturer's TypeError.
+        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            # ``_mark_failed`` still ran despite the capturer blowing up.
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert failed_event.payload is not None
+            # The capture error is recorded under the fallback reason code so the
+            # marker is still present for operators.
+            assert failed_event.payload["companion_logs_capture_error"].startswith(
+                "CAPTURE_FAILED:"
+            )
+
+    @pytest.mark.unit
     async def test_no_capturer_keeps_failure_event_payload_null(
         self,
         session_factory: async_sessionmaker[AsyncSession],

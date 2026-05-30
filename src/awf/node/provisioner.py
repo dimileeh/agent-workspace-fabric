@@ -490,8 +490,14 @@ class Provisioner:
 
         Returns ``None`` when no capturer is wired (preserving the historical
         null-payload behavior). The capturer is already best-effort; this guard
-        is belt-and-suspenders so a capturer that nonetheless raises a docker
-        error cannot mask the original ``ComposeOperationError``.
+        is belt-and-suspenders so a capturer that nonetheless raises cannot mask
+        the original ``ComposeOperationError``. We catch broad ``Exception`` (not
+        just ``ComposeOperationError``) because this runs *inside* the caller's
+        ``except ComposeOperationError`` handler: an escaping error of any other
+        type (e.g. a wiring/signature bug surfacing as ``TypeError``) would skip
+        ``_mark_failed`` and propagate in place of the root cause. The full
+        traceback is logged (``exc_info``) so nothing is silently swallowed —
+        mirroring the best-effort egress-audit recording in the same handler.
         """
         if self._service_diagnostics is None:
             return None
@@ -502,12 +508,14 @@ class Provisioner:
                 workspace_id=workspace_id,
                 tail_lines=self._config.service_startup_log_tail_lines,
             )
-        except ComposeOperationError as exc:
+        except Exception as exc:
+            reason_code = getattr(exc, "reason_code", "CAPTURE_FAILED")
             _log.warning(
                 "provisioner.service_diagnostics_capture_failed",
                 workspace_id=workspace_id,
-                reason_code=exc.reason_code,
+                reason_code=reason_code,
                 error=redact_secrets(str(exc)),
+                exc_info=True,
             )
             return cast(
                 "dict[str, Any]",
@@ -515,7 +523,7 @@ class Provisioner:
                     {
                         "schema": SERVICE_STARTUP_DIAGNOSTICS_SCHEMA,
                         "compose_project": project_name,
-                        "companion_logs_capture_error": f"{exc.reason_code}: {exc}",
+                        "companion_logs_capture_error": f"{reason_code}: {exc}",
                     }
                 ),
             )
