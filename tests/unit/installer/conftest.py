@@ -72,8 +72,18 @@ class InstallerHarness:
         install_rc: int = 0,
         uninstall_rc: int = 0,
         list_output: str = "",
+        tool_bin_dir: str | None = None,
     ) -> None:
-        """Stub the ``uv`` CLI subcommands the installer uses."""
+        """Stub the ``uv`` CLI subcommands the installer uses.
+
+        ``uv tool dir --bin`` reports the directory uv links executables into,
+        which uv derives from ``UV_TOOL_BIN_DIR``/``XDG_BIN_HOME`` and defaults to
+        ``~/.local/bin``. ``tool_bin_dir`` overrides that to simulate a uv
+        configured to install elsewhere.
+        """
+        bin_dir_expr = (
+            json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
+        )
         behavior = (
             'case "$1 $2" in\n'
             '  "tool install")\n'
@@ -88,7 +98,10 @@ class InstallerHarness:
             f"    printf '%s' {json.dumps(list_output)}\n"
             "    exit 0 ;;\n"
             '  "tool dir")\n'
-            "    printf '%s\\n' \"$HOME/.local/share/uv/tools\"\n"
+            '    case "$*" in\n'
+            f"      *--bin*) printf '%s\\n' {bin_dir_expr} ;;\n"
+            "      *) printf '%s\\n' \"$HOME/.local/share/uv/tools\" ;;\n"
+            "    esac\n"
             "    exit 0 ;;\n"
             "  *) exit 0 ;;\n"
             "esac"

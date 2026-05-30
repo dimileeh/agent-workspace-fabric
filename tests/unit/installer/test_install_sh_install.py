@@ -143,6 +143,35 @@ def test_default_install_binary_verified_even_when_path_awf_is_broken(
 
 
 @pytest.mark.unit
+def test_uv_install_uses_uv_tool_bin_dir_for_reachability(harness: InstallerHarness) -> None:
+    """A uv configured to link executables elsewhere is honored, not mis-reported.
+
+    When uv installs into a configured bin dir (UV_TOOL_BIN_DIR / XDG_BIN_HOME /
+    XDG_DATA_HOME) instead of ``~/.local/bin``, reachability must consult
+    ``uv tool dir --bin`` rather than a hard-coded ``~/.local/bin``; otherwise a
+    successful uv install is falsely reported ``AWF_NOT_REACHABLE`` and PATH
+    advice points at the wrong directory.
+    """
+    harness.add_uname("Linux", "x86_64")
+    uv_bin = harness.root / "uv-tool-bin"
+    uv_bin.mkdir()
+    harness.add_uv(tool_bin_dir=str(uv_bin))
+    # awf landed in uv's configured bin dir, which is not on PATH nor ~/.local/bin.
+    harness.add_awf(directory=uv_bin)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--shell", "bash"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+    # PATH advice (the dir is off-PATH) points at uv's real bin dir, not ~/.local/bin.
+    advice = result.stdout + result.stderr
+    assert str(uv_bin) in advice
+    assert "/.local/bin" not in advice
+
+
+@pytest.mark.unit
 def test_install_dir_verifies_installed_binary_not_path_shadow(
     harness: InstallerHarness,
 ) -> None:

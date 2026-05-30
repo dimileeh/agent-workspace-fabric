@@ -430,9 +430,22 @@ install_pipx() {
 default_bin_dir() {
     if [ -n "$INSTALL_DIR" ]; then
         printf '%s' "$INSTALL_DIR"
-    else
-        printf '%s' "${HOME}/.local/bin"
+        return 0
     fi
+    # With no --install-dir override, ask the active tool where it actually links
+    # executables. uv derives that directory from UV_TOOL_BIN_DIR / XDG_BIN_HOME /
+    # XDG_DATA_HOME (defaulting to ~/.local/bin), so a hard-coded ~/.local/bin
+    # would mis-report a configured uv install as AWF_NOT_REACHABLE and print PATH
+    # advice for the wrong directory. `uv tool dir --bin` resolves the real path.
+    if [ "$METHOD" = "uv" ] && command -v uv >/dev/null 2>&1; then
+        local uv_bin
+        uv_bin="$(uv tool dir --bin 2>/dev/null || true)"
+        if [ -n "$uv_bin" ]; then
+            printf '%s' "$uv_bin"
+            return 0
+        fi
+    fi
+    printf '%s' "${HOME}/.local/bin"
 }
 
 detect_shell() {
@@ -479,7 +492,8 @@ verify_awf() {
     bindir="$(default_bin_dir)"
     if [ -x "${bindir}/awf" ]; then
         # Prefer the binary at the directory we just installed into (INSTALL_DIR
-        # when given, else ~/.local/bin). Verifying that file directly — instead
+        # when given, else uv's resolved tool bin dir, falling back to
+        # ~/.local/bin). Verifying that file directly — instead
         # of whatever `command -v awf` resolves to — avoids falsely passing on an
         # older, unrelated awf earlier on PATH that would shadow the new install
         # and suppress PATH advice for the location we actually wrote to.
