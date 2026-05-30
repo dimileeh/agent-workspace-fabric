@@ -333,6 +333,57 @@ async def test_autofixable_precommit_repair_raises_when_ruff_fix_fails(
 
 
 @pytest.mark.unit
+async def test_autofixable_precommit_repair_raises_when_ruff_format_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # ruff check --fix succeeds
+    runner.queue_result(returncode=1, stderr="ruff format failed")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+
+    classification = executor_quality_gates._PostAgentCommitClassification(  # noqa: SLF001
+        reason_code="POST_AGENT_COMMIT_AUTOFIX_NEEDED",
+        failed_hooks=("ruff-check", "awf-ruff-format-check"),
+        format_repair_files=("src/app.py",),
+        normalizer_repair_files=(),
+        autofix_repair_files=("src/app.py",),
+        summary="ruff reported fixable diagnostics and format issues",
+        repair_strategy="deterministic_autofix",
+    )
+
+    with pytest.raises(executor_quality_gates._PostAgentCommitStepError) as exc_info:
+        await executor._run_post_agent_autofixable_precommit_repair(
+            workspace_id="ws_autofix",
+            worktree_path=tmp_path / "worktree",
+            commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+            classification=classification,
+            staged_paths=["src/app.py"],
+            run_commit=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+            git_in_worktree=AsyncMock(
+                return_value=CommandResult(returncode=0, stdout="", stderr="")
+            ),
+        )
+
+    assert exc_info.value.stage == "ruff format"
+    assert exc_info.value.reason_code_override == "POST_AGENT_FORMAT_REPAIR_FAILED"
+    assert exc_info.value.format_repair_attempted is True
+    assert exc_info.value.precommit_repair_attempted is True
+    assert exc_info.value.repair_strategy == "deterministic_autofix"
+
+    executor._record_post_agent_commit_format_repair.assert_awaited_once()  # type: ignore[attr-defined]
+    record_kwargs = executor._record_post_agent_commit_format_repair.await_args.kwargs  # type: ignore[attr-defined]
+    assert record_kwargs["retry_outcome"] == "error"
+    assert record_kwargs["formatter_paths"] == ["src/app.py"]
+    assert record_kwargs["repaired_paths"] == ["src/app.py"]
+
+    ruff_calls = [call for call in runner.calls if "ruff" in call.args]
+    assert len(ruff_calls) == 2
+    assert "check" in ruff_calls[0].args and "--fix" in ruff_calls[0].args
+    assert "format" in ruff_calls[1].args and "--check" not in ruff_calls[1].args
+
+
+@pytest.mark.unit
 async def test_autofixable_precommit_repair_raises_when_restaging_fails(
     tmp_path: Path,
 ) -> None:
