@@ -198,11 +198,13 @@ class PRStatus:
     check_state: CheckState
     unresolved_inline_threads: tuple[ReviewThread, ...]
     unresolved_review_comments: tuple[ReviewComment, ...]
-    """``unresolved_review_comments`` intentionally preserves advisory review
-    bodies and top-level issue comments for the address-comments loop.
+    """Outside-diff feedback retained for the address-comments loop.
 
-    This field is also mirrored as the raw ``review_feedback``/``unresolved_reviews``
-    operator log metric, which intentionally remains for backward compatibility.
+    Despite the historical field name, this is not GitHub's unresolved review
+    thread count. It keeps review bodies and top-level issue comments around so
+    monitor state can decide whether each item still needs agent attention.
+    Operator logs expose its raw length as ``review_feedback``; they must use
+    the state-filtered pending count for ``unresolved_reviews``.
     """
     base_behind_count: int  # commits on base not in head (local rev-list)
     blocking_reviews: tuple[ReviewComment, ...] = ()

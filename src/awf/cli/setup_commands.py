@@ -5,19 +5,32 @@ from __future__ import annotations
 import typer
 
 from awf.cli.common import OutputFormat, _emit
+from awf.host_setup.rendering import (
+    AWF_SETUP_PLACEHOLDER,
+    FirstRunPayload,
+    first_run_failure_payload,
+    render_first_run_json,
+    render_first_run_pretty,
+)
 
-SETUP_PLACEHOLDER_REASON = "AWF_SETUP_PLACEHOLDER"
+SETUP_PLACEHOLDER_REASON = AWF_SETUP_PLACEHOLDER
 
-_SETUP_PLACEHOLDER_PAYLOAD = {
-    "status": "blocked",
-    "reason_code": SETUP_PLACEHOLDER_REASON,
-    "command": "awf setup",
-    "message": "awf setup is reserved; host setup checks land in a later setup slice.",
-    "next_steps": [
-        "Run awf service bootstrap for current local Core startup.",
-        "Run awf init <path> to onboard a project repository.",
-    ],
-}
+_SETUP_PLACEHOLDER_SUMMARY = "awf setup is reserved; host setup checks land in a later setup slice."
+_SETUP_PLACEHOLDER_NEXT_STEPS = (
+    "Run awf service bootstrap for current local Core startup.",
+    "Run awf init <path> to onboard a project repository.",
+)
+
+
+def _setup_placeholder_payload() -> FirstRunPayload:
+    """Build the reserved setup command first-run placeholder payload."""
+    return first_run_failure_payload(
+        command="awf setup",
+        reason_code=SETUP_PLACEHOLDER_REASON,
+        summary=_SETUP_PLACEHOLDER_SUMMARY,
+        status="blocked",
+        next_steps=_SETUP_PLACEHOLDER_NEXT_STEPS,
+    )
 
 
 def setup_command(
@@ -28,20 +41,9 @@ def setup_command(
     ),
 ) -> None:
     """Prepare this machine for AWF first-run use."""
+    payload = _setup_placeholder_payload()
     if fmt == OutputFormat.json:
-        _emit(_SETUP_PLACEHOLDER_PAYLOAD, fmt)
+        _emit(render_first_run_json(payload), fmt)
     else:
-        typer.echo("AWF setup: first-run host setup is reserved", err=True)
-        typer.echo(f"Reason: {SETUP_PLACEHOLDER_REASON}", err=True)
-        typer.echo(
-            "Problem: `awf setup` is a stable command surface; host setup checks "
-            "land in a later setup slice.",
-            err=True,
-        )
-        typer.echo("Next:", err=True)
-        typer.echo(
-            "  - Run `awf service bootstrap` for current local Core startup.",
-            err=True,
-        )
-        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
+        typer.echo(render_first_run_pretty(payload), err=True)
     raise typer.Exit(code=1)
