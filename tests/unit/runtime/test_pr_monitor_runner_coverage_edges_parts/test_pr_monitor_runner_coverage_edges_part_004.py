@@ -539,8 +539,11 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="DEFER: bot-only feedback is advisory")
-    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    # NEEDS_HUMAN keeps the thread open without triggering the #305
+    # follow-up capture (issue + comment + resolve); the re-address path
+    # is what this test exercises.
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: bot-only feedback needs a human")
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: maintainer reply needs human input")
     changed_thread = {
         "id": "T_same",
         "isResolved": False,
@@ -603,7 +606,7 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
 
     assert len(adapter.calls) == 2
     assert "maintainer reply needs a second look" in adapter.calls[1]
-    assert state.threads_addressed_ids["T_same"] == "defer"
+    assert state.threads_addressed_ids["T_same"] == "needs_human"
     assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
     assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
 

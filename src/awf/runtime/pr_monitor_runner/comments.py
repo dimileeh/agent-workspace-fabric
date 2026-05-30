@@ -19,7 +19,7 @@ from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
+Verdict = Literal["fix_committed", "false_positive", "defer", "needs_human", "agent_failed"]
 
 
 @dataclass(frozen=True)

@@ -879,27 +879,40 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return Abort(reason=AbortReason.merge_conflict_not_reproduced)
         return SyncBase()
 
-    # 7. Deferred HUMAN feedback still unresolved on GitHub → block
-    # auto-merge. Deferred BOT feedback does not block.
+    # 7. Unresolved review feedback that the runner has triaged but not cleared
+    # blocks auto-merge (#305).
     #
-    # "Defer" means the coding CLI decided a reviewer comment needs
-    # human follow-up (design question, out-of-scope, etc.) — NOT that
-    # the thread has been addressed. Originally this gate blocked the
-    # merge on ANY defer regardless of author, and PR 342 sat for 4
-    # hours because Greptile's P1 nit kept returning "defer" on every
-    # iteration. Bot reviewers post advisory feedback only —
-    # they cannot themselves mark threads resolved, so their deferred
-    # nits would linger forever. Humans still block: a maintainer who
-    # opens a thread expects their question answered before the merge
-    # fires.
-    has_human_defer = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_review_thread(t)
-        for t in status.unresolved_inline_threads
-    ) or any(
-        state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)
-        for c in status.unresolved_review_comments
-    )
-    if has_human_defer:
+    # Gate 2 (AddressComments) has already claimed every item whose verdict
+    # still ``_needs_comment_attention`` (None / ``agent_failed``), so anything
+    # reaching this gate carries a recorded verdict.
+    #
+    # Inline threads: block on ``defer`` or ``needs_human``. A successfully
+    # captured follow-up ``defer`` (explanatory comment + filed tracking issue)
+    # is RESOLVED on GitHub by the runner and leaves this snapshot entirely; a
+    # ``defer`` still visible here means capture did not complete, and a failed
+    # capture is downgraded to ``needs_human`` — either way, block instead of
+    # merging with the thread open (the PR #303 incident). ``fix_committed`` and
+    # ``false_positive`` do not block: the work is handled even if a maintainer
+    # has not clicked Resolve yet.
+    #
+    # Review-level comments cannot be resolved via the GraphQL mutation (no
+    # thread id), so the author-scoped rule from #342 stays: a human ``defer``
+    # blocks; ``needs_human`` blocks regardless of author (the diff may be
+    # wrong); advisory bot deferrals do not wedge the PR. Comments with no
+    # triage verdict (non-actionable bot status notes) do not block.
+    def _thread_blocks_merge(thread_id: str) -> bool:
+        return state.threads_addressed_ids.get(thread_id) in {"defer", "needs_human"}
+
+    def _review_comment_blocks_merge(comment: ReviewComment) -> bool:
+        verdict = state.threads_addressed_ids.get(comment.comment_id)
+        if verdict == "needs_human":
+            return True
+        return verdict == "defer" and not _is_bot_author(comment.author)
+
+    has_blocking_feedback = any(
+        _thread_blocks_merge(t.thread_id) for t in status.unresolved_inline_threads
+    ) or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
+    if has_blocking_feedback:
         return NotifyHuman()
 
     # 8. GitHub may report BLOCKED / HAS_HOOKS because required approval,

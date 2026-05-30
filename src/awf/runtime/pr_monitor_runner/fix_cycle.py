@@ -142,7 +142,29 @@ async def _run_fix_cycle(
                     reason_code=exc.reason_code,
                 )
             _mark_review_thread_addressed(state, t, verdict)
-            if verdict not in {"defer", "agent_failed"}:
+            if verdict == "defer":
+                # Follow-up defer (#305): durably capture the deferred work
+                # (explanatory comment + tracking issue) before the thread is
+                # resolved. On capture failure, downgrade to needs_human so the
+                # merge gate keeps blocking instead of silently resolving.
+                captured = await _capture_deferred_review_thread(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    thread=t,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                )
+                if captured:
+                    threads_to_resolve.append(t.thread_id)
+                else:
+                    _mark_review_thread_addressed(state, t, "needs_human")
+            elif verdict not in {"needs_human", "agent_failed"}:
                 threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
         for c in reviews:
@@ -413,3 +435,107 @@ async def _run_fix_cycle(
                 },
             )
     return cast(_GitPushResult, push_result)
+
+
+def _deferred_issue_filed_marker(thread_id: str) -> str:
+    """State key recording that a tracking issue was filed for a deferred thread.
+
+    Distinct from the verdict/body-hash keys that ``_clear_addressed_state_by_id``
+    pops, so the marker survives a resolve-retry's state clear and keeps the
+    capture idempotent across outer monitor iterations (no duplicate issues).
+    """
+    return f"__deferred_issue_filed__:{thread_id}"
+
+
+async def _capture_deferred_review_thread(
+    self: Any,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    thread: ReviewThread,
+    state: MonitorState,
+    base_branch: str | None,
+    remote_branch: str,
+    operation_id: str | None,
+    operation_type: str | None,
+    monitor_log: WorkspaceLogSink | None,
+) -> bool:
+    """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
+
+    Posts an explanatory PR comment and files a tracking issue. Idempotent: a
+    per-thread marker records that the issue was already filed so a later
+    resolve-retry (which clears the verdict and re-addresses the thread) does
+    not file a duplicate. Returns True when the deferred work is durably
+    captured (caller may resolve the thread), or False on capture failure
+    (caller downgrades the verdict to ``needs_human`` so the merge stays
+    blocked and the operator is notified).
+    """
+    marker = _deferred_issue_filed_marker(thread.thread_id)
+    if state.threads_addressed_ids.get(marker):
+        return True
+    location = thread.path or "the PR diff"
+    thread_ref = thread.url or f"PR #{pr_number}"
+    issue_title = f"Deferred from PR #{pr_number}: {location}"
+    issue_body = (
+        f"AWF deferred a review thread while monitoring PR #{pr_number}.\n\n"
+        f"- Path: {location}\n"
+        f"- Thread: {thread_ref}\n\n"
+        f"Original review comment:\n\n> {thread.body_excerpt}\n\n"
+        "This issue tracks the deferred follow-up so the PR thread could be "
+        "resolved without losing the work."
+    )
+    try:
+        issue_url = await self._deps.gh.create_issue(
+            repo=repo,
+            title=issue_title,
+            body=issue_body,
+        )
+        await self._deps.gh.post_comment(
+            repo=repo,
+            pr_number=pr_number,
+            body=(
+                f"AWF deferred the review thread on `{location}` and filed "
+                f"{issue_url} to track the follow-up. Resolving this thread; the "
+                "deferred work lives in that issue."
+            ),
+        )
+    except GitHubClientError as exc:
+        _log.warning(
+            "monitor.deferred_capture_failed",
+            thread_id=thread.thread_id,
+            stderr=exc.stderr,
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+            action="capture_deferred_thread",
+            outcome="failed",
+            reason_code="DEFERRED_CAPTURE_FAILED",
+            pr_number=pr_number,
+            status=None,
+            base_branch=base_branch or "",
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            evidence={"thread_ids": [thread.thread_id], "error_message": str(exc)},
+        )
+        return False
+    state.mark_addressed(marker, issue_url)
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action="capture_deferred_thread",
+        outcome="succeeded",
+        reason_code="DEFERRED_CAPTURE",
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch or "",
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+        evidence={"thread_ids": [thread.thread_id], "issue_url": issue_url},
+    )
+    return True

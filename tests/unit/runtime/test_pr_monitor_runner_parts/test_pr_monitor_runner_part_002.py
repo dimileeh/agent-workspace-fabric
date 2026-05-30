@@ -767,7 +767,7 @@ async def test_pre_merge_recheck_requeues_changed_thread_history_before_deciding
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: maintainer reply needs human input")
     cmd.queue_result(returncode=0)  # git fetch origin development
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     changed_thread = {
@@ -843,7 +843,7 @@ async def test_pre_merge_recheck_requeues_changed_thread_history_before_deciding
     assert _gh_pr_merge_calls(cmd) == []
     assert len(adapter.calls) == 1
     assert "maintainer reply needs human input" in adapter.calls[0]
-    assert state.threads_addressed_ids["T_handled"] == "defer"
+    assert state.threads_addressed_ids["T_handled"] == "needs_human"
     assert _review_thread_body_state_key("T_handled") in state.threads_addressed_ids
 
 

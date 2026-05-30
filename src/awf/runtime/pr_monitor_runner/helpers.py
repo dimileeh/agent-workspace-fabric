@@ -137,14 +137,20 @@ def _parse_verdict(stdout: str) -> Verdict:
 
 def _parse_verdict_result(stdout: str) -> VerdictResult:
     if not stdout:
-        return VerdictResult(verdict="defer")
+        # Empty agent output is a failure to produce, not a considered
+        # deferral. Treat it as needs_human so it blocks the merge instead of
+        # triggering the follow-up defer capture (comment + filed issue +
+        # resolve) on a thread the agent never actually addressed (#305).
+        return VerdictResult(verdict="needs_human")
     awf_match = _AWF_VERDICT.search(stdout)
     if awf_match is not None:
         label = re.sub(r"\s+", " ", awf_match.group("label").strip().lower())
         reason = awf_match.group("reason").strip() or None
         if label == "false positive":
             return VerdictResult(verdict="false_positive", reason=reason)
-        if label in {"defer", "needs_human"}:
+        if label == "needs_human":
+            return VerdictResult(verdict="needs_human", reason=reason)
+        if label == "defer":
             return VerdictResult(verdict="defer", reason=reason)
         return VerdictResult(verdict="fix_committed", reason=reason)
     if _VERDICT_FALSE_POSITIVE.search(stdout):
@@ -239,7 +245,9 @@ def _monitor_state_verdict(verdict: str) -> Verdict:
     normalized = verdict.strip().lower()
     if normalized == "false_positive":
         return "false_positive"
-    if normalized in {"defer", "needs_human"}:
+    if normalized == "needs_human":
+        return "needs_human"
+    if normalized == "defer":
         return "defer"
     if normalized == "agent_failed":
         return "agent_failed"

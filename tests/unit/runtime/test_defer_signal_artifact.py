@@ -33,8 +33,8 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     RecordedSleep,
     make_runner,
     pr_payload,
+    review_node,
     seed_monitoring_workspace,
-    thread_node,
 )
 
 
@@ -79,24 +79,21 @@ class TestDeferSignalArtifact:
         the orchestrator can spec follow-up workspaces."""
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        bot_thread = thread_node(
-            tid="T_bot",
-            author="greptile-apps",
-            path="src/foo.py",
-            line=42,
-            body="consider renaming",
-        )
+        # #305: inline-thread defers are captured + resolved, so the terminal
+        # deferred item recorded in the artifact is a review-level comment defer
+        # (never auto-resolved). A bot review-comment defer does not block merge.
+        bot_review = review_node(cid=801, author="greptile-apps", body="consider renaming")
         # Outer iter 1: AddressComments fires; adapter defers.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="DEFER: advisory nit, skipping")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))  # settle
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA\n")
         runner = make_runner(
@@ -119,11 +116,9 @@ class TestDeferSignalArtifact:
         assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
         item = data["deferred_bot_items"][0]
-        assert item["kind"] == "thread"
-        assert item["id"] == "T_bot"
+        assert item["kind"] == "review"
+        assert item["id"] == "801"
         assert item["author"] == "greptile-apps"
-        assert item["path"] == "src/foo.py"
-        assert item["line"] == 42
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
@@ -143,25 +138,21 @@ class TestDeferSignalArtifact:
         """
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        bot_thread = thread_node(
-            tid="T_bot",
-            author="greptile-apps",
-            path="src/foo.py",
-            line=42,
-            body="consider renaming",
-        )
+        # #305: terminal deferred item is a bot review-comment defer (inline
+        # thread defers are captured + resolved and never reach the artifact).
+        bot_review = review_node(cid=801, author="greptile-apps", body="consider renaming")
         # Outer iter 1: AddressComments fires; adapter defers.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="DEFER: advisory nit, skipping")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))  # settle
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge dispatched, but
         # gh pr merge is blocked by branch protection → downgrade path.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(
             returncode=1,
             stderr="pull request not mergeable: required status checks pending",
@@ -169,7 +160,7 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, reviews=[bot_review]))
         cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
@@ -189,10 +180,9 @@ class TestDeferSignalArtifact:
         assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
         item = data["deferred_bot_items"][0]
-        assert item["id"] == "T_bot"
+        assert item["kind"] == "review"
+        assert item["id"] == "801"
         assert item["author"] == "greptile-apps"
-        assert item["path"] == "src/foo.py"
-        assert item["line"] == 42
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
@@ -206,30 +196,26 @@ class TestDeferSignalArtifact:
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        human_thread = thread_node(
-            tid="T_human",
-            author="alice-human",
-            path="src/bar.py",
-            line=7,
-            body="design question",
-        )
+        # #305: a human review-comment defer blocks (NotifyHuman) and is the
+        # terminal deferred item recorded; inline-thread defers are captured.
+        human_review = review_node(cid=802, author="alice-human", body="design question")
         # Outer iter 1: AddressComments; agent defers.
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         adapter.queue(stdout="DEFER: needs maintainer input")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Outer iter 2: human-defer → gate blocks → NotifyHuman.
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
         # NotifyHuman is not terminal; the monitor remains alive until the
         # PR is actually merged.
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, reviews=[human_review]))
         cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
@@ -250,9 +236,9 @@ class TestDeferSignalArtifact:
         assert data["deferred_bot_items"] == []
         assert len(data["deferred_human_items"]) == 1
         item = data["deferred_human_items"][0]
-        assert item["id"] == "T_human"
+        assert item["kind"] == "review"
+        assert item["id"] == "802"
         assert item["author"] == "alice-human"
-        assert item["path"] == "src/bar.py"
 
     @pytest.mark.unit
     async def test_artifact_written_on_abort(
