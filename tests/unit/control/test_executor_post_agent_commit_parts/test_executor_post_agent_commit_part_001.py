@@ -822,6 +822,68 @@ async def test_post_agent_commit_autofixable_ruff_check_also_formats_reported_pa
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_autofixable_ruff_check_format_failure_marks_repair_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    path = "src/awf/bar.py"
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout=f"{path}\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_autofixable_ruff_check_and_format_output(path),
+    )  # both Ruff hooks failed, but check diagnostics are autofixable
+    fake.queue_result(returncode=0)  # ruff check --fix path succeeds
+    fake.queue_result(returncode=1, stderr="ruff format: error")  # ruff format path fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic_autofix"
+    assert payload["retry_outcome"] == "error"
+    assert payload["failed_hooks"] == ["awf-ruff-check", "awf-ruff-format-check"]
+    assert payload["repaired_paths"] == [path]
+    assert payload["formatter_paths"] == [path]
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    commit_details = event.payload["details"]["post_agent_commit"]
+    assert commit_details["stage"] == "ruff format"
+    assert commit_details["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert commit_details["format_repair_attempted"] is True
+    assert commit_details["precommit_repair_attempted"] is True
+    assert commit_details["repair_strategy"] == "deterministic_autofix"
+
+    ruff_format_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "format" in call.args and "--check" not in call.args
+    ]
+    assert len(ruff_format_calls) == 1
+    assert path in ruff_format_calls[0].args
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_semantic_repair_stages_new_files_before_policy_checks(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
