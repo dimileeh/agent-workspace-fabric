@@ -162,6 +162,13 @@ async def _run_fix_cycle(
                 )
                 if captured:
                     threads_to_resolve.append(t.thread_id)
+                    # Roll back with the publish-dependent set: if the push
+                    # later fails, the "defer" addressed marker is cleared so
+                    # the thread is re-addressed (and re-resolved) next cycle
+                    # instead of staying marked-addressed-but-unresolved and
+                    # wedging the merge gate. The filed-issue marker survives
+                    # the clear, so the idempotent capture never re-files.
+                    publish_dependent_ids.append(t.thread_id)
                 else:
                     _mark_review_thread_addressed(state, t, "needs_human")
             elif verdict not in {"needs_human", "agent_failed"}:
@@ -491,15 +498,6 @@ async def _capture_deferred_review_thread(
             title=issue_title,
             body=issue_body,
         )
-        await self._deps.gh.post_comment(
-            repo=repo,
-            pr_number=pr_number,
-            body=(
-                f"AWF deferred the review thread on `{location}` and filed "
-                f"{issue_url} to track the follow-up. Resolving this thread; the "
-                "deferred work lives in that issue."
-            ),
-        )
     except GitHubClientError as exc:
         _log.warning(
             "monitor.deferred_capture_failed",
@@ -522,7 +520,27 @@ async def _capture_deferred_review_thread(
             evidence={"thread_ids": [thread.thread_id], "error_message": str(exc)},
         )
         return False
+    # Filing the tracking issue is the durable capture. Record it immediately so
+    # a later retry (e.g. after a failed push) never files a duplicate, even if
+    # the explanatory comment below fails. The comment is best-effort courtesy.
     state.mark_addressed(marker, issue_url)
+    try:
+        await self._deps.gh.post_comment(
+            repo=repo,
+            pr_number=pr_number,
+            body=(
+                f"AWF deferred the review thread on `{location}` and filed "
+                f"{issue_url} to track the follow-up. Resolving this thread; the "
+                "deferred work lives in that issue."
+            ),
+        )
+    except GitHubClientError as exc:
+        _log.warning(
+            "monitor.deferred_capture_comment_failed",
+            thread_id=thread.thread_id,
+            issue_url=issue_url,
+            stderr=exc.stderr,
+        )
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

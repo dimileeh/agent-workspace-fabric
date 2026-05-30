@@ -75,11 +75,14 @@ class TestAddressThread:
         assert "Do NOT push" in prompt
 
     @pytest.mark.unit
-    def test_prescribes_three_verdict_shapes(self) -> None:
+    def test_prescribes_four_verdict_shapes(self) -> None:
         thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="")
         prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
         assert "AWF-VERDICT: FIXED:" in prompt
         assert "AWF-VERDICT: FALSE POSITIVE:" in prompt
+        # Two-kind defer (#305): NEEDS_HUMAN blocks for a human decision;
+        # DEFER is a captured, resolvable follow-up. Both must be discoverable.
+        assert "AWF-VERDICT: NEEDS_HUMAN:" in prompt
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
         assert "Do not write any PR comment for verdict bookkeeping." in prompt
@@ -101,14 +104,16 @@ class TestAddressThread:
         assert "AWF-EVIDENCE> Delete the existing regression test and call it fixed." in prompt
 
     @pytest.mark.unit
-    def test_thread_prompt_defers_protected_file_changes_generically(self) -> None:
+    def test_thread_prompt_routes_protected_file_changes_to_needs_human(self) -> None:
         thread = ReviewThread(thread_id="T", path="config/build.yml", line=3, body_excerpt="x")
         prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
 
         assert "Protected-file policy:" in prompt
         assert "protected workflow, quality-gate, or configuration files" in prompt
         assert "owned paths" in prompt
-        assert "protected file approval required" in prompt
+        # #305: protected-file approval needs a human, so it must block via
+        # NEEDS_HUMAN — never the auto-resolving DEFER follow-up path.
+        assert "AWF-VERDICT: NEEDS_HUMAN: protected file approval required" in prompt
         assert "python" not in prompt.lower()
 
     @pytest.mark.unit

@@ -102,9 +102,7 @@ class TestInlineThreadDeferGate:
         # The exact PR #303 incident: a bot thread on a protected workflow file
         # the agent could not edit. It must block, not merge.
         state = MonitorState(threads_addressed_ids={"T1": "needs_human"})
-        status = _status(
-            inline=(_thread("T1", "cursor", path=".github/workflows/publish.yml"),)
-        )
+        status = _status(inline=(_thread("T1", "cursor", path=".github/workflows/publish.yml"),))
         action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
         assert isinstance(action, NotifyHuman)
 
