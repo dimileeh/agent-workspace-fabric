@@ -984,9 +984,9 @@ async def _execute(
                 remote_push_url=remote_push_url,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                monitor_log=monitor_log,
-                operation_id=operation.operation_id if operation is not None else None,
-                operation_type=OperationType.comment_repair.value,
+                _monitor_log=monitor_log,
+                _operation_id=operation.operation_id if operation is not None else None,
+                _operation_type=OperationType.comment_repair.value,
             )
         except ProviderRecoveryRetryError:
             await self._finish_monitor_operation(

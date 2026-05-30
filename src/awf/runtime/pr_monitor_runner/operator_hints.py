@@ -35,13 +35,12 @@ async def _run_operator_hint_cycle(
     remote_push_url: str | None = None,
     compose_project: str,
     compose_file: Path,
-    monitor_log: WorkspaceLogSink | None = None,
+    _monitor_log: WorkspaceLogSink | None = None,
     base_branch: str | None = None,
-    operation_id: str | None = None,
-    operation_type: str | None = None,
+    _operation_id: str | None = None,
+    _operation_type: str | None = None,
 ) -> _GitPushResult:
     """Run one repair pass for an operator hint and push committed work."""
-    del monitor_log, operation_id, operation_type
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,
