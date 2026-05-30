@@ -18,12 +18,14 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_issue_from_reason_code,
     first_run_remediation_from_reason_code,
+    first_run_setup_readiness_payload,
     first_run_success_payload,
     first_run_warning_payload,
     redact_first_run_value,
     render_first_run_json,
     render_first_run_pretty,
 )
+from awf.host_setup.system_checks import SystemCheck, SystemChecksReport
 
 
 @pytest.mark.unit
@@ -1127,3 +1129,130 @@ def test_first_run_redaction_does_not_double_redact_provider_ref_assignments() -
         "message": "TOKEN=[redacted]",
         "nested": ("API_KEY=[redacted]",),
     }
+
+
+def _readiness_check(
+    *,
+    check_id: str,
+    status: str,
+    reason: str,
+    fix: str | None = None,
+    docs_link: str | None = None,
+) -> SystemCheck:
+    return SystemCheck(
+        id=check_id,
+        label=check_id,
+        status=status,  # type: ignore[arg-type]
+        reason=reason,
+        message=f"{check_id} {status}",
+        fix=fix,
+        docs_link=docs_link,
+    )
+
+
+@pytest.mark.unit
+def test_setup_readiness_payload_success() -> None:
+    """Verify an ok report becomes an exit-0 success payload with details."""
+    report = SystemChecksReport(
+        checks=(
+            _readiness_check(check_id="docker_cli", status="ok", reason="DOCKER_CLI_AVAILABLE"),
+        ),
+        capacity={"cpu_cores": 8.0, "memory_gb": 16.0},
+    )
+
+    payload = first_run_setup_readiness_payload(
+        report,
+        dry_run=True,
+        providers=("github",),
+        allow_plain_secrets=False,
+        source_checkout_root="/repo",
+    )
+    rendered = render_first_run_json(payload)
+
+    assert payload.status == "success"
+    assert rendered["details"]["dry_run"] is True
+    assert rendered["details"]["providers"] == ["github"]
+    assert rendered["details"]["provider_scope"] == "targeted recheck"
+    assert rendered["details"]["capacity"] == {"cpu_cores": 8.0, "memory_gb": 16.0}
+    assert rendered["details"]["source_checkout"] == "/repo"
+    assert any("awf start" in step for step in rendered["next_steps"])
+
+
+@pytest.mark.unit
+def test_setup_readiness_payload_blocked() -> None:
+    """Verify a failing report becomes a blocked payload with blocker fixes."""
+    report = SystemChecksReport(
+        checks=(
+            _readiness_check(
+                check_id="docker_cli",
+                status="fail",
+                reason="DOCKER_CLI_NOT_FOUND",
+                fix="Install Docker Desktop.",
+                docs_link="https://docs.docker.com/get-docker/",
+            ),
+            _readiness_check(check_id="gh", status="warn", reason="GH_NOT_FOUND"),
+        ),
+    )
+
+    payload = first_run_setup_readiness_payload(
+        report,
+        dry_run=True,
+        providers=(),
+        allow_plain_secrets=False,
+        source_checkout_root=None,
+    )
+    pretty = render_first_run_pretty(payload)
+
+    assert payload.status == "blocked"
+    assert payload.reason_code == "SETUP_READINESS_FAILED"
+    assert "Install Docker Desktop." in payload.next_steps
+    assert any("Re-run awf setup --dry-run" in step for step in payload.next_steps)
+    assert "https://docs.docker.com/get-docker/" in pretty
+    assert "docker_cli" in pretty
+
+
+@pytest.mark.unit
+def test_setup_readiness_payload_warning_succeeds() -> None:
+    """Verify a warn-only report succeeds (exit 0) while carrying warnings."""
+    report = SystemChecksReport(
+        checks=(
+            _readiness_check(check_id="docker_cli", status="ok", reason="DOCKER_CLI_AVAILABLE"),
+            _readiness_check(check_id="gh", status="warn", reason="GH_NOT_FOUND"),
+        ),
+    )
+
+    payload = first_run_setup_readiness_payload(
+        report,
+        dry_run=False,
+        providers=(),
+        allow_plain_secrets=False,
+        source_checkout_root=None,
+    )
+    rendered = render_first_run_json(payload)
+
+    assert payload.status == "success"
+    assert "warnings" in rendered["details"]
+    assert rendered["details"]["warnings"] == ["gh"]
+    assert "warnings" in payload.summary.lower()
+
+
+@pytest.mark.unit
+def test_setup_readiness_payload_redacts_provider_refs() -> None:
+    """Verify token-shaped check content is redacted by render_first_run_json."""
+    report = SystemChecksReport(
+        checks=(
+            _readiness_check(check_id="docker_cli", status="ok", reason="DOCKER_CLI_AVAILABLE"),
+        ),
+    )
+    payload = first_run_setup_readiness_payload(
+        report,
+        dry_run=True,
+        providers=("env://OPENAI_API_KEY",),
+        allow_plain_secrets=False,
+        source_checkout_root=None,
+    )
+
+    rendered = render_first_run_json(payload)
+
+    assert "env://OPENAI_API_KEY" not in json.dumps(rendered)
+    assert "[redacted]" in json.dumps(rendered)

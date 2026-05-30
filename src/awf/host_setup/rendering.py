@@ -26,6 +26,7 @@ from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_ASSETS_STALE,
     SOURCE_CHECKOUT_INVALID,
 )
+from awf.host_setup.system_checks import SystemChecksReport
 from awf.service.doctor.reasons import reason_text_for_code
 
 AWF_SETUP_PLACEHOLDER = "AWF_SETUP_PLACEHOLDER"
@@ -311,6 +312,90 @@ def first_run_failure_payload(
         issues=(issue,),
         next_steps=next_steps,
     )
+
+
+def first_run_setup_readiness_payload(
+    report: SystemChecksReport,
+    *,
+    command: str = "awf setup",
+    dry_run: bool,
+    providers: tuple[str, ...],
+    allow_plain_secrets: bool,
+    source_checkout_root: str | None,
+) -> FirstRunPayload:
+    """Build a first-run readiness payload from a host system-checks report.
+
+    A failing report becomes a blocked failure payload keyed on
+    ``SETUP_READINESS_FAILED`` whose ``next_steps`` are the de-duplicated blocker
+    fixes plus a re-run instruction. An ``ok``/``warn`` report becomes a success
+    payload (exit 0); warnings ride along in ``details`` so they render without
+    failing the command. The next command on success is ``awf start``.
+    """
+    details = _setup_readiness_details(
+        report,
+        dry_run=dry_run,
+        providers=providers,
+        allow_plain_secrets=allow_plain_secrets,
+        source_checkout_root=source_checkout_root,
+    )
+    if report.status == "fail":
+        return first_run_failure_payload(
+            command=command,
+            reason_code=SETUP_READINESS_FAILED,
+            summary="AWF setup found one or more machine readiness blockers.",
+            status="blocked",
+            details=details,
+            next_steps=_setup_blocker_next_steps(report),
+        )
+    summary = (
+        "AWF setup machine readiness checks passed."
+        if report.status == "ok"
+        else "AWF setup machine readiness checks passed with warnings."
+    )
+    return first_run_success_payload(
+        command=command,
+        summary=summary,
+        details=details,
+        next_steps=("Run awf start to launch local AWF Core.",),
+    )
+
+
+def _setup_readiness_details(
+    report: SystemChecksReport,
+    *,
+    dry_run: bool,
+    providers: tuple[str, ...],
+    allow_plain_secrets: bool,
+    source_checkout_root: str | None,
+) -> dict[str, Any]:
+    """Build the JSON-safe readiness details mapping (redacted at render time)."""
+    # The consent boolean is reported under a redaction-safe key. Any detail key
+    # containing "secret"/"token" has its value scrubbed by render_first_run_json,
+    # which would hide this non-sensitive opt-in decision from operators.
+    details: dict[str, Any] = {
+        "dry_run": dry_run,
+        "providers": list(providers),
+        "provider_scope": "targeted recheck" if providers else "all",
+        "allow_plain_file_credentials": allow_plain_secrets,
+        "checks": [check.to_dict() for check in report.checks],
+        "blockers": [check.id for check in report.blockers],
+        "warnings": [check.id for check in report.warnings],
+    }
+    if source_checkout_root is not None:
+        details["source_checkout"] = source_checkout_root
+    if report.capacity is not None:
+        details["capacity"] = dict(report.capacity)
+    return details
+
+
+def _setup_blocker_next_steps(report: SystemChecksReport) -> tuple[str, ...]:
+    """Return de-duplicated blocker fixes followed by a re-run instruction."""
+    steps: list[str] = []
+    for check in report.blockers:
+        if check.fix and check.fix not in steps:
+            steps.append(check.fix)
+    steps.append("Re-run awf setup --dry-run after resolving the blockers above.")
+    return tuple(steps)
 
 
 def render_first_run_json(payload: FirstRunPayload) -> dict[str, Any]:
@@ -645,6 +730,7 @@ __all__ = [
     "first_run_failure_payload",
     "first_run_issue_from_reason_code",
     "first_run_remediation_from_reason_code",
+    "first_run_setup_readiness_payload",
     "first_run_success_payload",
     "first_run_warning_payload",
     "redact_first_run_value",

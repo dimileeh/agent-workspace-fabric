@@ -53,6 +53,7 @@ from awf.host_setup.rendering import (
     first_run_failure_payload,
     first_run_issue_from_reason_code,
     first_run_remediation_from_reason_code,
+    first_run_setup_readiness_payload,
     first_run_success_payload,
     first_run_warning_payload,
     redact_first_run_value,
@@ -71,6 +72,11 @@ from awf.host_setup.source_assets import (
     VerifiedSourceCheckout,
     validate_source_checkout,
     verified_source_from_metadata,
+)
+from awf.host_setup.system_checks import (
+    SystemCheck,
+    SystemChecksReport,
+    run_system_checks,
 )
 
 __all__ = [
@@ -126,17 +132,21 @@ __all__ = [
     "SourceCheckoutAssetPaths",
     "SourceCheckoutError",
     "SourceCheckoutMarker",
+    "SystemCheck",
+    "SystemChecksReport",
     "VerifiedSourceCheckout",
     "default_host_setup_config_path",
     "first_run_failure_payload",
     "first_run_issue_from_reason_code",
     "first_run_remediation_from_reason_code",
+    "first_run_setup_readiness_payload",
     "first_run_success_payload",
     "first_run_warning_payload",
     "read_host_setup_config",
     "redact_first_run_value",
     "render_first_run_json",
     "render_first_run_pretty",
+    "run_system_checks",
     "validate_source_checkout",
     "verified_source_from_metadata",
     "write_host_setup_config",

@@ -91,9 +91,10 @@ app.add_typer(smoke_app, name="smoke")
 app.command(
     "setup",
     help=(
-        "Prepare this machine for AWF first-run use. "
-        "Reserved before full setup checks land. "
-        "Current runnable path: awf service bootstrap, then awf init <path>."
+        "Prepare this machine for AWF first-run use: run bounded host readiness "
+        "checks and emit a reason-coded readiness report. Use --dry-run to inspect "
+        "readiness without writing config or starting Core; --provider scopes a "
+        "targeted recheck. Next: awf start."
     ),
 )(setup_command)
 app.command(
