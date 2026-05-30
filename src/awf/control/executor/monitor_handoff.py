@@ -253,7 +253,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         )
 
     try:
-        profile = _profile_for_workspace(
+        resolved_profile = _profile_for_workspace(
             ws,
             worktree_path=self._config.worktrees_root / workspace_id,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
@@ -262,7 +262,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             self,
             ws=ws,
             workspace_id=workspace_id,
-            profile=profile,
+            profile=resolved_profile,
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
         # Keep the profile timeout as the fallback if stored companion policy
