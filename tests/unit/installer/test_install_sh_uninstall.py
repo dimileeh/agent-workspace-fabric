@@ -29,7 +29,10 @@ def test_uninstall_managed_pipx_install(harness: InstallerHarness) -> None:
     result = harness.run(["--uninstall", "--method", "pipx"])
 
     assert result.returncode == 0, result.stderr
-    assert f"pipx uninstall {PACKAGE}" in "\n".join(harness.calls())
+    joined = "\n".join(harness.calls())
+    assert f"pipx uninstall {PACKAGE}" in joined
+    # The pipx path is exclusive: the uv uninstall command must not also run.
+    assert f"uv tool uninstall {PACKAGE}" not in joined
 
 
 @pytest.mark.unit
@@ -57,7 +60,10 @@ def test_uninstall_with_nothing_installed_is_a_noop(harness: InstallerHarness) -
     result = harness.run(["--uninstall"])
 
     assert result.returncode == 0, result.stderr
-    assert f"uv tool uninstall {PACKAGE}" not in "\n".join(harness.calls())
+    # A clean no-op must invoke neither uninstall command.
+    joined = "\n".join(harness.calls())
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    assert f"pipx uninstall {PACKAGE}" not in joined
 
 
 @pytest.mark.unit
