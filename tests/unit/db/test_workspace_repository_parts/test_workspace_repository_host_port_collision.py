@@ -224,12 +224,16 @@ class TestFindHostPortConflicts:
         assert conflicts == []
 
     @pytest.mark.asyncio
-    async def test_all_terminal_statuses_excluded(self, session: AsyncSession) -> None:
+    async def test_truly_terminal_statuses_excluded(self, session: AsyncSession) -> None:
+        """Only truly stack-free statuses are excluded from port conflict detection.
+
+        ``failed`` and ``cancelled`` workspaces retain their compose stacks for
+        operator inspection until cleanup/destroy releases the containers, so
+        they must still participate in host-port conflict detection.
+        """
         repo = WorkspaceRepository(session)
         terminal_statuses = [
             WorkspaceStatus.completed,
-            WorkspaceStatus.failed,
-            WorkspaceStatus.cancelled,
             # destroying is NOT terminal for port conflicts — containers
             # may still hold host ports until cleanup finishes.
             WorkspaceStatus.destroyed,
@@ -254,6 +258,75 @@ class TestFindHostPortConflicts:
             excluding_workspace_id=None,
         )
         assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_failed_workspace_blocks_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A failed workspace retains its compose stack and blocks host ports.
+
+        When a workspace fails after its compose stack has started, it transitions
+        to ``failed`` without tearing the stack down. Because its containers may
+        still hold host ports, ``find_host_port_conflicts`` must treat it as a
+        port conflict so that a new create returns ``HOST_PORT_CONFLICT``
+        instead of 202 followed by a compose-up failure.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == ws.id
+
+    @pytest.mark.asyncio
+    async def test_cancelled_workspace_blocks_host_ports(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A cancelled workspace retains its compose stack and blocks host ports.
+
+        Like ``failed``, a ``cancelled`` workspace's containers may still hold
+        host ports until cleanup/destroy releases them.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.cancelled,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == ws.id
 
     @pytest.mark.asyncio
     async def test_multiple_conflicting_ports(self, session: AsyncSession) -> None:
