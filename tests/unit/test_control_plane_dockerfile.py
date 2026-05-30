@@ -34,3 +34,4 @@ def test_control_plane_installs_pinned_docker_buildx_plugin() -> None:
     assert "ARG DOCKER_BUILDX_PLUGIN_VERSION=" in dockerfile
     assert "ARG DOCKER_BUILDX_PLUGIN_VERSION=latest" not in dockerfile
     assert '"docker-buildx-plugin=${DOCKER_BUILDX_PLUGIN_VERSION}"' in dockerfile
+    assert "docker buildx version" in dockerfile
