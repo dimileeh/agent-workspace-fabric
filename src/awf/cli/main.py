@@ -99,9 +99,10 @@ app.command(
 app.command(
     "start",
     help=(
-        "Start local AWF Core after setup. "
-        "Reserved before service startup lands. "
-        "Current runnable path: awf service bootstrap, then awf init <path>."
+        "Start local AWF Core. A friendly wrapper over the existing service "
+        "bootstrap engine that renders a first-run success panel or a "
+        "reason-coded failure. The expert commands awf service "
+        "bootstrap/status/doctor remain available."
     ),
 )(start_command)
 
