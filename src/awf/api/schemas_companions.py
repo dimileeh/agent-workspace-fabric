@@ -23,6 +23,7 @@ EnvironmentKey = Annotated[
     str, Field(min_length=1, max_length=256, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
 ]
 
+ENV_KEY_MAX_LENGTH = 256
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
 _ENVIRONMENT_NAME_START_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _ENVIRONMENT_VALUE_INTERPOLATION_PATTERN_TEXT = r"(^|[^$])(?:\$\$)*\$(?:[A-Za-z_]|\{[A-Za-z_])"

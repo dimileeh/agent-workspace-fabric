@@ -14,6 +14,7 @@ from typing import cast
 
 from awf.api.schemas_companions import (
     _ENVIRONMENT_KEY_PATTERN,
+    ENV_KEY_MAX_LENGTH,
     _value_has_compose_interpolation,
 )
 from awf.cli.env_file import parse_dotenv_file
@@ -169,8 +170,10 @@ def _validate_env_keys(
             _warn(f"{comp_name!r}: skipping env key {key!r}: invalid key name pattern")
             skip.add(key)
             continue
-        if len(key) > 256:
-            _warn(f"{comp_name!r}: skipping env key {key!r}: key exceeds 256 characters")
+        if len(key) > ENV_KEY_MAX_LENGTH:
+            _warn(
+                f"{comp_name!r}: skipping env key {key!r}: key exceeds {ENV_KEY_MAX_LENGTH} characters"
+            )
             skip.add(key)
             continue
         value = file_vars[key]
