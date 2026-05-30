@@ -1049,3 +1049,50 @@ def test_protected_manual_ready_handoff_rejects_blocking_bot_thread() -> None:
     )
     state = MonitorState(threads_addressed_ids={"T_bot": "needs_human"})
     assert _is_protected_manual_ready_handoff(blocked, state) is False
+
+
+@pytest.mark.unit
+async def test_deferred_capture_transient_failure_requeues_instead_of_downgrading(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # #305: a transient `gh issue create` failure (502) must NOT permanently
+    # downgrade a valid defer to needs_human. It clears the verdict so the next
+    # poll re-addresses and re-attempts capture once GitHub recovers.
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
+
+    ws_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")  # gh issue create (transient)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_defer", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "defer")
+
+    result = await _capture_deferred_review_thread(
+        runner,
+        workspace_id=ws_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    # None (requeue), not False (which would downgrade to needs_human); and the
+    # verdict is cleared so the thread is re-addressed next poll.
+    assert result is None
+    assert state.threads_addressed_ids.get("T_defer") is None

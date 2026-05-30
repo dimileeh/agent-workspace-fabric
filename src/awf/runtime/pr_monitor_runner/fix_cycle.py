@@ -183,8 +183,11 @@ async def _run_fix_cycle(
                     # wedging the merge gate. The filed-issue marker survives
                     # the clear, so the idempotent capture never re-files.
                     publish_dependent_ids.append(t.thread_id)
-                else:
+                elif captured is False:
                     _mark_review_thread_addressed(state, t, "needs_human")
+                # captured is None: a transient capture failure already cleared
+                # the verdict so the next poll re-attempts capture — don't
+                # permanently downgrade a valid defer to needs_human.
             elif verdict not in {"needs_human", "agent_failed"}:
                 threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
@@ -521,17 +524,20 @@ async def _capture_deferred_review_thread(
     operation_id: str | None,
     operation_type: str | None,
     monitor_log: WorkspaceLogSink | None,
-) -> bool:
+) -> bool | None:
     """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
 
     Posts an explanatory PR comment and files a tracking issue. Idempotent per
     thread *and body*: a marker records that the issue was already filed so a
     later same-body resolve-retry (which clears the verdict and re-addresses the
     thread) does not file a duplicate, while new reviewer replies (a changed
-    body) are captured into a fresh issue. Returns True when the deferred work
-    is durably captured (caller may resolve the thread), or False on capture
-    failure (caller downgrades the verdict to ``needs_human`` so the merge stays
-    blocked and the operator is notified).
+    body) are captured into a fresh issue. Returns ``True`` when the deferred
+    work is durably captured (caller may resolve the thread); ``False`` on a
+    *permanent* capture failure (caller downgrades to ``needs_human`` so the
+    merge stays blocked and the operator is notified); or ``None`` on a
+    *transient* failure — the thread verdict is cleared so the next poll
+    re-addresses and re-attempts capture once GitHub recovers, instead of
+    permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
     if state.threads_addressed_ids.get(marker):
@@ -554,8 +560,36 @@ async def _capture_deferred_review_thread(
             body=issue_body,
         )
     except GitHubClientError as exc:
-        # Redact before logging/persisting: gh CLI errors can echo tokens or
-        # credentialed URLs.
+        if await self._wait_after_transient_github_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context="capture_deferred_thread",
+            monitor_log=monitor_log,
+        ):
+            # Transient (502 / rate-limit / reset): a temporary issue-API outage
+            # must not permanently downgrade a valid defer to needs_human. Clear
+            # the verdict so the next poll re-addresses and re-attempts capture
+            # once GitHub recovers. The thread stays unresolved meanwhile.
+            _clear_addressed_state_by_id(state, thread.thread_id)
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                action="capture_deferred_thread",
+                outcome="requeued",
+                reason_code=_GITHUB_TRANSIENT_RETRY_REASON,
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                evidence={"thread_ids": [thread.thread_id]},
+            )
+            return None
+        # Permanent failure (e.g. token missing the issues scope). Redact before
+        # logging/persisting: gh CLI errors can echo tokens or credentialed URLs.
         redacted_error = _redact_and_truncate_github_error(str(exc))
         _log.warning(
             "monitor.deferred_capture_failed",
