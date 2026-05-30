@@ -55,6 +55,20 @@ def merge_companion_env(
     """
     name_to_index = _build_name_index(companions)
 
+    # Validate that every companion's environment is a dict (or absent).
+    # JSON values like strings, arrays, booleans, or numbers are not valid
+    # environment mappings and would crash merge/exclude operations.
+    for comp in companions:
+        env = comp.get("environment")
+        if env is not None and not isinstance(env, dict):
+            name = comp.get("name", "<unknown>")
+            raise ValueError(
+                f"companion {name!r} has a non-object 'environment' field "
+                f"(expected a JSON object/mapping, got {type(env).__name__}). "
+                f"Each companion's 'environment' must be a key-value mapping "
+                f'like {{"KEY": "value"}}, not a scalar or array.'
+            )
+
     # Validate env-from targets exist and files are accessible
     for comp_name, file_path_str in env_from:
         _require_companion(comp_name, name_to_index, "--companion-env-from")
@@ -168,5 +182,13 @@ def _shallow_copy_companion(companion: dict[str, object]) -> dict[str, object]:
     """Shallow-copy a companion dict, deep-copying the environment."""
     result = dict(companion)
     env = companion.get("environment")
+    if env is not None and not isinstance(env, dict):
+        name = companion.get("name", "<unknown>")
+        raise ValueError(
+            f"companion {name!r} has a non-object 'environment' field "
+            f"(expected a JSON object/mapping, got {type(env).__name__}). "
+            f"Each companion's 'environment' must be a key-value mapping "
+            f'like {{"KEY": "value"}}, not a scalar or array.'
+        )
     result["environment"] = dict(cast(dict[str, str], env)) if env else {}
     return result

@@ -111,4 +111,8 @@ def parse_env_exclude_arg(arg: str) -> tuple[str, set[str]]:
     if not keys_str:
         raise ValueError(f"--companion-env-exclude argument is malformed (empty keys): {arg!r}")
     keys = {k.strip() for k in keys_str.split(",") if k.strip()}
+    if not keys:
+        raise ValueError(
+            f"--companion-env-exclude argument is malformed (keys contain no non-empty values): {arg!r}"
+        )
     return name, keys

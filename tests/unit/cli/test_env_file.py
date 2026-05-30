@@ -225,3 +225,15 @@ def test_parse_env_exclude_arg_empty_name_raises() -> None:
 def test_parse_env_exclude_arg_empty_keys_raises() -> None:
     with pytest.raises(ValueError, match="--companion-env-exclude.*malformed"):
         parse_env_exclude_arg("my-app=")
+
+
+@pytest.mark.unit
+def test_parse_env_exclude_arg_comma_only_raises() -> None:
+    with pytest.raises(ValueError, match="--companion-env-exclude.*malformed"):
+        parse_env_exclude_arg("my-app=,")
+
+
+@pytest.mark.unit
+def test_parse_env_exclude_arg_multiple_commas_only_raises() -> None:
+    with pytest.raises(ValueError, match="--companion-env-exclude.*malformed"):
+        parse_env_exclude_arg("my-app=,,")

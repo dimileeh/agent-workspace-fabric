@@ -272,3 +272,39 @@ def test_exclude_for_missing_companion_raises() -> None:
             env_from=[],
             env_exclude=[("nonexistent", {"KEY"})],
         )
+
+
+# ---------------------------------------------------------------------------
+# Non-object environment crashes pre-validated
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        "not-a-dict",
+        ["list", "of", "strings"],
+        True,
+        42,
+    ],
+    ids=["string", "list", "bool-true", "int"],
+)
+def test_non_object_environment_raises(bad_env: object) -> None:
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": bad_env}]
+    with pytest.raises(ValueError, match="non-object 'environment' field"):
+        merge_companion_env(companions, env_from=[], env_exclude=[])
+
+
+@pytest.mark.unit
+def test_false_environment_also_raises() -> None:
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": False}]
+    with pytest.raises(ValueError, match="non-object 'environment' field"):
+        merge_companion_env(companions, env_from=[], env_exclude=[])
+
+
+@pytest.mark.unit
+def test_none_environment_treated_as_empty() -> None:
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment": None}]
+    result = merge_companion_env(companions, env_from=[], env_exclude=[])
+    assert result[0]["environment"] == {}
