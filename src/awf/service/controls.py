@@ -88,6 +88,14 @@ _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _REMONITOR_PAST_SETTLE_WARNING_CODE = "REMONITOR_PAST_SETTLE"
+_REMONITOR_PAST_SETTLE_HINT_MESSAGE = (
+    "Workspace is past reviewer-settle window; auto-merge is frozen "
+    "until the operator hint is processed."
+)
+_REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE = (
+    "Workspace is past reviewer-settle window; auto-merge is paused "
+    "until reviewer settle is re-evaluated."
+)
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
@@ -549,17 +557,18 @@ class WorkspaceControlService:
         )
         warnings: list[dict[str, object]] = []
         pending_operator_hint: dict[str, object] | None = None
-        hint_state_changed = False
+        monitor_state_changed = False
         reason_text = (reason or "").strip()
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        settle_head_shas = remonitor_elapsed_settle_head_shas(
+            monitor_state,
+            pr_number=workspace.pr_number,
+            preferred_head_sha=workspace.monitor_last_commit_sha,
+        )
+        past_settle = bool(settle_head_shas)
+        requested_at = utcnow() if reason_text or past_settle else None
         if reason_text:
-            monitor_state = dict(workspace.monitor_threads_addressed or {})
-            settle_head_shas = remonitor_elapsed_settle_head_shas(
-                monitor_state,
-                pr_number=workspace.pr_number,
-                preferred_head_sha=workspace.monitor_last_commit_sha,
-            )
-            past_settle = bool(settle_head_shas)
-            requested_at = utcnow()
+            assert requested_at is not None
             hint = OperatorHint(
                 reason=reason_text,
                 operation_id=operation.id,
@@ -567,26 +576,30 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_REMONITOR_REASON_CODE,
             )
             persist_operator_hint(monitor_state, hint)
-            if past_settle and workspace.pr_number is not None:
-                for settle_head_sha in settle_head_shas:
-                    arm_operator_hint_freeze(
-                        monitor_state,
-                        pr_number=workspace.pr_number,
-                        head_sha=settle_head_sha,
-                        now=requested_at,
-                    )
-                warnings.append(
-                    {
-                        "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,
-                        "message": (
-                            "Workspace is past reviewer-settle window; auto-merge is frozen "
-                            "until the operator hint is processed."
-                        ),
-                    }
-                )
-            workspace.monitor_threads_addressed = monitor_state
-            hint_state_changed = True
+            monitor_state_changed = True
             pending_operator_hint = build_pending_operator_hint_payload(hint)
+        if past_settle and workspace.pr_number is not None:
+            assert requested_at is not None
+            for settle_head_sha in settle_head_shas:
+                arm_operator_hint_freeze(
+                    monitor_state,
+                    pr_number=workspace.pr_number,
+                    head_sha=settle_head_sha,
+                    now=requested_at,
+                )
+            warnings.append(
+                {
+                    "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,
+                    "message": (
+                        _REMONITOR_PAST_SETTLE_HINT_MESSAGE
+                        if reason_text
+                        else _REMONITOR_PAST_SETTLE_NO_HINT_MESSAGE
+                    ),
+                }
+            )
+            monitor_state_changed = True
+        if monitor_state_changed:
+            workspace.monitor_threads_addressed = monitor_state
         claims_reset = _claim_reset_snapshot(workspace)
         claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(
@@ -601,7 +614,7 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        if state_reset is None and (claims_will_reset or hint_state_changed):
+        if state_reset is None and (claims_will_reset or monitor_state_changed):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,

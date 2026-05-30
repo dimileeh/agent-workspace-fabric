@@ -870,6 +870,67 @@ async def test_remonitor_before_settle_persists_operator_hint_without_freeze(
 
 
 @pytest.mark.unit
+async def test_remonitor_no_reason_past_settle_warns_without_operator_hint(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(47)
+    initial_started_key = _initial_review_grace_started_key(47)
+    settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=47,
+        head_sha=head_sha,
+    )
+    settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=47,
+        head_sha=head_sha,
+    )
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/47"
+    workspace.pr_number = 47
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-past-settle",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    warnings = [
+        {
+            "warning_code": "REMONITOR_PAST_SETTLE",
+            "message": (
+                "Workspace is past reviewer-settle window; auto-merge is paused "
+                "until reviewer settle is re-evaluated."
+            ),
+        }
+    ]
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert [warning.model_dump() for warning in response.warnings] == warnings
+    assert workspace.version == 2
+    assert initial_done_key not in monitor_state
+    assert settle_done_key not in monitor_state
+    assert float(monitor_state[initial_started_key]) >= 1_000_000_000
+    assert float(monitor_state[settle_started_key]) >= 1_000_000_000
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert operations[0].result["warnings"] == warnings
+    assert events[0].event_type == "workspace.remonitor_requested"
+    assert "pending_operator_hint" not in events[0].payload
+    assert events[0].payload["warnings"] == warnings
+
+
+@pytest.mark.unit
 async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
     session: AsyncSession,
 ) -> None:
