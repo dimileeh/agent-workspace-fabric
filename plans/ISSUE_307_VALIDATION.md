@@ -14,6 +14,8 @@ Complete for the required scope and Stretch 2 warning.
   merge-blocking human wait.
 - `WorkspaceControlResponse` now includes `warnings`, and past-settle remonitor
   returns `REMONITOR_PAST_SETTLE`.
+- REST, MCP, CLI, and contract fixtures now explicitly include the default
+  `warnings: []` control-response field.
 - `openapi.json` was regenerated.
 
 ## Deferred Stretch
@@ -23,6 +25,10 @@ Complete for the required scope and Stretch 2 warning.
 
 ## Focused Checks Run
 
+- Iteration 1 plan-conformance closeout:
+  `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_001.py::TestWorkspaceControls::test_cancel_workspace_calls_service_and_returns_structured_response tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_001.py::TestWorkspaceControls::test_stop_workspace_calls_service_and_returns_structured_response tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_001.py::TestWorkspaceControls::test_destroy_workspace_calls_service_and_returns_structured_response tests/unit/contracts/test_control_surface_parity_contract.py::test_control_commands_emit_expected_request_shape_and_output tests/unit/api/test_workspace_control_response_schema.py -q`
+- Iteration 1 affected contract sweep:
+  `uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_control_surface_parity_contract.py tests/unit/contracts/test_response_payload_alignment.py::test_control_rest_matches_mcp_structured_content_for_registry tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_001.py::TestWorkspaceControls tests/unit/api/test_workspace_control_response_schema.py -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_operator_hints.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py::TestOperatorHints tests/unit/runtime/test_monitor_prompts.py::TestOperatorHintPrompt -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/api/test_workspace_controls_idempotency_parts/test_workspace_controls_idempotency_part_001.py -q`
 - `uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_response_payload_alignment.py::test_control_rest_matches_mcp_structured_content_for_registry tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_remonitor_workspace_tool_returns_control_response tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_003.py::TestMcpOperatorSurfaceParityPart002::test_remonitor_workspace_with_idempotency_key_replays_on_duplicate -q`
@@ -32,6 +38,10 @@ Complete for the required scope and Stretch 2 warning.
 - `uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor.py src/awf/runtime/operator_hints.py src/awf/runtime/monitor_prompts.py src/awf/runtime/pr_monitor_runner/operator_hints.py src/awf/runtime/pr_monitor_runner/lifecycle.py src/awf/runtime/pr_monitor_runner/loop.py src/awf/service/controls.py src/awf/service/controls_helpers.py src/awf/api/schemas.py tests/unit/runtime/test_pr_monitor_operator_hints.py tests/unit/runtime/test_monitor_prompts.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py tests/unit/api/test_workspace_controls_idempotency_parts/test_workspace_controls_idempotency_part_001.py`
 - `uv run --python 3.12 --extra dev mypy src/awf/runtime/pr_monitor.py src/awf/runtime/operator_hints.py src/awf/runtime/monitor_prompts.py src/awf/runtime/pr_monitor_runner/operator_hints.py src/awf/runtime/pr_monitor_runner/lifecycle.py src/awf/runtime/pr_monitor_runner/loop.py src/awf/service/controls.py src/awf/service/controls_helpers.py src/awf/api/schemas.py`
 - `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check`
+
+Iteration 1 repeated the ruff, format, mypy, and OpenAPI checks with the
+contract/schema fixture files added to the focused ruff and format command
+where applicable.
 
 Full AWF/GitHub validation and merge gating remain owned by AWF after this
 agent phase.
