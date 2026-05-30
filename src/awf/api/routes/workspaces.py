@@ -92,6 +92,7 @@ from awf.service.workspace_observability import (
     list_workspace_stale_reasons_response,
 )
 from awf.service.workspaces import (
+    WorkspaceCreateHostPortConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
@@ -336,6 +337,19 @@ async def create_workspace(
                     "task ID for this backlog slice or retry the original scope."
                 ),
                 detail={"external_id": exc.external_id},
+            ).model_dump(),
+        )
+    except WorkspaceCreateHostPortConflictError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code="HOST_PORT_CONFLICT",
+                message=(
+                    f"Companion host port {exc.host_port} is already in use by "
+                    f"workspace {exc.conflicting_workspace_id}"
+                ),
+                detail=exc.detail,
             ).model_dump(),
         )
     except WorkspaceProviderReadinessBlockedError as exc:

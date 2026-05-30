@@ -41,6 +41,7 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
+from awf.db.repositories.base import HostPortConflict
 from awf.profiles.models import ProfileAppEndpoint
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
@@ -275,6 +276,35 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceCreateHostPortConflictError(Exception):
+    """Raised when a companion host_port is already mapped by a non-terminal workspace.
+
+    TOCTOU note: there is a time-of-check/time-of-use window between
+    the SELECT that finds the conflict and the INSERT that creates the new
+    workspace.  Docker Compose itself would fail in the same scenario, so
+    this check is a best-effort early detection, not a serialisation
+    guarantee.
+    """
+
+    error_code = "HOST_PORT_CONFLICT"
+
+    def __init__(
+        self,
+        *,
+        host_port: int,
+        conflicting_workspace_id: str,
+    ) -> None:
+        self.host_port = host_port
+        self.conflicting_workspace_id = conflicting_workspace_id
+        self.detail: dict[str, Any] = {
+            "host_port": host_port,
+            "conflicting_workspace_id": conflicting_workspace_id,
+        }
+        super().__init__(
+            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
+        )
+
+
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
@@ -438,6 +468,17 @@ class WorkspaceService:
                 disk_check = await _resolve_disk_check_factory(disk_check_factory)
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
+
+            host_ports = [hp for c in req.companions for _, hp in c.ports]
+            if host_ports:
+                conflicts = await repo.find_host_port_conflicts(
+                    host_ports=host_ports,
+                )
+                if conflicts:
+                    raise WorkspaceCreateHostPortConflictError(
+                        host_port=conflicts[0].host_port,
+                        conflicting_workspace_id=conflicts[0].workspace_id,
+                    )
 
             ws = await create_workspace_row(
                 s,
@@ -1128,6 +1169,8 @@ __all__ = [
     "WorkspaceRetrySalvageUnavailableError",
     "WorkspaceProviderReadinessBlockedError",
     "WorkspaceCreateIdempotencyConflictError",
+    "HostPortConflict",
+    "WorkspaceCreateHostPortConflictError",
     "WorkspaceCreateInsufficientDiskError",
     "WorkspaceRetryResult",
     "create_workspace_row",

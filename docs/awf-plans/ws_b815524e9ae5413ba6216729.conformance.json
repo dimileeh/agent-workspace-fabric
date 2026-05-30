@@ -1,0 +1,6 @@
+{
+  "status": "satisfied",
+  "summary": "All plan items for issue #304 (host-port collision detection at dispatch time) are implemented and tested. The error class, repository method, service-layer check, and HTTP 409 route handler are all present. 11 unit tests cover collision, no-collision, terminal exclusion, multi-port, multi-companion, idempotent replay, terminal statuses, and edge cases. Validation evidence in plans/ISSUE_304_VALIDATION.md confirms 11/11 tests pass, ruff and mypy pass, and openapi drift check passes.",
+  "gaps": [],
+  "reason_code": null
+}

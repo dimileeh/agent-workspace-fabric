@@ -45,6 +45,7 @@ from awf.db.models import (
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
     WorkspaceEventCreate,
@@ -501,6 +502,60 @@ class WorkspaceRepository:
                             )
                         )
         return overlaps
+
+    async def find_host_port_conflicts(
+        self,
+        *,
+        host_ports: builtins.list[int],
+        excluding_workspace_id: str | None = None,
+    ) -> builtins.list[HostPortConflict]:
+        """Find active workspaces whose companions claim any of the given host ports.
+
+        A port conflict exists when a non-terminal workspace's companion
+        ``ports`` list includes ``[container_port, host_port]`` where
+        ``host_port`` appears in *host_ports*.
+
+        NOTE: A small TOCTOU window exists between this SELECT and the
+        subsequent INSERT.  The caller must handle the resulting 409
+        idempotently if a race occurs.
+        """
+        if not host_ports:
+            return []
+
+        host_ports_set = set(host_ports)
+        stmt = select(Workspace.id, Workspace.task_policy).where(
+            Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES)
+        )
+
+        if excluding_workspace_id is not None:
+            stmt = stmt.where(Workspace.id != excluding_workspace_id)
+
+        rows = (await self._session.execute(stmt)).all()
+
+        conflicts: builtins.list[HostPortConflict] = []
+        for row in rows:
+            task_policy = row.task_policy
+            if not task_policy or not isinstance(task_policy, dict):
+                continue
+            companions = task_policy.get("companions")
+            if not companions or not isinstance(companions, list):
+                continue
+            for companion in companions:
+                if not isinstance(companion, dict):
+                    continue
+                ports = companion.get("ports")
+                if not ports or not isinstance(ports, list):
+                    continue
+                for port_mapping in ports:
+                    if isinstance(port_mapping, list) and len(port_mapping) >= 2:
+                        try:
+                            hp = int(port_mapping[1])
+                        except (ValueError, TypeError):
+                            continue
+                        if hp in host_ports_set:
+                            conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
+
+        return conflicts
 
     async def list(
         self,

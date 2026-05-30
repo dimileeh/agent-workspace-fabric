@@ -154,6 +154,12 @@ class OwnedPathConflict:
 
 
 @dataclass(frozen=True)
+class HostPortConflict:
+    host_port: int
+    workspace_id: str
+
+
+@dataclass(frozen=True)
 class OwnedPathOverlapMatch:
     left_path: str
     right_path: str
