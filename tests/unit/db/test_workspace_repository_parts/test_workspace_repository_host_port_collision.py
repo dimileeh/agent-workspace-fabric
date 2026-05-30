@@ -123,6 +123,32 @@ class TestFindHostPortConflicts:
         assert conflicts == []
 
     @pytest.mark.asyncio
+    async def test_destroying_workspace_is_blocking(self, session: AsyncSession) -> None:
+        """A destroying workspace still holds host ports until cleanup finishes."""
+        repo = WorkspaceRepository(session)
+        existing_ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.destroying,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == existing_ws.id
+
+    @pytest.mark.asyncio
     async def test_multiple_ports_one_companion(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
         existing = await _make_workspace(
@@ -204,7 +230,8 @@ class TestFindHostPortConflicts:
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
-            WorkspaceStatus.destroying,
+            # destroying is NOT terminal for port conflicts — containers
+            # may still hold host ports until cleanup finishes.
             WorkspaceStatus.destroyed,
         ]
         for status in terminal_statuses:

@@ -45,6 +45,7 @@ from awf.db.models import (
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT,
+    HOST_PORT_CONFLICT_STATUSES,
     HostPortConflict,
     OwnedPathConflict,
     OwnedPathOverlap,
@@ -524,7 +525,7 @@ class WorkspaceRepository:
 
         host_ports_set = set(host_ports)
         stmt = select(Workspace.id, Workspace.task_policy).where(
-            Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES)
+            Workspace.status.in_(HOST_PORT_CONFLICT_STATUSES)
         )
 
         if excluding_workspace_id is not None:

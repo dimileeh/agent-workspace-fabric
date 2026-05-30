@@ -84,6 +84,10 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
 )
+HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+    *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
+    WorkspaceStatus.destroying.value,
+)
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.completed.value,
