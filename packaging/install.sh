@@ -485,13 +485,25 @@ dir_on_path() {
 verify_awf() {
     local resolved="" on_path=0 bindir
     bindir="$(default_bin_dir)"
-    if command -v awf >/dev/null 2>&1; then
+    if [ -n "$INSTALL_DIR" ]; then
+        # An explicit --install-dir pins exactly where the binary landed. Verify
+        # that file directly instead of whatever `command -v awf` resolves to,
+        # which could be an older, unrelated awf earlier on PATH that would
+        # falsely pass and suppress PATH advice for the new install location.
+        resolved="${bindir}/awf"
+        if [ ! -x "$resolved" ]; then
+            resolved=""
+        elif [ "$(command -v awf 2>/dev/null)" = "$resolved" ]; then
+            on_path=1
+        fi
+    elif command -v awf >/dev/null 2>&1; then
         resolved="$(command -v awf)"
         on_path=1
     elif [ -x "${bindir}/awf" ]; then
         resolved="${bindir}/awf"
-        on_path=0
-    else
+    fi
+
+    if [ -z "$resolved" ]; then
         print_path_advice
         fail AWF_NOT_REACHABLE "awf is not runnable after install; install reported success but no awf binary was found"
     fi

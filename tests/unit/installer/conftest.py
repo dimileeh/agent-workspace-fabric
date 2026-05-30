@@ -121,9 +121,9 @@ class InstallerHarness:
         )
         self._write_stub("pipx", behavior)
 
-    def add_awf(self, *, directory: Path | None = None) -> Path:
-        """Place a runnable ``awf`` stub on ``PATH`` or in ``directory``."""
-        return self._write_stub("awf", "exit 0", directory=directory)
+    def add_awf(self, *, directory: Path | None = None, rc: int = 0) -> Path:
+        """Place an ``awf`` stub on ``PATH`` or in ``directory`` (exits ``rc``)."""
+        return self._write_stub("awf", f"exit {rc}", directory=directory)
 
     # -- manifest / wheel fixtures ------------------------------------
 

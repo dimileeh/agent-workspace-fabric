@@ -91,6 +91,83 @@ def test_default_install_bin_off_path_is_reachable_with_advice(
 
 
 @pytest.mark.unit
+def test_install_dir_verifies_installed_binary_not_path_shadow(
+    harness: InstallerHarness,
+) -> None:
+    """With --install-dir, an older awf on PATH must not shadow verification.
+
+    The freshly installed binary lives at ``${INSTALL_DIR}/awf`` (off PATH) while
+    an unrelated awf sits earlier on PATH. Verification must inspect the install
+    location and still surface PATH advice for it, not silently pass on the
+    shadowing binary and report success without advice.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()  # older, unrelated awf earlier on PATH (stub bin dir)
+    install_dir = harness.root / "bin-install"
+    install_dir.mkdir()
+    harness.add_awf(directory=install_dir)  # freshly installed binary, off PATH
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--install-dir", str(install_dir)], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    advice = result.stdout + result.stderr
+    assert "export PATH=" in advice
+    assert str(install_dir) in advice
+
+
+@pytest.mark.unit
+def test_install_dir_binary_verified_even_when_path_awf_is_broken(
+    harness: InstallerHarness,
+) -> None:
+    """The install-dir binary is verified, not a broken awf earlier on PATH.
+
+    A non-runnable awf on PATH must not make verification fail when the freshly
+    installed ``${INSTALL_DIR}/awf`` is itself runnable.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf(rc=1)  # broken awf earlier on PATH
+    install_dir = harness.root / "bin-install"
+    install_dir.mkdir()
+    harness.add_awf(directory=install_dir)  # runnable freshly installed binary
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--install-dir", str(install_dir)], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "AWF_NOT_REACHABLE" not in result.stderr
+
+
+@pytest.mark.unit
+def test_install_dir_missing_binary_fails_even_with_stale_path_awf(
+    harness: InstallerHarness,
+) -> None:
+    """A stale PATH awf cannot mask a missing install-dir binary.
+
+    When ``--install-dir`` produced no awf, verification must fail with
+    ``AWF_NOT_REACHABLE`` rather than falsely passing on an unrelated awf that
+    happens to be earlier on PATH.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()  # install "succeeds" but produces no awf in the install dir
+    harness.add_awf()  # unrelated awf earlier on PATH
+    install_dir = harness.root / "bin-install"
+    install_dir.mkdir()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--install-dir", str(install_dir)], manifest=manifest)
+
+    assert result.returncode != 0
+    assert "AWF_NOT_REACHABLE" in result.stderr
+    assert "export PATH=" in result.stderr
+
+
+@pytest.mark.unit
 def test_invalid_method_is_a_bad_usage_error(harness: InstallerHarness) -> None:
     """An unsupported ``--method`` value is rejected before any work."""
     result = harness.run(["--method", "conda"])
