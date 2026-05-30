@@ -12,6 +12,13 @@ from datetime import (
 )
 from typing import Any
 
+from sqlalchemy import (
+    String,
+    cast,
+    or_,
+    update,
+)
+
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor.metadata import (
@@ -48,11 +55,21 @@ async def _persist_resolved_profile_snapshot_if_missing(
     """Freeze the runtime-resolved profile snapshot if the row lacks one."""
     snapshot = profile.model_dump(mode="json", by_alias=True)
     async with self._session_factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        if workspace is None or workspace.resolved_profile is not None:
-            return
-        workspace.resolved_profile = snapshot
-        await session.commit()
+        result = await session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                or_(
+                    Workspace.resolved_profile.is_(None),
+                    cast(Workspace.resolved_profile, String) == "null",
+                ),
+            )
+            .values(resolved_profile=snapshot)
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is not None:
+            await session.commit()
 
 
 async def _claim_ready(

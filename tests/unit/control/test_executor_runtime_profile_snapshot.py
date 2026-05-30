@@ -109,6 +109,79 @@ async def test_runtime_profile_snapshot_does_not_replace_existing_snapshot(
 
 
 @pytest.mark.unit
+async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapshot() -> None:
+    competing_snapshot = _custom_planning_profile("first-worker").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    stale_worker_profile = _custom_planning_profile("stale-worker")
+    store = {"resolved_profile": None}
+
+    class FakeUpdateResult:
+        def scalar_one_or_none(self) -> str | None:
+            return None
+
+    class RaceAwareSession:
+        def __init__(self) -> None:
+            self.info: dict[str, object] = {}
+            self.bind = None
+            self.commits = 0
+            self.execute_calls = 0
+            self.loaded_workspace: SimpleNamespace | None = None
+
+        async def __aenter__(self) -> RaceAwareSession:
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        async def get(self, model: object, workspace_id: str) -> SimpleNamespace:
+            assert model is Workspace
+            self.loaded_workspace = SimpleNamespace(
+                id=workspace_id,
+                resolved_profile=None,
+            )
+            store["resolved_profile"] = competing_snapshot
+            return self.loaded_workspace
+
+        async def execute(self, statement: object) -> FakeUpdateResult:
+            self.execute_calls += 1
+            compiled = str(statement)
+            assert "workspaces.resolved_profile IS NULL" in compiled
+            assert "workspaces.id" in compiled
+            store["resolved_profile"] = competing_snapshot
+            return FakeUpdateResult()
+
+        async def commit(self) -> None:
+            self.commits += 1
+            if self.loaded_workspace is not None:
+                store["resolved_profile"] = self.loaded_workspace.resolved_profile
+
+    class RaceAwareSessionFactory:
+        def __init__(self) -> None:
+            self.sessions: list[RaceAwareSession] = []
+
+        def __call__(self) -> RaceAwareSession:
+            session = RaceAwareSession()
+            self.sessions.append(session)
+            return session
+
+    session_factory = RaceAwareSessionFactory()
+    executor = SimpleNamespace(_session_factory=session_factory)
+
+    await _persist_resolved_profile_snapshot_if_missing(
+        executor,
+        workspace_id="ws_profile_race",
+        profile=stale_worker_profile,
+    )
+
+    session = session_factory.sessions[0]
+    assert session.execute_calls == 1
+    assert session.commits == 0
+    assert store["resolved_profile"] == competing_snapshot
+
+
+@pytest.mark.unit
 def test_profile_for_workspace_attaches_runtime_snapshot_to_workspace(
     tmp_path,
 ) -> None:
