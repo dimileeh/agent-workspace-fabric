@@ -945,13 +945,13 @@ class TestOwnedPathOverlapLookup:
         await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/existing/**", "docs/awf-plans/ws_*.md"],
+            owned_paths=["src/existing/**", "docs/awf-plans/**"],
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/requested/**", "docs/awf-plans/ws_*.md"],
+            owned_paths=["src/requested/**", "docs/awf-plans/**"],
         )
 
         assert overlaps == []
@@ -966,13 +966,13 @@ class TestOwnedPathOverlapLookup:
         existing = await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/shared/**", "docs/awf-plans/ws_*.md"],
+            owned_paths=["src/shared/**", "docs/awf-plans/**"],
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/shared/module.py", "docs/awf-plans/ws_*.md"],
+            owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
         )
 
         assert overlaps == [
@@ -1020,7 +1020,7 @@ class TestOwnedPathOverlapLookup:
         existing = await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["docs/awf-plans/**"],
+            owned_paths=["docs/awf-plans/README.md"],
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
@@ -1032,7 +1032,7 @@ class TestOwnedPathOverlapLookup:
         assert overlaps == [
             repositories.OwnedPathOverlap(
                 workspace_id=existing.id,
-                existing_path="docs/awf-plans/**",
+                existing_path="docs/awf-plans/README.md",
                 requested_path="docs/awf-plans/README.md",
             )
         ]

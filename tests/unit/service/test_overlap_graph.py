@@ -107,14 +107,14 @@ async def test_overlap_graph_ignores_internal_plan_artifact_only_edges(
     running_id = await _workspace(
         session_factory,
         title="Running source A",
-        owned_paths=["src/feature-a/**", "docs/awf-plans/ws_*.md"],
+        owned_paths=["src/feature-a/**", "docs/awf-plans/**"],
         status=WorkspaceStatus.running,
         created_at=now,
     )
     queued_id = await _workspace(
         session_factory,
         title="Queued source B",
-        owned_paths=["src/feature-b/**", "docs/awf-plans/ws_*.md"],
+        owned_paths=["src/feature-b/**", "docs/awf-plans/**"],
         status=WorkspaceStatus.requested,
         created_at=now + timedelta(minutes=1),
     )
@@ -123,8 +123,8 @@ async def test_overlap_graph_ignores_internal_plan_artifact_only_edges(
 
     assert {node.workspace_id for node in graph.nodes} == {running_id, queued_id}
     node_paths = {node.workspace_id: node.owned_paths for node in graph.nodes}
-    assert node_paths[running_id] == ("src/feature-a/**", "docs/awf-plans/ws_*.md")
-    assert node_paths[queued_id] == ("src/feature-b/**", "docs/awf-plans/ws_*.md")
+    assert node_paths[running_id] == ("src/feature-a/**", "docs/awf-plans/**")
+    assert node_paths[queued_id] == ("src/feature-b/**", "docs/awf-plans/**")
     assert graph.summary.edge_count == 0
     assert graph.edges == ()
 
@@ -140,14 +140,14 @@ async def test_overlap_graph_ignores_plan_artifact_matches_but_keeps_real_edge(
     running_id = await _workspace(
         session_factory,
         title="Running shared source",
-        owned_paths=["src/shared/**", "docs/awf-plans/ws_*.md"],
+        owned_paths=["src/shared/**", "docs/awf-plans/**"],
         status=WorkspaceStatus.running,
         created_at=now,
     )
     queued_id = await _workspace(
         session_factory,
         title="Queued shared source",
-        owned_paths=["src/shared/module.py", "docs/awf-plans/ws_*.md"],
+        owned_paths=["src/shared/module.py", "docs/awf-plans/**"],
         status=WorkspaceStatus.requested,
         created_at=now + timedelta(minutes=1),
     )
@@ -174,7 +174,7 @@ async def test_overlap_graph_keeps_awf_plans_readme_overlap(
     running_id = await _workspace(
         session_factory,
         title="Running awf-plans docs",
-        owned_paths=["docs/awf-plans/**"],
+        owned_paths=["docs/awf-plans/README.md"],
         status=WorkspaceStatus.running,
         created_at=now,
     )
@@ -193,7 +193,7 @@ async def test_overlap_graph_keeps_awf_plans_readme_overlap(
     assert edge.affected_workspace_ids == tuple(sorted([running_id, queued_id]))
     assert {
         frozenset([match.left_owned_path, match.right_owned_path]) for match in edge.path_matches
-    } == {frozenset(["docs/awf-plans/**", "docs/awf-plans/README.md"])}
+    } == {frozenset(["docs/awf-plans/README.md"])}
 
 
 @pytest.mark.unit

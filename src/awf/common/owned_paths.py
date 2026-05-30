@@ -28,6 +28,8 @@ def normalize_owned_path(path: str) -> str:
 
 def _is_internal_plan_artifact_normalized(normalized: str) -> bool:
     """Return true for normalized AWF-generated planning/conformance artifact paths."""
+    if normalized == f"{INTERNAL_PLAN_ARTIFACT_DIR}/**":
+        return True
     prefix = f"{INTERNAL_PLAN_ARTIFACT_DIR}/"
     if not normalized.startswith(prefix):
         return False
