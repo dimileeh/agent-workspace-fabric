@@ -8,7 +8,7 @@ from typing import Final
 
 INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
-    r"^ws_[A-Za-z0-9_*?-]+(?:\.conformance\.json|\.md)$"
+    r"^ws_[A-Za-z0-9_*?-]+(?:\.md|(?:\.conformance)?\.json)$"
 )
 
 
