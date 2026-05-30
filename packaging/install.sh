@@ -637,7 +637,14 @@ run_install() {
     say "Checksum verified for ${ARTIFACT_NAME}."
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        plan "install via ${METHOD}: ${METHOD} tool install ${ARTIFACT_NAME}"
+        # uv and pipx diverge: the real commands are `uv tool install` and
+        # `pipx install` (pipx has no `tool` subcommand), so the plan must not
+        # template a single `${METHOD} tool install` string for both.
+        if [ "$METHOD" = "uv" ]; then
+            plan "install via ${METHOD}: uv tool install ${ARTIFACT_NAME}"
+        else
+            plan "install via ${METHOD}: pipx install ${ARTIFACT_NAME}"
+        fi
         plan "verify awf reachability"
         say "Dry run complete; no changes were made."
         return 0

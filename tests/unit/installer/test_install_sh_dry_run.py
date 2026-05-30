@@ -61,3 +61,41 @@ def test_dry_run_reports_the_resolved_wheel_name(harness: InstallerHarness) -> N
 
     assert result.returncode == 0, result.stderr
     assert wheel.name in result.stdout
+
+
+@pytest.mark.unit
+def test_dry_run_uv_plan_shows_real_uv_tool_install_command(
+    harness: InstallerHarness,
+) -> None:
+    """The uv dry-run plan prints the exact ``uv tool install`` command."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--dry-run", "--method", "uv"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert f"uv tool install {wheel.name}" in result.stdout
+
+
+@pytest.mark.unit
+def test_dry_run_pipx_plan_uses_valid_pipx_install_command(
+    harness: InstallerHarness,
+) -> None:
+    """The pipx dry-run plan prints ``pipx install`` — pipx has no ``tool`` subcommand.
+
+    A user reading the dry-run output to verify what would happen must see a
+    runnable command; ``pipx tool install`` is not a real pipx invocation.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_pipx()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--dry-run", "--method", "pipx"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert f"pipx install {wheel.name}" in result.stdout
+    # The invalid ``pipx tool install`` must never appear in the dry-run plan.
+    assert "pipx tool install" not in result.stdout
