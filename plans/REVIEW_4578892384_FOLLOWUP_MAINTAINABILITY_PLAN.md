@@ -9,8 +9,8 @@ Scope is limited to:
 
 - removing a redundant `paths` guard in merge-queue candidate owned-path
   filtering;
-- replacing the local staleness wildcard helper with the shared owned-path
-  helper;
+- promoting the shared owned-path wildcard helper to public API for staleness
+  use;
 - documenting why custom-profile workspace-id globs intentionally accept only
   generated workspace-id shapes even though the default AWF plan directory
   accepts broader `ws_*` artifact names.
@@ -21,8 +21,8 @@ No merge-safety behavior change is intended.
 
 - Preserve merge-queue fallback from workspace paths to attempt paths when
   workspace paths are empty or filter entirely to internal plan artifacts.
-- Remove the duplicate `_has_wildcard` implementation from
-  `src/awf/service/staleness.py`.
+- Remove cross-module use of a private wildcard helper by exposing
+  public `has_wildcard` from `src/awf/common/owned_paths.py`.
 - Add an inline comment in `src/awf/common/owned_paths.py` explaining the
   constrained workspace-id glob charset versus the broader default-directory
   filename classifier.
@@ -33,8 +33,9 @@ No merge-safety behavior change is intended.
 
 1. Simplify `_candidate_owned_paths()` in `src/awf/service/merge_queue.py` so
    `interworkspace_owned_paths()` handles empty workspace paths directly.
-2. Import `_has_wildcard` from `awf.common.owned_paths` in
-   `src/awf/service/staleness.py` and delete the local duplicate helper.
+2. Import public `has_wildcard` from `awf.common.owned_paths` in
+   `src/awf/service/staleness.py` and delete any cross-module private helper
+   usage.
 3. Add a targeted explanatory comment near `_workspace_id_glob_path_pattern()`
    in `src/awf/common/owned_paths.py`.
 4. Run focused formatting/lint and unit checks covering the touched helper
@@ -44,9 +45,9 @@ No merge-safety behavior change is intended.
 
 ## Verification Commands And Pass Criteria
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py tests/unit/runtime/test_merge_queue_ordering.py -q`
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_path_matches_glob_semantics -q`
   passes.
-- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/service/merge_queue.py src/awf/service/staleness.py`
+- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/service/staleness.py tests/unit/common/test_owned_paths.py`
   passes.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.

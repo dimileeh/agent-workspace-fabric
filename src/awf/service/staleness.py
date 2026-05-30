@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
 from awf.common.owned_paths import (
-    _has_wildcard,
+    has_wildcard,
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
@@ -399,15 +399,15 @@ def _path_matches(path: str, pattern: str) -> bool:
         return False
     if path == pattern:
         return True
-    if pattern.endswith("/**") and not _has_wildcard(pattern[: -len("/**")]):
+    if pattern.endswith("/**") and not has_wildcard(pattern[: -len("/**")]):
         prefix = pattern[: -len("**")]
         return path.startswith(prefix) or path == prefix.rstrip("/")
-    if pattern.endswith("/*") and not _has_wildcard(pattern[: -len("/*")]):
+    if pattern.endswith("/*") and not has_wildcard(pattern[: -len("/*")]):
         prefix = pattern[: -len("*")]
         return path.startswith(prefix) and "/" not in path[len(prefix) :]
     if pattern.endswith("/"):
         return path.startswith(pattern)
-    if _has_wildcard(pattern):
+    if has_wildcard(pattern):
         return fnmatchcase(path, pattern)
     return path.startswith(pattern + "/")
 

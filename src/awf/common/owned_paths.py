@@ -140,7 +140,7 @@ def _matches_configured_internal_plan_artifact_path(
         # classify the persisted owned-path scope declaration itself.
         if artifact_path.endswith("/**"):
             continue
-        if _has_wildcard(artifact_path) and fnmatchcase(normalized, artifact_path):
+        if has_wildcard(artifact_path) and fnmatchcase(normalized, artifact_path):
             return True
     return False
 
@@ -179,7 +179,7 @@ def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
     return pattern
 
 
-def _has_wildcard(path: str) -> bool:
+def has_wildcard(path: str) -> bool:
     """Return true when a path pattern contains fnmatch wildcards."""
     return "*" in path or "?" in path or "[" in path
 

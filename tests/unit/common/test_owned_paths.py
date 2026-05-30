@@ -6,6 +6,7 @@ import pytest
 
 from awf.common import owned_paths
 from awf.common.owned_paths import (
+    has_wildcard,
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
@@ -25,6 +26,21 @@ from awf.common.owned_paths import (
 def test_normalize_owned_path(raw_path: str, normalized: str) -> None:
     """Owned path normalization removes shell-ish path noise."""
     assert normalize_owned_path(raw_path) == normalized
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("src/awf/**", True),
+        ("docs/[ab].md", True),
+        ("tests/unit/test_?.py", True),
+        ("src/awf/service/staleness.py", False),
+    ],
+)
+def test_public_wildcard_helper(path: str, expected: bool) -> None:
+    """Public wildcard helper identifies fnmatch pattern syntax."""
+    assert has_wildcard(path) is expected
 
 
 @pytest.mark.unit

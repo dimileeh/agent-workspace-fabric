@@ -7,8 +7,8 @@ Plan reference:
 
 - Complete: Preserve merge-queue fallback from workspace paths to attempt paths
   when workspace paths are empty or filter entirely to internal plan artifacts.
-- Complete: Remove the duplicate `_has_wildcard` implementation from
-  `src/awf/service/staleness.py`.
+- Complete: Remove cross-module use of a private wildcard helper by exposing
+  public `has_wildcard` from `src/awf/common/owned_paths.py`.
 - Complete: Add an inline comment in `src/awf/common/owned_paths.py`
   explaining the constrained workspace-id glob charset versus the broader
   default-directory filename classifier.
@@ -20,8 +20,8 @@ Plan reference:
 Files changed:
 
 - `src/awf/common/owned_paths.py`
-- `src/awf/service/merge_queue.py`
 - `src/awf/service/staleness.py`
+- `tests/unit/common/test_owned_paths.py`
 - `plans/REVIEW_4578892384_FOLLOWUP_MAINTAINABILITY_PLAN.md`
 - `plans/REVIEW_4578892384_FOLLOWUP_MAINTAINABILITY_VALIDATION.md`
 
@@ -29,12 +29,10 @@ Focused verification:
 
 - `git diff --check`
   - Passed.
-- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/service/merge_queue.py src/awf/service/staleness.py`
+- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/service/staleness.py tests/unit/common/test_owned_paths.py`
   - Passed.
-- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py tests/unit/runtime/test_merge_queue_ordering.py -q`
-  - Passed: `53 passed in 15.11s`.
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_path_matches_glob_semantics -q`
-  - Passed: `10 passed in 0.45s`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_path_matches_glob_semantics -q`
+  - Passed: `55 passed in 0.51s`.
 
 Full AWF/GitHub validation was not run in the agent phase. AWF owns broad
 validation, provenance, logs, and merge gating after completion.
