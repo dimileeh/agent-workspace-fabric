@@ -97,6 +97,41 @@ def test_uninstall_ignores_pipx_substring_fork(harness: InstallerHarness) -> Non
 
 
 @pytest.mark.unit
+def test_dry_run_uninstall_previews_uv_removal_without_mutation(
+    harness: InstallerHarness,
+) -> None:
+    """``--dry-run --uninstall`` plans the uv removal but never invokes it."""
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+
+    result = harness.run(["--dry-run", "--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    # The real removal command must not run under dry-run.
+    assert f"uv tool uninstall {PACKAGE}" not in "\n".join(harness.calls())
+    # The plan still explains the action a real run would take.
+    assert f"uv tool uninstall {PACKAGE}" in result.stdout
+
+
+@pytest.mark.unit
+def test_dry_run_uninstall_previews_pipx_removal_without_mutation(
+    harness: InstallerHarness,
+) -> None:
+    """``--dry-run --uninstall`` plans the pipx removal but never invokes it."""
+    harness.add_uv(list_output="")  # uv reports no managed package
+    harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
+
+    result = harness.run(["--dry-run", "--uninstall"])
+
+    assert result.returncode == 0, result.stderr
+    joined = "\n".join(harness.calls())
+    # Neither manager's removal command may run under dry-run.
+    assert f"pipx uninstall {PACKAGE}" not in joined
+    assert f"uv tool uninstall {PACKAGE}" not in joined
+    # The plan reflects the discovered manager (pipx), not the install default.
+    assert f"pipx uninstall {PACKAGE}" in result.stdout
+
+
+@pytest.mark.unit
 def test_uninstall_aborts_on_unsupported_platform_before_mutation(
     harness: InstallerHarness,
 ) -> None:

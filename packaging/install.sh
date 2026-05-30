@@ -595,12 +595,22 @@ resolve_awf_path() {
 
 uninstall_awf() {
     if uv_lists_package; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            plan "uninstall via uv: uv tool uninstall ${PACKAGE}"
+            say "Dry run complete; no changes were made."
+            return 0
+        fi
         uv tool uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "uv tool uninstall failed for $PACKAGE"
         say "Uninstalled ${PACKAGE} via uv."
         return 0
     fi
 
     if pipx_lists_package; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            plan "uninstall via pipx: pipx uninstall ${PACKAGE}"
+            say "Dry run complete; no changes were made."
+            return 0
+        fi
         pipx uninstall "$PACKAGE" || fail INSTALL_METHOD_FAILED "pipx uninstall failed for $PACKAGE"
         say "Uninstalled ${PACKAGE} via pipx."
         return 0
