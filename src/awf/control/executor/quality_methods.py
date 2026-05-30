@@ -700,7 +700,8 @@ async def _run_post_agent_autofixable_precommit_repair(
             reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
         )
 
-    if format_repair_paths:
+    format_paths = sorted(set(format_repair_paths) | set(repair_paths))
+    if format_paths:
         format_result = await self._runner.run(
             [
                 "uv",
@@ -712,7 +713,7 @@ async def _run_post_agent_autofixable_precommit_repair(
                 "ruff",
                 "format",
                 "--",
-                *format_repair_paths,
+                *format_paths,
             ],
             cwd=str(worktree_path),
         )
@@ -721,7 +722,7 @@ async def _run_post_agent_autofixable_precommit_repair(
                 workspace_id=workspace_id,
                 repaired_paths=repair_paths,
                 restaged_paths=[],
-                formatter_paths=format_repair_paths,
+                formatter_paths=format_paths,
                 normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic_autofix",
@@ -750,7 +751,7 @@ async def _run_post_agent_autofixable_precommit_repair(
             workspace_id=workspace_id,
             repaired_paths=repair_paths,
             restaged_paths=restage_paths,
-            formatter_paths=format_repair_paths,
+            formatter_paths=format_paths,
             normalizer_paths=classification.normalizer_repair_files,
             failed_hooks=classification.failed_hooks,
             repair_strategy="deterministic_autofix",
@@ -778,7 +779,7 @@ async def _run_post_agent_autofixable_precommit_repair(
             workspace_id=workspace_id,
             repaired_paths=repair_paths,
             restaged_paths=restage_paths,
-            formatter_paths=format_repair_paths,
+            formatter_paths=format_paths,
             normalizer_paths=classification.normalizer_repair_files,
             failed_hooks=classification.failed_hooks,
             repair_strategy="deterministic_autofix",
@@ -792,7 +793,7 @@ async def _run_post_agent_autofixable_precommit_repair(
         workspace_id=workspace_id,
         repaired_paths=repair_paths,
         restaged_paths=restage_paths,
-        formatter_paths=format_repair_paths,
+        formatter_paths=format_paths,
         normalizer_paths=classification.normalizer_repair_files,
         failed_hooks=classification.failed_hooks,
         repair_strategy="deterministic_autofix",

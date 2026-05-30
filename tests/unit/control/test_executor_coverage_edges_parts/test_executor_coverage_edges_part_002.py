@@ -442,6 +442,55 @@ async def test_autofixable_precommit_repair_commits_repaired_paths(
 
 
 @pytest.mark.unit
+async def test_autofixable_precommit_repair_runs_format_on_autofixed_paths(
+    tmp_path: Path,
+) -> None:
+    """Regression: ruff format must run on autofixed paths even when
+    classification.format_repair_files is empty.  Ruff check --fix can
+    produce import-sort changes that need formatting, so the formatter
+    must run over the union of format_repair_paths and repair_paths
+    (see PR review thread PRRT_kwDOSJAM6s6F5kGM).
+    """
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)  # ruff check --fix succeeds
+    runner.queue_result(returncode=0)  # ruff format succeeds
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._record_post_agent_commit_format_repair = AsyncMock()  # type: ignore[method-assign]
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    run_commit = AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr=""))
+    git_in_worktree = AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr=""))
+
+    classification = executor_quality_gates._PostAgentCommitClassification(  # noqa: SLF001
+        reason_code="POST_AGENT_COMMIT_AUTOFIX_NEEDED",
+        failed_hooks=("ruff-check",),
+        format_repair_files=(),
+        normalizer_repair_files=(),
+        autofix_repair_files=("src/app.py",),
+        summary="ruff reported fixable diagnostics",
+        repair_strategy="deterministic_autofix",
+    )
+
+    repaired = await executor._run_post_agent_autofixable_precommit_repair(
+        workspace_id="ws_autofix",
+        worktree_path=tmp_path / "worktree",
+        commit_result=CommandResult(returncode=1, stdout="", stderr="pre-commit failed"),
+        classification=classification,
+        staged_paths=["src/app.py"],
+        run_commit=run_commit,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert repaired is True
+    ruff_calls = [call for call in runner.calls if "ruff" in call.args]
+    assert len(ruff_calls) == 2
+    assert "check" in ruff_calls[0].args and "--fix" in ruff_calls[0].args
+    assert "format" in ruff_calls[1].args and "--check" not in ruff_calls[1].args
+    assert "src/app.py" in ruff_calls[1].args
+    record_kwargs = executor._record_post_agent_commit_format_repair.await_args.kwargs  # type: ignore[attr-defined]
+    assert record_kwargs["formatter_paths"] == ["src/app.py"]
+
+
+@pytest.mark.unit
 async def test_autofixable_precommit_repair_raises_when_retry_commit_still_fails(
     tmp_path: Path,
 ) -> None:
