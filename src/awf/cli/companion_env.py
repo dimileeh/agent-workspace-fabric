@@ -117,7 +117,7 @@ def merge_companion_env(
         secret_keys = set(
             cast(dict[str, object], companion.get("environment_secrets") or {}).keys()
         )
-        overlap_keys = set(file_vars.keys()) & secret_keys - skip_keys
+        overlap_keys = (set(file_vars.keys()) & secret_keys) - skip_keys
         for key in sorted(overlap_keys):
             _warn(
                 f"{comp_name!r}: skipping env key {key!r}: already declared in environment_secrets"

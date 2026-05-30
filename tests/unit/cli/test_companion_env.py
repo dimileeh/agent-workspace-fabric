@@ -189,18 +189,20 @@ def test_interpolation_value_warned_and_skipped(
 
 @pytest.mark.unit
 def test_warning_never_leaks_value(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Warnings about keys never include the actual secret value."""
+    """Warnings about overlapping keys never include the actual secret value."""
     env_file = tmp_path / ".env"
-    env_file.write_text("SECRET_KEY=super-secret-value-12345\n")
-    companions = _c(("app", {}))
+    env_file.write_text("SECRET_KEY=$DB_PASSWORD/my-secret-12345\n")
+    companions = _c(("app", {"environment_secrets": {"SECRET_KEY": "s3cret"}}))
     merge_companion_env(
         companions,
         env_from=[("app", str(env_file))],
         env_exclude=[],
     )
     captured = capsys.readouterr()
-    assert "super-secret-value-12345" not in captured.err
-    assert "super-secret-value-12345" not in captured.out
+    assert "my-secret-12345" not in captured.err
+    assert "my-secret-12345" not in captured.out
+    assert "s3cret" not in captured.err
+    assert "SECRET_KEY" in captured.err
 
 
 # ---------------------------------------------------------------------------
