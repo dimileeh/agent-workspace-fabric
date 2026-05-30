@@ -250,6 +250,20 @@ class TestAddressThread:
 
 class TestAddressReviewComment:
     @pytest.mark.unit
+    def test_prescribes_four_verdict_shapes(self) -> None:
+        # Mirror the thread-level contract (TestAddressThread): the review-level
+        # prompt must expose all four verdicts — including NEEDS_HUMAN and DEFER
+        # after the two-kind split (#305) — and keep verdicts off public GitHub.
+        c = ReviewComment(comment_id="C", body_excerpt="x")
+        prompt = address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=c)
+        assert "AWF-VERDICT: FIXED:" in prompt
+        assert "AWF-VERDICT: FALSE POSITIVE:" in prompt
+        assert "AWF-VERDICT: NEEDS_HUMAN:" in prompt
+        assert "AWF-VERDICT: DEFER:" in prompt
+        assert "public commit-resolution reply" not in prompt
+        assert "Do not write any PR comment for review-level verdict bookkeeping." in prompt
+
+    @pytest.mark.unit
     def test_embeds_identifiers_and_body(self) -> None:
         c = ReviewComment(
             comment_id="C_42",

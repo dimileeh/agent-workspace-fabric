@@ -965,8 +965,17 @@ def _is_protected_manual_ready_handoff(status: PRStatus, state: MonitorState) ->
         return False
     if status.blocking_reviews:
         return False
-    _, human_deferred = _collect_defer_items(status, state)
-    return not human_deferred
+    bot_items, human_deferred = _collect_defer_items(status, state)
+    if human_deferred:
+        return False
+    # #305: a bot inline thread (defer/needs_human) or a bot needs_human comment
+    # also blocks the merge in decide() gate 7, even though it isn't
+    # human-deferred. A PR is only a "ready for human merge (branch protection)"
+    # handoff when none of those are present — mirror the _notify_human_reason
+    # guard so we never broadcast "ready" while decide() is still blocking.
+    if any(item["kind"] == "thread" or item.get("verdict") == "needs_human" for item in bot_items):
+        return False
+    return True
 
 
 def _candidate_stale_required_action(reason: str | None) -> str | None:

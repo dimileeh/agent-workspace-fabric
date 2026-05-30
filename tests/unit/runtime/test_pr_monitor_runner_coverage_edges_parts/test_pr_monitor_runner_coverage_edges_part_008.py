@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor_runner import (
 from awf.runtime.pr_monitor_runner import remote_repair as pr_monitor_runner_remote_repair
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.helpers import (
+    _is_protected_manual_ready_handoff,
     _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -1024,3 +1025,27 @@ def test_deferred_thread_conversation_includes_all_replies() -> None:
     # Fallback to the excerpt when GitHub supplied no structured comments.
     bare = ReviewThread(thread_id="T2", path="x", line=1, body_excerpt="only excerpt", comments=())
     assert "only excerpt" in _deferred_thread_conversation(bare)
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_rejects_blocking_bot_thread() -> None:
+    # #305: a bot inline thread with needs_human/defer blocks in decide() gate 7
+    # but is not "human deferred"; the protected-merge handoff must NOT report
+    # ready-for-merge, mirroring the _notify_human_reason guard.
+    base = _status_for_helpers()
+    blocked = PRStatus(
+        number=base.number,
+        head_sha=base.head_sha,
+        mergeable=base.mergeable,
+        check_state=base.check_state,
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id="T_bot", path="x", line=1, body_excerpt="?", author="coderabbitai"
+            ),
+        ),
+        unresolved_review_comments=(),
+        base_behind_count=base.base_behind_count,
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+    state = MonitorState(threads_addressed_ids={"T_bot": "needs_human"})
+    assert _is_protected_manual_ready_handoff(blocked, state) is False
