@@ -42,7 +42,7 @@ uv run --python 3.12 --extra dev pytest tests/unit/control/test_executor_parts -
 uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
 
 # OpenAPI drift gate (fails if openapi.json diverges from the FastAPI app)
-python scripts/generate_openapi.py --check
+uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
 
 # Console (Next.js)
 npm --prefix apps/console run lint
@@ -97,7 +97,7 @@ These override default behavior. They are project-specific, not generic boilerpl
 
 ### Layering and dependency direction
 
-```
+```text
   client surfaces            business logic         orchestration            execution substrate
   ───────────────            ──────────────         ─────────────            ───────────────────
   api/   (FastAPI /v1)  ┐                       ┌─ control/worker  (poll+claim+dispatch loop)
@@ -145,7 +145,7 @@ These override default behavior. They are project-specific, not generic boilerpl
 
 State is guarded by `control/state_machine.py` (see invariant below):
 
-```
+```text
 requested → provisioning → ready → running → validating → pushing → monitoring_pr → completed
         (any) → failed (preserved for inspection) | cancelled | destroying → destroyed
 ```

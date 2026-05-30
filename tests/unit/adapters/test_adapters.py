@@ -659,9 +659,13 @@ class TestClaudeCodeAdapter:
         # The claude CLI accepts low/medium/high/xhigh/max natively, so AWF
         # propagates the requested effort as-is. xhigh must NOT collapse to max.
         assert _claude_effort_for_awf_effort("low") == "low"
+        assert _claude_effort_for_awf_effort("medium") == "medium"
         assert _claude_effort_for_awf_effort("high") == "high"
         assert _claude_effort_for_awf_effort("xhigh") == "xhigh"
         assert _claude_effort_for_awf_effort("max") == "max"
+        # Mixed-case input is normalized to lowercase, never remapped.
+        assert _claude_effort_for_awf_effort("XHigh") == "xhigh"
+        assert _claude_effort_for_awf_effort("MAX") == "max"
 
 
 class TestGeminiAdapter:
