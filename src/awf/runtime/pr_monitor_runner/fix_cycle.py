@@ -526,6 +526,8 @@ def _mark_publish_dependent_items_needs_human(
     reason: str,
 ) -> None:
     for item_id in item_ids:
+        if state.threads_addressed_ids.get(item_id) != "fix_committed":
+            continue
         state.mark_addressed(item_id, "needs_human")
         state.mark_addressed(_needs_human_reason_state_key(item_id), reason)
 
