@@ -63,7 +63,15 @@ class ProfileDocker(BaseModel):
     compose_files: list[str] = Field(default_factory=list)
     project_directory: str = "."
     startup_timeout_seconds: int = Field(default=300, ge=1, le=7200)
-    dind_image: str = Field(default="docker:27-dind", min_length=1, max_length=512)
+    # Interpolated unescaped into image: "{{ s.image }}" in the compose Jinja
+    # template (autoescape=False), so guard the canonical image-reference grammar
+    # here to keep an embedded quote/newline from injecting compose YAML.
+    dind_image: str = Field(
+        default="docker:27-dind",
+        min_length=1,
+        max_length=512,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_./:@-]*$",
+    )
 
 
 class ProfileCommand(BaseModel):

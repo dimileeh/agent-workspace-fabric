@@ -2805,6 +2805,7 @@
             "default": "docker:27-dind",
             "maxLength": 512,
             "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./:@-]*$",
             "title": "Dind Image",
             "type": "string"
           },
