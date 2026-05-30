@@ -132,6 +132,25 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
 
 
 @pytest.mark.unit
+def test_workspace_id_glob_matching_uses_configured_glob_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured workspace-id glob prefixes stay synchronized with matching."""
+    monkeypatch.setattr(owned_paths, "_WORKSPACE_ID_GLOB", "workspace_*")
+
+    internal_paths = ("docs/alternate/workspace_*.md",)
+
+    assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/workspace_123.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_123.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+
+
+@pytest.mark.unit
 def test_interworkspace_owned_paths_normalizes_each_path_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

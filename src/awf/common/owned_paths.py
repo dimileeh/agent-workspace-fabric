@@ -115,6 +115,11 @@ def _matches_configured_internal_plan_artifact_path(
             continue
         if normalized == artifact_path:
             return True
+        # "/**"-suffix entries are matched only via exact equality above.
+        # Sub-path matching relies on the companion workspace-id filename
+        # patterns that _internal_plan_artifact_paths_from_template always
+        # generates alongside every "/**" entry. Do not add standalone "/**"
+        # entries without them.
         if artifact_path.endswith("/**"):
             continue
         if _WORKSPACE_ID_GLOB in artifact_path:
@@ -128,7 +133,9 @@ def _matches_configured_internal_plan_artifact_path(
 
 def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool:
     """Match a configured artifact path with a constrained workspace-id glob."""
-    workspace_id_pattern = r"ws_[A-Za-z0-9_*?-]+"
+    # Keep the constrained regex in sync with _WORKSPACE_ID_GLOB's literal prefix.
+    glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
+    workspace_id_pattern = rf"{re.escape(glob_prefix)}[A-Za-z0-9_*?-]+"
     pattern = re.escape(artifact_path).replace(
         re.escape(_WORKSPACE_ID_GLOB),
         workspace_id_pattern,
