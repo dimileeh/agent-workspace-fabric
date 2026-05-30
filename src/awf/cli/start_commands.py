@@ -309,11 +309,17 @@ _START_FAILURE_SUMMARIES = {
 
 def _classify_start_failure(exc: ServiceBootstrapError) -> str | None:
     """Return the START_* reason code for a bootstrap error, or None if unclassified."""
-    if exc.reason_code == "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND":
+    from awf.service.bootstrap import (
+        SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND,
+        SERVICE_BOOTSTRAP_STAGE_FAILED,
+        SERVICE_BOOTSTRAP_TIMEOUT,
+    )
+
+    if exc.reason_code == SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND:
         return START_COMPOSE_ASSETS_MISSING
-    if exc.reason_code == "SERVICE_BOOTSTRAP_TIMEOUT":
+    if exc.reason_code == SERVICE_BOOTSTRAP_TIMEOUT:
         return START_HEALTH_TIMEOUT
-    if exc.reason_code == "SERVICE_BOOTSTRAP_STAGE_FAILED":
+    if exc.reason_code == SERVICE_BOOTSTRAP_STAGE_FAILED:
         if exc.stage == "migrate":
             return START_MIGRATION_FAILED
         if _looks_like_port_conflict(exc):

@@ -31,6 +31,13 @@ DEFAULT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 AGENT_RUNTIME_DOCKERFILE = Path("docker/agent-runtime.Dockerfile")
 PACKAGED_BOOTSTRAP_ASSET_ROOT = Path("bootstrap_assets")
 
+# Bootstrap failure reason codes. Exposed as named constants so consumers (e.g.
+# ``awf start`` failure classification) reference one source of truth instead of
+# duplicating the literal strings, which would silently drift on a rename.
+SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND = "SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND"
+SERVICE_BOOTSTRAP_STAGE_FAILED = "SERVICE_BOOTSTRAP_STAGE_FAILED"
+SERVICE_BOOTSTRAP_TIMEOUT = "SERVICE_BOOTSTRAP_TIMEOUT"
+
 
 class CompletedProcessLike(Protocol):
     @property
@@ -568,7 +575,7 @@ def _resolve_compose_env_file(asset_root: Path | None) -> Path | None:
 
 def _bootstrap_assets_not_found_error(compose_file: Path) -> ServiceBootstrapError:
     return ServiceBootstrapError(
-        reason_code="SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND",
+        reason_code=SERVICE_BOOTSTRAP_ASSETS_NOT_FOUND,
         message=(
             "Cannot resolve AWF bootstrap assets for local service startup. "
             "Run awf service bootstrap from an AWF source checkout that contains "
@@ -621,7 +628,7 @@ def _run_stage(
         )
     except FileNotFoundError as exc:
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed: docker binary not found on PATH",
             stage=stage.name,
             command=stage.command,
@@ -631,7 +638,7 @@ def _run_stage(
     except OSError as exc:
         detail = f"{type(exc).__name__}: {exc}"
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed: {detail}",
             stage=stage.name,
             command=stage.command,
@@ -643,7 +650,7 @@ def _run_stage(
     stderr = result.stderr or ""
     if result.returncode != 0:
         raise ServiceBootstrapError(
-            reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
             message=f"{stage.name} failed with exit code {result.returncode}",
             stage=stage.name,
             command=stage.command,
@@ -699,7 +706,7 @@ async def _poll_status(
         remaining = deadline - monotonic()
         if remaining <= 0:
             error = ServiceBootstrapError(
-                reason_code="SERVICE_BOOTSTRAP_TIMEOUT",
+                reason_code=SERVICE_BOOTSTRAP_TIMEOUT,
                 message="timed out waiting for local service readiness",
                 last_status=last_status,
             )
