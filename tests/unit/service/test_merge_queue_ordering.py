@@ -685,6 +685,25 @@ def test_merge_queue_candidate_dependency_falls_back_to_attempt_owned_paths() ->
 
 
 @pytest.mark.unit
+def test_merge_queue_candidate_dependency_falls_back_when_workspace_paths_filter_empty() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    blocker = _candidate(
+        candidate_id="older",
+        created_at=now,
+        owned_paths=["docs/awf-plans/**"],
+    )
+    target = _candidate(
+        candidate_id="later",
+        created_at=now + timedelta(minutes=5),
+        owned_paths=["docs/awf-plans/**"],
+    )
+    blocker.attempt.owned_paths = ["src/shared/**"]
+    target.attempt.owned_paths = ["src/shared/file.py"]
+
+    assert merge_queue._candidate_blocks_target(blocker, target)  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_monitor_recovery_operation_policy_false_and_true_paths() -> None:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
