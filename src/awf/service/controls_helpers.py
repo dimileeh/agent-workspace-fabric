@@ -267,12 +267,12 @@ def _control_response(
 
 def _operation_result_warnings(operation: Operation) -> list[dict[str, object]]:
     result = operation.result
-    if not isinstance(result, Mapping):
+    if not isinstance(result, dict):
         return []
     warnings = result.get("warnings")
-    if not isinstance(warnings, Sequence) or isinstance(warnings, str):
+    if not isinstance(warnings, list):
         return []
-    return [dict(warning) for warning in warnings if isinstance(warning, Mapping)]
+    return [dict(warning) for warning in warnings if isinstance(warning, dict)]
 
 
 def _operator_operation_payload(
