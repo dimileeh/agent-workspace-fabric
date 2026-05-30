@@ -440,6 +440,13 @@ def _profile_from_resolved_profile_snapshot(
     *,
     planning_max_iterations_default: int = 3,
 ) -> WorkspaceProfile | None:
+    """Realign executor profile state from the persisted snapshot winner.
+
+    This mutates the executor's detached ``Workspace`` object only for
+    in-memory reads in the current flow. Do not pass the mutated object to
+    ``session.add()`` or ``session.merge()`` afterward; SQLAlchemy would treat
+    ``resolved_profile`` as dirty and could overwrite a newer database value.
+    """
     if snapshot is None:
         return None
     ws.resolved_profile = snapshot

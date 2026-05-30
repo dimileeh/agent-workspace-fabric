@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from awf.common import owned_paths
+from awf.common import (
+    ids,
+    owned_paths,
+)
 from awf.common.owned_paths import (
     has_wildcard,
     internal_plan_artifact_owned_paths_from_profile,
@@ -320,6 +325,18 @@ def test_unknown_custom_plan_template_does_not_filter_shorthand_workspace_ids() 
         "docs/alternate/ws_protocol.md",
         "docs/alternate/README.md",
     )
+
+
+@pytest.mark.unit
+def test_custom_profile_workspace_id_glob_tracks_generated_id_contract() -> None:
+    """Custom artifact globs share the same workspace-id contract as ID generation."""
+    generated_workspace_id = ids.new_workspace_id()
+    workspace_id_glob = owned_paths._WORKSPACE_ID_GLOB  # noqa: SLF001
+    workspace_id_suffix_pattern = owned_paths._WORKSPACE_ID_SUFFIX_PATTERN  # noqa: SLF001
+
+    assert re.fullmatch(ids.WORKSPACE_ID_PATTERN, generated_workspace_id)
+    assert workspace_id_glob == f"{ids.WORKSPACE_ID_PREFIX}*"
+    assert workspace_id_suffix_pattern == ids.WORKSPACE_ID_SUFFIX_PATTERN
 
 
 @pytest.mark.unit

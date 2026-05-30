@@ -7,14 +7,19 @@ from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import Final
 
+from awf.common.ids import (
+    WORKSPACE_ID_PREFIX,
+    WORKSPACE_ID_SUFFIX_PATTERN,
+)
+
 INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
-_WORKSPACE_ID_GLOB: Final = "ws_*"
+_WORKSPACE_ID_GLOB: Final = f"{WORKSPACE_ID_PREFIX}*"
 # The reserved default AWF plan directory treats direct ``ws_*`` markdown/JSON
 # files as generated artifacts. Configured custom paths below still use the
-# stricter workspace-id glob matcher.
-_WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
+# stricter generated workspace-id glob matcher from ``awf.common.ids``.
+_WORKSPACE_ID_SUFFIX_PATTERN: Final = WORKSPACE_ID_SUFFIX_PATTERN
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
     r"^ws_(?:[A-Za-z0-9][A-Za-z0-9_]*|\*)"
     r"(?:\.md|(?:\.conformance)?\.json)$"
@@ -160,9 +165,10 @@ def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
 
     glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
     # Custom-profile artifact globs are generated from `{workspace_id}` and
-    # intentionally match only concrete AWF workspace IDs. The default
-    # `docs/awf-plans/ws_*` filename classifier is broader so legacy/manual AWF
-    # artifact names in the reserved directory remain nonblocking.
+    # intentionally match only concrete AWF workspace IDs. Keep this tied to
+    # `awf.common.ids` so future ID-format changes update custom artifact
+    # detection with the generator. The default `docs/awf-plans/ws_*` filename
+    # classifier stays broader for legacy/manual AWF artifact names.
     first_workspace_id_pattern = (
         rf"{re.escape(glob_prefix)}(?P<workspace_id>{_WORKSPACE_ID_SUFFIX_PATTERN})"
     )
