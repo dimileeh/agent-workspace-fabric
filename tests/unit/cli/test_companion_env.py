@@ -319,6 +319,37 @@ def test_false_environment_also_raises() -> None:
         merge_companion_env(companions, env_from=[], env_exclude=[])
 
 
+# ---------------------------------------------------------------------------
+# Non-object environment_secrets crashes pre-validated
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_secrets",
+    [
+        "not-a-dict",
+        ["list", "of", "strings"],
+        True,
+        42,
+    ],
+    ids=["string", "list", "bool-true", "int"],
+)
+def test_non_object_environment_secrets_raises(bad_secrets: object) -> None:
+    """A non-dict environment_secrets field raises ValueError before .keys() crashes."""
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment_secrets": bad_secrets}]
+    with pytest.raises(ValueError, match="non-object 'environment_secrets' field"):
+        merge_companion_env(companions, env_from=[], env_exclude=[])
+
+
+@pytest.mark.unit
+def test_false_environment_secrets_also_raises() -> None:
+    """A boolean False environment_secrets field raises ValueError."""
+    companions = [{"name": "app", "repo_url": "git@x:app.git", "environment_secrets": False}]
+    with pytest.raises(ValueError, match="non-object 'environment_secrets' field"):
+        merge_companion_env(companions, env_from=[], env_exclude=[])
+
+
 @pytest.mark.unit
 def test_none_environment_treated_as_empty() -> None:
     """A None environment field is treated as an empty dict."""

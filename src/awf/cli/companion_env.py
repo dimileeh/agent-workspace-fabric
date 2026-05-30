@@ -70,6 +70,19 @@ def merge_companion_env(
                 f'like {{"KEY": "value"}}, not a scalar or array.'
             )
 
+    # Validate that environment_secrets is also a dict (or absent).
+    # A truthy non-dict (string, array) would crash .keys() during merge.
+    for comp in companions:
+        secrets = comp.get("environment_secrets")
+        if secrets is not None and not isinstance(secrets, dict):
+            name = comp.get("name", "<unknown>")
+            raise ValueError(
+                f"companion {name!r} has a non-object 'environment_secrets' field "
+                f"(expected a JSON object/mapping, got {type(secrets).__name__}). "
+                "Each companion's 'environment_secrets' must be a key-value mapping "
+                'like {"KEY": {"value_from": "..."}}, not a scalar or array.'
+            )
+
     # Validate env-from targets exist and files are accessible
     for comp_name, file_path_str in env_from:
         _require_companion(comp_name, name_to_index, "--companion-env-from")
