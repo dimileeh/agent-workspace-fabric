@@ -572,10 +572,12 @@ uv_lists_package() {
 pipx_lists_package() {
     command -v pipx >/dev/null 2>&1 || return 1
     # Require the package name as its own token (start of line or preceded by a
-    # space, and followed by a space) so a differently-named fork is not matched
-    # as a substring. The leading-space alternative tolerates the "package "
-    # prefix that `pipx list` emits.
-    pipx list 2>/dev/null | grep -qE "(^| )${PACKAGE} " || return 1
+    # space, and followed by a space or end of line) so a differently-named fork
+    # is not matched as a substring. The leading-space alternative tolerates the
+    # "package " prefix that `pipx list` emits; the trailing ( |$) mirrors
+    # uv_lists_package so a line ending exactly at the name (no version) still
+    # matches a genuinely managed install.
+    pipx list 2>/dev/null | grep -qE "(^| )${PACKAGE}( |$)" || return 1
     return 0
 }
 
