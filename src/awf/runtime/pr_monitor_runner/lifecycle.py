@@ -28,19 +28,26 @@ from awf.db.repositories import (
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
+    operator_hint_processed_key,
     persist_operator_hint,
 )
 from awf.runtime.pr_monitor import (
     AbortReason,
     MonitorState,
+    OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _SYNC_BASE_NO_PROGRESS_COUNT_KEY,
     _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
     _initial_review_grace_state_for_runtime,
+    _initial_review_grace_wall_seconds,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_prefix,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
     _record_ignored_monitor_terminal_callback,
@@ -119,13 +126,111 @@ def _load_state(_self: Any, ws: Workspace) -> MonitorState:
     )
 
 
+def _operator_hint_matches(left: OperatorHint, right: OperatorHint) -> bool:
+    if left.operation_id or right.operation_id:
+        return left.operation_id == right.operation_id
+    return left == right
+
+
+def _operator_hint_is_processed(
+    threads_addressed: dict[str, str],
+    hint: OperatorHint,
+) -> bool:
+    return (
+        hint.operation_id is not None
+        and threads_addressed.get(operator_hint_processed_key(hint.operation_id)) == "processed"
+    )
+
+
+def _merge_concurrent_operator_hint(
+    threads_addressed: dict[str, str],
+    *,
+    db_threads_addressed: dict[str, str],
+    state_hint: OperatorHint | None,
+) -> dict[str, str]:
+    db_hint = operator_hint_from_threads(db_threads_addressed)
+    if db_hint is None:
+        return threads_addressed
+    if state_hint is not None and _operator_hint_matches(state_hint, db_hint):
+        return threads_addressed
+    if _operator_hint_is_processed(threads_addressed, db_hint):
+        return threads_addressed
+    return persist_operator_hint(threads_addressed, db_hint)
+
+
+def _same_persisted_wait_marker(left: str | None, right: str) -> bool:
+    if left == right:
+        return True
+    left_seconds = _initial_review_grace_wall_seconds(left)
+    right_seconds = _initial_review_grace_wall_seconds(right)
+    if left_seconds is None or right_seconds is None:
+        return False
+    return abs(left_seconds - right_seconds) <= 1.0
+
+
+def _preserve_concurrent_wait_marker(
+    threads_addressed: dict[str, str],
+    *,
+    db_threads_addressed: dict[str, str],
+    started_key: str,
+    done_key: str,
+) -> None:
+    db_started = db_threads_addressed.get(started_key)
+    if db_started is None:
+        return
+    if _same_persisted_wait_marker(threads_addressed.get(started_key), db_started):
+        return
+    threads_addressed[started_key] = db_started
+    if done_key not in db_threads_addressed:
+        threads_addressed.pop(done_key, None)
+
+
+def _merge_concurrent_operator_freeze_state(
+    threads_addressed: dict[str, str],
+    *,
+    db_threads_addressed: dict[str, str],
+    pr_number: int | None,
+) -> dict[str, str]:
+    if pr_number is None:
+        return threads_addressed
+
+    _preserve_concurrent_wait_marker(
+        threads_addressed,
+        db_threads_addressed=db_threads_addressed,
+        started_key=_initial_review_grace_started_key(pr_number),
+        done_key=_initial_review_grace_done_key(pr_number),
+    )
+
+    settle_started_prefix = _non_check_reviewer_settle_started_prefix(
+        pr_number=pr_number,
+    )
+    settle_done_prefix = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha="",
+    )
+    for started_key in db_threads_addressed:
+        if not started_key.startswith(settle_started_prefix):
+            continue
+        suffix = started_key.removeprefix(settle_started_prefix)
+        if not suffix:
+            continue
+        _preserve_concurrent_wait_marker(
+            threads_addressed,
+            db_threads_addressed=db_threads_addressed,
+            started_key=started_key,
+            done_key=f"{settle_done_prefix}{suffix}",
+        )
+    return threads_addressed
+
+
 async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> None:
     async with self._deps.session_factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
             return
         now_monotonic = time.monotonic()
         now_wall = datetime.now(UTC)
+        db_threads_addressed = dict(ws.monitor_threads_addressed or {})
         threads_addressed = dict(state.threads_addressed_ids)
         if ws.pr_number is not None:
             threads_addressed = _initial_review_grace_state_for_persistence(
@@ -141,6 +246,16 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
                 now_wall_seconds=now_wall.timestamp(),
             )
         threads_addressed = persist_operator_hint(threads_addressed, state.pending_operator_hint)
+        threads_addressed = _merge_concurrent_operator_hint(
+            threads_addressed,
+            db_threads_addressed=db_threads_addressed,
+            state_hint=state.pending_operator_hint,
+        )
+        threads_addressed = _merge_concurrent_operator_freeze_state(
+            threads_addressed,
+            db_threads_addressed=db_threads_addressed,
+            pr_number=ws.pr_number,
+        )
         if (
             state.sync_base_no_progress_signature is not None
             and state.sync_base_no_progress_count > 0
