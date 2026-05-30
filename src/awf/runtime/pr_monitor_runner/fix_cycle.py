@@ -52,6 +52,12 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 
+# Verdicts whose threads may be resolved on GitHub. ``needs_human`` and
+# ``agent_failed`` must keep the thread open, so a thread re-addressed to one of
+# them in a later fix-cycle pass is never resolved even if an earlier pass
+# queued it for resolution.
+_RESOLVABLE_THREAD_VERDICTS = frozenset({"defer", "false_positive", "fix_committed"})
+
 
 async def _run_fix_cycle(
     self: Any,
@@ -362,6 +368,14 @@ async def _run_fix_cycle(
     # marked addressed in state and the reviewer's re-read usually
     # clears them.
     for tid in threads_to_resolve:
+        # A later pass in this fix cycle may have re-addressed the thread (a new
+        # reviewer reply landed during the settle window) and downgraded its
+        # verdict to one that must keep the thread open. Resolve only when the
+        # *latest* verdict is still resolvable — never resolve a thread the
+        # current evidence says needs human/actionable follow-up, or auto-merge
+        # could proceed past unaddressed feedback (the #305 failure mode).
+        if state.threads_addressed_ids.get(tid) not in _RESOLVABLE_THREAD_VERDICTS:
+            continue
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)
         except GitHubClientError as exc:

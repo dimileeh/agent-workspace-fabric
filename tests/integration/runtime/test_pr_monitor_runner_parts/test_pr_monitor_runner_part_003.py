@@ -1326,3 +1326,89 @@ class TestDeferredThreadCapture:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.monitor_threads_addressed.get("T_defer_partial") == "defer"
+
+    @pytest.mark.unit
+    async def test_stale_defer_resolve_skipped_when_readdressed_to_needs_human(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """If a captured-defer thread gains a new reviewer reply during the
+        settle window and a later pass re-addresses it as NEEDS_HUMAN, the
+        stale resolve queued by the first pass must NOT fire — the thread stays
+        open and the merge is blocked (#305 failure mode)."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        t_v1 = {
+            "id": "T_race",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "nit", "author": {"login": "cr"}}]},
+        }
+        t_v2 = {
+            "id": "T_race",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {
+                "nodes": [
+                    {"bodyText": "nit", "author": {"login": "cr"}},
+                    {
+                        "bodyText": "actually this needs a design decision",
+                        "author": {"login": "alice"},
+                    },
+                ]
+            },
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v1]))  # initial
+        adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up styling nit")  # pass 1 -> capture
+        cmd.queue_result(
+            returncode=0, stdout="https://github.com/o/r/issues/91\n"
+        )  # gh issue create
+        cmd.queue_result(returncode=0)  # gh pr comment (capture)
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #1: new reply
+        adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: design decision required")  # pass 2
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #2: quiet
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse HEAD
+        # No resolve queued — the guard must skip the stale resolve for T_race.
+        cmd.queue_result(returncode=0)  # iter2 git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # still open -> block
+        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        cmd.queue_result(returncode=0)  # iter3 git fetch
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[t_v2]))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The thread was re-judged needs_human, so the stale resolve must NOT fire.
+        for c in cmd.calls:
+            assert not any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args), (
+                "a thread re-addressed to needs_human must not be resolved"
+            )
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "an unresolved needs_human thread must block merge"
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.monitor_threads_addressed.get("T_race") == "needs_human"
