@@ -167,5 +167,6 @@ def _warn(message: str) -> None:
 def _shallow_copy_companion(companion: dict[str, object]) -> dict[str, object]:
     """Shallow-copy a companion dict, deep-copying the environment."""
     result = dict(companion)
-    result["environment"] = cast(dict[str, str], companion.get("environment") or {})
+    env = companion.get("environment")
+    result["environment"] = dict(cast(dict[str, str], env)) if env else {}
     return result
