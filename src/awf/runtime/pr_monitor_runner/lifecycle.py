@@ -158,6 +158,32 @@ def _merge_concurrent_operator_hint(
     return persist_operator_hint(threads_addressed, db_hint)
 
 
+async def _refresh_operator_hint_from_workspace(
+    self: Any,
+    workspace_id: str,
+    state: MonitorState,
+) -> bool:
+    """Import a concurrently persisted operator hint without discarding runtime state."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        if ws is None:
+            return False
+        db_threads_addressed = dict(ws.monitor_threads_addressed or {})
+
+    db_hint = operator_hint_from_threads(db_threads_addressed)
+    if db_hint is None:
+        return False
+    if state.pending_operator_hint is not None and _operator_hint_matches(
+        state.pending_operator_hint,
+        db_hint,
+    ):
+        return False
+    if _operator_hint_is_processed(state.threads_addressed_ids, db_hint):
+        return False
+    state.pending_operator_hint = db_hint
+    return True
+
+
 def _same_persisted_wait_marker(left: str | None, right: str) -> bool:
     if left == right:
         return True

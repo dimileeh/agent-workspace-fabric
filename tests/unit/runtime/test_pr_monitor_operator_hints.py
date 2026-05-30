@@ -27,6 +27,7 @@ from awf.runtime.operator_hints import (
 from awf.runtime.pr_monitor import (
     AddressOperatorHint,
     CheckState,
+    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorState,
@@ -461,3 +462,67 @@ async def test_persist_state_preserves_concurrent_operator_hint_and_freeze(
     assert settle_done_key not in monitor_state
     assert monitor_state["review-thread"] == "fix_committed"
     assert monitor_state["second-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_merge_rechecks_persisted_operator_hint_before_merge_pr(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    stale_state = MonitorState()
+    hint = OperatorHint(
+        reason="operator warning arrived after the monitor loaded state",
+        operation_id="op_merge_recheck",
+        requested_at="2026-05-30T23:55:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint(
+            dict(workspace.monitor_threads_addressed or {}),
+            hint,
+        )
+        await session.commit()
+
+    calls: list[OperatorHint] = []
+
+    async def _record_operator_hint_cycle(**kwargs: object) -> _GitPushResult:
+        called_hint = kwargs["hint"]
+        state_arg = kwargs["state"]
+        assert isinstance(called_hint, OperatorHint)
+        assert isinstance(state_arg, MonitorState)
+        calls.append(called_hint)
+        mark_operator_hint_processed(state_arg)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _record_operator_hint_cycle)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=stale_state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert calls == [hint]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)

@@ -352,6 +352,23 @@ async def handle_merge_action(
                     else:
                         merge_status = checked_status
 
+            if fresh_action is None and await self._refresh_operator_hint_from_workspace(
+                workspace_id,
+                state,
+            ):
+                checked_action = decide(merge_status, state, self._config)
+                if not isinstance(checked_action, Merge):
+                    fresh_action = checked_action
+                    fresh_status = merge_status
+                    _log.info(
+                        "monitor.merge_operator_hint_recheck_changed_action",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        original_action="Merge",
+                        fresh_action=type(checked_action).__name__,
+                        head_sha=merge_status.head_sha[:10],
+                    )
+
             if (
                 recheck_error is None
                 and recheck_base_error is None
