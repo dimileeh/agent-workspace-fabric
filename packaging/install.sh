@@ -474,14 +474,6 @@ print_path_advice() {
     warn "Then restart your shell or 'source ${rc}'."
 }
 
-dir_on_path() {
-    local dir="$1"
-    case ":${PATH}:" in
-        *":${dir}:"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 verify_awf() {
     local resolved="" on_path=0 bindir
     bindir="$(default_bin_dir)"
