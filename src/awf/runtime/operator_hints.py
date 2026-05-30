@@ -7,30 +7,16 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
+from awf.runtime.pr_monitor_runner.helpers import (
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _initial_review_grace_wall_started_value_from_datetime,
+    _non_check_reviewer_settle_done_key,
+    _non_check_reviewer_settle_started_key,
+)
 
 OPERATOR_HINT_STATE_KEY = "__awf_pending_operator_hint__"
 OPERATOR_HINT_PROCESSED_KEY_PREFIX = "__awf_operator_hint_processed__:"
-
-
-def _initial_review_grace_started_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_started__:{pr_number}"
-
-
-def _initial_review_grace_done_key(pr_number: int) -> str:
-    return f"__awf_initial_review_grace_done__:{pr_number}"
-
-
-def _non_check_reviewer_settle_started_key(*, pr_number: int, head_sha: str) -> str:
-    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:{head_sha}"
-
-
-def _non_check_reviewer_settle_done_key(*, pr_number: int, head_sha: str) -> str:
-    return f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
-
-
-def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime) -> str:
-    started_dt = started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=UTC)
-    return f"{started_dt.timestamp():.6f}"
 
 
 def operator_hint_from_threads(threads_addressed: dict[str, str]) -> OperatorHint | None:

@@ -15,6 +15,7 @@ from awf.db.enums import OperationType
 from awf.db.models import Operation
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime import operator_hints
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     mark_operator_hint_processed,
@@ -30,6 +31,7 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
     PRStatus,
 )
+from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
@@ -59,6 +61,26 @@ def _ready_status(*, head_sha: str = "abc1234567890def") -> PRStatus:
         unresolved_review_comments=(),
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+
+@pytest.mark.unit
+def test_operator_hint_freeze_uses_canonical_runtime_state_key_helpers() -> None:
+    assert (
+        operator_hints._initial_review_grace_started_key
+        is runner_helpers._initial_review_grace_started_key
+    )
+    assert (
+        operator_hints._initial_review_grace_done_key
+        is runner_helpers._initial_review_grace_done_key
+    )
+    assert (
+        operator_hints._non_check_reviewer_settle_started_key
+        is runner_helpers._non_check_reviewer_settle_started_key
+    )
+    assert (
+        operator_hints._non_check_reviewer_settle_done_key
+        is runner_helpers._non_check_reviewer_settle_done_key
     )
 
 
