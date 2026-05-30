@@ -224,6 +224,37 @@ def _precommit_autofixable_ruff_check_output(*paths: str) -> str:
     return "\n".join(lines)
 
 
+def _precommit_autofixable_ruff_check_and_format_output(*paths: str) -> str:
+    lines = [
+        "ruff check..............................................................Failed",
+        "- hook id: awf-ruff-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in paths:
+        lines.extend(
+            [
+                "I001 [*] Import block is un-sorted or un-formatted",
+                f"   --> {path}:13:1",
+            ]
+        )
+    lines.extend(
+        [
+            f"Found {len(paths)} error{'s' if len(paths) != 1 else ''}.",
+            f"[*] {len(paths)} fixable with the `--fix` option.",
+            "",
+            "ruff format --check.....................................................Failed",
+            "- hook id: awf-ruff-format-check",
+            "- exit code: 1",
+            "",
+        ]
+    )
+    for path in paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 async def _failed_state_event(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -713,6 +744,74 @@ async def test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_
     assert "src/awf/mcp/server.py" in ruff_fix_calls[0].args
     assert ruff_fix_calls[0].cwd is not None
     assert ruff_fix_calls[0].cwd.endswith(ws_id)
+
+    agent_repair_calls = [
+        call
+        for call in fake.calls
+        if call.input_bytes is not None and b"post-agent pre-commit repair" in call.input_bytes
+    ]
+    assert agent_repair_calls == []
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_autofixable_ruff_check_also_formats_reported_paths(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    path = "tests/unit/service/test_host_setup_credentials.py"
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout=f"{path}\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_autofixable_ruff_check_and_format_output(path),
+    )  # both Ruff hooks failed, but check diagnostics are autofixable
+    fake.queue_result(returncode=0)  # ruff check --fix path
+    fake.queue_result(returncode=0)  # ruff format path
+    fake.queue_result(returncode=0)  # git add -- original staged paths
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # stop before validation/PR pipeline
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic_autofix"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == ["awf-ruff-check", "awf-ruff-format-check"]
+    assert payload["repaired_paths"] == [path]
+    assert payload["formatter_paths"] == [path]
+    assert payload["restaged_paths"] == [path]
+
+    ruff_fix_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "check" in call.args and "--fix" in call.args
+    ]
+    assert len(ruff_fix_calls) == 1
+    assert path in ruff_fix_calls[0].args
+
+    ruff_format_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "format" in call.args and "--check" not in call.args
+    ]
+    assert len(ruff_format_calls) == 1
+    assert path in ruff_format_calls[0].args
+    assert ruff_format_calls[0].cwd is not None
+    assert ruff_format_calls[0].cwd.endswith(ws_id)
 
     agent_repair_calls = [
         call
