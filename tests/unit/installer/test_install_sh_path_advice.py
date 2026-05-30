@@ -91,4 +91,11 @@ def test_no_path_advice_when_awf_already_on_path(harness: InstallerHarness) -> N
     result = harness.run(["--shell", "zsh"], manifest=manifest)
 
     assert result.returncode == 0, result.stderr
-    assert ".zshrc" not in (result.stdout + result.stderr)
+    # When awf is already reachable, no PATH-remediation advice of any shell
+    # flavour should be emitted — not just the zsh rc file.
+    advice = result.stdout + result.stderr
+    assert ".zshrc" not in advice
+    assert ".bashrc" not in advice
+    assert "config.fish" not in advice
+    assert "export PATH=" not in advice
+    assert "fish_add_path" not in advice
