@@ -1076,6 +1076,36 @@ def test_deferred_issue_filed_marker_is_body_aware() -> None:
 
 
 @pytest.mark.unit
+def test_deferred_thread_conversation_includes_all_replies() -> None:
+    # #305: a body-aware recapture fires because new reviewer replies changed the
+    # thread, so the tracking issue must carry the whole conversation — not just
+    # the truncated first-comment excerpt — or the new feedback is lost on resolve.
+    from awf.runtime.pr_monitor import ReviewThread, ReviewThreadComment
+    from awf.runtime.pr_monitor_runner.fix_cycle import _deferred_thread_conversation
+
+    thread = ReviewThread(
+        thread_id="T1",
+        path="x",
+        line=1,
+        body_excerpt="first finding",
+        comments=(
+            ReviewThreadComment(comment_id="c1", body="first finding", author="cr"),
+            ReviewThreadComment(
+                comment_id="c2", body="follow-up reply\nsecond line", author="alice"
+            ),
+            ReviewThreadComment(comment_id="c3", body="", author="bot"),
+        ),
+    )
+    body = _deferred_thread_conversation(thread)
+    assert "first finding" in body
+    assert "follow-up reply" in body and "second line" in body  # all replies, multi-line
+    assert "alice" in body
+    # Fallback to the excerpt when GitHub supplied no structured comments.
+    bare = ReviewThread(thread_id="T2", path="x", line=1, body_excerpt="only excerpt", comments=())
+    assert "only excerpt" in _deferred_thread_conversation(bare)
+
+
+@pytest.mark.unit
 def test_target_reconcile_payload_supports_dict_to_dict_and_fallback() -> None:
     class _ToDict:
         def to_dict(self) -> dict[str, object]:

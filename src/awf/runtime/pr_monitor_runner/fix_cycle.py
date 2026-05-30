@@ -229,7 +229,11 @@ async def _run_fix_cycle(
                 )
             elif verdict == "fix_committed":
                 fixed_review_comments.append((c, verdict_result))
-            if verdict not in {"defer", "agent_failed"}:
+            # Exclude ``needs_human`` from the rollback set, mirroring the inline
+            # thread path: the agent already judged this comment needs a human,
+            # so a push failure must not clear that verdict and force a pointless
+            # re-address next cycle.
+            if verdict not in {"needs_human", "defer", "agent_failed"}:
                 publish_dependent_ids.append(c.comment_id)
 
         # 2) Settle window — small sleep, then re-poll for new activity.
@@ -461,6 +465,23 @@ def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:
     return f"__deferred_issue_filed__:{thread_id}:{body_hash}"
 
 
+def _deferred_thread_conversation(thread: ReviewThread) -> str:
+    """Render the full review-thread history for the tracking-issue body.
+
+    A body-aware recapture (see ``_deferred_issue_filed_marker``) fires precisely
+    because new reviewer replies changed the thread, so the filed issue must
+    carry the whole conversation — not just the truncated first-comment excerpt —
+    or the very feedback that triggered the recapture would be lost on resolve.
+    """
+    if not thread.comments:
+        return f"> {thread.body_excerpt}"
+    blocks: list[str] = []
+    for comment in thread.comments:
+        quoted = "\n".join(f"> {line}" for line in (comment.body or "").splitlines() or [""])
+        blocks.append(f"**{comment.author or 'reviewer'}**:\n\n{quoted}")
+    return "\n\n".join(blocks)
+
+
 async def _capture_deferred_review_thread(
     self: Any,
     *,
@@ -496,7 +517,7 @@ async def _capture_deferred_review_thread(
         f"AWF deferred a review thread while monitoring PR #{pr_number}.\n\n"
         f"- Path: {location}\n"
         f"- Thread: {thread_ref}\n\n"
-        f"Original review comment:\n\n> {thread.body_excerpt}\n\n"
+        f"Review thread (full history):\n\n{_deferred_thread_conversation(thread)}\n\n"
         "This issue tracks the deferred follow-up so the PR thread could be "
         "resolved without losing the work."
     )
