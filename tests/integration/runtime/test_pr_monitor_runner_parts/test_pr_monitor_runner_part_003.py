@@ -1015,6 +1015,11 @@ class TestParseVerdict:
             ("false positive: yep", "false_positive"),
             ("DEFER: need maintainer input", "defer"),
             ("DEFER : lowercase also fine", "defer"),
+            # A bare NEEDS_HUMAN: (no AWF-VERDICT: prefix) must be fail-safe —
+            # needs_human, never fix_committed (which would resolve + merge).
+            ("NEEDS_HUMAN: the diff may be wrong", "needs_human"),
+            ("NEEDS HUMAN: maintainer must decide", "needs_human"),
+            ("Some chatty prose\nNEEDS_HUMAN: ask a human", "needs_human"),
             ("Some chatty prose\nFALSE POSITIVE: ...", "false_positive"),
             ("Pushed fix. See commit.", "fix_committed"),
         ],

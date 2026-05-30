@@ -85,6 +85,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _VALIDATION_RECOVERY_STALE_REASONS,
     _VERDICT_DEFER,
     _VERDICT_FALSE_POSITIVE,
+    _VERDICT_NEEDS_HUMAN,
 )
 from awf.runtime.pr_monitor_runner.gates import (
     _MergeGateResult,
@@ -156,6 +157,11 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
         return VerdictResult(verdict="fix_committed", reason=reason)
     if _VERDICT_FALSE_POSITIVE.search(stdout):
         return VerdictResult(verdict="false_positive", reason=_verdict_reason(stdout))
+    # Check needs_human before defer so a bare ``NEEDS_HUMAN:`` (no
+    # ``AWF-VERDICT:`` prefix) blocks the merge instead of falling through to
+    # ``fix_committed`` and being resolved (the unsafe direction, #305).
+    if _VERDICT_NEEDS_HUMAN.search(stdout):
+        return VerdictResult(verdict="needs_human", reason=_verdict_reason(stdout))
     if _VERDICT_DEFER.search(stdout):
         return VerdictResult(verdict="defer", reason=_verdict_reason(stdout))
     return VerdictResult(verdict="fix_committed")
