@@ -186,13 +186,21 @@ def _resolve_start_bootstrap_inputs(
     from awf.service.config import local_service_environ, resolve_service_settings
 
     if verified is not None:
+        from awf.cli.init_ops import _resolve_existing_service_env_file
+
         compose_file = verified.compose_file
         asset_root: Path | None = verified.root
         compose_env_candidate = verified.root / "docker" / "compose" / ".env"
         compose_env_file: Path | None = (
             compose_env_candidate if compose_env_candidate.exists() else None
         )
-        read_env_file = compose_env_file
+        # Before the compose .env is seeded the checkout root .env carries tokens
+        # and DB settings, so read it as a fallback exactly like
+        # `awf service bootstrap` does via `_resolve_existing_service_env_file`.
+        # The compose --env-file (compose_env_file) stays pinned to the compose
+        # .env, so the root .env is used for reads only, never forwarded to Docker.
+        resolved_read_env = _resolve_existing_service_env_file(compose_env_candidate)
+        read_env_file = resolved_read_env if resolved_read_env.exists() else None
     else:
         from awf.cli.init_ops import (
             _resolve_service_compose_paths,

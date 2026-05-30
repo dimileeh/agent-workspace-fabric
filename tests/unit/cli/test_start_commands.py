@@ -269,6 +269,55 @@ def test_start_with_valid_source_checkout_pins_assets(
 
 
 @pytest.mark.unit
+def test_resolve_start_inputs_source_checkout_falls_back_to_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verified source checkout reads the root .env when the compose .env is unseeded.
+
+    Regression for PRRT_kwDOSJAM6s6F5crG: before ``docker/compose/.env`` is
+    seeded the checkout root ``.env`` holds tokens and DB settings, exactly the
+    file ``awf service bootstrap`` reads via ``_resolve_existing_service_env_file``.
+    ``awf start`` must read the same fallback while never forwarding the root
+    ``.env`` to Docker as the compose ``--env-file``.
+    """
+    root = (tmp_path / "checkout").resolve()
+    (root / "docker" / "compose").mkdir(parents=True)
+    root_env = root / ".env"
+    root_env.write_text("AWF_API_TOKEN=from-root\n", encoding="utf-8")
+    # Intentionally no docker/compose/.env: the compose env is not seeded yet.
+
+    verified = SimpleNamespace(
+        root=root,
+        compose_file=root / "docker/compose/local-service.yml",
+    )
+
+    captured: dict[str, object] = {}
+
+    def _capture_environ(**kwargs: object) -> dict[str, str]:
+        captured["environ_env_file"] = kwargs.get("env_file")
+        return {}
+
+    def _capture_settings(**kwargs: object) -> object:
+        captured["settings_env_file"] = kwargs.get("_env_file")
+        return object()
+
+    monkeypatch.setattr("awf.service.config.local_service_environ", _capture_environ)
+    monkeypatch.setattr("awf.common.config.Settings", _capture_settings)
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda *_a, **_k: SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+    )
+
+    inputs = start_commands._resolve_start_bootstrap_inputs(verified)
+
+    assert captured["environ_env_file"] == root_env
+    assert captured["settings_env_file"] == root_env
+    # The root .env is the read source only; it is never forwarded to Compose.
+    assert inputs.compose_env_file is None
+
+
+@pytest.mark.unit
 def test_start_with_invalid_source_checkout_fails_without_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
