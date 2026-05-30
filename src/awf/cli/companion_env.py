@@ -144,12 +144,18 @@ def merge_companion_env(
 
 
 def _build_name_index(companions: list[dict[str, object]]) -> dict[str, int]:
-    """Map companion names to their index in the list."""
+    """Map companion names to their index in the list.
+
+    Names are stripped of leading/trailing whitespace so that companions
+    loaded from ``--companion-json`` (where Pydantic may normalise whitespace)
+    match the stripped names produced by ``--companion-env-from`` and
+    ``--companion-env-exclude``.
+    """
     index: dict[str, int] = {}
     for i, c in enumerate(companions):
         name = c.get("name")
         if name is not None:
-            index[str(name)] = i
+            index[str(name).strip()] = i
     return index
 
 

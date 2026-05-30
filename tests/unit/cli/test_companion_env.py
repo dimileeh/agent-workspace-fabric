@@ -419,3 +419,54 @@ def test_env_from_overlap_value_never_leaked_in_warning(
     captured = capsys.readouterr()
     assert "top-secret-value-999" not in captured.err
     assert "top-secret-value-999" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Whitespace in companion names — index must strip to match CLI arg stripping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_companion_name_with_leading_trailing_whitespace(tmp_path: Path) -> None:
+    """Companion names with whitespace still match stripped CLI args."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("DB_HOST=localhost\n")
+    companions = [{"name": "  app  ", "repo_url": "git@x:app.git", "environment": {}}]
+    result = merge_companion_env(
+        companions,
+        env_from=[("app", str(env_file))],
+        env_exclude=[],
+    )
+    assert result[0]["environment"] == {"DB_HOST": "localhost"}
+
+
+@pytest.mark.unit
+def test_companion_name_with_leading_whitespace(tmp_path: Path) -> None:
+    """Leading whitespace in companion name does not prevent env merge."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORT=8080\n")
+    companions = [{"name": " svc", "repo_url": "git@x:svc.git", "environment": {}}]
+    result = merge_companion_env(
+        companions,
+        env_from=[("svc", str(env_file))],
+        env_exclude=[],
+    )
+    assert result[0]["environment"] == {"PORT": "8080"}
+
+
+@pytest.mark.unit
+def test_companion_name_whitespace_exclude(tmp_path: Path) -> None:
+    """Companion name with trailing whitespace works for env-exclude."""
+    companions = [
+        {
+            "name": "worker ",
+            "repo_url": "git@x:worker.git",
+            "environment": {"SKIP": "1", "KEEP": "2"},
+        }
+    ]
+    result = merge_companion_env(
+        companions,
+        env_from=[],
+        env_exclude=[("worker", {"SKIP"})],
+    )
+    assert result[0]["environment"] == {"KEEP": "2"}
