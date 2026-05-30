@@ -229,6 +229,64 @@ class TestStalenessRefreshService:
         ]
 
     @pytest.mark.unit
+    async def test_internal_plan_artifact_only_workspace_paths_fall_back_to_attempt_paths(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/awf-plans/**"],
+            task_class="test_task",
+        )
+
+        async with factory() as session:
+            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            assert attempt.id == attempt_id
+            attempt.owned_paths = ["src/shared/**"]
+            await session.commit()
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            result = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/shared/module.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            active = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert result.stale is True
+        assert [
+            (finding.reason_code, finding.trigger_ref, finding.blocks_merge)
+            for finding in result.findings
+        ] == [("STALE_OVERLAP", "src/shared/module.py", True)]
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "STALE_OVERLAP"
+        assert [(r.reason_code, r.trigger_ref, r.blocks_merge) for r in active] == [
+            ("STALE_OVERLAP", "src/shared/module.py", True)
+        ]
+
+    @pytest.mark.unit
     async def test_custom_sibling_plan_artifact_refresh_is_advisory_without_stale_candidate(
         self,
         factory: async_sessionmaker[AsyncSession],

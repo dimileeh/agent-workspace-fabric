@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.common.logging import get_logger
 from awf.common.owned_paths import (
     internal_plan_artifact_owned_paths_from_profile,
+    interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
 )
 from awf.db.models import (
@@ -642,24 +643,50 @@ class StalenessRefreshError(RuntimeError):
 def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
     workspace: Workspace = candidate.workspace
     attempt: TaskAttempt = candidate.attempt
-    owned = tuple(workspace.owned_paths) if workspace.owned_paths else tuple(attempt.owned_paths)
     profile = workspace.resolved_profile
     concrete_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(
         profile,
         workspace_id=workspace.id,
     )
     wildcard_plan_artifacts = internal_plan_artifact_owned_paths_from_profile(profile)
+    internal_plan_artifact_paths = tuple(
+        dict.fromkeys(concrete_plan_artifacts + wildcard_plan_artifacts)
+    )
     return CandidateSnapshot(
-        owned_paths=owned,
+        owned_paths=_snapshot_owned_paths(
+            workspace,
+            attempt,
+            internal_plan_artifact_paths=internal_plan_artifact_paths,
+        ),
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
         # Target changes may contain sibling workspace artifacts rendered from the
         # same profile template, so staleness classification needs the wildcard
         # shape in addition to this workspace's concrete artifact path.
-        internal_plan_artifact_paths=tuple(
-            dict.fromkeys(concrete_plan_artifacts + wildcard_plan_artifacts)
-        ),
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
     )
+
+
+def _snapshot_owned_paths(
+    workspace: Workspace,
+    attempt: TaskAttempt,
+    *,
+    internal_plan_artifact_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    workspace_owned = tuple(path for path in workspace.owned_paths if path)
+    if not workspace_owned:
+        return tuple(path for path in attempt.owned_paths if path)
+
+    if interworkspace_owned_paths(
+        workspace_owned,
+        internal_plan_artifact_paths=internal_plan_artifact_paths,
+    ):
+        return workspace_owned
+
+    attempt_owned = tuple(path for path in attempt.owned_paths if path)
+    if not attempt_owned:
+        return workspace_owned
+    return tuple(dict.fromkeys(workspace_owned + attempt_owned))
 
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
