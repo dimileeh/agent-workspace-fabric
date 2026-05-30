@@ -45,6 +45,8 @@ def internal_plan_artifact_owned_paths_from_profile(
     planning = resolved_profile.get("planning")
     if not isinstance(planning, Mapping):
         return ()
+    if planning.get("required") is not True:
+        return ()
 
     paths: list[str] = []
     for field_name in _PLANNING_PATH_FIELDS:

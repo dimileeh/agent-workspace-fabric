@@ -186,6 +186,7 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
     monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(workspace_ids))
     custom_profile = {
         "planning": {
+            "required": True,
             "plan_path": "docs/alternate/{workspace_id}.md",
             "conformance_report_path": "docs/alternate/{workspace_id}.json",
         },

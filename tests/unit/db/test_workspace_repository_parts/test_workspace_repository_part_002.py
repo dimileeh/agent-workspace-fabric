@@ -996,6 +996,7 @@ class TestOwnedPathOverlapLookup:
         )
         custom_profile = {
             "planning": {
+                "required": True,
                 "plan_path": "docs/alternate/{workspace_id}.md",
                 "conformance_report_path": "docs/alternate/{workspace_id}.json",
             },
@@ -1029,7 +1030,7 @@ class TestOwnedPathOverlapLookup:
         session: AsyncSession,
     ) -> None:
         """Requested real docs matching ws_* keep overlap checks before id assignment."""
-        custom_profile = {"planning": {"plan_path": "docs/{workspace_id}.md"}}
+        custom_profile = {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}}
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,
@@ -1065,7 +1066,7 @@ class TestOwnedPathOverlapLookup:
             "new_workspace_id",
             lambda: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
         )
-        custom_profile = {"planning": {"plan_path": "docs/{workspace_id}.md"}}
+        custom_profile = {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}}
         repo = WorkspaceRepository(session)
         existing = await _create_policy_workspace(
             session,

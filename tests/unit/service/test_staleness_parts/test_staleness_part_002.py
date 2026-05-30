@@ -244,6 +244,7 @@ class TestStalenessRefreshService:
             task_class="test_task",
             resolved_profile={
                 "planning": {
+                    "required": True,
                     "plan_path": "docs/alternate/{workspace_id}.md",
                     "conformance_report_path": "docs/alternate/{workspace_id}.json",
                 },

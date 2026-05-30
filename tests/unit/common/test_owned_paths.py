@@ -99,11 +99,38 @@ def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> No
 
 
 @pytest.mark.unit
+def test_disabled_planning_custom_profile_paths_are_not_internal_artifacts() -> None:
+    """Custom planning paths are artifacts only when profile planning is required."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {
+            "planning": {
+                "required": False,
+                "plan_path": "docs/{workspace_id}.md",
+                "conformance_report_path": "docs/{workspace_id}.json",
+            },
+        },
+    )
+
+    assert internal_paths == ()
+    assert interworkspace_owned_paths(
+        [
+            "docs/ws_0123456789abcdef01234567.md",
+            "docs/ws_0123456789abcdef01234567.json",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == (
+        "docs/ws_0123456789abcdef01234567.md",
+        "docs/ws_0123456789abcdef01234567.json",
+    )
+
+
+@pytest.mark.unit
 def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_paths() -> None:
     """Resolved profile planning paths extend internal artifact classification."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
         {
             "planning": {
+                "required": True,
                 "plan_path": "docs/alternate/{workspace_id}.md",
                 "conformance_report_path": "docs/alternate/{workspace_id}.json",
             },
@@ -156,7 +183,7 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
 def test_known_workspace_custom_plan_template_preserves_artifact_wildcards() -> None:
     """Known custom templates still filter persisted generated artifact globs."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "docs/alternate/{workspace_id}.md"}},
+        {"planning": {"required": True, "plan_path": "docs/alternate/{workspace_id}.md"}},
         workspace_id="ws_123",
     )
 
@@ -176,7 +203,7 @@ def test_known_workspace_custom_plan_template_preserves_artifact_wildcards() -> 
 def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None:
     """Real files in a custom plan artifact parent directory keep overlap checks."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "docs/runbooks/{workspace_id}.md"}},
+        {"planning": {"required": True, "plan_path": "docs/runbooks/{workspace_id}.md"}},
         workspace_id="ws_custom",
     )
 
@@ -196,7 +223,7 @@ def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None
 def test_known_workspace_custom_plan_template_does_not_filter_other_ws_docs() -> None:
     """Known workspace ids narrow custom artifact filtering to the concrete path."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "docs/{workspace_id}.md"}},
+        {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}},
         workspace_id="ws_custom",
     )
 
@@ -215,7 +242,7 @@ def test_known_workspace_custom_plan_template_does_not_filter_other_ws_docs() ->
 def test_unknown_custom_plan_template_keeps_real_ws_docs() -> None:
     """Unknown workspace ids filter generated artifacts without hiding real docs."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "docs/{workspace_id}.md"}},
+        {"planning": {"required": True, "plan_path": "docs/{workspace_id}.md"}},
     )
 
     assert internal_paths == ("docs/ws_*.md",)
@@ -235,6 +262,7 @@ def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
         {
             "planning": {
+                "required": True,
                 "plan_path": "docs/alternate/{workspace_id}.md",
                 "conformance_report_path": "docs/alternate/{workspace_id}.json",
             },
@@ -265,7 +293,12 @@ def test_unknown_custom_plan_template_filters_shorthand_workspace_ids() -> None:
 def test_repeated_workspace_id_placeholders_require_the_same_id() -> None:
     """Multi-placeholder templates do not hide cross-workspace path overlaps."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "{workspace_id}/archive/{workspace_id}_report.md"}},
+        {
+            "planning": {
+                "required": True,
+                "plan_path": "{workspace_id}/archive/{workspace_id}_report.md",
+            },
+        },
     )
 
     same_workspace_path = "ws_123/archive/ws_123_report.md"
@@ -293,7 +326,7 @@ def test_repeated_workspace_id_placeholders_require_the_same_id() -> None:
 def test_custom_profile_parent_scope_filters_concrete_workspace_scope() -> None:
     """Generated custom parent scopes filter concrete workspace scope ownership."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "{workspace_id}/plans/{workspace_id}.md"}},
+        {"planning": {"required": True, "plan_path": "{workspace_id}/plans/{workspace_id}.md"}},
     )
 
     assert internal_paths == ("ws_*/plans/ws_*.md", "ws_*/plans/**")
@@ -328,7 +361,7 @@ def test_custom_profile_parent_scope_filters_concrete_workspace_scope() -> None:
 def test_workspace_scoped_custom_plan_parent_scope_is_internal_artifact() -> None:
     """Workspace-id parent directories may still be treated as artifact scopes."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
-        {"planning": {"plan_path": "docs/runbooks/{workspace_id}/plan.md"}},
+        {"planning": {"required": True, "plan_path": "docs/runbooks/{workspace_id}/plan.md"}},
         workspace_id="ws_custom",
     )
 
