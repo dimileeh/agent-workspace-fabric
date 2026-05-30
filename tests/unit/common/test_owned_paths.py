@@ -183,8 +183,8 @@ def test_known_workspace_custom_plan_template_does_not_filter_other_ws_docs() ->
 
 
 @pytest.mark.unit
-def test_unknown_workspace_custom_plan_template_keeps_ws_glob() -> None:
-    """Unknown workspace ids retain broad artifact matching for pre-id checks."""
+def test_unknown_custom_plan_template_keeps_real_ws_docs() -> None:
+    """Unknown workspace ids filter generated artifacts without hiding real docs."""
     internal_paths = internal_plan_artifact_owned_paths_from_profile(
         {"planning": {"plan_path": "docs/{workspace_id}.md"}},
     )
@@ -192,11 +192,12 @@ def test_unknown_workspace_custom_plan_template_keeps_ws_glob() -> None:
     assert internal_paths == ("docs/ws_*.md",)
     assert interworkspace_owned_paths(
         [
-            "docs/ws_generated.md",
+            "docs/ws_0123456789abcdef01234567.md",
+            "docs/ws_protocol.md",
             "docs/README.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/README.md",)
+    ) == ("docs/ws_protocol.md", "docs/README.md")
 
 
 @pytest.mark.unit
@@ -234,11 +235,15 @@ def test_workspace_id_glob_matching_uses_configured_glob_prefix(
     internal_paths = ("docs/alternate/workspace_*.md",)
 
     assert is_internal_plan_artifact_owned_path(
-        "docs/alternate/workspace_123.md",
+        "docs/alternate/workspace_0123456789abcdef01234567.md",
         internal_plan_artifact_paths=internal_paths,
     )
     assert not is_internal_plan_artifact_owned_path(
-        "docs/alternate/ws_123.md",
+        "docs/alternate/workspace_protocol.md",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_0123456789abcdef01234567.md",
         internal_plan_artifact_paths=internal_paths,
     )
 

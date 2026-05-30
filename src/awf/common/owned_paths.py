@@ -11,6 +11,7 @@ INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = "ws_*"
+_WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
     r"^ws_[A-Za-z0-9_*?-]+(?:\.md|(?:\.conformance)?\.json)$"
 )
@@ -129,9 +130,9 @@ def _matches_configured_internal_plan_artifact_path(
 
 def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool:
     """Match a configured artifact path with a constrained workspace-id glob."""
-    # Keep the constrained regex in sync with _WORKSPACE_ID_GLOB's literal prefix.
+    # Keep the constrained regex in sync with generated workspace ids.
     glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
-    workspace_id_pattern = rf"{re.escape(glob_prefix)}[A-Za-z0-9_*?-]+"
+    workspace_id_pattern = rf"{re.escape(glob_prefix)}{_WORKSPACE_ID_SUFFIX_PATTERN}"
     pattern = re.escape(artifact_path).replace(
         re.escape(_WORKSPACE_ID_GLOB),
         workspace_id_pattern,

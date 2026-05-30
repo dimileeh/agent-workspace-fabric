@@ -986,8 +986,14 @@ class TestOwnedPathOverlapLookup:
     async def test_custom_internal_plan_artifact_overlap_does_not_report_interworkspace_overlap(
         self,
         session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Profile-configured planning artifacts are excluded from repository overlaps."""
+        monkeypatch.setattr(
+            repositories,
+            "new_workspace_id",
+            lambda: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         custom_profile = {
             "planning": {
                 "plan_path": "docs/alternate/{workspace_id}.md",
@@ -998,18 +1004,54 @@ class TestOwnedPathOverlapLookup:
         await _create_policy_workspace(
             session,
             repo,
-            owned_paths=["src/existing/**", "docs/alternate/ws_existing.md"],
+            owned_paths=[
+                "src/existing/**",
+                "docs/alternate/ws_aaaaaaaaaaaaaaaaaaaaaaaa.md",
+            ],
             resolved_profile=custom_profile,
         )
 
         overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
-            owned_paths=["src/requested/**", "docs/alternate/ws_existing.md"],
+            owned_paths=[
+                "src/requested/**",
+                "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
+            ],
             resolved_profile=custom_profile,
         )
 
         assert overlaps == []
+
+    @pytest.mark.unit
+    async def test_custom_profile_unknown_requested_workspace_keeps_real_ws_docs_overlap(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Requested real docs matching ws_* keep overlap checks before id assignment."""
+        custom_profile = {"planning": {"plan_path": "docs/{workspace_id}.md"}}
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["docs/ws_protocol.md"],
+            resolved_profile=custom_profile,
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["docs/ws_protocol.md"],
+            resolved_profile=custom_profile,
+        )
+
+        assert overlaps == [
+            repositories.OwnedPathOverlap(
+                workspace_id=existing.id,
+                existing_path="docs/ws_protocol.md",
+                requested_path="docs/ws_protocol.md",
+            )
+        ]
 
     @pytest.mark.unit
     async def test_internal_plan_artifact_filter_does_not_hide_real_overlap(
