@@ -11,6 +11,7 @@ INTERNAL_PLAN_ARTIFACT_DIR: Final = "docs/awf-plans"
 _PLANNING_PATH_FIELDS: Final = ("plan_path", "conformance_report_path")
 _WORKSPACE_ID_PLACEHOLDER: Final = "{workspace_id}"
 _WORKSPACE_ID_GLOB: Final = "ws_*"
+# Keep these suffix patterns in sync with workspace ID generation in awf.common.ids.
 _WORKSPACE_ID_SUFFIX_PATTERN: Final = r"[0-9a-f]{24}"
 _WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN: Final = r"[0-9]+"
 INTERNAL_PLAN_ARTIFACT_NAME_RE: Final = re.compile(
@@ -191,7 +192,12 @@ def interworkspace_owned_paths(
     *,
     internal_plan_artifact_paths: Iterable[str] = (),
 ) -> tuple[str, ...]:
-    """Owned paths that should participate in inter-workspace dependency checks."""
+    """Owned paths that should participate in inter-workspace dependency checks.
+
+    Filtering compares normalized paths, but the returned entries preserve each
+    caller-provided path string. Callers that compare returned paths must still
+    normalize before matching.
+    """
     filtered_paths: list[str] = []
     normalized_internal_paths = _normalized_internal_plan_artifact_paths(
         internal_plan_artifact_paths
