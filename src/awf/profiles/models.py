@@ -63,6 +63,7 @@ class ProfileDocker(BaseModel):
     compose_files: list[str] = Field(default_factory=list)
     project_directory: str = "."
     startup_timeout_seconds: int = Field(default=300, ge=1, le=7200)
+    dind_image: str = Field(default="docker:27-dind", min_length=1, max_length=512)
 
 
 class ProfileCommand(BaseModel):

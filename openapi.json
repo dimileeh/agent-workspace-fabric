@@ -2801,6 +2801,13 @@
             "title": "Compose Files",
             "type": "array"
           },
+          "dind_image": {
+            "default": "docker:27-dind",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Dind Image",
+            "type": "string"
+          },
           "mode": {
             "$ref": "#/components/schemas/DockerMode",
             "default": "none"
