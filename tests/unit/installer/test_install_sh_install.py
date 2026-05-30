@@ -251,19 +251,29 @@ def test_install_dir_missing_binary_fails_even_with_stale_path_awf(
 @pytest.mark.unit
 def test_invalid_method_is_a_bad_usage_error(harness: InstallerHarness) -> None:
     """An unsupported ``--method`` value is rejected before any work."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_pipx()
     result = harness.run(["--method", "conda"])
 
     assert result.returncode != 0
     assert "BAD_USAGE" in result.stderr
+    # Rejected during arg parsing: no platform probe or install tool is invoked.
+    assert harness.calls() == []
 
 
 @pytest.mark.unit
 def test_invalid_channel_is_a_bad_usage_error(harness: InstallerHarness) -> None:
     """An unsupported ``--channel`` value is rejected before any work."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_pipx()
     result = harness.run(["--channel", "nightly"])
 
     assert result.returncode != 0
     assert "BAD_USAGE" in result.stderr
+    # Rejected during arg parsing: no platform probe or install tool is invoked.
+    assert harness.calls() == []
 
 
 @pytest.mark.unit
