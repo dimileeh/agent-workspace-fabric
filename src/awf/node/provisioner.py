@@ -316,32 +316,44 @@ class Provisioner:
             # Capture companion logs/healthcheck state BEFORE marking failed and
             # before any later teardown — the failed containers still exist now.
             # Best-effort and must never mask the original ComposeOperationError.
-            diagnostics = await self._capture_service_startup_diagnostics(workspace_id)
-            if (
-                egress_plan is not None
-                and egress_decision is not None
-                and destination_category is not None
-            ):
-                try:
-                    await self._record_egress_audit_if_current(
-                        workspace_id=workspace_id,
-                        egress_plan=egress_plan,
-                        egress_decision=egress_decision,
-                        destination_category=destination_category,
-                    )
-                except Exception:
-                    _log.exception(
-                        "provisioner.egress_audit_record_failed",
-                        workspace_id=workspace_id,
-                        failure_context="stack_startup_failed",
-                    )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                failure_reason=FailureReason.service_startup_failure,
-                message=str(exc)[:2000],
-                from_status=WorkspaceStatus.provisioning,
-                event_payload=diagnostics,
-            )
+            #
+            # The capture/egress-audit awaits are wrapped so ``_mark_failed``
+            # runs in the ``finally`` even when one of them is interrupted by a
+            # ``BaseException`` the inner guards don't catch — notably
+            # ``asyncio.CancelledError`` (task cancellation during shutdown).
+            # Without this, an interrupted capture would skip ``_mark_failed``,
+            # leaving the workspace stuck in ``provisioning`` with secret leases
+            # un-revoked and the failed compose stack never finalized. The
+            # interrupting exception still propagates after teardown.
+            diagnostics: dict[str, Any] | None = None
+            try:
+                diagnostics = await self._capture_service_startup_diagnostics(workspace_id)
+                if (
+                    egress_plan is not None
+                    and egress_decision is not None
+                    and destination_category is not None
+                ):
+                    try:
+                        await self._record_egress_audit_if_current(
+                            workspace_id=workspace_id,
+                            egress_plan=egress_plan,
+                            egress_decision=egress_decision,
+                            destination_category=destination_category,
+                        )
+                    except Exception:
+                        _log.exception(
+                            "provisioner.egress_audit_record_failed",
+                            workspace_id=workspace_id,
+                            failure_context="stack_startup_failed",
+                        )
+            finally:
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    failure_reason=FailureReason.service_startup_failure,
+                    message=str(exc)[:2000],
+                    from_status=WorkspaceStatus.provisioning,
+                    event_payload=diagnostics,
+                )
             raise
         except Exception as exc:
             _log.exception(

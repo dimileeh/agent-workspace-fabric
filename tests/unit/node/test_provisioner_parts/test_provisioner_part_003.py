@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from collections.abc import AsyncIterator
@@ -655,6 +656,80 @@ class TestServiceStartupDiagnostics:
             assert failed_event.payload["companion_logs_capture_error"].startswith(
                 "CAPTURE_FAILED:"
             )
+
+    @pytest.mark.unit
+    async def test_cancellation_during_diagnostics_capture_still_marks_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        # Cancellation is a BaseException, so it escapes the capturer's broad
+        # ``except Exception`` guard. If the diagnostics await is interrupted by
+        # task cancellation (e.g. during shutdown), ``_mark_failed`` must still
+        # run — otherwise the workspace stays ``provisioning`` and the secret
+        # lease issued before stack launch is never revoked. ``_mark_failed``
+        # runs in a ``finally`` so the failure path is finalized even though the
+        # cancellation itself still propagates (it is never swallowed).
+        raw_ref = "provider/path/not-a-token-value"
+
+        class _CancellingDiagnostics:
+            async def capture_companion_diagnostics(
+                self, *, project_name: str, workspace_id: str, tail_lines: int = 200
+            ) -> dict[str, Any]:
+                del project_name, workspace_id, tail_lines
+                raise asyncio.CancelledError
+
+        profile = {
+            "name": "cancelled-secrets",
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "kind": "env",
+                    "target": "API_TOKEN",
+                    "provider": "vault",
+                    "ref": raw_ref,
+                }
+            ],
+        }
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingComposeLauncher(),
+            service_diagnostics=_CancellingDiagnostics(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=profile,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        # The cancellation still propagates out of ``provision`` — never swallowed.
+        with pytest.raises(asyncio.CancelledError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            # ``_mark_failed`` ran in the ``finally`` despite the cancellation.
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            failed_event = _latest_failed_event(reloaded.events)
+            assert failed_event.reason_code == "SERVICE_STARTUP_FAILURE"
+            # The lease issued before stack launch is revoked through the normal
+            # failure path rather than leaking.
+            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
+            assert len(leases) == 1
+            assert leases[0].status == "revoked"
+            assert leases[0].revoke_reason_code == "PROVISIONING_FAILED"
 
     @pytest.mark.unit
     async def test_no_capturer_keeps_failure_event_payload_null(
