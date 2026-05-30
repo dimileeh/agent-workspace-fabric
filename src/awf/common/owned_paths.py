@@ -26,9 +26,8 @@ def normalize_owned_path(path: str) -> str:
     return "/".join(segments)
 
 
-def is_internal_plan_artifact_owned_path(path: str) -> bool:
-    """Return true for AWF-generated planning/conformance artifact paths."""
-    normalized = normalize_owned_path(path)
+def _is_internal_plan_artifact_normalized(normalized: str) -> bool:
+    """Return true for normalized AWF-generated planning/conformance artifact paths."""
     prefix = f"{INTERNAL_PLAN_ARTIFACT_DIR}/"
     if not normalized.startswith(prefix):
         return False
@@ -36,10 +35,17 @@ def is_internal_plan_artifact_owned_path(path: str) -> bool:
     return "/" not in filename and INTERNAL_PLAN_ARTIFACT_NAME_RE.fullmatch(filename) is not None
 
 
+def is_internal_plan_artifact_owned_path(path: str) -> bool:
+    """Return true for AWF-generated planning/conformance artifact paths."""
+    return _is_internal_plan_artifact_normalized(normalize_owned_path(path))
+
+
 def interworkspace_owned_paths(paths: Iterable[str]) -> tuple[str, ...]:
     """Owned paths that should participate in inter-workspace dependency checks."""
-    return tuple(
-        path
-        for path in paths
-        if normalize_owned_path(path) != "" and not is_internal_plan_artifact_owned_path(path)
-    )
+    filtered_paths: list[str] = []
+    for path in paths:
+        normalized = normalize_owned_path(path)
+        if normalized == "" or _is_internal_plan_artifact_normalized(normalized):
+            continue
+        filtered_paths.append(path)
+    return tuple(filtered_paths)

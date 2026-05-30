@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from awf.common import owned_paths
 from awf.common.owned_paths import (
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
@@ -85,3 +86,28 @@ def test_interworkspace_owned_paths_filters_only_internal_plan_artifacts() -> No
         "src/awf/**",
         "docs/runbooks/**",
     )
+
+
+@pytest.mark.unit
+def test_interworkspace_owned_paths_normalizes_each_path_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inter-workspace filtering reuses each normalized path for classification."""
+    calls: list[str] = []
+    real_normalize_owned_path = owned_paths.normalize_owned_path
+
+    def counting_normalize_owned_path(path: str) -> str:
+        calls.append(path)
+        return real_normalize_owned_path(path)
+
+    monkeypatch.setattr(owned_paths, "normalize_owned_path", counting_normalize_owned_path)
+
+    paths = (
+        "",
+        "docs/awf-plans/ws_123.json",
+        "src/awf/**",
+        "./docs/awf-plans/ws_456.md",
+    )
+
+    assert owned_paths.interworkspace_owned_paths(paths) == ("src/awf/**",)
+    assert calls == list(paths)
