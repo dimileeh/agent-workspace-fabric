@@ -434,7 +434,7 @@ def _profile_for_workspace(
     )
 
 
-def _profile_from_resolved_profile_snapshot(
+def _realign_profile_from_resolved_profile_snapshot(
     ws: Workspace,
     snapshot: dict[str, Any] | None,
     *,

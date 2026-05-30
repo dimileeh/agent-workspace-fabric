@@ -23,7 +23,7 @@ from sqlalchemy import (
 
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
-from awf.control.executor.helpers import _profile_from_resolved_profile_snapshot
+from awf.control.executor.helpers import _realign_profile_from_resolved_profile_snapshot
 from awf.control.executor.metadata import (
     _metadata_int,
     _metadata_number,
@@ -114,7 +114,7 @@ async def _sync_resolved_profile(
         workspace_id=workspace_id,
         profile=profile,
     )
-    persisted_profile = _profile_from_resolved_profile_snapshot(
+    persisted_profile = _realign_profile_from_resolved_profile_snapshot(
         ws,
         persisted_profile_snapshot,
         planning_max_iterations_default=planning_max_iterations_default,

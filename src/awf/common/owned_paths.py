@@ -75,6 +75,8 @@ def _internal_plan_artifact_paths_from_template(
     """Render configured planning artifact templates into matchable owned paths."""
     normalized = normalize_owned_path(template)
     if _WORKSPACE_ID_PLACEHOLDER not in normalized:
+        # Fixed plan paths are shared repository files, not per-workspace
+        # generated artifacts, so they must remain overlap blockers.
         return ()
 
     replacement = workspace_id or _WORKSPACE_ID_GLOB

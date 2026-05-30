@@ -15,7 +15,7 @@ from awf.control.executor import execution_validation as executor_execution_vali
 from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.helpers import (
     _profile_for_workspace,
-    _profile_from_resolved_profile_snapshot,
+    _realign_profile_from_resolved_profile_snapshot,
 )
 from awf.control.executor.state_ops import (
     _persist_resolved_profile_snapshot_if_missing,
@@ -734,7 +734,7 @@ async def test_sync_resolved_profile_stamps_runtime_snapshot_when_missing(
 
 
 @pytest.mark.unit
-def test_profile_from_resolved_snapshot_realigns_workspace_and_active_profile() -> None:
+def test_realign_profile_from_resolved_snapshot_realigns_workspace_and_active_profile() -> None:
     stale_snapshot = _custom_planning_profile("stale-worker").model_dump(
         mode="json",
         by_alias=True,
@@ -757,7 +757,7 @@ def test_profile_from_resolved_snapshot_realigns_workspace_and_active_profile() 
         resolved_profile=stale_snapshot,
     )
 
-    profile = _profile_from_resolved_profile_snapshot(
+    profile = _realign_profile_from_resolved_profile_snapshot(
         workspace,
         competing_snapshot,
     )
