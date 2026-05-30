@@ -4,7 +4,7 @@
 
 Every `docker compose up` in a DinD workspace prints:
 
-```
+```text
 level=warning msg="Docker Compose requires buildx plugin to be installed"
 ```
 
