@@ -193,7 +193,18 @@ async def _run_fix_cycle(
                 # captured is None: a transient capture failure already cleared
                 # the verdict so the next poll re-attempts capture — don't
                 # permanently downgrade a valid defer to needs_human.
-            elif verdict not in {"needs_human", "agent_failed"}:
+            elif verdict in {"needs_human", "agent_failed"}:
+                # A thread re-addressed to needs_human/agent_failed in a later
+                # pass must drop out of the rollback/resolve sets an earlier
+                # capture added it to. Otherwise a push failure would clear the
+                # verdict (forcing a pointless re-address of feedback already
+                # judged to need a human), and the stale queued id could be
+                # resolved on the now-superseded defer.
+                if t.thread_id in publish_dependent_ids:
+                    publish_dependent_ids.remove(t.thread_id)
+                if t.thread_id in threads_to_resolve:
+                    threads_to_resolve.remove(t.thread_id)
+            else:
                 threads_to_resolve.append(t.thread_id)
                 publish_dependent_ids.append(t.thread_id)
         for c in reviews:

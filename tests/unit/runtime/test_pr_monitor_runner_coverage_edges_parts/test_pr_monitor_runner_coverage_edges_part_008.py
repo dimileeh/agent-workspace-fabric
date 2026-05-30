@@ -1156,6 +1156,7 @@ async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
     assert state.threads_addressed_ids.get("T_transient") != "needs_human"
 
 
+@pytest.mark.unit
 async def test_address_thread_stashes_only_defer_reason() -> None:
     # _address_thread stashes the agent's DEFER reason in state (for the
     # deferred-capture issue) only when there is a reason, the verdict is defer,
@@ -1212,3 +1213,10 @@ async def test_address_thread_stashes_only_defer_reason() -> None:
     s3 = MonitorState()
     assert await _call(_runner(VerdictResult(verdict="defer", reason=None)), s3) == "defer"
     assert reason_key not in s3.threads_addressed_ids
+
+    # A re-triage with a bare defer CLEARS a stale reason from a prior pass.
+    s4 = MonitorState()
+    await _call(_runner(VerdictResult(verdict="defer", reason="old reason")), s4)
+    assert s4.threads_addressed_ids[reason_key] == "old reason"
+    await _call(_runner(VerdictResult(verdict="defer", reason=None)), s4)
+    assert reason_key not in s4.threads_addressed_ids

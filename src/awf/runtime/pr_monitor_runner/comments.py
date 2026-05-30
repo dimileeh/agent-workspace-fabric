@@ -75,8 +75,14 @@ async def _address_thread(
     )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
-    if state is not None and result.verdict == "defer" and result.reason:
-        state.mark_addressed(_defer_reason_state_key(thread.thread_id), result.reason)
+    # On any defer, overwrite/clear the stored reason so a re-triage with a bare
+    # DEFER (no reason) can't leave a stale reason from a prior pass.
+    if state is not None and result.verdict == "defer":
+        reason_key = _defer_reason_state_key(thread.thread_id)
+        if result.reason:
+            state.mark_addressed(reason_key, result.reason)
+        else:
+            state.threads_addressed_ids.pop(reason_key, None)
     return result.verdict
 
 
