@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.db.repositories as repositories
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.api.schemas import WorkspaceCreateRequest
 from awf.common.config import Settings
@@ -417,6 +418,88 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
     assert preflight["model"] == "gpt-5.5"
     assert preflight["override_used"] is True
     assert preflight["override_reason"] == "retry after local auth repair"
+
+
+@pytest.mark.unit
+async def test_retry_overlap_lookup_uses_source_workspace_id_for_requested_filtering(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    workspace_ids = iter(
+        [
+            "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "ws_bbbbbbbbbbbbbbbbbbbbbbbb",
+            "ws_cccccccccccccccccccccccc",
+        ]
+    )
+    monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(workspace_ids))
+    requested_path = "docs/ws_0123456789abcdef01234567.md"
+    planning = {"plan_path": "docs/{workspace_id}.md"}
+    payload_data = _request_with_preflight_override().model_dump(mode="python")
+    payload_data["task"]["owned_paths"] = [requested_path]
+    payload_data["workspace"] = {
+        "profile_ref": None,
+        "profile": {"name": "custom-planning", "planning": planning},
+    }
+    payload = WorkspaceCreateRequest.model_validate(payload_data)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        existing = await repo.create(
+            repo_url=payload.repo.url,
+            branch_base=payload.repo.base_branch,
+            task_title="Active docs owner",
+            task_prompt="Own a real ws-shaped docs file.",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            owned_paths=[requested_path],
+            resolved_profile={"planning": planning},
+        )
+        source = await create_workspace_row(
+            session,
+            payload,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retry.new_workspace.id,
+                        WorkspaceEvent.event_type == "workspace.owned_path_overlap_risk",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert len(events) == 1
+    assert events[0].payload["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+    assert events[0].payload["workspace_ids"] == [existing.id]
+    assert events[0].payload["overlaps"] == [
+        {
+            "workspace_id": existing.id,
+            "existing_path": requested_path,
+            "requested_path": requested_path,
+        }
+    ]
 
 
 async def _mark_failed(

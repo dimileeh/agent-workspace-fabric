@@ -430,6 +430,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
         resolved_profile: Mapping[str, object] | None = None,
+        workspace_id: str | None = None,
     ) -> list[OwnedPathConflict]:
         """Return active owned-path overlaps in the legacy conflict shape."""
         overlaps = await self.find_active_owned_path_overlaps(
@@ -437,6 +438,7 @@ class WorkspaceRepository:
             branch_base=branch_base,
             owned_paths=owned_paths,
             resolved_profile=resolved_profile,
+            workspace_id=workspace_id,
         )
         return [
             OwnedPathConflict(
@@ -454,13 +456,15 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
         resolved_profile: Mapping[str, object] | None = None,
+        workspace_id: str | None = None,
     ) -> list[OwnedPathOverlap]:
         """Return active inter-workspace owned-path overlaps for merge safety."""
         requested_paths = list(
             interworkspace_owned_paths(
                 owned_paths,
                 internal_plan_artifact_paths=internal_plan_artifact_owned_paths_from_profile(
-                    resolved_profile
+                    resolved_profile,
+                    workspace_id=workspace_id,
                 ),
             )
         )

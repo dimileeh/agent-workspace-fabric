@@ -1054,6 +1054,43 @@ class TestOwnedPathOverlapLookup:
         ]
 
     @pytest.mark.unit
+    async def test_known_requested_workspace_id_does_not_filter_other_ws_shaped_docs_path(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Known requested ids keep real ws-shaped docs paths in overlap checks."""
+        monkeypatch.setattr(
+            repositories,
+            "new_workspace_id",
+            lambda: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        custom_profile = {"planning": {"plan_path": "docs/{workspace_id}.md"}}
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["docs/ws_0123456789abcdef01234567.md"],
+            resolved_profile=custom_profile,
+        )
+
+        overlaps = await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["docs/ws_0123456789abcdef01234567.md"],
+            resolved_profile=custom_profile,
+            workspace_id="ws_bbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+
+        assert overlaps == [
+            repositories.OwnedPathOverlap(
+                workspace_id=existing.id,
+                existing_path="docs/ws_0123456789abcdef01234567.md",
+                requested_path="docs/ws_0123456789abcdef01234567.md",
+            )
+        ]
+
+    @pytest.mark.unit
     async def test_internal_plan_artifact_filter_does_not_hide_real_overlap(
         self,
         session: AsyncSession,

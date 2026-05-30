@@ -133,6 +133,7 @@ async def retry_workspace_row(
         branch_base=source.branch_base,
         owned_paths=list(source.owned_paths),
         resolved_profile=source.resolved_profile,
+        workspace_id=source.id,
     )
     retried_task_policy = _retry_task_policy(
         source,
