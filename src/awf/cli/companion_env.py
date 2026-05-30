@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import cast
 
 from awf.api.schemas_companions import (
-    _ENVIRONMENT_KEY_PATTERN,
     ENV_KEY_MAX_LENGTH,
-    _value_has_compose_interpolation,
+    ENVIRONMENT_KEY_PATTERN,
+    value_has_compose_interpolation,
 )
 from awf.cli.env_file import parse_dotenv_file
 
@@ -179,13 +179,13 @@ def _validate_env_keys(
     """Validate env keys and values, warn and return the set of keys to skip.
 
     Uses the same patterns as the server-side companion env validation
-    (``_ENVIRONMENT_KEY_PATTERN`` and ``_value_has_compose_interpolation``).
+    (``ENVIRONMENT_KEY_PATTERN`` and ``value_has_compose_interpolation``).
 
     Warnings go to stderr with the key name ONLY — never the value.
     """
     skip: set[str] = set()
     for key in file_vars:
-        if not _ENVIRONMENT_KEY_PATTERN.fullmatch(key):
+        if not ENVIRONMENT_KEY_PATTERN.fullmatch(key):
             _warn(f"{comp_name!r}: skipping env key {key!r}: invalid key name pattern")
             skip.add(key)
             continue
@@ -196,7 +196,7 @@ def _validate_env_keys(
             skip.add(key)
             continue
         value = file_vars[key]
-        if _value_has_compose_interpolation(value):
+        if value_has_compose_interpolation(value):
             _warn(
                 f"{comp_name!r}: skipping env key {key!r}: "
                 f"value contains Docker Compose interpolation syntax"

@@ -19,11 +19,10 @@ ServiceName = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA
 CompanionPath = Annotated[str, Field(min_length=1, max_length=1024)]
 CompanionVolume = tuple[CompanionPath, CompanionPath]
 _ENVIRONMENT_KEY_PATTERN_TEXT = r"^[A-Za-z_][A-Za-z0-9_]*$"
-EnvironmentKey = Annotated[
-    str, Field(min_length=1, max_length=256, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
-]
-
 ENV_KEY_MAX_LENGTH = 256
+EnvironmentKey = Annotated[
+    str, Field(min_length=1, max_length=ENV_KEY_MAX_LENGTH, pattern=_ENVIRONMENT_KEY_PATTERN_TEXT)
+]
 _ENVIRONMENT_KEY_PATTERN = re.compile(_ENVIRONMENT_KEY_PATTERN_TEXT)
 _ENVIRONMENT_NAME_START_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _ENVIRONMENT_VALUE_INTERPOLATION_PATTERN_TEXT = r"(^|[^$])(?:\$\$)*\$(?:[A-Za-z_]|\{[A-Za-z_])"
@@ -126,6 +125,10 @@ def _value_has_compose_interpolation(value: str) -> bool:
             return True
         cursor = next_index
     return False
+
+
+ENVIRONMENT_KEY_PATTERN = _ENVIRONMENT_KEY_PATTERN
+value_has_compose_interpolation = _value_has_compose_interpolation
 
 
 def _is_absolute_or_escaping_path(value: str) -> bool:
