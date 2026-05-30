@@ -432,12 +432,39 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.agent_runtime_image == "custom-agent-runtime:dev"
     assert ("DATABASE_URL", "postgresql://awf@postgres/awf") in spec.agent_environment
     assert spec.docker_mode == "dind"
+    assert spec.dind_image == "docker:27-dind"
     assert spec.git_name == "AWF Agent"
     assert spec.git_email == "awf@example.com"
     assert [service.name for service in spec.services] == ["postgres"]
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "rw"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_passes_profile_dind_image_to_spec() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        docker=ProfileDocker(
+            mode=DockerMode.dind,
+            dind_image="ghcr.io/example/dind:buildx",
+        ),
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=profile,
+        )
+    )
+
+    assert compose.specs[0].dind_image == "ghcr.io/example/dind:buildx"
 
 
 @pytest.mark.unit

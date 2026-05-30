@@ -610,6 +610,30 @@ def test_environment_identity_digest_is_stable_across_mapping_and_service_order(
 
 
 @pytest.mark.unit
+def test_environment_identity_digest_changes_for_dind_daemon_image() -> None:
+    # The DinD daemon image is rendered into the per-workspace compose stack, so
+    # two runs that differ only by docker.dind_image must not collide on the
+    # environment identity digest (else validation provenance treats different
+    # Docker daemons as identical).
+    baseline = _identity_profile()
+    overridden = _identity_profile(
+        docker={
+            "mode": "dind",
+            "compose_files": ["compose.yml", "compose.override.yml"],
+            "project_directory": ".",
+            "startup_timeout_seconds": 120,
+            "dind_image": "ghcr.io/example/dind:buildx",
+        }
+    )
+
+    assert environment_identity_inputs(baseline)["docker"]["dind_image"] == "docker:27-dind"
+    assert (
+        environment_identity_inputs(overridden)["docker"]["dind_image"]
+        == "ghcr.io/example/dind:buildx"
+    )
+    assert environment_identity_digest(baseline) != environment_identity_digest(overridden)
+
+
 def test_environment_identity_digest_changes_for_parallel_coverage_policy() -> None:
     serial = _identity_profile()
     parallel = _identity_profile(

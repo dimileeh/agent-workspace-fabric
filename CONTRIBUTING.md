@@ -85,8 +85,9 @@ then re-run the same command or `pre-commit run --all-files` before committing.
 ### Build the Agent Runtime Image
 
 AWF workspaces use `awf-agent-runtime:latest` unless configured otherwise.
-The image includes the Docker CLI and Docker Compose plugin so DinD profiles
-can run project Compose diagnostics inside the workspace sidecar. Rebuild this
+The image includes the Docker CLI, Docker Compose plugin, and the Docker
+Buildx plugin so DinD profiles can run project Compose diagnostics (with
+BuildKit, not the legacy builder) inside the workspace sidecar. Rebuild this
 image whenever the runtime Dockerfile or those Docker tooling packages change.
 
 ```bash
