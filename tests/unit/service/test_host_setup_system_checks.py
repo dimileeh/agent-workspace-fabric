@@ -553,6 +553,30 @@ def test_default_command_runner_returns_none_when_unlaunchable(
 
 
 @pytest.mark.unit
+def test_default_command_runner_decodes_with_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe output must decode with errors='replace' so a non-UTF-8 locale or a
+
+    binary emitting raw bytes cannot raise UnicodeDecodeError (a ValueError
+    subclass the probe except-tuple does not catch) and crash ``awf setup``.
+    """
+    import subprocess
+
+    captured: dict[str, object] = {}
+
+    def fake_run(*_a: object, **kwargs: object) -> _FakeCompleted:
+        captured.update(kwargs)
+        return _FakeCompleted(0, "out", "err")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = system_checks._default_command_runner(["probe"])
+    assert result is not None
+    assert captured["text"] is True
+    assert captured["errors"] == "replace"
+
+
+@pytest.mark.unit
 def test_default_port_available_detects_in_use_and_free() -> None:
     """Verify the default port probe distinguishes in-use from free ports."""
     import socket

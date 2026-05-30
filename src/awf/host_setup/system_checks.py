@@ -113,6 +113,7 @@ def _default_command_runner(
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
