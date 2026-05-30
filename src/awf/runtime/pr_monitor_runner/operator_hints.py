@@ -49,7 +49,7 @@ async def _run_operator_hint_cycle(
     )
     if dirty_result is not None:
         return cast(_GitPushResult, dirty_result)
-    _operation_start_head, head_result = await self._repair_operation_start_head_result(
+    operation_start_head, head_result = await self._repair_operation_start_head_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         operation_type="operator_hint_repair",
@@ -114,8 +114,8 @@ async def _run_operator_hint_cycle(
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
             base_branch=base_branch or "",
-            operation_start_head=pr_head_sha,
-            source_head_sha=pr_head_sha,
+            operation_start_head=operation_start_head,
+            source_head_sha=operation_start_head,
         )
         if protected_scope_block is not None
         else await self._validated_git_push_result(

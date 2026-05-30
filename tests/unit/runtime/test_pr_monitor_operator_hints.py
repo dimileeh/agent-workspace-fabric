@@ -34,7 +34,8 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
-from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -247,6 +248,87 @@ async def test_operator_hint_repair_converts_protected_scope_diff_error_to_push_
     assert captured["remote_branch"] == "awf/ws_operator_hint_scope"
     assert isinstance(captured["exc"], ProtectedScopeDiffError)
     assert state.pending_operator_hint == hint
+
+
+@pytest.mark.unit
+async def test_operator_hint_repair_uses_captured_operation_start_head_for_protected_scope(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="repair must roll back only the current operation delta",
+        operation_id="op_leftover_worktree",
+        requested_at="2026-05-30T12:00:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    captured: dict[str, object] = {}
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _leftover_worktree_start_head(**_kwargs: object) -> tuple[str, None]:
+        return ("leftover-worktree-head", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _protected_scope_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        )
+
+    async def _capture_protected_scope_repair(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _pushed_head(_worktree_path: Path) -> str:
+        return "pushed-head"
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _leftover_worktree_start_head,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_block)
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_commits_before_push",
+        _capture_protected_scope_repair,
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _pushed_head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_leftover_head",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="pr-head-sha",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_leftover_head",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert captured["operation_start_head"] == "leftover-worktree-head"
+    assert captured["source_head_sha"] == "leftover-worktree-head"
+    assert state.pending_operator_hint is None
+    assert state.last_push_sha == "pushed-head"
 
 
 @pytest.mark.unit
