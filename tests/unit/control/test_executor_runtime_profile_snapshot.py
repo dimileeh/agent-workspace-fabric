@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.executor import execution_flow as executor_execution_flow
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor.helpers import (
     _profile_for_workspace,
@@ -331,6 +332,113 @@ async def test_sync_resolved_profile_returns_winning_snapshot_and_realigns_works
     assert profile.name == "first-worker"
     assert profile.planning.max_iterations == 4
     assert in_memory_workspace.resolved_profile == competing_snapshot
+
+
+@pytest.mark.unit
+async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    frozen_snapshot = _custom_planning_profile("first-writer").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    workspace = Workspace(
+        id="ws_frozen_profile",
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the repo profile.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=frozen_snapshot,
+    )
+    events: list[str] = []
+
+    class FrozenProfileExecutor:
+        _config = SimpleNamespace(
+            agent_idle_timeout_seconds=30,
+            agent_wall_timeout_seconds=60,
+            compose_projects_root=tmp_path / "compose",
+            planning_max_iterations_default=6,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        _log_store = None
+        _runner = object()
+        _usage_sampler = None
+
+        async def _claim_ready(self, *args: object, **kwargs: object) -> Workspace:
+            return workspace
+
+        async def _recheck_status(self, *args: object, **kwargs: object) -> bool:
+            return True
+
+        async def _reject_unsupported_task_kind(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> bool:
+            return False
+
+        async def _block_open_pr_reexecution_without_recovery(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            return SimpleNamespace(blocked=False, recovery=None)
+
+        async def _dispatch_non_feature_task_kind(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> bool:
+            return False
+
+        async def _prepare_conformance_salvage_for_execution(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            return None
+
+        def _defaults_for(self, *args: object) -> None:
+            return None
+
+        async def _mark_failed(self, *args: object, **kwargs: object) -> None:
+            events.append("failed")
+
+    def fake_get_adapter(*args: object, **kwargs: object) -> object:
+        events.append("adapter")
+        return object()
+
+    async def fail_sync_resolved_profile(*args: object, **kwargs: object) -> WorkspaceProfile:
+        raise AssertionError("frozen resolved_profile should skip persistence sync")
+
+    async def fake_repair_agent_runtime_ownership(*args: object, **kwargs: object) -> bool:
+        events.append("repair")
+        return False
+
+    monkeypatch.setattr(executor_execution_flow, "get_adapter", fake_get_adapter)
+    monkeypatch.setattr(
+        executor_execution_flow,
+        "_sync_resolved_profile",
+        fail_sync_resolved_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_flow,
+        "repair_agent_runtime_ownership",
+        fake_repair_agent_runtime_ownership,
+    )
+
+    await executor_execution_flow.execute(
+        FrozenProfileExecutor(),
+        workspace.id,
+    )
+
+    assert events == ["adapter", "repair", "failed"]
 
 
 @pytest.mark.unit

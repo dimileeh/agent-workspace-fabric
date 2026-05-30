@@ -243,13 +243,14 @@ async def execute(
             worktree_path=worktree_path,
             planning_max_iterations_default=(self._config.planning_max_iterations_default),
         )
-        profile = await _sync_resolved_profile(
-            self,
-            ws=ws,
-            workspace_id=workspace_id,
-            profile=profile,
-            planning_max_iterations_default=(self._config.planning_max_iterations_default),
-        )
+        if not ws.resolved_profile:
+            profile = await _sync_resolved_profile(
+                self,
+                ws=ws,
+                workspace_id=workspace_id,
+                profile=profile,
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
+            )
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,
