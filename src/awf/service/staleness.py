@@ -433,6 +433,7 @@ def _target_changes_are_only_plan_artifacts(
     *,
     internal_plan_artifact_paths: Iterable[str] = (),
 ) -> bool:
+    """Return true when all target changes are advisory planning artifacts."""
     return bool(changed_paths) and all(
         _is_plan_artifact_path(
             path,

@@ -43,5 +43,21 @@ Follow-up after later owned-path normalization review commit:
 - `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py -q`:
   21 passed.
 
+Follow-up after later custom plan-artifact profile commit:
+
+- Added behavior-neutral docstrings to the profile-derived internal artifact
+  helpers in `src/awf/common/owned_paths.py` and the updated staleness
+  plan-artifact-only helper in `src/awf/service/staleness.py`.
+- Targeted AST audit passed for 6 callables:
+  `_internal_plan_artifact_paths_from_template`,
+  `_normalized_internal_plan_artifact_paths`,
+  `_matches_configured_internal_plan_artifact_path`,
+  `_workspace_id_glob_path_matches`, `_has_wildcard`, and
+  `_target_changes_are_only_plan_artifacts`.
+- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py src/awf/service/staleness.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py::test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_paths tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_plan_artifact_only_overlap_is_advisory_without_target_advanced -q`:
+  2 passed.
+
 Full AWF/GitHub validation, coverage gates, and any broad external docstring
 coverage check are intentionally left to AWF after agent completion.

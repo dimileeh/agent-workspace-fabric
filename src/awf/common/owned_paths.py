@@ -60,6 +60,7 @@ def _internal_plan_artifact_paths_from_template(
     *,
     workspace_id: str | None,
 ) -> tuple[str, ...]:
+    """Render configured planning artifact templates into matchable owned paths."""
     normalized = normalize_owned_path(template)
     if _WORKSPACE_ID_PLACEHOLDER not in normalized:
         return ()
@@ -80,6 +81,7 @@ def _internal_plan_artifact_paths_from_template(
 
 
 def _normalized_internal_plan_artifact_paths(paths: Iterable[str]) -> tuple[str, ...]:
+    """Normalize configured internal artifact paths while preserving order."""
     return tuple(dict.fromkeys(normalize_owned_path(path) for path in paths))
 
 
@@ -107,6 +109,7 @@ def _matches_configured_internal_plan_artifact_path(
     normalized: str,
     internal_plan_artifact_paths: Iterable[str],
 ) -> bool:
+    """Return true when a normalized path matches configured artifact paths."""
     for artifact_path in internal_plan_artifact_paths:
         if not artifact_path:
             continue
@@ -124,6 +127,7 @@ def _matches_configured_internal_plan_artifact_path(
 
 
 def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool:
+    """Match a configured artifact path with a constrained workspace-id glob."""
     workspace_id_pattern = r"ws_[A-Za-z0-9_*?-]+"
     pattern = re.escape(artifact_path).replace(
         re.escape(_WORKSPACE_ID_GLOB),
@@ -133,6 +137,7 @@ def _workspace_id_glob_path_matches(normalized: str, artifact_path: str) -> bool
 
 
 def _has_wildcard(path: str) -> bool:
+    """Return true when a path pattern contains fnmatch wildcards."""
     return "*" in path or "?" in path or "[" in path
 
 

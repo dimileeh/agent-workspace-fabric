@@ -20,6 +20,9 @@ PR's plan-artifact nonblocking overlap work.
 - A later `owned_paths` review follow-up added a nested test helper in
   `tests/unit/common/test_owned_paths.py`; include that helper in this
   comment's diff-scoped docstring cleanup.
+- A later custom plan-artifact follow-up added profile-derived planning helpers
+  in `src/awf/common/owned_paths.py`; include those helpers in this
+  comment's diff-scoped docstring cleanup without changing behavior.
 
 ## Requirements Checklist
 
