@@ -558,28 +558,25 @@ class WorkspaceControlService:
                 pr_number=workspace.pr_number,
                 head_sha=workspace.monitor_last_commit_sha,
             )
+            requested_at = utcnow()
+            hint = OperatorHint(
+                reason=reason_text,
+                operation_id=operation.id,
+                requested_at=requested_at.isoformat(),
+                reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+            )
+            persist_operator_hint(monitor_state, hint)
             if (
                 past_settle
                 and workspace.pr_number is not None
                 and workspace.monitor_last_commit_sha
             ):
-                requested_at = utcnow()
-                hint = OperatorHint(
-                    reason=reason_text,
-                    operation_id=operation.id,
-                    requested_at=requested_at.isoformat(),
-                    reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-                )
-                persist_operator_hint(monitor_state, hint)
                 arm_operator_hint_freeze(
                     monitor_state,
                     pr_number=workspace.pr_number,
                     head_sha=workspace.monitor_last_commit_sha,
                     now=requested_at,
                 )
-                workspace.monitor_threads_addressed = monitor_state
-                hint_state_changed = True
-                pending_operator_hint = build_pending_operator_hint_payload(hint)
                 warnings.append(
                     {
                         "warning_code": _REMONITOR_PAST_SETTLE_WARNING_CODE,
@@ -589,6 +586,9 @@ class WorkspaceControlService:
                         ),
                     }
                 )
+            workspace.monitor_threads_addressed = monitor_state
+            hint_state_changed = True
+            pending_operator_hint = build_pending_operator_hint_payload(hint)
         claims_reset = _claim_reset_snapshot(workspace)
         claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(

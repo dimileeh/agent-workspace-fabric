@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
@@ -786,6 +788,7 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "execution_claimed_by": "execution-worker",
         "execution_claim_expires_at": execution_expiry.isoformat(),
     }
+    pending_hint = events[0].payload["pending_operator_hint"]
 
     assert response.operation_id == replay.operation_id
     assert response.status == WorkspaceStatus.monitoring_pr
@@ -805,12 +808,59 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "source_base_sha": "b" * 40,
     }
     assert events[0].event_type == "workspace.remonitor_requested"
+    assert pending_hint == {
+        "operation_id": operations[0].id,
+        "reason": "worker restarted",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": pending_hint["requested_at"],
+        "status": "pending",
+    }
     assert events[0].payload == {
         "reason": "worker restarted",
         "operation_id": operations[0].id,
         "claims_reset": expected_snapshot,
         "expected_version": 1,
+        "pending_operator_hint": pending_hint,
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_before_settle_persists_operator_hint_without_freeze(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
+    workspace.pr_number = 44
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason="please repair the reviewer note",
+        idempotency_key="remonitor-pre-settle-hint",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+
+    assert response.warnings == []
+    assert workspace.version == 2
+    assert persisted_hint == {
+        "operation_id": operations[0].id,
+        "reason": "please repair the reviewer note",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_at": persisted_hint["requested_at"],
+        "status": "pending",
+    }
+    assert all("initial_review_grace" not in key for key in monitor_state)
+    assert all("non_check_reviewer_settle" not in key for key in monitor_state)
+    assert "warnings" not in operations[0].result
+    assert events[0].payload["pending_operator_hint"] == persisted_hint
+    assert "warnings" not in events[0].payload
 
 
 @pytest.mark.unit
