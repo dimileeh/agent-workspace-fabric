@@ -35,6 +35,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.4.0",
     "pyyaml>=6.0.0",
+    "keyring>=25.0.0",
 ]
 
 [project.optional-dependencies]
