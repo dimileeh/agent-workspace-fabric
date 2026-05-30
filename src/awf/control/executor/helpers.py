@@ -427,6 +427,9 @@ def _profile_for_workspace(
         planning_max_iterations_default,
         raw_profile=ws.requested_profile,
     )
+    # Side effect: stamp the snapshot only when resolving from scratch. The
+    # persistence sync can then freeze it or realign this object if another
+    # executor won the first-write race.
     ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
     return profile
 

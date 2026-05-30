@@ -12,7 +12,10 @@ from awf.control.executor.helpers import (
     _profile_for_workspace,
     _profile_from_resolved_profile_snapshot,
 )
-from awf.control.executor.state_ops import _persist_resolved_profile_snapshot_if_missing
+from awf.control.executor.state_ops import (
+    _persist_resolved_profile_snapshot_if_missing,
+    _sync_resolved_profile,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -220,6 +223,52 @@ async def test_runtime_profile_snapshot_atomic_update_preserves_competing_snapsh
     assert session.commits == 0
     assert store["resolved_profile"] == competing_snapshot
     assert frozen_snapshot == competing_snapshot
+
+
+@pytest.mark.unit
+async def test_sync_resolved_profile_returns_winning_snapshot_and_realigns_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    competing_snapshot = _custom_planning_profile("first-worker").model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    competing_snapshot["planning"].pop("max_iterations")
+    stale_worker_profile = _custom_planning_profile("stale-worker")
+    stale_snapshot = stale_worker_profile.model_dump(mode="json", by_alias=True)
+    async with factory() as session:
+        persisted_workspace = await _create_workspace(
+            session,
+            resolved_profile=competing_snapshot,
+        )
+        workspace_id = persisted_workspace.id
+
+    in_memory_workspace = Workspace(
+        id=workspace_id,
+        status=WorkspaceStatus.running.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="Runtime profile",
+        task_prompt="Resolve the repo profile.",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=[],
+        profile_ref="auto",
+        resolved_profile=stale_snapshot,
+    )
+    executor = SimpleNamespace(_session_factory=factory)
+
+    profile = await _sync_resolved_profile(
+        executor,
+        ws=in_memory_workspace,
+        workspace_id=workspace_id,
+        profile=stale_worker_profile,
+        planning_max_iterations_default=4,
+    )
+
+    assert profile.name == "first-worker"
+    assert profile.planning.max_iterations == 4
+    assert in_memory_workspace.resolved_profile == competing_snapshot
 
 
 @pytest.mark.unit
