@@ -296,13 +296,14 @@ class WorkspaceCreateHostPortConflictError(Exception):
     ) -> None:
         self.host_port = host_port
         self.conflicting_workspace_id = conflicting_workspace_id
-        self.detail: dict[str, Any] = {
+        self.message = (
+            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
+        )
+        self.detail: dict[str, Any] | None = {
             "host_port": host_port,
             "conflicting_workspace_id": conflicting_workspace_id,
         }
-        super().__init__(
-            f"Host port {host_port} is already in use by workspace {conflicting_workspace_id}"
-        )
+        super().__init__(self.message)
 
 
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]

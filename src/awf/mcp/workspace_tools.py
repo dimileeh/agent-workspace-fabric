@@ -93,6 +93,7 @@ from awf.service.workspace_observability import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
+    WorkspaceCreateHostPortConflictError,
     WorkspaceCreateIdempotencyConflictError,
     WorkspaceCreateInsufficientDiskError,
     WorkspaceProviderReadinessBlockedError,
@@ -441,6 +442,8 @@ def register_workspace_tools(
         except WorkspaceCreateIdempotencyConflictError as exc:
             return _workspace_error_result(exc)
         except WorkspaceCreateInsufficientDiskError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceCreateHostPortConflictError as exc:
             return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
