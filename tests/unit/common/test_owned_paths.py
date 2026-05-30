@@ -97,6 +97,7 @@ def test_interworkspace_owned_paths_normalizes_each_path_once(
     real_normalize_owned_path = owned_paths.normalize_owned_path
 
     def counting_normalize_owned_path(path: str) -> str:
+        """Record normalization calls while preserving real normalization behavior."""
         calls.append(path)
         return real_normalize_owned_path(path)
 

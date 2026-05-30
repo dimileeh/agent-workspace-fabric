@@ -30,5 +30,18 @@ Follow-up after later plan-artifact narrowing commit:
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_staleness_parts/test_staleness_part_001.py::TestEvaluateStaleness::test_awf_plans_readme_overlap_blocks_as_real_docs_path -q`:
   1 passed.
 
+Follow-up after later owned-path normalization review commit:
+
+- Added a docstring to the nested
+  `tests/unit/common/test_owned_paths.py::test_interworkspace_owned_paths_normalizes_each_path_once`
+  `counting_normalize_owned_path` helper.
+- Diff-scoped AST audit for `src/awf/common/owned_paths.py` and
+  `tests/unit/common/test_owned_paths.py`: passed; no callables/classes without
+  docstrings.
+- `uv run --python 3.12 --extra dev ruff check src/awf/common/owned_paths.py tests/unit/common/test_owned_paths.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/common/test_owned_paths.py -q`:
+  21 passed.
+
 Full AWF/GitHub validation, coverage gates, and any broad external docstring
 coverage check are intentionally left to AWF after agent completion.

@@ -15,6 +15,12 @@ PR's plan-artifact nonblocking overlap work.
 - Use focused local validation only; full AWF/GitHub validation remains managed
   by AWF after agent completion.
 
+## Assumptions/Changes
+
+- A later `owned_paths` review follow-up added a nested test helper in
+  `tests/unit/common/test_owned_paths.py`; include that helper in this
+  comment's diff-scoped docstring cleanup.
+
 ## Requirements Checklist
 
 - [x] Diff-scoped production helper callables touched by the PR have concise
