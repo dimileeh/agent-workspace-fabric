@@ -153,7 +153,6 @@ def _workspace_id_glob_path_matches(path: str, workspace_id_glob_path: str) -> b
 
 def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
     """Build a regex that requires repeated workspace-id globs to share one id."""
-    # Keep the constrained regex in sync with generated workspace ids.
     escaped_glob = re.escape(_WORKSPACE_ID_GLOB)
     escaped_path = re.escape(workspace_id_glob_path)
     path_parts = escaped_path.split(escaped_glob)
@@ -161,6 +160,10 @@ def _workspace_id_glob_path_pattern(workspace_id_glob_path: str) -> str | None:
         return None
 
     glob_prefix = _WORKSPACE_ID_GLOB.rstrip("*")
+    # Custom-profile artifact globs are generated from `{workspace_id}` and
+    # intentionally match only concrete AWF workspace IDs. The default
+    # `docs/awf-plans/ws_*` filename classifier is broader so legacy/manual AWF
+    # artifact names in the reserved directory remain nonblocking.
     workspace_id_suffix_pattern = (
         rf"(?:{_WORKSPACE_ID_SUFFIX_PATTERN}|{_WORKSPACE_ID_SHORTHAND_SUFFIX_PATTERN})"
     )

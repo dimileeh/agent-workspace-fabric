@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
 from awf.common.owned_paths import (
+    _has_wildcard,
     internal_plan_artifact_owned_paths_from_profile,
     interworkspace_owned_paths,
     is_internal_plan_artifact_owned_path,
@@ -436,10 +437,6 @@ def _target_changes_are_only_plan_artifacts(
         )
         for path in changed_paths
     )
-
-
-def _has_wildcard(pattern: str) -> bool:
-    return "*" in pattern or "?" in pattern or "[" in pattern
 
 
 # ── Service layer ──────────────────────────────────────────────────────────

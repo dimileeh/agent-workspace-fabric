@@ -771,13 +771,12 @@ def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
         candidate.workspace.resolved_profile,
         workspace_id=candidate.workspace.id,
     )
-    if paths:
-        interworkspace_paths = interworkspace_owned_paths(
-            paths,
-            internal_plan_artifact_paths=internal_paths,
-        )
-        if interworkspace_paths:
-            return interworkspace_paths
+    interworkspace_paths = interworkspace_owned_paths(
+        paths,
+        internal_plan_artifact_paths=internal_paths,
+    )
+    if interworkspace_paths:
+        return interworkspace_paths
     return interworkspace_owned_paths(
         (path for path in candidate.attempt.owned_paths if path),
         internal_plan_artifact_paths=internal_paths,
