@@ -108,6 +108,10 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
         internal_plan_artifact_paths=internal_paths,
     )
     assert is_internal_plan_artifact_owned_path(
+        "docs/alternate/ws_custom.json",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert not is_internal_plan_artifact_owned_path(
         "docs/alternate/ws_*.json",
         internal_plan_artifact_paths=internal_paths,
     )
@@ -123,6 +127,7 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
         [
             "docs/alternate/**",
             "docs/alternate/ws_custom.md",
+            "docs/alternate/ws_custom.json",
             "docs/alternate/ws_*.json",
             "docs/alternate/README.md",
             "docs/alternate/ws_custom.notes.md",
@@ -131,6 +136,7 @@ def test_custom_profile_plan_artifact_paths_are_filtered_from_interworkspace_pat
         internal_plan_artifact_paths=internal_paths,
     ) == (
         "docs/alternate/**",
+        "docs/alternate/ws_*.json",
         "docs/alternate/README.md",
         "docs/alternate/ws_custom.notes.md",
         "src/awf/**",
@@ -145,7 +151,7 @@ def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None
         workspace_id="ws_custom",
     )
 
-    assert internal_paths == ("docs/runbooks/ws_*.md", "docs/runbooks/ws_custom.md")
+    assert internal_paths == ("docs/runbooks/ws_custom.md",)
     assert interworkspace_owned_paths(
         [
             "docs/runbooks/**",
@@ -154,7 +160,43 @@ def test_custom_profile_plan_parent_scope_remains_interworkspace_owned() -> None
             "docs/runbooks/README.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/runbooks/**", "docs/runbooks/README.md")
+    ) == ("docs/runbooks/**", "docs/runbooks/ws_*.md", "docs/runbooks/README.md")
+
+
+@pytest.mark.unit
+def test_known_workspace_custom_plan_template_does_not_filter_other_ws_docs() -> None:
+    """Known workspace ids narrow custom artifact filtering to the concrete path."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "docs/{workspace_id}.md"}},
+        workspace_id="ws_custom",
+    )
+
+    assert internal_paths == ("docs/ws_custom.md",)
+    assert interworkspace_owned_paths(
+        [
+            "docs/ws_custom.md",
+            "docs/ws_protocol.md",
+            "docs/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/ws_protocol.md", "docs/README.md")
+
+
+@pytest.mark.unit
+def test_unknown_workspace_custom_plan_template_keeps_ws_glob() -> None:
+    """Unknown workspace ids retain broad artifact matching for pre-id checks."""
+    internal_paths = internal_plan_artifact_owned_paths_from_profile(
+        {"planning": {"plan_path": "docs/{workspace_id}.md"}},
+    )
+
+    assert internal_paths == ("docs/ws_*.md",)
+    assert interworkspace_owned_paths(
+        [
+            "docs/ws_generated.md",
+            "docs/README.md",
+        ],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/README.md",)
 
 
 @pytest.mark.unit
@@ -165,17 +207,21 @@ def test_workspace_scoped_custom_plan_parent_scope_is_internal_artifact() -> Non
         workspace_id="ws_custom",
     )
 
-    assert "docs/runbooks/ws_*/**" in internal_paths
-    assert "docs/runbooks/ws_custom/**" in internal_paths
+    assert internal_paths == ("docs/runbooks/ws_custom/plan.md", "docs/runbooks/ws_custom/**")
     assert interworkspace_owned_paths(
         [
             "docs/runbooks/**",
             "docs/runbooks/ws_*/**",
+            "docs/runbooks/ws_custom/plan.md",
             "docs/runbooks/ws_custom/**",
             "docs/runbooks/ws_custom/README.md",
         ],
         internal_plan_artifact_paths=internal_paths,
-    ) == ("docs/runbooks/**", "docs/runbooks/ws_custom/README.md")
+    ) == (
+        "docs/runbooks/**",
+        "docs/runbooks/ws_*/**",
+        "docs/runbooks/ws_custom/README.md",
+    )
 
 
 @pytest.mark.unit

@@ -65,17 +65,13 @@ def _internal_plan_artifact_paths_from_template(
     if _WORKSPACE_ID_PLACEHOLDER not in normalized:
         return ()
 
-    paths = [normalized.replace(_WORKSPACE_ID_PLACEHOLDER, _WORKSPACE_ID_GLOB)]
-    if workspace_id:
-        paths.append(normalized.replace(_WORKSPACE_ID_PLACEHOLDER, workspace_id))
+    replacement = workspace_id or _WORKSPACE_ID_GLOB
+    paths = [normalized.replace(_WORKSPACE_ID_PLACEHOLDER, replacement)]
 
     parent, separator, _filename = normalized.rpartition("/")
     if separator and parent and _WORKSPACE_ID_PLACEHOLDER in parent:
-        wildcard_parent = parent.replace(_WORKSPACE_ID_PLACEHOLDER, _WORKSPACE_ID_GLOB)
-        paths.append(f"{wildcard_parent}/**")
-        if workspace_id:
-            rendered_parent = parent.replace(_WORKSPACE_ID_PLACEHOLDER, workspace_id)
-            paths.append(f"{rendered_parent}/**")
+        rendered_parent = parent.replace(_WORKSPACE_ID_PLACEHOLDER, replacement)
+        paths.append(f"{rendered_parent}/**")
 
     return tuple(paths)
 
