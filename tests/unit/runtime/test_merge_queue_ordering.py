@@ -20,6 +20,7 @@ from awf.db.repositories import (
     TaskRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+    owned_paths_overlap,
     sync_candidate_readiness,
 )
 from awf.db.session import make_session_factory
@@ -191,6 +192,7 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
             "conformance_report_path": "docs/alternate/{workspace_id}.json",
         },
     }
+    custom_artifact_glob = "docs/alternate/ws_*.md"
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     await _seed_monitoring_candidate(
         factory,
@@ -199,7 +201,7 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
         created_at=now,
         owned_paths=[
             "src/feature-a/**",
-            "docs/alternate/ws_aaaaaaaaaaaaaaaaaaaaaaaa.md",
+            custom_artifact_glob,
         ],
         resolved_profile=custom_profile,
     )
@@ -210,7 +212,7 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
         created_at=now + timedelta(minutes=5),
         owned_paths=[
             "src/feature-b/**",
-            "docs/alternate/ws_bbbbbbbbbbbbbbbbbbbbbbbb.md",
+            custom_artifact_glob,
         ],
         resolved_profile=custom_profile,
     )
@@ -221,6 +223,7 @@ async def test_custom_plan_artifact_overlap_does_not_block_later_candidate(
             candidate_id=later_candidate_id,
         )
 
+    assert owned_paths_overlap(custom_artifact_glob, custom_artifact_glob) is True
     assert blockers == []
 
 
