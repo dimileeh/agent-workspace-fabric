@@ -26,6 +26,10 @@ def test_uninstall_managed_pipx_install(harness: InstallerHarness) -> None:
     harness.add_uv(list_output="")
     harness.add_pipx(list_output=f"package {PACKAGE} 0.1.0\n")
 
+    # ``--method`` is intentionally ignored during ``--uninstall``: uninstall_awf
+    # always probes uv then pipx by actual presence, never by the flag. It is
+    # passed here only to prove that routing follows discovery (uv empty -> pipx
+    # owns the removal), not the requested method.
     result = harness.run(["--uninstall", "--method", "pipx"])
 
     assert result.returncode == 0, result.stderr
