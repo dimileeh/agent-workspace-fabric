@@ -61,7 +61,7 @@ async def _seed_monitoring_candidate(
     status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
     owned_paths: list[str] | None = None,
 ) -> tuple[str, str, str]:
-    resolved_owned_paths = list(owned_paths or ["src/shared/**"])
+    resolved_owned_paths = ["src/shared/**"] if owned_paths is None else list(owned_paths)
     async with factory() as session:
         workspace_repo = WorkspaceRepository(session)
         workspace = await workspace_repo.create(
@@ -209,6 +209,34 @@ async def test_candidate_with_only_plan_artifact_path_does_not_block_merge_queue
         pr_number=86,
         created_at=now + timedelta(minutes=5),
         owned_paths=["src/later/**", "docs/awf-plans/**"],
+    )
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
+async def test_candidate_with_explicit_empty_owned_paths_does_not_use_default(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _seed_monitoring_candidate(
+        factory,
+        title="Older no owned paths",
+        pr_number=87,
+        created_at=now,
+        owned_paths=[],
+    )
+    _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later default source work",
+        pr_number=88,
+        created_at=now + timedelta(minutes=5),
     )
 
     async with factory() as session:
