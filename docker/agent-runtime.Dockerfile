@@ -70,9 +70,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Stage 2: Docker CLI + Compose plugin ──────────────────────────────────
+# ── Stage 2: Docker CLI + Compose + Buildx plugins ────────────────────────
+# Buildx is the client-side plugin Compose uses to drive BuildKit builds.
+# Without it, `docker compose` warns ("requires buildx plugin to be
+# installed") and falls back to the legacy builder. The agent is the Docker
+# client inside DinD workspaces (DOCKER_HOST=tcp://docker:2375), so it needs
+# buildx locally even though the DinD daemon already ships BuildKit.
 ARG DOCKER_CE_CLI_VERSION=5:29.4.1-1~debian.12~bookworm
 ARG DOCKER_COMPOSE_PLUGIN_VERSION=5.1.3-1~debian.12~bookworm
+ARG DOCKER_BUILDX_PLUGIN_VERSION=0.34.1-1~debian.12~bookworm
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
       -o /etc/apt/keyrings/docker.asc \
@@ -84,9 +90,11 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends \
         "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
         "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
+        "docker-buildx-plugin=${DOCKER_BUILDX_PLUGIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && docker --version \
-    && docker compose version
+    && docker compose version \
+    && docker buildx version
 
 # ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
 ARG GH_VERSION=2.92.0
