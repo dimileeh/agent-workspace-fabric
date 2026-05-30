@@ -1220,11 +1220,10 @@ def _collect_defer_items(
 def _pending_review_feedback_count(status: PRStatus, state: MonitorState) -> int:
     """Count review feedback still requiring agent attention under monitor state.
 
-    This is the operator-facing counterpart to `unresolved_review_comments`:
-    raw outside-diff feedback count stays in ``review_feedback`` (and the
-    compatibility alias ``unresolved_reviews``), while this metric only counts
-    items that can still be triaged now, after body hash and prior verdict state
-    are applied.
+    This is the operator-facing counterpart to ``review_feedback``: the raw
+    outside-diff retained inbox is exposed as ``review_feedback``, while this
+    metric only counts items that can still be triaged now (body-hash and prior
+    verdict state applied) and is logged as ``unresolved_reviews``.
     """
     return sum(
         1
