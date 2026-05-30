@@ -24,6 +24,7 @@ from awf.common.owned_paths import (
     ("raw_path", "normalized"),
     [
         (" ./docs//awf-plans/../awf-plans/ws.md ", "docs/awf-plans/ws.md"),
+        ("../docs/README.md", "docs/README.md"),
         ("docs\\awf-plans\\**", "docs/awf-plans/**"),
         ("", ""),
     ],
@@ -142,6 +143,23 @@ def test_disabled_planning_custom_profile_paths_are_not_internal_artifacts() -> 
         "docs/ws_0123456789abcdef01234567.md",
         "docs/ws_0123456789abcdef01234567.json",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolved_profile",
+    [
+        None,
+        [],
+        {"planning": []},
+        {"planning": {"required": True, "plan_path": "docs/shared-plan.md"}},
+    ],
+)
+def test_profiles_without_workspace_templates_do_not_define_internal_artifacts(
+    resolved_profile: object,
+) -> None:
+    """Only required planning templates with workspace placeholders are artifacts."""
+    assert internal_plan_artifact_owned_paths_from_profile(resolved_profile) == ()
 
 
 @pytest.mark.unit
@@ -325,6 +343,27 @@ def test_unknown_custom_plan_template_does_not_filter_shorthand_workspace_ids() 
         "docs/alternate/ws_protocol.md",
         "docs/alternate/README.md",
     )
+
+
+@pytest.mark.unit
+def test_configured_artifact_paths_ignore_empty_entries_and_match_wildcards() -> None:
+    """Configured internal artifact paths tolerate empty entries and leaf wildcards."""
+    internal_paths = ("", "docs/generated/*.json")
+
+    assert is_internal_plan_artifact_owned_path(
+        "docs/generated/report.json",
+        internal_plan_artifact_paths=internal_paths,
+    )
+    assert interworkspace_owned_paths(
+        ["docs/generated/report.json", "docs/generated/report.md"],
+        internal_plan_artifact_paths=internal_paths,
+    ) == ("docs/generated/report.md",)
+
+
+@pytest.mark.unit
+def test_workspace_id_glob_pattern_requires_workspace_id_glob() -> None:
+    """Static configured artifact paths do not produce workspace-id regexes."""
+    assert owned_paths._workspace_id_glob_path_pattern("docs/static.md") is None  # noqa: SLF001
 
 
 @pytest.mark.unit
