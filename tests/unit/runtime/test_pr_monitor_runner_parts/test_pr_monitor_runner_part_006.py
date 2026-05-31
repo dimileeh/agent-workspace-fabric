@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import structlog
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -23,7 +24,7 @@ from awf.runtime.pr_monitor import (
     _review_thread_body_hash,
     decide,
 )
-from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, fix_cycle
+from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner, comments, fix_cycle
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
     _address_review_comment_result,
@@ -421,7 +422,7 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
         load_count += 1
         return [".github/workflows/publish.yml"]
 
-    monkeypatch.setattr(fix_cycle, "_owned_paths_for_prompt", _load_owned_paths)
+    monkeypatch.setattr(fix_cycle, "_owned_paths_for_prompt_or_empty", _load_owned_paths)
     threads = (
         ReviewThread(
             thread_id="T_one",
@@ -468,6 +469,66 @@ async def test_fix_cycle_fetches_prompt_owned_paths_once_for_comment_batch(
     assert load_count == 1
     assert len(adapter.calls) == 4
     assert all(".github/workflows/publish.yml" in prompt for prompt in adapter.calls)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_continues_with_empty_owned_paths_when_prompt_load_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify owned-path prompt load failures do not crash comment repair."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: operator decision required")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_owned_paths(
+        _runner: PullRequestMonitorRunner,
+        _workspace_id: str,
+    ) -> list[str]:
+        raise OperationalError(
+            "select owned_paths",
+            {},
+            Exception("server closed the connection unexpectedly"),
+        )
+
+    monkeypatch.setattr(comments, "_owned_paths_for_prompt", _raise_owned_paths)
+    thread = ReviewThread(
+        thread_id="T_owned_paths_db_error",
+        path="src/awf/runtime/example.py",
+        line=12,
+        body_excerpt="please check runtime behavior",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert state.threads_addressed_ids["T_owned_paths_db_error"] == "needs_human"
+    assert len(adapter.calls) == 1
+    assert "Declared owned_paths:" not in adapter.calls[0]
 
 
 @pytest.mark.unit

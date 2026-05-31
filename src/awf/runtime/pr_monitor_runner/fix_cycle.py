@@ -31,7 +31,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comments import (
     VerdictResult,
-    _owned_paths_for_prompt,
+    _owned_paths_for_prompt_or_empty,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -117,7 +117,7 @@ async def _run_fix_cycle(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
-    owned_paths = await _owned_paths_for_prompt(self, workspace_id)
+    owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
 
     def _drop_pending_publish_state(item_id: str) -> None:
         publish_dependent_ids[:] = [

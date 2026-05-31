@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from awf.adapters.base import AgentRunError
+from awf.common.audit import redact_audit_text
 from awf.common.command_evidence import append_command_evidence
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
@@ -168,6 +169,22 @@ async def _owned_paths_for_prompt(
     async with session_context as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         return list(workspace.owned_paths) if workspace is not None else []
+
+
+async def _owned_paths_for_prompt_or_empty(
+    runner: PullRequestMonitorRunner,
+    workspace_id: str,
+) -> list[str]:
+    try:
+        return await _owned_paths_for_prompt(runner, workspace_id)
+    except Exception as exc:
+        _log.warning(
+            "monitor.owned_paths_prompt_unavailable",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+            error=redact_audit_text(str(exc), limit=240),
+        )
+        return []
 
 
 async def _invoke_cli_for_verdict(
