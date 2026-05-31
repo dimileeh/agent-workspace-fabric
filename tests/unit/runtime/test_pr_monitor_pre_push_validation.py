@@ -934,6 +934,8 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_fails(
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted fix\n")
     runner = make_runner(
@@ -997,6 +999,8 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="attempted fix\n")
     runner = make_runner(
@@ -1041,6 +1045,47 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
     assert any("clean -fdx" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
+    tmp_path: Path,
+) -> None:
+    """Rollback should keep ignored artifacts like .venv while removing generated files."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+
+    runner = make_runner(
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    cmd = cast(FakeCommandRunner, runner._deps.runner)
+    worktree = tmp_path / "worktrees" / "workspace"
+    _mark_git_worktree(worktree)
+    restore_ref = "d" * 40
+
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {restore_ref[:8]}\n")
+    cmd.queue_result(returncode=0, stdout="?? generated.tmp\n!! .venv/\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout=f"{restore_ref}\n")
+    cmd.queue_result(returncode=0, stdout="")
+
+    rolled_back = await pre_push_validation._rollback_failed_pre_push_validation_fix_pass(
+        runner,
+        workspace_id="workspace",
+        worktree_path=worktree,
+        restore_ref=restore_ref,
+        ignore_ignored_paths=(".venv",),
+        pass_number=1,
+        reason="test",
+    )
+
+    assert rolled_back is True
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {restore_ref}" in call for call in joined_calls)
+    assert any("clean -fdx -- generated.tmp" in call for call in joined_calls)
+    assert all(not ("clean -fdx" in call and ".venv" in call) for call in joined_calls)
 
 
 @pytest.mark.unit
