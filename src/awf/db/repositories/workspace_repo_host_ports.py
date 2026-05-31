@@ -202,9 +202,14 @@ async def find_host_port_conflicts(
     directly.  For unclaimed (queued) workspaces where
     ``Workspace.node_id`` is still null, the planned node from the
     latest active ``ResourceReservation`` row is consulted instead.
-    Host ports are Docker host ports and are scoped to the worker
-    node, so a workspace on node A binding port 8080 must not block
-    a create on node B that also wants 8080.
+    For legacy terminal workspaces whose active reservation has been
+    released and whose ``Workspace.node_id`` was never set (e.g.  rows
+    created before the provisioner started stamping ``node_id`` on
+    failure), the latest reservation regardless of release status
+    provides a last-resort node assignment so that unreleased containers
+    on that node are still detected.  Host ports are Docker host ports
+    and are scoped to the worker node, so a workspace on node A binding
+    port 8080 must not block a create on node B that also wants 8080.
 
     NOTE: The TOCTOU window between this SELECT and the subsequent INSERT
     is closed by acquiring a per-port ``pg_advisory_xact_lock`` before
@@ -272,7 +277,17 @@ async def find_host_port_conflicts(
             .correlate(Workspace)
             .scalar_subquery()
         )
-        effective_node = func.coalesce(Workspace.node_id, active_reservation_node)
+        latest_reservation_node = (
+            select(ResourceReservation.node_id)
+            .where(ResourceReservation.workspace_id == Workspace.id)
+            .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+            .limit(1)
+            .correlate(Workspace)
+            .scalar_subquery()
+        )
+        effective_node = func.coalesce(
+            Workspace.node_id, active_reservation_node, latest_reservation_node
+        )
         stmt = stmt.where(effective_node == node_id)
 
     if excluding_workspace_id is not None:

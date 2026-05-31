@@ -1187,3 +1187,83 @@ class TestCrossNodeAndEdgeCases:
             excluding_workspace_id=None,
         )
         assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_terminal_null_node_id_with_released_reservation_blocks_same_node(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A terminal workspace with null node_id and released reservation still blocks its node.
+
+        Legacy rows created before the provisioner started stamping
+        ``Workspace.node_id`` on failure can have
+        ``compose_project_name IS NOT NULL`` and
+        ``Workspace.node_id IS NULL``.  After ``transition()`` releases
+        the active reservation, the active-reservation subquery returns
+        NULL.  The ``latest_reservation_node`` fallback must pick up the
+        released reservation's node_id so that the workspace is still
+        detected on its actual node, preventing a compose-up collision
+        on an upgraded single-node install.
+        """
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.failed,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+            compose_project_name="awf_legacy_null_node",
+        )
+        ws.node_id = None
+        await session.flush()
+        task = await TaskRepository(session).create_or_get(
+            repo_url=ws.repo_url,
+            base_branch=ws.branch_base,
+            title=ws.task_title,
+            prompt=ws.task_prompt,
+            external_id=None,
+            idempotency_key=f"hostport-legacy-null-node:{ws.id}",
+            task_class=ws.task_class,
+            owned_paths=list(ws.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=ws,
+        )
+        res_repo = ResourceReservationRepository(session)
+        await res_repo.create(
+            workspace_id=ws.id,
+            attempt_id=attempt.id,
+            node_id="node-a",
+            steady_cpu=1.0,
+            steady_memory_gb=1.0,
+            peak_cpu=2.0,
+            peak_memory_gb=2.0,
+            disk_mb=512,
+            phase="active",
+        )
+        await res_repo.release_active_for_workspace(ws.id)
+        await session.commit()
+
+        conflicts_a = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="node-a",
+        )
+        assert len(conflicts_a) == 1
+        assert conflicts_a[0].host_port == 8080
+        assert conflicts_a[0].workspace_id == ws.id
+
+        conflicts_b = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+            node_id="node-b",
+        )
+        assert conflicts_b == []
