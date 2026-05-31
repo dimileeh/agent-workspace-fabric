@@ -2614,6 +2614,43 @@ def test_check_host_home_ok_records_resolved_auth_mount_root() -> None:
 
 
 @pytest.mark.unit
+def test_check_host_home_ok_text_names_validated_root() -> None:
+    """The OK summary/detail describe the case that actually applies.
+
+    Regression for PRRT_kwDOSJAM6s6F8PSF: with a set ``AWF_HOST_HOME`` the OK
+    detail must not still claim the override is unset, or pretty/JSON readiness
+    output misleads operators about which auth-mount root was validated. A set,
+    absolute override is the auth-mount root verbatim; an unset/empty override
+    falls back to ``${HOME}``.
+    """
+    override = system_checks.check_host_home(
+        environ={"AWF_HOST_HOME": "/mnt/auth", "HOME": "/home/op"}
+    )
+    assert override.level is SetupCheckLevel.OK
+    # The set override is named as the validated root, and the text never claims
+    # it is unset.
+    assert "/mnt/auth" in override.summary
+    assert "/mnt/auth" in override.detail
+    assert "unset" not in override.summary
+    assert "unset" not in override.detail
+
+    fallback = system_checks.check_host_home(environ={"HOME": "/home/op"})
+    assert fallback.level is SetupCheckLevel.OK
+    # An unset override falls back to ${HOME}; name that as the validated root.
+    assert "unset" in fallback.detail
+    assert "/home/op" in fallback.detail
+
+    empty_override = system_checks.check_host_home(
+        environ={"AWF_HOST_HOME": "", "HOME": "/home/op"}
+    )
+    assert empty_override.level is SetupCheckLevel.OK
+    # An empty override also falls back to ${HOME}: describe the fallback case and
+    # name ${HOME}, never echo the empty override as the root.
+    assert "unset" in empty_override.detail
+    assert "/home/op" in empty_override.detail
+
+
+@pytest.mark.unit
 def test_check_host_home_override_blocks_with_value_in_data() -> None:
     """``check_host_home_override`` distinguishes non-absolute vs. padded values.
 

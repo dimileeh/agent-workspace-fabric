@@ -2057,16 +2057,33 @@ def check_host_home(*, environ: Mapping[str, str] | None = None) -> SetupCheckRe
     # non-empty, exactly as _invalid_host_home_override /
     # _invalid_auth_mount_home_fallback decide which value they validated.
     resolved_root = env_value if env_value else home
+    # Describe the case that actually applies so the readiness summary/detail name
+    # the auth-mount root that was validated rather than a static "unset or
+    # absolute" disjunction. Reaching this OK result already proves resolved_root
+    # is an absolute, unpadded path: a set override is the root verbatim, while an
+    # unset/empty override falls back to ${HOME} (Compose treats both the same).
+    if env_value:
+        summary = f"AWF_HOST_HOME={env_value!r} is an absolute auth-mount root."
+        detail = (
+            f"AWF_HOST_HOME is set to the absolute path {env_value!r}, so the auth mounts "
+            f"({env_value}/.config/gh, /.ssh, the agent CLI directories, ...) resolve to "
+            "absolute targets awf start can bind."
+        )
+    else:
+        summary = (
+            "AWF_HOST_HOME is unset or empty; the ${HOME} fallback is an absolute auth-mount root."
+        )
+        detail = (
+            "AWF_HOST_HOME is unset or empty, so the local-service Compose stack falls back "
+            f"to ${{HOME}}={home!r} (an absolute path) as the auth-mount root; the auth mounts "
+            f"({home}/.config/gh, /.ssh, the agent CLI directories, ...) resolve to absolute "
+            "targets awf start can bind."
+        )
     return SetupCheckResult(
         name="host_home",
         level=SetupCheckLevel.OK,
-        summary="AWF_HOST_HOME resolves to an absolute auth-mount root.",
-        detail=(
-            "AWF_HOST_HOME is unset (the local-service Compose stack falls back to a usable "
-            "${HOME}) or an absolute path, so the auth mounts (${AWF_HOST_HOME:-${HOME}}/.config/gh, "
-            "/.ssh, the agent CLI directories, ...) resolve to absolute targets awf start "
-            "can bind."
-        ),
+        summary=summary,
+        detail=detail,
         data={"env_value": env_value, "home": home, "resolved_root": resolved_root},
     )
 
