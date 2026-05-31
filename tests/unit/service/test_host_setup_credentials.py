@@ -7,6 +7,7 @@ import stat
 from pathlib import Path
 
 import pytest
+import structlog
 
 import awf.host_setup.credentials as credentials
 from awf.host_setup.config import ProviderConfig
@@ -169,6 +170,50 @@ def test_store_falls_back_to_env_ref_when_keyring_unusable_at_write_time(
     # but the secret never reaches the env-ref offer.
     assert module.set_calls == [("awf/github", "default", _FAKE_GH_TOKEN)]
     assert _FAKE_GH_TOKEN not in ref.ref
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("preferred", [None, "keyring"])
+def test_store_logs_keyring_degradation_to_env_ref(preferred: str | None) -> None:
+    """Verify the keyring→env_ref degradation emits a secret-free structured warning.
+
+    The selected keyring backend passes its cheap ``is_available`` probe but proves
+    unusable only at write time, so the credential degrades to the env-ref offer.
+    That degradation is otherwise observable to callers only as a changed
+    ``CredentialRef.backend``; a structured warning makes it visible — recording the
+    requested vs effective backend and the reason code — so a caller who explicitly
+    requested keyring can tell the stored ref now points at an env var rather than
+    the OS keychain, without the secret ever entering the log record.
+    """
+    module = FakeKeyringModule(backend=_ChainerBackend(), drop_writes=True)
+    keyring_backend = KeyringCredentialBackend(keyring_module=module)
+
+    with structlog.testing.capture_logs() as captured:
+        ref = store_provider_credential(
+            CredentialRequest(
+                provider="github",
+                env_var="GH_TOKEN",
+                secret_source=_secret(_FAKE_GH_TOKEN),
+            ),
+            preferred=preferred,
+            capabilities=_HEADLESS_LINUX,
+            allow_plain_secrets=False,
+            plain_file_consent=False,
+            keyring_backend=keyring_backend,
+        )
+
+    assert ref.backend == "env_ref"
+    degraded = [e for e in captured if e["event"] == "host_setup.credential_backend_degraded"]
+    assert len(degraded) == 1
+    entry = degraded[0]
+    assert entry["log_level"] == "warning"
+    assert entry["requested_backend"] == "keyring"
+    assert entry["effective_backend"] == "env_ref"
+    assert entry["preferred"] == preferred
+    assert entry["reason_code"] == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert entry["provider"] == "github"
+    # The secret never enters the structured log record.
+    assert _FAKE_GH_TOKEN not in str(captured)
 
 
 @pytest.mark.unit

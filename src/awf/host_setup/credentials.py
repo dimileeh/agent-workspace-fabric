@@ -28,6 +28,7 @@ from typing import Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from awf.common.audit import REDACTION_MARKER, redact_audit_text
+from awf.common.logging import get_logger
 from awf.common.token_patterns import compile_known_token_re
 from awf.host_setup.rendering import (
     CREDENTIAL_BACKEND_UNAVAILABLE,
@@ -74,6 +75,8 @@ _TOKEN_SHAPE_RE = compile_known_token_re(
 # ``keyring`` resolves to these no-op backends on hosts without a usable
 # keychain (e.g. headless Linux); treat them as unavailable.
 _NOOP_KEYRING_BACKEND_LEAVES = frozenset({"fail", "null"})
+
+logger = get_logger(__name__)
 
 
 class CredentialError(RuntimeError):
@@ -516,6 +519,23 @@ def store_provider_credential(
         # silently mask the rejected provider/account or the missing secret.
         if backend.kind != "keyring" or exc.reason_code != CREDENTIAL_BACKEND_UNAVAILABLE:
             raise
+        # The selected keyring backend passed its cheap ``is_available`` probe but
+        # proved unusable only at write time, so the credential degrades to the
+        # env-ref offer. That degradation is otherwise observable to callers only as
+        # a changed ``CredentialRef.backend``; emit a structured, secret-free warning
+        # so a caller who explicitly requested keyring (``preferred="keyring"``) can
+        # tell the stored ref now points at an env var rather than the OS keychain.
+        # ``provider`` is already validated by ``create_ref`` before any
+        # backend-unavailable signal, but redact it defensively in case it carried a
+        # token-shaped value.
+        logger.warning(
+            "host_setup.credential_backend_degraded",
+            requested_backend="keyring",
+            preferred=preferred,
+            effective_backend="env_ref",
+            reason_code=exc.reason_code,
+            provider=_redact_token_shaped(request.provider),
+        )
         # Mirror the pre-``create_ref`` path exactly: with an ``env_var`` this mints
         # the ``env://NAME`` offer; without one it raises ``INTERACTIVE_INPUT_REQUIRED``
         # (the actionable "provide an env var" signal), never the raw keyring error.
