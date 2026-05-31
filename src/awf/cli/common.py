@@ -11,7 +11,7 @@ import traceback
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 import httpx
@@ -94,7 +94,7 @@ def _parse_api_host_port(host_port: str) -> int:
     return parsed_port
 
 
-def _exit_invalid_api_host_port(host_port: str) -> None:
+def _exit_invalid_api_host_port(host_port: str) -> NoReturn:
     typer.echo(
         f"error: AWF_API_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}",
         err=True,
