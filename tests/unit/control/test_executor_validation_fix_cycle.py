@@ -592,6 +592,8 @@ class TestValidationSideEffectCleanup:
         fake.queue_result(returncode=0, stdout=" M apps/console/next-env.d.ts\n")
         fake.queue_result(returncode=0)  # restore tracked side effect
         fake.queue_result(returncode=0, stdout="")  # clean after cleanup
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify restore ref before push
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # verify HEAD after cleanup
         _queue_push_and_pr(fake)
 
         await executor.execute(ws_id)
