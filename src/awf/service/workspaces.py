@@ -529,10 +529,11 @@ class WorkspaceService:
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 
+            req_profile, resolved_profile = workspace_create_profile_snapshots(req)
             await check_host_port_conflicts(
                 repo,
                 req.companions,
-                resolved_profile=workspace_create_profile_snapshots(req)[1],
+                resolved_profile=resolved_profile,
             )
 
             ws = await create_workspace_row(
@@ -541,6 +542,8 @@ class WorkspaceService:
                 idempotency_key=idempotency_key,
                 settings=self._settings,
                 disk_check=disk_check,
+                requested_profile=req_profile,
+                resolved_profile=resolved_profile,
             )
             await s.commit()
             return workspace_response(ws)

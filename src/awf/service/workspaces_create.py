@@ -69,6 +69,8 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+_PROFILE_NOT_PROVIDED: Any = object()
+
 
 async def create_workspace_row(
     session: AsyncSession,
@@ -80,13 +82,20 @@ async def create_workspace_row(
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
+    requested_profile: dict[str, Any] | None = _PROFILE_NOT_PROVIDED,
+    resolved_profile: dict[str, Any] | None = _PROFILE_NOT_PROVIDED,
 ) -> Workspace:
     """Persist one rich workspace create request without committing the session."""
     _assert_supported_direct_create_task_kind(payload.task.kind)
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
-    requested_profile, resolved_profile = workspace_create_profile_snapshots(payload)
+    if requested_profile is _PROFILE_NOT_PROVIDED or resolved_profile is _PROFILE_NOT_PROVIDED:
+        _requested, _resolved = workspace_create_profile_snapshots(payload)
+        if requested_profile is _PROFILE_NOT_PROVIDED:
+            requested_profile = _requested
+        if resolved_profile is _PROFILE_NOT_PROVIDED:
+            resolved_profile = _resolved
     preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=payload.task.agent,
@@ -147,7 +156,9 @@ async def create_workspace_row(
         owned_paths=payload.task.owned_paths,
     )
     attempt = await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
-    reservation_plan = resource_reservation_plan(payload, settings=resolved_settings)
+    reservation_plan = resource_reservation_plan(
+        payload, settings=resolved_settings, resolved_profile=resolved_profile
+    )
     resource_summary = await _resource_reservation_summary(
         session,
         reservation_plan,
@@ -437,9 +448,14 @@ def _requested_resource_reservation_values(
     return values
 
 
-def _requested_resource_dind_slots(payload: WorkspaceCreateRequest) -> int:
+def _requested_resource_dind_slots(
+    payload: WorkspaceCreateRequest,
+    *,
+    resolved_profile: dict[str, Any] | None = _PROFILE_NOT_PROVIDED,
+) -> int:
     """Return the number of DinD slots requested by the payload's resolved profile."""
-    _, resolved_profile = workspace_create_profile_snapshots(payload)
+    if resolved_profile is _PROFILE_NOT_PROVIDED:
+        resolved_profile = workspace_create_profile_snapshots(payload)[1]
     return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
 
 
@@ -916,13 +932,15 @@ def resource_reservation_plan(
     payload: WorkspaceCreateRequest,
     *,
     settings: Settings,
+    resolved_profile: dict[str, Any] | None = _PROFILE_NOT_PROVIDED,
 ) -> ResourceReservationPlan:
     """Build a resource reservation plan from a rich create request and settings."""
     from awf.service.workspaces import ResourceReservationPlan  # noqa: E402
 
+    if resolved_profile is _PROFILE_NOT_PROVIDED:
+        resolved_profile = workspace_create_profile_snapshots(payload)[1]
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
-    _, resolved_profile = workspace_create_profile_snapshots(payload)
     dind_mode = _dind_mode_from_profile_snapshot(resolved_profile)
     return ResourceReservationPlan(
         node_id=settings.worker_node_id or "local",
