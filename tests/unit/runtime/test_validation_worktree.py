@@ -34,7 +34,6 @@ class _CommandResultLike:
 @pytest.mark.unit
 async def test_check_validation_worktree_clean_handles_none_stdout_as_clean(tmp_path: Path) -> None:
     """A git status result with ``None`` stdout should behave as a clean worktree."""
-
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
@@ -53,7 +52,6 @@ async def test_check_validation_worktree_clean_treats_untracked_paths_as_dirty(
     tmp_path: Path,
 ) -> None:
     """Untracked files are pre-existing dirt and should be rejected by the guard."""
-
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
@@ -81,7 +79,6 @@ async def test_cleanup_validation_worktree_restores_tracked_files_with_none_stde
     tmp_path: Path,
 ) -> None:
     """A failed git restore should not crash if stderr is None."""
-
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
@@ -105,7 +102,6 @@ async def test_cleanup_validation_worktree_cleans_untracked_files_with_none_stde
     tmp_path: Path,
 ) -> None:
     """A failed git clean should not crash if stderr is None."""
-
     worktree = _init_fake_worktree(tmp_path)
 
     async def run_git(args: list[str]) -> _CommandResultLike:
@@ -129,7 +125,6 @@ async def test_cleanup_validation_worktree_verify_check_does_not_report_status_a
     tmp_path: Path,
 ) -> None:
     """If cleanup succeeds but worktree remains dirty, do not label status as the cleanup command."""
-
     worktree = _init_fake_worktree(tmp_path)
 
     calls: list[tuple[str, ...]] = []
@@ -158,7 +153,6 @@ async def test_cleanup_validation_worktree_verify_status_failure_is_preserved(
     tmp_path: Path,
 ) -> None:
     """Status inspection failures during post-clean verification."""
-
     worktree = _init_fake_worktree(tmp_path)
     calls: list[tuple[str, ...]] = []
 
@@ -188,7 +182,6 @@ async def test_cleanup_validation_worktree_rejects_invalid_head_output(
     tmp_path: Path,
 ) -> None:
     """Malformed ``git rev-parse`` output must fail as status-check validation."""
-
     worktree = _init_fake_worktree(tmp_path)
     restore_ref = "deadbeef01"
 
@@ -217,7 +210,6 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
     tmp_path: Path,
 ) -> None:
     """A clean worktree whose HEAD advanced during validation should fail cleanup."""
-
     worktree = _init_fake_worktree(tmp_path)
     restore_ref = "a" * 40
     current_head = "b" * 40
@@ -243,7 +235,6 @@ async def test_cleanup_validation_worktree_fails_when_head_changes(
 @pytest.mark.unit
 def test_validation_worktree_cleanup_failure_message_prefers_verify_paths() -> None:
     """Human-readable cleanup failures should report remaining dirty paths when verification runs."""
-
     cleanup = ValidationWorktreeCleanup(
         cleaned=False,
         check=ValidationWorktreeCheck(

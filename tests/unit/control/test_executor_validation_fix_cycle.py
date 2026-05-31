@@ -60,6 +60,7 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield an async SQLAlchemy session factory for validation-cycle tests."""
     async with postgres_test_engine() as engine:
         session_factory = make_session_factory(engine)
         session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
@@ -68,6 +69,7 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 
 @pytest.fixture
 def fake() -> FakeCommandRunner:
+    """Create a fake command runner for subprocess assertions."""
     return FakeCommandRunner()
 
 
@@ -79,6 +81,7 @@ def _make_executor(
     max_fix_passes: int,
     validation: object | None = None,
 ) -> WorkspaceExecutor:
+    """Build an executor configured for validation-loop unit tests."""
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     validation_runner = validation or ValidationRunner(
         runner=fake, artifacts_dir=tmp_path / "artifacts"
@@ -110,6 +113,7 @@ async def _seed_ready_workspace(
     owned_paths: list[str] | None = None,
     resolved_profile: dict | None = None,
 ) -> str:
+    """Create and persist a ready workspace with optional custom profile settings."""
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
@@ -135,9 +139,7 @@ async def _seed_ready_workspace(
 
 
 def _queue_initial_pass(fake: FakeCommandRunner) -> None:
-    """Queue the subprocess results for the initial agent-run + commit
-    block (through to just before validation). Shared prefix for every
-    test in this file."""
+    """Queue the shared initial command outputs for setup and commit."""
     fake.queue_result(returncode=0)  # adapter.run (initial)
     fake.queue_result(returncode=0, stdout="")  # current branch
     fake.queue_result(returncode=0)  # git add -A
@@ -149,10 +151,7 @@ def _queue_initial_pass(fake: FakeCommandRunner) -> None:
 
 
 def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
-    """Queue the subprocess results for one fix-cycle iteration's
-    agent-run + commit block. ``changed=True`` means the agent made
-    file edits worth committing; ``False`` means no diff and the
-    commit is skipped."""
+    """Queue command outputs for a single validation fix pass."""
     fake.queue_result(returncode=0)  # adapter.run (fix pass)
     fake.queue_result(returncode=0)  # git add -A
     if changed:
@@ -166,14 +165,7 @@ def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
-    """Queue the subprocess results for executor's pre-push policy check,
-    then pr_creator's pre-push diagnostics + push + gh pr create. The
-    three diagnostic queries
-    (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
-    ``git log origin/<base>..HEAD``) were added after the T39
-    incident to capture worktree state when ``gh pr create`` rejects
-    with "No commits between development and awf/ws_...". Every test
-    that pushes must account for these reads."""
+    """Queue push-and-PR outputs that follow validation side-effect checks."""
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -188,6 +180,7 @@ async def _insert_pending_validate_operation(
     workspace_id: str,
     operation_id: str,
 ) -> None:
+    """Insert a pending validation operation row for stale-worktree tests."""
     async with factory() as session:
         await session.execute(
             text(
@@ -224,6 +217,7 @@ async def _fetch_operation(
     *,
     operation_id: str,
 ) -> dict[str, object]:
+    """Fetch an operation row by ID for assertions."""
     async with factory() as session:
         row = (
             (
@@ -521,6 +515,8 @@ def _mark_git_worktree(worktree_path: Path) -> None:
 
 
 class TestValidationPassesOnFirstTry:
+    """Test the default validation flow with no fix-cycle retries."""
+
     @pytest.mark.unit
     async def test_no_fix_cycle_invoked_when_validation_green(
         self,
@@ -528,8 +524,7 @@ class TestValidationPassesOnFirstTry:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Green validation shouldn't spawn any retry work — the
-        subprocess queue should drain cleanly with no extras."""
+        """Green validation should skip retry work and complete directly."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -546,6 +541,8 @@ class TestValidationPassesOnFirstTry:
 
 
 class TestValidationSideEffectCleanup:
+    """Exercise cleanup behavior for validation side-effects."""
+
     @pytest.mark.unit
     async def test_executor_cleans_validation_side_effect_before_pr_push(
         self,
@@ -553,6 +550,7 @@ class TestValidationSideEffectCleanup:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Executor should restore tracked side effects before attempting push."""
         validation = _ValidationSideEffectRunner(
             artifacts_dir=tmp_path / "artifacts",
             results=[True],
@@ -598,6 +596,7 @@ class TestValidationSideEffectCleanup:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Cleanup failures should prevent PR push and fail the run."""
         validation = _ValidationSideEffectRunner(
             artifacts_dir=tmp_path / "artifacts",
             results=[True],
@@ -639,6 +638,7 @@ class TestValidationSideEffectCleanup:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Git status failures should flow through as infrastructure failures."""
         executor = _make_executor(
             fake=fake,
             factory=factory,
@@ -680,6 +680,7 @@ class TestValidationSideEffectCleanup:
         tmp_path: Path,
         raise_cleanup_exception: bool,
     ) -> None:
+        """Stale callbacks should still run side-effect cleanup before exit."""
         validation = _StaleValidationFailureRunner(
             factory=factory,
             terminal_status=WorkspaceStatus.cancelled,
@@ -727,6 +728,7 @@ class TestValidationSideEffectCleanup:
         tmp_path: Path,
         terminal_status: WorkspaceStatus,
     ) -> None:
+        """Cleanup failures in stale states should stop execution without pushing."""
         validation = _StaleValidationSuccessRunner(
             factory=factory,
             terminal_status=terminal_status,
@@ -763,6 +765,8 @@ class TestValidationSideEffectCleanup:
 
 
 class TestFixCycleRecoversAfterOneFailure:
+    """Verify normal recovery when validation fix passes succeed."""
+
     @pytest.mark.unit
     async def test_single_fix_pass_is_enough(
         self,
@@ -770,8 +774,7 @@ class TestFixCycleRecoversAfterOneFailure:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Validation fails once → fix pass runs → validation passes →
-        push + completed. This is the common case the user wants."""
+        """One retry pass should recover a single transient validation failure."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -795,9 +798,7 @@ class TestFixCycleRecoversAfterOneFailure:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """The whole point of the loop: the coding CLI gets a second
-        ``docker compose exec`` invocation. Two adapter calls must
-        appear in the runner's history."""
+        """A failed validation should trigger a second validation-fix adapter run."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -820,8 +821,7 @@ class TestFixCycleRecoversAfterOneFailure:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """The fix prompt handed to the CLI on the second call must carry
-        the failing command + its tail output so the CLI knows what to fix."""
+        """Fix prompt for the second pass should include failure context."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -848,12 +848,15 @@ class TestFixCycleRecoversAfterOneFailure:
 
 
 class TestFixCycleMissingWorktree:
+    """Validate missing-worktree behavior during validation retries."""
+
     @pytest.mark.unit
     async def test_missing_worktree_before_fix_agent_stops_without_fix_attempt(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """A disappearing worktree must stop before attempting a fix pass."""
         ws_id = await _seed_ready_workspace(factory)
         worktree_path = _test_worktree_path(factory, ws_id)
         fake = _RemoveWorktreeOnCall(
@@ -886,6 +889,7 @@ class TestFixCycleMissingWorktree:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Missing worktrees during fix pass should not trigger another retry."""
         ws_id = await _seed_ready_workspace(factory)
         worktree_path = _test_worktree_path(factory, ws_id)
         fake = _RemoveWorktreeAfterSecondAdapterRun(worktree_path)
@@ -982,6 +986,7 @@ class TestFixCycleMissingWorktree:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """If worktree disappears after fix add, diff/commit steps must be skipped."""
         ws_id = await _seed_ready_workspace(factory)
         worktree_path = _test_worktree_path(factory, ws_id)
         fake = _RemoveWorktreeOnCall(
@@ -1018,6 +1023,7 @@ class TestFixCycleMissingWorktree:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """If worktree disappears while computing fix diff, skip commit."""
         ws_id = await _seed_ready_workspace(factory)
         worktree_path = _test_worktree_path(factory, ws_id)
         fake = _RemoveWorktreeOnCall(
@@ -1055,6 +1061,8 @@ class TestFixCycleMissingWorktree:
 
 
 class TestFixPassGitCommandFailures:
+    """Validate error handling for git failures in fix-pass command flow."""
+
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("failure_stage", "reason_code", "message_fragment"),
@@ -1073,6 +1081,7 @@ class TestFixPassGitCommandFailures:
         reason_code: str,
         message_fragment: str,
     ) -> None:
+        """A git failure in fix command flow should fail the workspace immediately."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         operation_id = f"op_validate_fix_git_{failure_stage}"
@@ -1122,6 +1131,8 @@ class TestFixPassGitCommandFailures:
 
 
 class TestProtectedQualityGateChanges:
+    """Exercise quality-gate and protected-file behavior across fix cycles."""
+
     @pytest.mark.unit
     async def test_initial_agent_can_commit_allowed_pyproject_dependency_addition(
         self,
@@ -1129,6 +1140,7 @@ class TestProtectedQualityGateChanges:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Allowed pyproject dependency edits should be commitable by initial agent."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         old_text = """
@@ -1177,6 +1189,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Unowned quality-gate edits should fail validation by initial agent."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter.run (initial)
@@ -1201,6 +1214,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Self-committed protected change before staging must be rejected."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory, owned_paths=["src/**"])
         fake.queue_result(returncode=0)  # adapter.run (initial)
@@ -1248,6 +1262,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Fix pass should not commit unowned quality-gate changes."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1276,8 +1291,11 @@ dependencies = [
             assert "pyproject.toml" in (ws.failure_message or "")
 
     class TestSupplyChainPolicy:
+        """Validate helper behavior for supply-chain block messages and findings."""
+
         @pytest.mark.unit
         def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
+            """Check helper output and evidence capture for blocking findings."""
             evidence: list[str] = []
             append_command_evidence(None, stdout="ignored", stderr="ignored")
             append_command_evidence(evidence, stdout="out", stderr="err")
@@ -1304,6 +1322,7 @@ dependencies = [
 
         @pytest.mark.unit
         def test_supply_chain_block_message_allows_none_details(self) -> None:
+            """Allow ``details=None`` and still emit the expected supply-chain message."""
             findings = [
                 SupplyChainFinding(
                     reason_code="SUPPLY_CHAIN_TEST_NONE",
@@ -1328,6 +1347,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Fail before commit when initial agent creates a blocking supply-chain finding."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1372,6 +1392,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Continue normal execution when supply-chain findings are warnings."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1416,6 +1437,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Fail and block commit when fix-pass produces blocking supply-chain finding."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1468,6 +1490,8 @@ dependencies = [
 
 
 class TestFixCycleExhaustion:
+    """Verify behavior when retries exhaust their maximum allowance."""
+
     @pytest.mark.unit
     async def test_persistent_failure_hits_cap_and_marks_failed(
         self,
@@ -1475,9 +1499,7 @@ class TestFixCycleExhaustion:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """If validation keeps failing beyond ``max_validation_fix_passes``,
-        the workspace is marked failed with the exhaustion message. This
-        is the worst-case outcome the loop is allowed to reach."""
+        """Fail validation after exceeding the configured fix-pass allowance."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=2)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1505,8 +1527,7 @@ class TestFixCycleExhaustion:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Recovery after several fix passes — verifies the loop
-        correctly advances its pass counter."""
+        """Allow a later validation pass to recover after earlier failures."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1526,6 +1547,8 @@ class TestFixCycleExhaustion:
 
 
 class TestFixPassAgentFailure:
+    """Exercise resilience when a fix-pass command exits non-zero."""
+
     @pytest.mark.unit
     async def test_agent_nonzero_on_fix_pass_does_not_abort_loop(
         self,
@@ -1533,10 +1556,7 @@ class TestFixPassAgentFailure:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Coding CLI exiting non-zero on a fix pass mirrors the initial-
-        run salvage behaviour: log it, commit whatever's there, let
-        the next validation decide. If validation passes anyway, the
-        workspace completes. If not, the loop continues."""
+        """Keep going through the loop after a non-zero fix-pass exit."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1559,6 +1579,8 @@ class TestFixPassAgentFailure:
 
 
 class TestFixPassNoChanges:
+    """Verify no-op fix passes keep the loop running without commits."""
+
     @pytest.mark.unit
     async def test_fix_pass_with_no_diff_skips_commit_and_continues(
         self,
@@ -1566,10 +1588,7 @@ class TestFixPassNoChanges:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """If the fix pass makes no edits (CLI decided nothing needed
-        changing), the loop must continue without trying to commit an
-        empty change. Validation simply re-runs; if it still fails,
-        the loop keeps going until either recovery or exhaustion."""
+        """Skip commit when fix pass produces no diff and rerun validation."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=2)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1587,6 +1606,8 @@ class TestFixPassNoChanges:
 
 
 class TestFailureMessage:
+    """Validate validation failure message content and attempt counts."""
+
     @pytest.mark.unit
     async def test_exhaustion_message_mentions_attempt_count(
         self,
@@ -1594,6 +1615,7 @@ class TestFailureMessage:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Include fix-attempt count and failing command in failure message."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=3)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1613,6 +1635,8 @@ class TestFailureMessage:
 
 
 class TestExecProcessCleanupSafety:
+    """Validate process cleanup failures are surfaced as infrastructure failures."""
+
     @pytest.mark.unit
     async def test_agent_cleanup_failure_fails_infrastructure_before_validation(
         self,
@@ -1620,6 +1644,7 @@ class TestExecProcessCleanupSafety:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Return infrastructure failure when initial cleanup cannot be completed."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(
@@ -1652,6 +1677,7 @@ class TestExecProcessCleanupSafety:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Stop before retry when cleanup for a validation run reports failure."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1688,6 +1714,7 @@ class TestExecProcessCleanupSafety:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Mark infrastructure failure if cleanup fails before fix-pass commit."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -1733,6 +1760,7 @@ class TestExecProcessCleanupSafety:
         tmp_path: Path,
         terminal_status: WorkspaceStatus,
     ) -> None:
+        """Honor terminal workspace status even after an initial validation failure."""
         validation = _CancelBeforeFixValidation(
             factory=factory,
             artifacts_dir=tmp_path / "artifacts",

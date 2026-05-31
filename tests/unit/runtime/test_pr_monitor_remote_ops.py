@@ -48,16 +48,19 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
 )
 @pytest.mark.unit
 def test_git_push_failure_outcome_maps_pre_push_validation_reasons(reason_code: str) -> None:
+    """Pre-push validation reason codes should map to the monitor failure outcome."""
     assert _git_push_failure_outcome(_make_push_result(reason_code)) == "pre_push_validation_failed"
 
 
 @pytest.mark.unit
 def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() -> None:
+    """Roll-back failure on pre-push validation should remain terminal."""
     assert _make_push_result("PRE_PUSH_VALIDATION_ROLLBACK_FAILED").terminal_monitor_failure is True
 
 
 @pytest.mark.unit
 def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
+    """Unknown push failures should retain the default push-failed outcome."""
     assert _git_push_failure_outcome(_make_push_result("UNKNOWN_FAILURE")) == "git_push_failed"
 
 
@@ -83,6 +86,7 @@ def test_remote_ops_worktree_constants_match_validation_worktree() -> None:
 
 @pytest.mark.unit
 def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> None:
+    """Monitor push-repair and workflow-scope outcomes map to their specific buckets."""
     assert (
         _git_push_failure_outcome(
             _GitPushResult(
@@ -112,6 +116,7 @@ def test_git_push_failure_outcome_maps_repair_and_protected_scope_reasons() -> N
 
 @pytest.mark.unit
 def test_git_failure_message_prefers_stderr_then_stdout() -> None:
+    """Failure messages should prefer stderr over stdout when formatting command output."""
     assert (
         _git_failure_message(
             "git push",
@@ -137,6 +142,7 @@ def test_git_failure_message_prefers_stderr_then_stdout() -> None:
 
 @pytest.mark.unit
 def test_append_git_recovery_failure_includes_available_context() -> None:
+    """Recovery failure messages should include upstream and fallback operation context."""
     assert _append_git_recovery_failure(
         push_stderr="push rejected",
         recovery_stderr="fetch failed",
