@@ -110,19 +110,62 @@ async def test_git_push_result_maps_github_workflow_scope_rejection(
 @pytest.mark.parametrize(
     "stderr",
     [
-        (
+        pytest.param(
             "remote: error: refusing to allow a GitHub App to create or update "
             "workflow `.github/workflows/publish.yml` because the workflows "
-            "permission is required"
+            "permission is required",
+            id="workflow-permission-required",
         ),
-        (
+        pytest.param(
             "remote: error: `.github/workflows/publish.yml` must have workflow "
             "permission\n ! [remote rejected] HEAD -> awf/ws (protected branch "
-            "hook declined)"
+            "hook declined)",
+            id="must-have-workflow-permission",
         ),
-        (
+        pytest.param(
             "remote: error: workflow scope required to update "
-            ".github/workflows/publish.yml\n ! [remote rejected] HEAD -> awf/ws"
+            ".github/workflows/publish.yml\n ! [remote rejected] HEAD -> awf/ws",
+            id="workflow-scope-required",
+        ),
+        pytest.param(
+            "remote: error: missing the `workflow` scope while attempting to "
+            "create or update workflow `.github/workflows/publish.yml`",
+            id="missing-workflow-scope",
+        ),
+        pytest.param(
+            "remote: error: `.github/workflows/publish.yml` lacks workflow "
+            "permission\n ! [remote rejected] HEAD -> awf/ws",
+            id="lacks-workflow-permission",
+        ),
+        pytest.param(
+            "remote: error: token does not have workflow scope for "
+            ".github/workflows/publish.yml\n ! [remote rejected] HEAD -> awf/ws",
+            id="does-not-have-workflow-scope",
+        ),
+        pytest.param(
+            "remote: error: token doesn't have workflow permission to create "
+            "or update workflow `.github/workflows/publish.yml`",
+            id="doesnt-have-workflow-permission",
+        ),
+        pytest.param(
+            "remote: error: token has no workflow permission for workflow-file "
+            ".github/workflows/publish.yml",
+            id="has-no-workflow-permission",
+        ),
+        pytest.param(
+            "remote: error: updating .github/workflows/publish.yml requires "
+            "the workflow scope\n ! [remote rejected] HEAD -> awf/ws",
+            id="requires-workflow-scope",
+        ),
+        pytest.param(
+            "remote: error: workflow-file .github/workflows/publish.yml needs "
+            "a workflow permission",
+            id="needs-workflow-permission",
+        ),
+        pytest.param(
+            "remote: error: create or update workflow "
+            "`.github/workflows/publish.yml` must include the workflow scope",
+            id="must-include-workflow-scope",
         ),
     ],
 )
