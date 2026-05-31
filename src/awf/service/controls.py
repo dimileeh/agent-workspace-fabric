@@ -390,6 +390,19 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
+        if stop_stack and not await _has_terminal_runtime_released_event(
+            self._session, workspace.id
+        ):
+            await repo.add_event(
+                workspace,
+                event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
+                reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                payload={
+                    "compose_project_name": workspace.compose_project_name,
+                    "workspace_status": workspace.status,
+                    "cleanup": {"stack_stopped": True, "source": "cancel_workspace"},
+                },
+            )
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -485,6 +498,17 @@ class WorkspaceControlService:
                 event_type="workspace.stack_stopped",
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
+            )
+        if not await _has_terminal_runtime_released_event(self._session, workspace.id):
+            await repo.add_event(
+                workspace,
+                event_type=_TERMINAL_RUNTIME_RELEASED_EVENT_TYPE,
+                reason_code=_TERMINAL_RUNTIME_RELEASED_REASON_CODE,
+                payload={
+                    "compose_project_name": workspace.compose_project_name,
+                    "workspace_status": workspace.status,
+                    "cleanup": {"stack_stopped": True, "source": "stop_workspace"},
+                },
             )
         await operations.finish(
             operation,

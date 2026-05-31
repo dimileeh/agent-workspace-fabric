@@ -1536,3 +1536,138 @@ async def test_destroy_workspace_records_terminal_runtime_released_after_cleanup
             excluding_workspace_id=None,
         )
         assert len(conflicts) == 0
+
+
+@pytest.mark.unit
+async def test_stop_workspace_records_terminal_runtime_released(
+    engine: AsyncEngine,
+) -> None:
+    """After a successful stop, the terminal_runtime_released event is
+    recorded so the cancelled workspace no longer blocks host ports."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_stop_release",
+        )
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8081]],
+                }
+            ]
+        }
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        response = await service.stop_workspace(
+            workspace.id,
+            reason="stop for port release",
+            idempotency_key="stop-release-event",
+        )
+
+        assert response.status == WorkspaceStatus.cancelled
+        repo = WorkspaceRepository(session)
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 1
+        assert release_events[0].reason_code == "TERMINAL_RUNTIME_RELEASED"
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8081],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 0
+
+
+@pytest.mark.unit
+async def test_cancel_workspace_records_terminal_runtime_released(
+    engine: AsyncEngine,
+) -> None:
+    """After a successful cancel with stop_stack=True, the terminal_runtime_released
+    event is recorded so the cancelled workspace no longer blocks host ports."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_cancel_release",
+        )
+        workspace.task_policy = {
+            "companions": [
+                {
+                    "name": "web",
+                    "repo_url": "git@github.com:example/web.git",
+                    "ports": [[80, 8082]],
+                }
+            ]
+        }
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        response = await service.cancel_workspace(
+            workspace.id,
+            reason="cancel for port release",
+            stop_stack=True,
+            idempotency_key="cancel-release-event",
+        )
+
+        assert response.status == WorkspaceStatus.cancelled
+        repo = WorkspaceRepository(session)
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 1
+        assert release_events[0].reason_code == "TERMINAL_RUNTIME_RELEASED"
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8082],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 0
+
+
+@pytest.mark.unit
+async def test_cancel_workspace_without_stop_stack_skips_terminal_runtime_released(
+    engine: AsyncEngine,
+) -> None:
+    """When cancel is called with stop_stack=False, the terminal_runtime_released
+    event is not recorded because the compose stack may still be running."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.cancelled,
+            compose_project_name="awf_ws_cancel_no_stop",
+        )
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service.cancel_workspace(
+            workspace.id,
+            reason="no stack stop",
+            stop_stack=False,
+            idempotency_key="cancel-no-stop",
+        )
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        release_events = [
+            e for e in events if e.event_type == "workspace.terminal_runtime_released"
+        ]
+        assert len(release_events) == 0
