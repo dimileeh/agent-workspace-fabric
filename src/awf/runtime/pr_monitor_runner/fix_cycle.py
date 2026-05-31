@@ -97,7 +97,7 @@ async def _run_fix_cycle(
     # Last settle-poll status; used after the loop to skip resolving threads that
     # gained fresh feedback we couldn't re-address (e.g. at the pass limit).
     status: PRStatus | None = None
-    publish_dependent_review_comment_resolutions: list[tuple[ReviewComment, VerdictResult]] = []
+    fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
     threads = list(initial_threads)
     reviews = list(initial_reviews)
     worktree_path = self._worktrees_root / workspace_id
@@ -266,7 +266,7 @@ async def _run_fix_cycle(
             verdict = verdict_result.verdict
             _sync_needs_human_reason(state, c.comment_id, verdict_result)
             _mark_review_comment_addressed(state, c, verdict)
-            if verdict == "defer":
+            if verdict in {"false_positive", "defer"}:
                 await self._record_pr_feedback_resolution(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -276,8 +276,8 @@ async def _run_fix_cycle(
                     verdict_result=verdict_result,
                     operation_id=operation_id,
                 )
-            elif verdict in {"false_positive", "fix_committed"}:
-                publish_dependent_review_comment_resolutions.append((c, verdict_result))
+            elif verdict == "fix_committed":
+                fixed_review_comments.append((c, verdict_result))
             # Exclude ``needs_human`` from the rollback set, mirroring the inline
             # thread path: the agent already judged this comment needs a human,
             # so a push failure must not clear that verdict and force a pointless
@@ -409,7 +409,7 @@ async def _run_fix_cycle(
         )
 
     resolution_head_sha = pushed_head_sha or pr_head_sha
-    for comment, verdict_result in publish_dependent_review_comment_resolutions:
+    for comment, verdict_result in fixed_review_comments:
         await self._record_pr_feedback_resolution(
             workspace_id=workspace_id,
             repo=repo,

@@ -707,14 +707,14 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_requeues_false_positive_review_comment_state(
+async def test_workflow_scope_push_failure_restores_false_positive_review_comment_resolution(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope push failures do not preserve unpublished review verdicts."""
+    """Verify failed pushes do not lose durable false-positive review verdicts."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
-    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: local workflow fix already handles it")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing code already handles it")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[]))
     cmd.queue_result(
@@ -766,13 +766,29 @@ async def test_workflow_scope_push_failure_requeues_false_positive_review_commen
             pull_request_key="42",
         )
 
-    assert rows == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.feedback_kind == "review_comment"
+    assert row.feedback_id == "issue:workflow"
+    assert row.head_sha == "abc1234567890def"
+    assert row.verdict == "false_positive"
+    assert row.reason == "existing code already handles it"
+
+    changed = await runner._apply_pr_feedback_resolution_state(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(reviews=(comment,)),
+        state=state,
+    )
+
+    assert changed is True
+    assert state.threads_addressed_ids["issue:workflow"] == "false_positive"
+    assert _review_comment_body_state_key("issue:workflow") in state.threads_addressed_ids
 
     action = decide(_status(reviews=(comment,)), state, MonitorConfig())
 
-    assert isinstance(action, AddressComments)
-    assert action.threads == ()
-    assert action.review_comments == (comment,)
+    assert not isinstance(action, AddressComments)
 
 
 @pytest.mark.unit
