@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.helpers import (
+    _needs_human_reason_state_key,
     _target_reconcile_failure_payload,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -1488,11 +1489,11 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
 
 
 @pytest.mark.unit
-async def test_monitor_comment_repair_workflow_scope_failure_requeues_without_terminating(
+async def test_monitor_comment_repair_workflow_scope_failure_marks_needs_human_without_terminating(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope comment repair failures requeue review items."""
+    """Verify workflow-scope comment repair failures block items for humans."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(stdout="fixed locally")
@@ -1538,9 +1539,17 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_without_te
 
     assert terminal is False
     assert state.iter_count == 1
-    assert "T_workflow_scope" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow_scope" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_workflow_scope" not in state.threads_addressed_ids
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
+    )
+    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
+    assert "__review_thread_body_hash__:T_workflow_scope" in state.threads_addressed_ids
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow_scope")]
+        == expected_reason
+    )
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
     body = comment_calls[0].args[comment_calls[0].args.index("--body") + 1]
@@ -1579,7 +1588,7 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_without_te
 
 
 @pytest.mark.unit
-async def test_monitor_comment_repair_workflow_scope_notification_failure_requeues_without_masking_push_failure(
+async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_needs_human_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1630,7 +1639,16 @@ async def test_monitor_comment_repair_workflow_scope_notification_failure_requeu
 
     assert terminal is False
     assert state.iter_count == 1
-    assert "T_workflow_scope" not in state.threads_addressed_ids
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
+    )
+    assert state.threads_addressed_ids["T_workflow_scope"] == "needs_human"
+    assert (
+        state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow_scope")]
+        == expected_reason
+    )
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
     async with factory() as s:

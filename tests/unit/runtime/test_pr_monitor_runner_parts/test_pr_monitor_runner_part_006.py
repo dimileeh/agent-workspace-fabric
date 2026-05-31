@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor import (
     AddressComments,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     ReviewComment,
     ReviewThread,
     decide,
@@ -26,6 +27,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle import (
     _requeue_workflow_scope_publish_dependent_items,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _defer_reason_state_key,
     _needs_human_reason_state_key,
     _notify_human_reason,
     _review_comment_body_state_key,
@@ -572,11 +574,11 @@ async def test_generic_push_failure_preserves_review_comment_needs_human_after_l
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_requeues_fix_committed_thread_state(
+async def test_workflow_scope_push_failure_marks_fix_committed_thread_needs_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope push failures keep committed fixes retryable."""
+    """Verify workflow-scope push failures block committed fixes for humans."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FIXED: updated publish workflow")
@@ -620,23 +622,29 @@ async def test_workflow_scope_push_failure_requeues_fix_committed_thread_state(
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
+    )
+    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
+    assert "__review_thread_body_hash__:T_workflow" in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow")] == (
+        expected_reason
+    )
 
     action = decide(_status(inline=(thread,)), state, MonitorConfig())
 
-    assert isinstance(action, AddressComments)
-    assert action.threads == (thread,)
-    assert action.review_comments == ()
+    assert isinstance(action, NotifyHuman)
+    assert _notify_human_reason(_status(inline=(thread,)), state) == expected_reason
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
+async def test_workflow_scope_push_failure_preserves_push_independent_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Verify workflow-scope push failures requeue false-positive thread state."""
+    """Verify workflow-scope failures preserve false-positive inline verdicts."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: reviewer misread the diff")
@@ -688,12 +696,19 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert "T_false_positive" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
+    )
+    assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
+    assert "__review_thread_body_hash__:T_false_positive" in state.threads_addressed_ids
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
+    assert "__review_thread_body_hash__:T_workflow" in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow")] == (
+        expected_reason
+    )
 
     action = decide(
         _status(inline=(false_positive_thread, workflow_thread)),
@@ -701,9 +716,11 @@ async def test_workflow_scope_push_failure_requeues_false_positive_thread_state(
         MonitorConfig(),
     )
 
-    assert isinstance(action, AddressComments)
-    assert action.threads == (false_positive_thread, workflow_thread)
-    assert action.review_comments == ()
+    assert isinstance(action, NotifyHuman)
+    assert (
+        _notify_human_reason(_status(inline=(false_positive_thread, workflow_thread)), state)
+        == expected_reason
+    )
 
 
 @pytest.mark.unit
@@ -792,12 +809,12 @@ async def test_workflow_scope_push_failure_preserves_false_positive_review_comme
 
 
 @pytest.mark.unit
-async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
+async def test_workflow_scope_push_failure_preserves_captured_defer_thread_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify workflow-scope push failures requeue captured-defer thread state."""
+    """Verify workflow-scope failures preserve captured-defer inline verdicts."""
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
@@ -847,20 +864,21 @@ async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
 
     assert result.failed is True
     assert result.reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert "__review_thread_body_hash__:T_defer" in state.threads_addressed_ids
+    assert state.threads_addressed_ids[_defer_reason_state_key("T_defer")] == (
+        "track follow-up separately"
+    )
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
 
     action = decide(_status(inline=(deferred_thread,)), state, MonitorConfig())
 
-    assert isinstance(action, AddressComments)
-    assert action.threads == (deferred_thread,)
-    assert action.review_comments == ()
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
-def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() -> None:
-    """Verify workflow-scope requeue clears inline states needing resolution."""
+def test_workflow_scope_requeue_marks_publish_dependent_fixes_needs_human() -> None:
+    """Verify workflow-scope failures store per-item human-blocking reasons."""
     deferred_issue_marker = fix_cycle._deferred_issue_filed_marker("T_defer", "defer-hash")
     state = MonitorState(
         threads_addressed_ids={
@@ -879,28 +897,44 @@ def test_workflow_scope_requeue_clears_inline_threads_dependent_on_resolution() 
             "__review_comment_body_hash__:issue:fixed": "fixed-comment-hash",
         }
     )
+    expected_reason = (
+        "GitHub rejected the workflow-file push because the token lacks "
+        "`workflow` scope for .github/workflows/publish.yml. Grant a GitHub token "
+        "with workflow push permission, then rerun the monitor repair."
+    )
 
     _requeue_workflow_scope_publish_dependent_items(
         state,
-        ["T_false_positive", "T_defer", "T_workflow", "issue:1", "issue:fixed"],
-        inline_thread_ids=["T_false_positive", "T_defer", "T_workflow"],
+        ["T_workflow", "issue:fixed"],
+        reason=expected_reason,
     )
 
-    assert "T_false_positive" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_false_positive" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["T_false_positive"] == "false_positive"
+    assert state.threads_addressed_ids["__review_thread_body_hash__:T_false_positive"] == (
+        "fp-hash"
+    )
     assert "__needs_human_reason__:T_false_positive" not in state.threads_addressed_ids
-    assert "T_defer" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["T_defer"] == "defer"
+    assert state.threads_addressed_ids["__review_thread_body_hash__:T_defer"] == "defer-hash"
     assert "__needs_human_reason__:T_defer" not in state.threads_addressed_ids
-    assert "__defer_reason__:T_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["__defer_reason__:T_defer"] == "captured defer reason"
     assert state.threads_addressed_ids[deferred_issue_marker].endswith("/issues/305")
-    assert "T_workflow" not in state.threads_addressed_ids
-    assert "__review_thread_body_hash__:T_workflow" not in state.threads_addressed_ids
-    assert "__needs_human_reason__:T_workflow" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["T_workflow"] == "needs_human"
+    assert state.threads_addressed_ids["__review_thread_body_hash__:T_workflow"] == (
+        "workflow-hash"
+    )
+    assert state.threads_addressed_ids[_needs_human_reason_state_key("T_workflow")] == (
+        expected_reason
+    )
     assert state.threads_addressed_ids["issue:1"] == "false_positive"
     assert state.threads_addressed_ids["__review_comment_body_hash__:issue:1"] == "comment-hash"
-    assert "issue:fixed" not in state.threads_addressed_ids
-    assert "__review_comment_body_hash__:issue:fixed" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["issue:fixed"] == "needs_human"
+    assert state.threads_addressed_ids["__review_comment_body_hash__:issue:fixed"] == (
+        "fixed-comment-hash"
+    )
+    assert state.threads_addressed_ids[_needs_human_reason_state_key("issue:fixed")] == (
+        expected_reason
+    )
 
 
 @pytest.mark.unit
