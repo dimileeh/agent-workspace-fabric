@@ -73,6 +73,32 @@ def test_default_stable_channel_matches_stable_manifest(harness: InstallerHarnes
 
 
 @pytest.mark.unit
+def test_channel_pipeline_failure_does_not_silently_abort(harness: InstallerHarness) -> None:
+    """A non-zero channel-extraction pipeline must not silently abort the install.
+
+    ``extract_manifest_channel`` pipes ``sed`` into ``head -n 1``. Under
+    ``set -o pipefail`` ``head`` can close the pipe early and leave ``sed`` taking
+    SIGPIPE, so the pipeline exits non-zero. The captured value is guarded with
+    ``|| true`` so a non-zero pipeline degrades to an empty channel (handled by
+    the existing ``[ -n ... ] || return 0`` guard) instead of exiting the script
+    with no reason token. A ``head`` stub that exits non-zero after one line
+    reproduces that race deterministically.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    harness.add_head(rc=141)  # SIGPIPE-style early exit
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, channel="stable")
+
+    result = harness.run([], manifest=manifest)
+
+    # The install proceeds rather than aborting silently on the non-zero pipeline.
+    assert result.returncode == 0, result.stderr
+    assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
 def test_pinned_version_skips_channel_enforcement(harness: InstallerHarness) -> None:
     """A pinned ``--version`` selects the manifest directly; channel is not enforced."""
     harness.add_uname("Linux", "x86_64")

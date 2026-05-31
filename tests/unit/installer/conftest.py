@@ -152,6 +152,19 @@ class InstallerHarness:
         """Place an ``awf`` stub on ``PATH`` or in ``directory`` (exits ``rc``)."""
         return self._write_stub("awf", f"exit {rc}", directory=directory)
 
+    def add_head(self, *, rc: int = 0) -> None:
+        """Stub ``head`` to echo only its first input line then exit ``rc``.
+
+        ``extract_manifest_channel`` pipes ``sed`` into ``head -n 1``. The real
+        ``head`` closes its input after one line, so under ``set -o pipefail`` a
+        producer that keeps writing takes SIGPIPE and the whole pipeline exits
+        non-zero. Forcing a non-zero ``head`` exit reproduces that race
+        deterministically; ``head`` is only used by that one channel pipeline, so
+        the stub does not perturb any other install step.
+        """
+        behavior = f"IFS= read -r _line || true\nprintf '%s\\n' \"$_line\"\nexit {rc}"
+        self._write_stub("head", behavior)
+
     # -- manifest / wheel fixtures ------------------------------------
 
     def write_wheel(self, *, version: str = "0.1.0") -> tuple[Path, str]:

@@ -349,7 +349,12 @@ extract_manifest_channel() {
 # (legacy/hand-authored) is not enforced here; parse_manifest still guards shape.
 verify_channel() {
     [ -z "$VERSION" ] || return 0
-    MANIFEST_CHANNEL="$(extract_manifest_channel)"
+    # extract_manifest_channel pipes sed into `head -n 1`; under pipefail, head
+    # can close the pipe before sed finishes and leave sed taking SIGPIPE, so the
+    # pipeline may exit non-zero. `|| true` degrades that to an empty channel,
+    # which the guard below already treats as "no channel field" rather than
+    # letting set -e abort the install with no reason token.
+    MANIFEST_CHANNEL="$(extract_manifest_channel || true)"
     [ -n "$MANIFEST_CHANNEL" ] || return 0
     if [ "$MANIFEST_CHANNEL" != "$CHANNEL" ]; then
         fail CHANNEL_MISMATCH "requested channel ${CHANNEL} but the resolved manifest is on the ${MANIFEST_CHANNEL} channel (${MANIFEST_SOURCE}); pass --version <X.Y.Z> to install a specific ${CHANNEL} release"
@@ -473,8 +478,13 @@ detect_shell() {
 }
 
 print_path_advice() {
-    local bindir shell rc line login_rc="" candidate
-    bindir="$(default_bin_dir)"
+    # Reuse a bindir already resolved by the caller (verify_awf computes it via
+    # default_bin_dir) when one is passed; only resolve it here otherwise.
+    # Threading the cached value in avoids a second `uv tool dir --bin` /
+    # `pipx environment` subprocess per successful install without changing the
+    # advice itself.
+    local bindir="${1:-}" shell rc line login_rc="" candidate
+    [ -n "$bindir" ] || bindir="$(default_bin_dir)"
     shell="$(detect_shell)"
     case "$shell" in
         fish)
@@ -540,17 +550,17 @@ verify_awf() {
     fi
 
     if [ -z "$resolved" ]; then
-        print_path_advice
+        print_path_advice "$bindir"
         fail AWF_NOT_REACHABLE "awf is not runnable after install; install reported success but no awf binary was found"
     fi
 
     if ! "$resolved" --help >/dev/null 2>&1; then
-        print_path_advice
+        print_path_advice "$bindir"
         fail AWF_NOT_REACHABLE "awf installed at $resolved but is not runnable"
     fi
 
     if [ "$on_path" -eq 0 ]; then
-        print_path_advice
+        print_path_advice "$bindir"
     fi
 }
 

@@ -172,6 +172,34 @@ def test_uv_install_uses_uv_tool_bin_dir_for_reachability(harness: InstallerHarn
 
 
 @pytest.mark.unit
+def test_off_path_install_resolves_bin_dir_once(harness: InstallerHarness) -> None:
+    """A successful off-PATH install resolves the bin dir with a single subprocess.
+
+    ``verify_awf`` resolves the bin dir via ``uv tool dir --bin`` and threads the
+    cached value into ``print_path_advice`` instead of letting it re-resolve. A
+    successful install that lands off PATH (so PATH advice is printed) must spawn
+    ``uv tool dir --bin`` exactly once, not twice.
+    """
+    harness.add_uname("Linux", "x86_64")
+    uv_bin = harness.root / "uv-tool-bin"
+    uv_bin.mkdir()
+    harness.add_uv(tool_bin_dir=str(uv_bin))
+    # awf lands in uv's configured bin dir, off PATH, so advice is emitted.
+    harness.add_awf(directory=uv_bin)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(["--shell", "bash"], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    # Advice still points at uv's real bin dir...
+    assert str(uv_bin) in result.stdout + result.stderr
+    # ...but the bin dir is resolved with a single `uv tool dir --bin` subprocess.
+    tool_dir_calls = [call for call in harness.calls() if call.startswith("uv tool dir")]
+    assert len(tool_dir_calls) == 1, harness.calls()
+
+
+@pytest.mark.unit
 def test_pipx_install_uses_pipx_bin_dir_for_reachability(harness: InstallerHarness) -> None:
     """A pipx configured to link scripts elsewhere is honored, not mis-reported.
 
