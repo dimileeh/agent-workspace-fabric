@@ -1117,6 +1117,70 @@ async def test_persist_state_preserves_concurrent_operator_hint_and_freeze(
 
 
 @pytest.mark.unit
+async def test_persist_state_drops_stale_done_marker_when_freeze_started_matches(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    initial_done_key = runner_helpers._initial_review_grace_done_key(42)
+    initial_started_key = runner_helpers._initial_review_grace_started_key(42)
+    settle_done_key = runner_helpers._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    settle_started_key = runner_helpers._non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha=head_sha,
+    )
+    freeze_started_value = runner_helpers._initial_review_grace_wall_started_value_from_datetime(
+        datetime(2026, 5, 31, 4, 30, 46, tzinfo=UTC)
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_last_commit_sha = head_sha
+        workspace.monitor_threads_addressed = {
+            initial_started_key: freeze_started_value,
+            settle_started_key: freeze_started_value,
+        }
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    stale_state = MonitorState(
+        threads_addressed_ids={
+            initial_started_key: freeze_started_value,
+            initial_done_key: "elapsed",
+            settle_started_key: freeze_started_value,
+            settle_done_key: "elapsed",
+            "review-thread": "fix_committed",
+        }
+    )
+
+    await runner._persist_state(workspace_id, stale_state)
+
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    assert monitor_state[initial_started_key] == freeze_started_value
+    assert monitor_state[settle_started_key] == freeze_started_value
+    assert initial_done_key not in monitor_state
+    assert settle_done_key not in monitor_state
+    assert monitor_state["review-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
 async def test_merge_rechecks_persisted_operator_hint_before_merge_pr(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

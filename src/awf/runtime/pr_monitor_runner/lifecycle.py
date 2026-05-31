@@ -266,9 +266,8 @@ def _preserve_concurrent_wait_marker(
     db_started = db_threads_addressed.get(started_key)
     if db_started is None:
         return
-    if _same_persisted_wait_marker(threads_addressed.get(started_key), db_started):
-        return
-    threads_addressed[started_key] = db_started
+    if not _same_persisted_wait_marker(threads_addressed.get(started_key), db_started):
+        threads_addressed[started_key] = db_started
     if done_key not in db_threads_addressed:
         threads_addressed.pop(done_key, None)
 
