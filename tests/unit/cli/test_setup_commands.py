@@ -239,6 +239,46 @@ def test_setup_probes_persisted_source_checkout_env(
 
 
 @pytest.mark.unit
+def test_setup_no_checkout_probes_bootstrap_asset_root_env(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No source checkout: the probe honors the bootstrap asset root's compose env.
+
+    Regression for PRRT_kwDOSJAM6s6F6ljB: with no verified source checkout in
+    play, ``awf setup`` must resolve ``AWF_API_HOST_PORT``/``AWF_HOST_WORK_DIR``
+    the same way ``awf start`` does — through ``_resolve_service_compose_paths``/
+    ``_resolve_service_runtime_env_files``, which honor the packaged bootstrap
+    asset root's ``docker/compose/.env`` — instead of bare default discovery that
+    only searches the cwd and nearby source markers. Otherwise setup probes the
+    default 8000/work dir while start uses the bundled env file's values.
+    """
+    asset_root = tmp_path / "assets"
+    compose_dir = asset_root / "docker" / "compose"
+    compose_dir.mkdir(parents=True, exist_ok=True)
+    (compose_dir / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
+    (compose_dir / ".env").write_text("AWF_API_HOST_PORT=9100\n", encoding="utf-8")
+
+    import awf.service.bootstrap as bootstrap_mod
+
+    monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: asset_root)
+    monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def fake_checks(**kwargs: object) -> list[SetupCheckResult]:
+        captured["environ"] = kwargs.get("environ")
+        return _all_ok()
+
+    monkeypatch.setattr(setup_commands, "run_system_checks", fake_checks)
+    result = _runner.invoke(app, ["setup", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    environ = captured["environ"]
+    assert isinstance(environ, dict)
+    assert environ["AWF_API_HOST_PORT"] == "9100"
+
+
+@pytest.mark.unit
 def test_setup_persisted_source_checkout_stale_blocks(
     harness: _Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
