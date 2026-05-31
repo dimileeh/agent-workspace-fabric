@@ -1016,3 +1016,97 @@ def test_run_system_checks_ignores_invalid_env_port(
             environ={"AWF_API_HOST_PORT": invalid},
         )
         assert captured["port"] == 8123, invalid
+
+
+def _patch_probes_capture_disk_path(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object],
+) -> None:
+    """Patch every probe so ``run_system_checks`` runs in isolation, capturing the disk path."""
+
+    def fake_ok(name: str) -> SetupCheckResult:
+        return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
+
+    def fake_disk(path: Path) -> SetupCheckResult:
+        captured["disk_path"] = path
+        return fake_ok("disk")
+
+    monkeypatch.setattr(system_checks, "check_docker", lambda: fake_ok("docker"))
+    monkeypatch.setattr(system_checks, "check_compose", lambda: fake_ok("compose"))
+    monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
+    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
+    monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
+    monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
+    monkeypatch.setattr(system_checks, "check_disk", fake_disk)
+    monkeypatch.setattr(system_checks, "check_shell_path", lambda: fake_ok("shell_path"))
+    monkeypatch.setattr(system_checks, "check_local_capacity", lambda: fake_ok("local_capacity"))
+
+
+@pytest.mark.unit
+def test_run_system_checks_honors_awf_host_work_dir_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``AWF_HOST_WORK_DIR`` override is inspected instead of the config default.
+
+    The local-service Compose stack bind-mounts ``${AWF_HOST_WORK_DIR:-...}`` and
+    the running service resolves the same override as its work_dir, so the disk
+    readiness probe must report on that directory, not the saved ``config.work_dir``.
+    """
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        environ={"AWF_HOST_WORK_DIR": "/custom/state"},
+    )
+
+    assert captured["disk_path"] == Path("/custom/state")
+
+
+@pytest.mark.unit
+def test_run_system_checks_expands_awf_host_work_dir_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``~`` in the env override is expanded like the persisted config path is."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        environ={"AWF_HOST_WORK_DIR": "~/custom/state"},
+    )
+
+    assert captured["disk_path"] == Path("~/custom/state").expanduser()
+
+
+@pytest.mark.unit
+def test_run_system_checks_explicit_work_dir_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``work_dir`` wins over both the env override and config."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        work_dir=Path("/explicit/state"),
+        environ={"AWF_HOST_WORK_DIR": "/custom/state"},
+    )
+
+    assert captured["disk_path"] == Path("/explicit/state")
+
+
+@pytest.mark.unit
+def test_run_system_checks_ignores_blank_env_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank/whitespace-only override falls back to the persisted config work_dir."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    for blank in ("", "   "):
+        run_system_checks(
+            config=HostSetupConfig(work_dir="/persisted/state"),
+            environ={"AWF_HOST_WORK_DIR": blank},
+        )
+        assert captured["disk_path"] == Path("/persisted/state"), repr(blank)

@@ -675,6 +675,49 @@ def _resolve_api_host_port(
     return config.api.host_port
 
 
+def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
+    """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unset.
+
+    Mirrors the Compose ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` bind
+    source: a missing, blank, or whitespace-only value yields ``None`` so the
+    disk probe falls back to the persisted ``config.work_dir`` default rather
+    than inspecting an empty path.
+    """
+    raw = environ.get("AWF_HOST_WORK_DIR")
+    if raw is None:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    return candidate
+
+
+def _resolve_work_dir(
+    config: HostSetupConfig,
+    *,
+    work_dir: Path | None,
+    environ: Mapping[str, str] | None,
+) -> Path:
+    """Resolve which directory the disk readiness probe should inspect.
+
+    Precedence mirrors the path the local-service Compose stack actually mounts
+    (``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) rather than the persisted
+    default alone: an explicit caller override wins, then the
+    ``AWF_HOST_WORK_DIR`` environment override that Compose bind-mounts and that
+    the running service resolves as its work_dir, and finally the persisted
+    ``config.work_dir``. Honoring the env override keeps ``awf setup`` from
+    reporting disk readiness for the wrong directory when an operator points the
+    stack at a custom host work dir via the shell or ``docker/compose/.env``.
+    """
+    if work_dir is not None:
+        return work_dir
+    env = os.environ if environ is None else environ
+    override = _env_host_work_dir(env)
+    if override is not None:
+        return _safe_expanduser(override)
+    return _safe_expanduser(config.work_dir)
+
+
 def run_system_checks(
     *,
     config: HostSetupConfig,
@@ -684,7 +727,7 @@ def run_system_checks(
 ) -> list[SetupCheckResult]:
     """Run every host system check in a stable order and return the results."""
     resolved_port = _resolve_api_host_port(config, port=port, environ=environ)
-    resolved_work_dir = _safe_expanduser(config.work_dir) if work_dir is None else work_dir
+    resolved_work_dir = _resolve_work_dir(config, work_dir=work_dir, environ=environ)
     return [
         check_docker(),
         check_compose(),
