@@ -62,6 +62,7 @@ from awf.db.repositories.base import (
     _scheduler_scoring_time,
     _workspace_idempotency_advisory_lock_key,
     _workspace_status_value,
+    host_ports_from_resolved_profile,
     resolve_session_dialect_name,
 )
 from awf.db.repositories.quality_repo import (
@@ -580,25 +581,9 @@ class WorkspaceRepository:
                                     )
 
             resolved_profile = row.resolved_profile
-            if resolved_profile and isinstance(resolved_profile, dict):
-                services = resolved_profile.get("services")
-                if services and isinstance(services, list):
-                    for service in services:
-                        if not isinstance(service, dict):
-                            continue
-                        svc_ports = service.get("ports")
-                        if not svc_ports or not isinstance(svc_ports, list):
-                            continue
-                        for port_mapping in svc_ports:
-                            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                                try:
-                                    hp = int(port_mapping[1])
-                                except (ValueError, TypeError):
-                                    continue
-                                if hp in host_ports_set:
-                                    conflicts.append(
-                                        HostPortConflict(host_port=hp, workspace_id=row.id)
-                                    )
+            for hp in host_ports_from_resolved_profile(resolved_profile):
+                if hp in host_ports_set:
+                    conflicts.append(HostPortConflict(host_port=hp, workspace_id=row.id))
 
         return conflicts
 

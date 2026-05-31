@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import sys
@@ -167,6 +168,35 @@ class OwnedPathConflict:
 class HostPortConflict:
     host_port: int
     workspace_id: str
+
+
+def host_ports_from_resolved_profile(
+    resolved_profile: Mapping[str, Any] | None,
+) -> builtins.list[int]:
+    """Extract host-side ports from a resolved profile's services block.
+
+    Shared by the service layer and the repository layer so that the
+    port-mapping data shape is parsed in exactly one place.
+    """
+    if not resolved_profile or not isinstance(resolved_profile, dict):
+        return []
+    services = resolved_profile.get("services")
+    if not services or not isinstance(services, list):
+        return []
+    host_ports: builtins.list[int] = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        svc_ports = service.get("ports")
+        if not svc_ports or not isinstance(svc_ports, list):
+            continue
+        for port_mapping in svc_ports:
+            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
+                try:
+                    host_ports.append(int(port_mapping[1]))
+                except (ValueError, TypeError):
+                    continue
+    return host_ports
 
 
 @dataclass(frozen=True)

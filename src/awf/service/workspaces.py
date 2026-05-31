@@ -42,7 +42,7 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import HostPortConflict
+from awf.db.repositories.base import HostPortConflict, host_ports_from_resolved_profile
 from awf.profiles.models import ProfileAppEndpoint
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
@@ -310,29 +310,7 @@ class WorkspaceCreateHostPortConflictError(Exception):
 DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
 
 
-def _host_ports_from_resolved_profile(
-    resolved_profile: Mapping[str, Any] | None,
-) -> builtins.list[int]:
-    """Extract host-side ports from a resolved profile's services block."""
-    if not resolved_profile or not isinstance(resolved_profile, dict):
-        return []
-    services = resolved_profile.get("services")
-    if not services or not isinstance(services, list):
-        return []
-    host_ports: builtins.list[int] = []
-    for service in services:
-        if not isinstance(service, dict):
-            continue
-        svc_ports = service.get("ports")
-        if not svc_ports or not isinstance(svc_ports, list):
-            continue
-        for port_mapping in svc_ports:
-            if isinstance(port_mapping, (list, tuple)) and len(port_mapping) >= 2:
-                try:
-                    host_ports.append(int(port_mapping[1]))
-                except (ValueError, TypeError):
-                    continue
-    return host_ports
+_host_ports_from_resolved_profile = host_ports_from_resolved_profile
 
 
 def _host_ports_from_task_policy_companions(
