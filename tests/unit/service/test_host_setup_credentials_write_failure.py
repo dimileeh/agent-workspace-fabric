@@ -432,6 +432,92 @@ def test_write_secret_file_refuses_chmodable_preexisting_shared_dir(tmp_path: Pa
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_refuses_writable_ancestor_of_secrets_dir(tmp_path: Path) -> None:
+    """A group/world-writable, non-sticky *ancestor* of the secrets dir is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F8mAa: ``_mkdir_secure`` validates symlinks and
+    hardens/checks the 0o700 leaf, then returns — but the secret is written by a
+    *later* ``os.open(tmp_path)`` in ``_write_secret_file``. When the configured
+    secrets dir sits under an existing group/world-writable parent, a local user
+    with write access to that parent can, in that window, ``rename`` the checked
+    secrets dir aside and drop a ``secrets -> /attacker`` symlink in its place; the
+    temp-file open then follows the replacement into the attacker tree, exposing
+    the plain-file secret. The file-level ``O_EXCL`` only guards the temp *inode*,
+    not a swapped parent dir. ``_mkdir_secure`` must reject the writable ancestor
+    up front — before creating anything — so the swap vector never exists.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # group/world-writable, NON-sticky: a rename/swap vector
+    secrets_dir = shared / "secrets"  # AWF would otherwise create this 0o700
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # We fail closed *before* the create loop: no secrets dir, no secret, and the
+    # writable parent is left exactly as configured (never mutated).
+    assert not secrets_dir.exists()
+    assert not target.exists()
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o777
+    assert list(shared.iterdir()) == []
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_refuses_writable_grandparent_of_secrets_dir(tmp_path: Path) -> None:
+    """A writable, non-sticky ancestor *above* the immediate parent is also refused.
+
+    The swap vector is any writable ancestor, not just the immediate parent: a
+    writable grandparent lets an attacker rename the (AWF-created, 0o700) parent
+    aside and redirect it, so the symlink-refusal walk must reject a writable
+    ancestor anywhere up the chain to the filesystem root — even when the levels
+    below it are ones AWF creates 0o700 this call.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # writable grandparent above two AWF-created levels
+    secrets_dir = shared / "awf" / "secrets"  # both levels would be AWF-created 0o700
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert not secrets_dir.exists()
+    assert not (shared / "awf").exists()
+    assert list(shared.iterdir()) == []
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="sticky-bit semantics are POSIX-specific")
+def test_write_secret_file_accepts_sticky_world_writable_ancestor(tmp_path: Path) -> None:
+    """A *sticky* world-writable ancestor (e.g. ``/tmp``) is accepted, not over-refused.
+
+    The writable-ancestor refusal must not reject the legitimate ephemeral-path
+    case: on a sticky directory only an entry's *owner* may rename or delete it, so
+    a non-owner attacker cannot swap the secrets dir AWF created and owns there.
+    The secret is written normally — pinning that the guard exempts the sticky bit
+    rather than failing closed on every world-writable ancestor (which would break
+    secrets under ``/tmp`` and, with it, the test suite's own ``tmp_path`` tree).
+    """
+    sticky = tmp_path / "sticky"
+    sticky.mkdir()
+    sticky.chmod(0o1777)  # world-writable WITH the sticky bit, like /tmp
+    secrets_dir = sticky / "secrets"
+    target = secrets_dir / "github.secret"
+
+    credentials._write_secret_file(target, "tok-value")
+
+    assert target.read_text(encoding="utf-8") == "tok-value"
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_plain_file_backend_refuses_symlinked_secrets_dir(tmp_path: Path) -> None:
     """``create_ref`` refuses a symlinked secrets dir end-to-end (no resolve-away).
 

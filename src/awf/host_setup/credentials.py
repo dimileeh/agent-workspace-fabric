@@ -909,6 +909,13 @@ def _mkdir_secure(directory: Path) -> None:
     every ancestor up to the filesystem root (not merely the nearest pre-existing
     one, which would miss a symlinked grandparent above an already-created
     descendant).
+
+    A symlink-clean ancestor is still a swap vector if it is group/other-writable:
+    a local attacker with write access to it could rename the checked secrets dir
+    aside and plant a redirecting symlink in the window between this walk and the
+    later secret write. Each pre-existing ancestor is therefore also passed to
+    ``_reject_writable_ancestor`` (sticky dirs such as ``/tmp`` exempted), so a
+    secrets dir under a writable parent fails closed before anything is created.
     """
     # Refuse a symlinked leaf up front so it is rejected whether its target
     # exists (``exists()``/``is_dir()`` would follow it) or dangles (``mkdir``
@@ -953,8 +960,17 @@ def _mkdir_secure(directory: Path) -> None:
             # A not-yet-existing level the create loop will mkdir + harden below.
             # Existence is monotonic up the chain, so every level recorded here is
             # contiguous with the leaf; pre-existing ancestors are left untouched
-            # (merely symlink-checked) and never enter ``missing``.
+            # (merely symlink- and writability-checked) and never enter ``missing``.
             missing.append(probe)
+        else:
+            # A pre-existing ancestor AWF did not create this call. The levels AWF
+            # *does* create below are made 0o700 (never group/other-writable), so a
+            # pre-existing ancestor is the only swap vector left for the secrets dir
+            # in the TOCTOU window between this walk and the later secret write —
+            # refuse a group/other-writable (non-sticky) one before creating
+            # anything. ``probe`` is confirmed non-symlink just above, so the stat
+            # inside reflects the real directory rather than a redirected target.
+            _reject_writable_ancestor(probe)
         parent = probe.parent
         if parent == probe:  # reached the filesystem root.
             break
@@ -1026,6 +1042,43 @@ def _reject_group_or_world_accessible_dir(directory: Path) -> None:
             errno.EPERM,
             "Secrets directory is group- or world-accessible and could not be hardened to 0700.",
             str(directory),
+        )
+
+
+def _reject_writable_ancestor(ancestor: Path) -> None:
+    """Refuse a pre-existing ancestor a local attacker could swap before the write, on POSIX.
+
+    ``_mkdir_secure`` validates the secrets dir and its ancestors (symlinks,
+    owner-private leaf) and returns, but the secret is written by a *later*
+    ``os.open(tmp_path)`` in ``_write_secret_file``. Between the two, a local user
+    with write access to a group/other-writable ancestor can ``rename`` the checked
+    secrets dir aside and drop a ``secrets -> /attacker`` symlink in its place; the
+    subsequent temp-file open then follows the replacement into the attacker's tree,
+    exposing the plain-file secret despite the documented symlink refusal (the
+    file-level ``O_EXCL`` only guards the temp *inode*, not a swapped parent dir).
+    Reject any writable ancestor up front (PRRT_kwDOSJAM6s6F8mAa) so the swap vector
+    never exists — the default ``~/.awf/secrets`` under a user-owned home is
+    unaffected, and an operator simply points ``secrets_dir`` at a non-writable path.
+
+    The sticky bit (``0o1000``) is the exemption: on a sticky directory (e.g.
+    ``/tmp``) only an entry's *owner* may rename or delete it, so a non-owner
+    attacker cannot swap the secrets dir AWF created and owns there — exactly the
+    guarantee a plain world-writable parent lacks. POSIX-only: the rwx model and
+    rename-permission semantics do not apply off POSIX, where ``_chmod_best_effort``
+    is itself a no-op, so a non-POSIX ``st_mode`` carrying those bits is ignored
+    rather than treated as a swap vector.
+    """
+    if os.name != "posix":
+        return
+    mode = ancestor.stat().st_mode
+    # Group- or other-writable (``0o022``) without the sticky bit (``0o1000``) lets
+    # any writer rename the entry below it and plant a redirecting symlink.
+    if mode & 0o022 and not mode & 0o1000:
+        raise PermissionError(
+            errno.EPERM,
+            "Secrets directory has a group- or world-writable ancestor that could be "
+            "swapped for a symlink before the secret is written.",
+            str(ancestor),
         )
 
 

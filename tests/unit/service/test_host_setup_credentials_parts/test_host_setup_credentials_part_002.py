@@ -606,6 +606,27 @@ def test_reject_group_or_world_accessible_dir_skips_non_posix_hosts(
     credentials._reject_group_or_world_accessible_dir(target)
 
 
+@pytest.mark.unit
+def test_reject_writable_ancestor_skips_non_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the writable-ancestor swap-vector guard is a no-op on non-POSIX hosts.
+
+    The rename-permission semantics the guard relies on (sticky-bit ownership,
+    group/other write bits) are POSIX-specific — ``_chmod_best_effort`` is itself a
+    no-op off POSIX — so the guard must return without refusing an ancestor whose
+    mode carries group/other write bits the platform ignores: a 0o777 dir that
+    would be a fatal swap vector on POSIX is accepted off it.
+    """
+    ancestor = tmp_path / "shared"
+    ancestor.mkdir()
+    ancestor.chmod(0o777)  # group/world-writable, non-sticky: fatal on POSIX, ignored off it
+    monkeypatch.setattr(credentials.os, "name", "nt")
+
+    credentials._reject_writable_ancestor(ancestor)
+
+
 # --------------------------------------------------------------------------- #
 # 12. Credential refs stay within the ProviderConfig storage cap.
 # --------------------------------------------------------------------------- #
