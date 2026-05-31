@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from sqlalchemy import select
@@ -424,6 +425,65 @@ async def test_persist_state_preserves_concurrent_processed_operator_hint_marker
     assert OPERATOR_HINT_STATE_KEY not in monitor_state
     assert monitor_state[operator_hint_processed_key("op_hint_processed_elsewhere")] == "processed"
     assert monitor_state["review-thread"] == "fix_committed"
+    assert monitor_state["second-thread"] == "fix_committed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("terminal_status", ["needs_human", "agent_failed"])
+async def test_persist_state_preserves_concurrent_terminal_operator_hint_status(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    terminal_status: Literal["needs_human", "agent_failed"],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    pending_hint = OperatorHint(
+        reason="investigate the operator supplied remonitor hint",
+        operation_id="op_hint_terminal_elsewhere",
+        requested_at="2026-05-31T00:30:00+00:00",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, pending_hint)
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+
+    stale_workspace = await runner._load_workspace(workspace_id)
+    stale_state = runner._load_state(stale_workspace)
+    assert stale_state.pending_operator_hint == pending_hint
+
+    terminal_reason = "agent already determined this hint requires human attention"
+    terminal_hint = OperatorHint(
+        reason=pending_hint.reason,
+        operation_id=pending_hint.operation_id,
+        requested_at=pending_hint.requested_at,
+        status=terminal_status,
+        status_reason=terminal_reason,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, terminal_hint)
+        await session.commit()
+
+    stale_state.mark_addressed("second-thread", "fix_committed")
+    await runner._persist_state(workspace_id, stale_state)
+
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert persisted is not None
+    monitor_state = dict(persisted.monitor_threads_addressed)
+    persisted_hint = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    assert persisted_hint["operation_id"] == "op_hint_terminal_elsewhere"
+    assert persisted_hint["status"] == terminal_status
+    assert persisted_hint["status_reason"] == terminal_reason
     assert monitor_state["second-thread"] == "fix_committed"
 
 

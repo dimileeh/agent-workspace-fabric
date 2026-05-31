@@ -133,6 +133,10 @@ def _operator_hint_matches(left: OperatorHint, right: OperatorHint) -> bool:
     return left == right
 
 
+def _operator_hint_is_terminal(hint: OperatorHint) -> bool:
+    return hint.status in {"needs_human", "agent_failed"}
+
+
 def _operator_hint_is_processed(
     threads_addressed: dict[str, str],
     hint: OperatorHint,
@@ -157,9 +161,11 @@ def _merge_concurrent_operator_hint(
     db_hint = operator_hint_from_threads(db_threads_addressed)
     if db_hint is None:
         return threads_addressed
-    if state_hint is not None and _operator_hint_matches(state_hint, db_hint):
-        return threads_addressed
     if _operator_hint_is_processed(threads_addressed, db_hint):
+        return threads_addressed
+    if state_hint is not None and _operator_hint_matches(state_hint, db_hint):
+        if _operator_hint_is_terminal(db_hint):
+            return persist_operator_hint(threads_addressed, db_hint)
         return threads_addressed
     return persist_operator_hint(threads_addressed, db_hint)
 
