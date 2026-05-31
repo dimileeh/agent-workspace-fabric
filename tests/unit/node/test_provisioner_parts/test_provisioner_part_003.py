@@ -492,7 +492,7 @@ class TestServiceStartupDiagnostics:
         diagnostics = {
             "schema": "service_startup_diagnostics.v1",
             "containers_inspected": 1,
-            "companion_logs": {"backend": ["boot failed"]},
+            "unhealthy_companions": [{"service": "backend", "logs": ["boot failed"]}],
         }
         capturer = _FakeDiagnostics(diagnostics)
         provisioner = Provisioner(
@@ -540,7 +540,7 @@ class TestServiceStartupDiagnostics:
             ) -> dict[str, Any]:
                 del project_name, workspace_id, tail_lines
                 order.append("capture")
-                return {"schema": "service_startup_diagnostics.v1", "companion_logs": {}}
+                return {"schema": "service_startup_diagnostics.v1", "unhealthy_companions": []}
 
         provisioner = Provisioner(
             session_factory=session_factory,

@@ -484,11 +484,22 @@ class ComposeManager:
         and recorded as a ``companion_logs_capture_error`` marker so the caller
         can still re-raise the original ``ComposeOperationError`` unchanged.
 
-        The ``companion_logs_capture_error`` marker is always a uniform
-        ``dict[str, str]`` so consumers never have to special-case its shape:
-        top-level failures (``ps``/``inspect``/JSON) are keyed under
-        ``"_top_level"`` and per-container ``docker logs`` failures under the
-        compose service name.
+        Per-companion diagnostics are emitted as a ``unhealthy_companions`` *list
+        of records* — each record carries the compose service name under a
+        ``"service"`` field rather than using it as a mapping key. Compose
+        service names are arbitrary, operator-controlled strings; were they used
+        as dict keys, :func:`redact_audit_value`'s key-sensitive redaction would
+        replace the **entire** value with ``"[redacted]"`` for any service whose
+        name contains ``secret``/``token``/``api-key``/etc. (e.g.
+        ``secret-backend``), silently blanking diagnostics for exactly the
+        services where debugging matters most. As a *value*, the name only goes
+        through scalar token redaction and survives intact.
+
+        Top-level capture failures (``ps``/``inspect``/JSON) — where no
+        per-companion record exists yet — are still recorded under
+        ``companion_logs_capture_error`` keyed by the fixed ``"_top_level"``
+        scope; per-companion ``docker logs`` failures live on the record itself
+        under ``"logs_capture_error"``.
         """
         compose_file = self._projects_dir / workspace_id / "compose.yml"
         payload: dict[str, Any] = {
@@ -528,10 +539,7 @@ class ComposeManager:
         containers = inspected if isinstance(inspected, list) else []
         payload["containers_inspected"] = len(containers)
 
-        companion_health: dict[str, Any] = {}
-        healthcheck_test: dict[str, Any] = {}
-        companion_logs: dict[str, list[str]] = {}
-        logs_capture_error: dict[str, str] = {}
+        unhealthy_companions: list[dict[str, Any]] = []
 
         for idx, container in enumerate(containers):
             if not _container_is_unhealthy(container):
@@ -539,39 +547,38 @@ class ComposeManager:
             service = _compose_service_name(container) or str(
                 container.get("Id") or f"<unknown-{idx}>"
             )
-            companion_health[service] = _container_health_summary(container)
+            # NB: ``service`` is stored as a *value*, never a mapping key —
+            # otherwise audit key-sensitive redaction would blank diagnostics
+            # for services named like ``secret-backend``. See the docstring.
+            entry: dict[str, Any] = {
+                "service": service,
+                "health": _container_health_summary(container),
+            }
             test = _container_healthcheck_test(container)
             if test is not None:
-                healthcheck_test[service] = test
+                entry["healthcheck_test"] = test
             container_id = container.get("Id")
-            if not container_id:
-                continue
-            try:
-                logs_raw = await self._docker_capture(
-                    ["logs", "--tail", str(tail_lines), str(container_id)],
-                    operation="logs",
-                    combine_stderr=True,
-                )
-            except ComposeOperationError as exc:
-                logs_capture_error[service] = _capture_error_detail(exc)
-                _log.warning(
-                    "compose.companion_logs_capture_failed",
-                    workspace_id=workspace_id,
-                    service=service,
-                    reason_code=exc.reason_code,
-                    error=redact_secrets(str(exc)),
-                )
-                continue
-            companion_logs[service] = logs_raw.splitlines()
+            if container_id:
+                try:
+                    logs_raw = await self._docker_capture(
+                        ["logs", "--tail", str(tail_lines), str(container_id)],
+                        operation="logs",
+                        combine_stderr=True,
+                    )
+                    entry["logs"] = logs_raw.splitlines()
+                except ComposeOperationError as exc:
+                    entry["logs_capture_error"] = _capture_error_detail(exc)
+                    _log.warning(
+                        "compose.companion_logs_capture_failed",
+                        workspace_id=workspace_id,
+                        service=service,
+                        reason_code=exc.reason_code,
+                        error=redact_secrets(str(exc)),
+                    )
+            unhealthy_companions.append(entry)
 
-        if companion_health:
-            payload["companion_health"] = companion_health
-        if healthcheck_test:
-            payload["healthcheck_test"] = healthcheck_test
-        if companion_logs:
-            payload["companion_logs"] = companion_logs
-        if logs_capture_error:
-            payload["companion_logs_capture_error"] = logs_capture_error
+        if unhealthy_companions:
+            payload["unhealthy_companions"] = unhealthy_companions
 
         return _redacted_diagnostics(payload)
 

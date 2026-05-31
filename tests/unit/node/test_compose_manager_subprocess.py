@@ -440,6 +440,17 @@ def _docker_dispatch(
     return _fake
 
 
+def _companions_by_service(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index the ``unhealthy_companions`` records by their ``service`` value.
+
+    The persisted payload stores companions as a *list of records* (service
+    name as a value, never a mapping key) so audit key-sensitive redaction
+    cannot blank diagnostics for services named like ``secret-backend``. Tests
+    index by service purely for readable assertions.
+    """
+    return {entry["service"]: entry for entry in payload.get("unhealthy_companions", [])}
+
+
 class TestCaptureCompanionDiagnostics:
     @pytest.mark.unit
     async def test_happy_path_captures_unhealthy_only_and_excludes_healthy(
@@ -482,16 +493,16 @@ class TestCaptureCompanionDiagnostics:
         assert payload["tail_lines"] == 50
         assert payload["containers_inspected"] == 2
         # Healthy postgres excluded; unhealthy backend captured.
-        assert set(payload["companion_health"]) == {"backend"}
-        assert payload["companion_health"]["backend"]["health_status"] == "unhealthy"
-        assert payload["companion_health"]["backend"]["health_log"][0]["ExitCode"] == 1
-        assert payload["healthcheck_test"]["backend"] == [
+        companions = _companions_by_service(payload)
+        assert set(companions) == {"backend"}
+        backend = companions["backend"]
+        assert backend["health"]["health_status"] == "unhealthy"
+        assert backend["health"]["health_log"][0]["ExitCode"] == 1
+        assert backend["healthcheck_test"] == [
             "CMD-SHELL",
             "curl -f http://localhost:8000/health",
         ]
-        assert "backend" in payload["companion_logs"]
-        assert isinstance(payload["companion_logs"]["backend"], list)
-        assert "postgres" not in payload["companion_logs"]
+        assert isinstance(backend["logs"], list)
 
     @pytest.mark.unit
     async def test_redacts_planted_secrets_in_logs_and_health_output(
@@ -535,6 +546,57 @@ class TestCaptureCompanionDiagnostics:
         ):
             assert raw_secret not in blob, f"raw secret leaked: {raw_secret}"
         assert "[redacted]" in blob
+
+    @pytest.mark.unit
+    async def test_sensitively_named_service_diagnostics_survive_redaction(
+        self, manager: ComposeManager
+    ) -> None:
+        """A service whose name matches audit key-sensitive patterns keeps its data.
+
+        Regression: compose service names are arbitrary, operator-controlled
+        strings. Storing them as mapping keys made
+        :func:`redact_audit_value`'s ``_is_sensitive_key`` check (``secret``,
+        ``token``, ``api-key``, ...) replace the *entire* per-service value with
+        ``"[redacted]"`` — blanking diagnostics for exactly the services where
+        debugging matters most. Storing the name as a record *value* keeps the
+        captured health/logs/healthcheck data intact.
+        """
+        service = "api-key-secret-token-backend"
+        inspect = json.dumps(
+            [
+                _inspect_entry(
+                    container_id="c_sensitive",
+                    service=service,
+                    health_status="unhealthy",
+                    health_log=[{"ExitCode": 1, "Output": "probe failed: connection refused"}],
+                    healthcheck_test=["CMD-SHELL", "curl -f http://localhost:8000/health"],
+                ),
+            ]
+        ).encode()
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            side_effect=_docker_dispatch(
+                ps_ids=["c_sensitive"],
+                inspect_stdout=inspect,
+                logs_by_container={"c_sensitive": b"boot start\nlistening on :8000\n"},
+            ),
+        ):
+            payload = await manager.capture_companion_diagnostics(
+                project_name="awf_ws_sensitive",
+                workspace_id="ws_sensitive",
+            )
+
+        companions = _companions_by_service(payload)
+        # The record survives keyed by its (sensitively-named) service value, and
+        # none of its diagnostics are collapsed to the redaction marker.
+        assert set(companions) == {service}
+        entry = companions[service]
+        assert entry["service"] == service
+        assert entry["health"]["health_status"] == "unhealthy"
+        assert entry["health"]["health_log"][0]["Output"] == "probe failed: connection refused"
+        assert entry["healthcheck_test"] == ["CMD-SHELL", "curl -f http://localhost:8000/health"]
+        assert entry["logs"] == ["boot start", "listening on :8000"]
+        assert "[redacted]" not in json.dumps(entry)
 
     @pytest.mark.unit
     async def test_default_tail_lines_used_when_unspecified(self, manager: ComposeManager) -> None:
@@ -599,12 +661,14 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_exit",
             )
 
-        assert "c_orphan" in payload["companion_health"]
-        assert payload["companion_health"]["c_orphan"]["exit_code"] == 2
-        assert payload["companion_health"]["c_orphan"]["health_status"] is None
+        companions = _companions_by_service(payload)
+        assert "c_orphan" in companions
+        orphan = companions["c_orphan"]
+        assert orphan["health"]["exit_code"] == 2
+        assert orphan["health"]["health_status"] is None
         # No healthcheck declared → no test array recorded for this service.
-        assert "healthcheck_test" not in payload or "c_orphan" not in payload["healthcheck_test"]
-        assert payload["companion_logs"]["c_orphan"] == ["crashed early"]
+        assert "healthcheck_test" not in orphan
+        assert orphan["logs"] == ["crashed early"]
 
     @pytest.mark.unit
     async def test_running_sidecar_with_none_health_status_excluded(
@@ -647,8 +711,8 @@ class TestCaptureCompanionDiagnostics:
 
         # Only the genuinely unhealthy backend is captured; the running agent
         # with ``health_status == "none"`` is excluded.
-        assert set(payload["companion_health"]) == {"backend"}
-        assert "agent" not in payload.get("companion_logs", {})
+        companions = _companions_by_service(payload)
+        assert set(companions) == {"backend"}
 
     @pytest.mark.unit
     async def test_unhealthy_container_without_id_skips_logs(self, manager: ComposeManager) -> None:
@@ -674,8 +738,9 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_noid",
             )
 
-        assert "ghost" in payload["companion_health"]
-        assert "companion_logs" not in payload or "ghost" not in payload["companion_logs"]
+        companions = _companions_by_service(payload)
+        assert "ghost" in companions
+        assert "logs" not in companions["ghost"]
 
     @pytest.mark.unit
     async def test_per_container_logs_error_records_marker_and_continues(
@@ -704,12 +769,12 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_gone",
             )
 
-        marker = payload["companion_logs_capture_error"]
-        assert isinstance(marker, dict)
-        assert isinstance(marker["backend"], str)
+        backend = _companions_by_service(payload)["backend"]
+        assert isinstance(backend["logs_capture_error"], str)
+        assert "logs" not in backend
         # Health + healthcheck still captured despite the logs failure.
-        assert "backend" in payload["companion_health"]
-        assert payload["healthcheck_test"]["backend"] == ["CMD", "x"]
+        assert backend["health"]["health_status"] == "unhealthy"
+        assert backend["healthcheck_test"] == ["CMD", "x"]
 
     @pytest.mark.unit
     async def test_logs_daemon_failure_classified_docker_unavailable_with_combined_stderr(
@@ -760,19 +825,21 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_daemon",
             )
 
-        marker = payload["companion_logs_capture_error"]["backend"]
+        marker = _companions_by_service(payload)["backend"]["logs_capture_error"]
         assert marker.startswith("DOCKER_UNAVAILABLE"), marker
 
     @pytest.mark.unit
-    async def test_capture_error_marker_is_always_a_dict_keyed_by_scope(
+    async def test_capture_error_markers_have_predictable_scope_shapes(
         self, manager: ComposeManager
     ) -> None:
-        """``companion_logs_capture_error`` is a uniform ``dict[str, str]``.
+        """Capture-error markers have a predictable shape per scope.
 
-        Regression for the inconsistent-shape review: top-level failures
-        (ps/inspect/JSON) are keyed under ``_top_level`` and per-container logs
-        failures under the compose service name, so consumers never have to
-        special-case a bare ``str`` vs a per-service ``dict``.
+        Per-companion ``docker logs`` failures live on the companion record under
+        a string ``logs_capture_error`` field (the service name is a *value*, not
+        a key, so it can't collide with audit key-sensitive redaction).
+        Top-level failures (ps/inspect/JSON) — where no companion record exists —
+        are recorded under ``companion_logs_capture_error`` keyed by the fixed
+        ``"_top_level"`` scope.
         """
         inspect = json.dumps(
             [
@@ -788,7 +855,7 @@ class TestCaptureCompanionDiagnostics:
             side_effect=_docker_dispatch(
                 ps_ids=["c_gone"],
                 inspect_stdout=inspect,
-                logs_by_container={},  # per-container logs failure → service-keyed marker
+                logs_by_container={},  # per-container logs failure → record-level marker
             ),
         ):
             per_container = await manager.capture_companion_diagnostics(
@@ -804,22 +871,24 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_shape_tl",
             )
 
-        for marker in (
-            per_container["companion_logs_capture_error"],
-            top_level["companion_logs_capture_error"],
-        ):
-            assert isinstance(marker, dict)
-            assert all(isinstance(k, str) and isinstance(v, str) for k, v in marker.items())
-        assert set(per_container["companion_logs_capture_error"]) == {"backend"}
-        assert set(top_level["companion_logs_capture_error"]) == {"_top_level"}
+        # Per-companion: string marker on the record; no top-level dict produced.
+        backend = _companions_by_service(per_container)["backend"]
+        assert isinstance(backend["logs_capture_error"], str)
+        assert "companion_logs_capture_error" not in per_container
+        # Top-level: uniform ``dict[str, str]`` keyed by the ``_top_level`` scope.
+        marker = top_level["companion_logs_capture_error"]
+        assert isinstance(marker, dict)
+        assert all(isinstance(k, str) and isinstance(v, str) for k, v in marker.items())
+        assert set(marker) == {"_top_level"}
+        assert "unhealthy_companions" not in top_level
 
     @pytest.mark.unit
-    async def test_unidentifiable_containers_get_distinct_fallback_keys(
+    async def test_unidentifiable_containers_get_distinct_fallback_names(
         self, manager: ComposeManager
     ) -> None:
         """Containers lacking both a compose service label and an ``Id`` must not
-        collide on a single ``<unknown>`` key — each unhealthy one keeps its own
-        diagnostics entry via an index-disambiguated fallback key.
+        collide on a single ``<unknown>`` name — each unhealthy one keeps its own
+        diagnostics record via an index-disambiguated fallback service name.
         """
         inspect = json.dumps(
             [
@@ -840,9 +909,10 @@ class TestCaptureCompanionDiagnostics:
                 workspace_id="ws_noident",
             )
 
-        # Both unhealthy containers survive under distinct keys, not collapsed.
-        assert len(payload["companion_health"]) == 2
-        assert set(payload["companion_health"]) == {"<unknown-0>", "<unknown-1>"}
+        # Both unhealthy containers survive under distinct names, not collapsed.
+        companions = _companions_by_service(payload)
+        assert len(companions) == 2
+        assert set(companions) == {"<unknown-0>", "<unknown-1>"}
 
     @pytest.mark.unit
     async def test_top_level_ps_error_returns_partial_payload(
@@ -862,7 +932,7 @@ class TestCaptureCompanionDiagnostics:
         assert isinstance(marker, dict)
         assert marker["_top_level"].startswith("ps:")
         assert "docker ps boom" in marker["_top_level"]
-        assert "companion_health" not in payload
+        assert "unhealthy_companions" not in payload
 
     @pytest.mark.unit
     async def test_inspect_error_returns_partial_payload(self, manager: ComposeManager) -> None:
@@ -882,7 +952,7 @@ class TestCaptureCompanionDiagnostics:
         marker = payload["companion_logs_capture_error"]
         assert isinstance(marker, dict)
         assert marker["_top_level"].startswith("inspect:")
-        assert "companion_health" not in payload
+        assert "unhealthy_companions" not in payload
 
     @pytest.mark.unit
     async def test_unparseable_inspect_json_returns_partial_payload(
@@ -903,7 +973,7 @@ class TestCaptureCompanionDiagnostics:
         marker = payload["companion_logs_capture_error"]
         assert isinstance(marker, dict)
         assert marker["_top_level"].startswith("inspect: unparseable JSON")
-        assert "companion_health" not in payload
+        assert "unhealthy_companions" not in payload
 
     @pytest.mark.unit
     async def test_non_list_inspect_json_yields_no_companions(
@@ -922,7 +992,7 @@ class TestCaptureCompanionDiagnostics:
             )
 
         assert payload["containers_inspected"] == 0
-        assert "companion_health" not in payload
+        assert "unhealthy_companions" not in payload
 
     @pytest.mark.unit
     async def test_malformed_inspect_entries_are_skipped_defensively(
@@ -960,11 +1030,10 @@ class TestCaptureCompanionDiagnostics:
 
         assert payload["containers_inspected"] == 3
         # Only the well-formed unhealthy service is captured.
-        assert set(payload["companion_health"]) == {"svc"}
-        assert payload["companion_health"]["svc"]["health_log"] == [
-            {"ExitCode": 9, "Output": "real"}
-        ]
-        assert "companion_logs" not in payload
+        companions = _companions_by_service(payload)
+        assert set(companions) == {"svc"}
+        assert companions["svc"]["health"]["health_log"] == [{"ExitCode": 9, "Output": "real"}]
+        assert "logs" not in companions["svc"]
 
     @pytest.mark.unit
     async def test_no_containers_skips_inspect_and_logs(self, manager: ComposeManager) -> None:
@@ -978,7 +1047,7 @@ class TestCaptureCompanionDiagnostics:
             )
 
         assert payload["containers_inspected"] == 0
-        assert "companion_health" not in payload
+        assert "unhealthy_companions" not in payload
         # Only the ``docker ps`` call ran; no inspect/logs.
         assert mock_exec.call_count == 1
 
