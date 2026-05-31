@@ -65,6 +65,14 @@ MIN_MEMORY_BYTES = 4 * 1024**3
 # for it, unlike DEFAULT_API_HOST_PORT). Kept local to avoid editing config.py.
 DEFAULT_POSTGRES_HOST_PORT = 5433
 
+# Compose's built-in defaults for the optional ``ollama-bridge`` profile. When
+# ``COMPOSE_PROFILES`` enables it, the local-service stack binds the bridge via
+# host networking at
+# ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``;
+# readiness mirrors these defaults so it can report the resolved bind.
+DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT = 11434
+DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS = "172.17.0.1"
+
 _DOCKER_INSTALL_DOCS = "https://docs.docker.com/get-docker/"
 _DOCKER_DAEMON_DOCS = "https://docs.docker.com/config/daemon/"
 _GIT_DOCS = "https://git-scm.com/downloads"
@@ -1191,6 +1199,187 @@ def check_host_port_conflict(api_port: int, postgres_port: int) -> SetupCheckRes
     )
 
 
+def _ollama_bridge_profile_enabled(environ: Mapping[str, str]) -> bool:
+    """Return whether the optional ``ollama-bridge`` Compose profile is active.
+
+    Mirrors ``awf.service.bootstrap._compose_profile_enabled`` (the single source
+    that decides whether ``awf start`` appends the ``ollama_bridge`` bootstrap
+    stage), so readiness validates the bridge bind exactly when start would
+    publish it. ``COMPOSE_PROFILES`` is a comma- *or* whitespace-separated list,
+    read from the same merged service env ``run_system_checks`` already receives
+    (the setup CLI feeds it ``local_service_environ``), so a profile set in
+    ``docker/compose/.env`` is honored. Re-implemented here rather than imported
+    from ``service.bootstrap`` to avoid coupling host-setup readiness to a private
+    bootstrap symbol.
+    """
+    _, raw = env_lookup(environ, "COMPOSE_PROFILES")
+    return "ollama-bridge" in {
+        item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
+    }
+
+
+def _env_ollama_bridge_listen_port(environ: Mapping[str, str]) -> int | None:
+    """Return a usable ``AWF_OLLAMA_BRIDGE_LISTEN_PORT`` override, or ``None``.
+
+    Mirrors :func:`_env_postgres_host_port`: a missing, empty, whitespace-only,
+    surrounding-whitespace (padded), non-ASCII-decimal (``11_434``/``+11434``/
+    Unicode-digit), or out-of-range value yields ``None`` because Compose
+    interpolates ``TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}`` verbatim
+    into the bridge's socat command and ``awf start`` cannot honor a value the
+    socat option parser rejects. Rejecting non-ASCII-decimal before ``int`` keeps
+    that parse total (no dead error branch), exactly as the Postgres helper does.
+    """
+    raw = environ.get("AWF_OLLAMA_BRIDGE_LISTEN_PORT")
+    if raw is None:
+        return None
+    candidate = raw.strip()
+    if not candidate or candidate != raw:
+        return None
+    if not (candidate.isascii() and candidate.isdigit()):
+        return None
+    parsed = int(candidate)
+    if not 1 <= parsed <= 65535:
+        return None
+    return parsed
+
+
+def _invalid_ollama_bridge_listen_port_override(environ: Mapping[str, str]) -> str | None:
+    """Return the raw ``AWF_OLLAMA_BRIDGE_LISTEN_PORT`` when set to an unusable value.
+
+    Mirrors :func:`_invalid_postgres_host_port_override`. ``None`` when the
+    override is unset or *genuinely empty* (a zero-length string is a legitimate
+    fall-back to Compose's ``11434`` default, matching
+    ``${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``). Any other set-but-unhonorable
+    value -- including a whitespace-only or padded one Compose interpolates
+    verbatim -- is returned so readiness can block on it.
+    """
+    raw = environ.get("AWF_OLLAMA_BRIDGE_LISTEN_PORT")
+    if not raw:
+        return None
+    if _env_ollama_bridge_listen_port(environ) is not None:
+        return None
+    return raw
+
+
+def _invalid_ollama_bridge_bind_address(environ: Mapping[str, str]) -> str | None:
+    """Return the raw ``AWF_OLLAMA_BRIDGE_BIND_ADDRESS`` when set to an unusable value.
+
+    Compose interpolates the value verbatim into the bridge's socat option list
+    ``TCP-LISTEN:<port>,bind=<addr>,fork,reuseaddr`` inside a single YAML command
+    argument, so any whitespace (which splits the socat argument) or comma (which
+    terminates the ``bind=`` option) yields a broken command ``awf start`` cannot
+    run. ``None`` when the override is unset or empty (a legitimate fall-back to
+    Compose's ``172.17.0.1`` default, matching
+    ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}``). The value is intentionally
+    *not* parsed as an IP -- a bare IP, another docker-bridge address, or a
+    resolvable hostname are all legitimate -- so only the verbatim-interpolation
+    hazards (whitespace, comma) are rejected, keeping AWF core generic.
+    """
+    raw = environ.get("AWF_OLLAMA_BRIDGE_BIND_ADDRESS")
+    if not raw:
+        return None
+    if any(char.isspace() for char in raw) or "," in raw:
+        return raw
+    return None
+
+
+def check_ollama_bridge_listen_port(
+    environ: Mapping[str, str] | None = None,
+) -> SetupCheckResult | None:
+    """Validate the ollama-bridge listen port when that Compose profile is active.
+
+    Returns ``None`` when the optional ``ollama-bridge`` profile is *not* enabled
+    -- ``awf start`` never appends the bridge stage, so there is nothing to
+    validate and no readiness line is emitted (mirroring
+    :func:`check_host_port_conflict`'s not-applicable ``None``). When the profile
+    *is* active, the local-service Compose stack publishes the bridge via host
+    networking, binding
+    ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``;
+    a set-but-unusable ``AWF_OLLAMA_BRIDGE_LISTEN_PORT`` is interpolated verbatim
+    into the socat command and ``awf start`` fails to publish the bridge, so this
+    blocks rather than letting ``awf setup --dry-run`` report a false success.
+
+    This is deterministic, I/O-free validation only -- it does **not** bind-probe
+    the port for occupancy. The bridge binds the docker0 gateway (``172.17.0.1``)
+    via host networking, which does not exist on the host until Docker creates the
+    bridge, so a first-run bind probe (``awf setup`` commonly runs before Docker
+    is up) would fail with ``EADDRNOTAVAIL`` and emit misleading noise; occupancy
+    is left to start time.
+    """
+    env = os.environ if environ is None else environ
+    if not _ollama_bridge_profile_enabled(env):
+        return None
+    invalid = _invalid_ollama_bridge_listen_port_override(env)
+    if invalid is not None:
+        return SetupCheckResult(
+            name="ollama_bridge_port",
+            level=SetupCheckLevel.BLOCKED,
+            summary=f"AWF_OLLAMA_BRIDGE_LISTEN_PORT={invalid!r} is not a valid TCP port.",
+            detail="AWF_OLLAMA_BRIDGE_LISTEN_PORT must be an integer between 1 and 65535. With "
+            "COMPOSE_PROFILES=ollama-bridge the local-service Compose stack interpolates it "
+            "verbatim into the bridge's socat command "
+            "(TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=...), so this value makes "
+            "awf start fail to publish the bridge.",
+            fix="Set AWF_OLLAMA_BRIDGE_LISTEN_PORT to an integer between 1 and 65535, or unset it "
+            "to use the default 11434, then re-run awf setup --dry-run.",
+            data={"port": None, "available": False, "env_value": invalid},
+        )
+    resolved = _env_ollama_bridge_listen_port(env) or DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT
+    return SetupCheckResult(
+        name="ollama_bridge_port",
+        level=SetupCheckLevel.OK,
+        summary=f"Ollama bridge listen port {resolved} is a valid TCP port.",
+        detail=f"COMPOSE_PROFILES enables ollama-bridge, which binds host port {resolved}; the "
+        "configured AWF_OLLAMA_BRIDGE_LISTEN_PORT is a usable value (occupancy is checked at "
+        "start time, not probed here).",
+        data={"port": resolved, "available": True},
+    )
+
+
+def check_ollama_bridge_bind_address(
+    environ: Mapping[str, str] | None = None,
+) -> SetupCheckResult | None:
+    """Validate the ollama-bridge bind address when that Compose profile is active.
+
+    Companion to :func:`check_ollama_bridge_listen_port` for the address half of
+    the bridge bind. Returns ``None`` when the ``ollama-bridge`` profile is
+    inactive. When active, a set ``AWF_OLLAMA_BRIDGE_BIND_ADDRESS`` containing
+    whitespace or a comma is interpolated verbatim into the socat option list
+    ``...,bind=<addr>,fork,reuseaddr`` and corrupts the command, so readiness
+    blocks instead of reporting a false success. The address is not parsed as an
+    IP (a bare IP, another docker-bridge address, or a resolvable hostname are all
+    valid); only the verbatim-interpolation hazards are rejected.
+    """
+    env = os.environ if environ is None else environ
+    if not _ollama_bridge_profile_enabled(env):
+        return None
+    invalid = _invalid_ollama_bridge_bind_address(env)
+    if invalid is not None:
+        return SetupCheckResult(
+            name="ollama_bridge_bind_address",
+            level=SetupCheckLevel.BLOCKED,
+            summary=f"AWF_OLLAMA_BRIDGE_BIND_ADDRESS={invalid!r} is not a usable bind address.",
+            detail="With COMPOSE_PROFILES=ollama-bridge the local-service Compose stack "
+            "interpolates AWF_OLLAMA_BRIDGE_BIND_ADDRESS verbatim into the bridge's socat option "
+            "list (...,bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},...), so a value with "
+            "whitespace or a comma corrupts the command and awf start fails to publish the bridge.",
+            fix="Set AWF_OLLAMA_BRIDGE_BIND_ADDRESS to a whitespace- and comma-free host address "
+            "(an IP such as 172.17.0.1 or a resolvable hostname), or unset it to use the default "
+            "172.17.0.1, then re-run awf setup --dry-run.",
+            data={"address": None, "available": False, "env_value": invalid},
+        )
+    resolved = env.get("AWF_OLLAMA_BRIDGE_BIND_ADDRESS") or DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS
+    return SetupCheckResult(
+        name="ollama_bridge_bind_address",
+        level=SetupCheckLevel.OK,
+        summary=f"Ollama bridge bind address {resolved!r} is a usable literal.",
+        detail=f"COMPOSE_PROFILES enables ollama-bridge, which binds {resolved} via host "
+        "networking; the configured AWF_OLLAMA_BRIDGE_BIND_ADDRESS has no whitespace or comma "
+        "that would corrupt the socat command (reachability is left to start time).",
+        data={"address": resolved, "available": True},
+    )
+
+
 def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     """Return a usable ``AWF_HOST_WORK_DIR`` override, or ``None`` when unusable.
 
@@ -1808,6 +1997,13 @@ def run_system_checks(
         if resolved_port is not None and resolved_postgres_port is not None
         else None
     )
+    # The optional ``ollama-bridge`` profile, when enabled in the resolved service
+    # env, makes ``awf start`` publish a host-networking bridge bound to
+    # ``${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1}:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434}``.
+    # Validate that port/address verbatim (each helper returns ``None`` when the
+    # profile is off, so disabled-profile setups emit no extra readiness line).
+    ollama_bridge_port_check = check_ollama_bridge_listen_port(environ)
+    ollama_bridge_bind_address_check = check_ollama_bridge_bind_address(environ)
     invalid_work_dir = _invalid_host_work_dir_override(work_dir=work_dir, environ=environ)
     invalid_work_dir_home = _invalid_work_dir_home_fallback(work_dir=work_dir, environ=environ)
     if invalid_work_dir is not None:
@@ -1867,6 +2063,12 @@ def run_system_checks(
         ports_check,
         postgres_port_check,
         *([port_conflict_check] if port_conflict_check is not None else []),
+        *([ollama_bridge_port_check] if ollama_bridge_port_check is not None else []),
+        *(
+            [ollama_bridge_bind_address_check]
+            if ollama_bridge_bind_address_check is not None
+            else []
+        ),
         disk_check,
         host_home_check,
         check_shell_path(),
@@ -2030,6 +2232,8 @@ def _readiness_next_steps(*, blocked: bool) -> tuple[str, ...]:
 
 
 __all__ = [
+    "DEFAULT_OLLAMA_BRIDGE_BIND_ADDRESS",
+    "DEFAULT_OLLAMA_BRIDGE_LISTEN_PORT",
     "DEFAULT_POSTGRES_HOST_PORT",
     "KNOWN_SETUP_PROVIDERS",
     "MINIMUM_PYTHON",
@@ -2056,6 +2260,8 @@ __all__ = [
     "check_host_port_conflict",
     "check_host_work_dir_override",
     "check_local_capacity",
+    "check_ollama_bridge_bind_address",
+    "check_ollama_bridge_listen_port",
     "check_ports",
     "check_postgres_host_port_override",
     "check_postgres_port",
