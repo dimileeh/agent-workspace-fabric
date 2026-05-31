@@ -139,6 +139,45 @@ def test_write_secret_file_refuses_symlinked_ancestor(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
+def test_write_secret_file_refuses_preexisting_dir_under_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    """A *pre-created* secrets dir under a symlinked ancestor is refused.
+
+    Regression for PRRT_kwDOSJAM6s6F777j: when the configured secrets dir already
+    exists, the creation loop in ``_mkdir_secure`` runs zero iterations, so the
+    earlier guard only ever ``lstat``-checked the leaf — which follows an
+    intermediate ``~/.awf -> /attacker`` symlink and sees a perfectly ordinary
+    directory at ``/attacker/secrets``. The symlinked ancestor was never walked,
+    so the hardening chmod and every subsequent secret write landed under the
+    attacker-controlled link target, bypassing the ancestor check the *create*
+    path already applied. The guard must walk the existing ancestor chain too.
+    """
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+    # Pre-create the secrets dir *inside* the link target so it is reachable only
+    # by traversing the symlinked ancestor below — the exists-path the create
+    # path's ``probe`` walk never reached.
+    planted_secrets = attacker_dir / "secrets"
+    planted_secrets.mkdir()
+    planted_secrets.chmod(0o755)
+    parent_link = tmp_path / "awf"
+    parent_link.symlink_to(attacker_dir)
+    target = parent_link / "secrets" / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The secret never landed in the pre-existing dir under the link target...
+    assert list(planted_secrets.iterdir()) == []
+    # ...and its permissions were not hardened to 0o700 through the link.
+    assert stat.S_IMODE(planted_secrets.stat().st_mode) == 0o755
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_plain_file_backend_refuses_symlinked_secrets_dir(tmp_path: Path) -> None:
     """``create_ref`` refuses a symlinked secrets dir end-to-end (no resolve-away).
 
