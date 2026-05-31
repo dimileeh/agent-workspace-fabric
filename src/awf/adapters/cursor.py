@@ -42,16 +42,20 @@ class CursorAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the cursor-agent print-mode command arguments."""
-        selected_model = cursor_selected_model(
-            model=model,
-            default_model=self._default_model,
-            effort=self._default_effort,
-        )
+        selected_model = self._selected_model_for_run(model=model)
         args = ["cursor-agent", "-p", "--force"]
         if selected_model:
             args.extend(["-m", selected_model])
         args.extend(["--output-format", "text"])
         return args
+
+    def _selected_model_for_run(self, *, model: str | None) -> str | None:
+        """Return the Cursor model AWF actually asks the CLI to use."""
+        return cursor_selected_model(
+            model=model,
+            default_model=self._default_model,
+            effort=self._default_effort,
+        )
 
 
 def _cursor_selected_model(

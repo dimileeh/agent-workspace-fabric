@@ -1028,6 +1028,65 @@ class TestCursorAdapter:
         assert "-m" not in args[cursor_start:]
 
     @pytest.mark.unit
+    async def test_lower_effort_failure_metadata_omits_unselected_thinking_model(self) -> None:
+        """Cursor failure metadata follows the model actually selected for CLI."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="cursor-agent failed: cursor auth required")
+        adapter = CursorAdapter(
+            runner=runner,
+            default_model="sonnet-4-thinking",
+            default_effort="medium",
+        )
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(AgentRunError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+            )
+
+        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
+        assert exc.value.details["provider"] == "cursor"
+        assert exc.value.details["model"] == "unknown"
+        provider_recovery = exc.value.details["provider_recovery"]
+        assert provider_recovery["provider"] == "cursor"
+        assert "model" not in provider_recovery
+        assert "sonnet-4-thinking" not in provider_recovery["failure_fingerprint"]
+        assert any(
+            event.get("event") == "agent.run.start" and event.get("model") is None
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_explicit_lower_effort_failure_metadata_reports_selected_model(self) -> None:
+        """Cursor failure metadata keeps an explicit lower-effort model override."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="cursor-agent failed: cursor auth required")
+        adapter = CursorAdapter(
+            runner=runner,
+            default_model="sonnet-4-thinking",
+            default_effort="medium",
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                model="sonnet-4-thinking",
+            )
+
+        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
+        assert exc.value.details["provider"] == "cursor"
+        assert exc.value.details["model"] == "sonnet-4-thinking"
+        provider_recovery = exc.value.details["provider_recovery"]
+        assert provider_recovery["provider"] == "cursor"
+        assert provider_recovery["model"] == "sonnet-4-thinking"
+
+    @pytest.mark.unit
     async def test_explicit_thinking_model_override_is_preserved_for_lower_effort(self) -> None:
         """Explicit Cursor model overrides win even when effort is lower."""
         runner = FakeCommandRunner()
