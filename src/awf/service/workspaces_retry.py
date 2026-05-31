@@ -25,7 +25,10 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import has_terminal_runtime_released_event
+from awf.db.repositories.base import (
+    HOST_PORT_TERMINAL_RELEASE_STATUSES,
+    has_terminal_runtime_released_event,
+)
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -90,12 +93,7 @@ async def _source_runtime_not_yet_released(
     compose runtime has not been released yet (no ``terminal_runtime_released``
     event).  In that state the source's host ports are still claimed and a
     retry would collide at Docker Compose time."""
-    if WorkspaceStatus(source.status) not in (
-        WorkspaceStatus.failed,
-        WorkspaceStatus.cancelled,
-        WorkspaceStatus.completed,
-        WorkspaceStatus.destroyed,
-    ):
+    if WorkspaceStatus(source.status) not in HOST_PORT_TERMINAL_RELEASE_STATUSES:
         return False
     if source.compose_project_name is None:
         return False
