@@ -653,6 +653,8 @@ async def test_pre_push_validation_tracked_side_effect_after_validation_cleans_b
     )  # validation side effect
     cmd.queue_result(returncode=0)  # restore tracked side effect
     cmd.queue_result(returncode=0, stdout="")  # clean after cleanup
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD@{awf}
+    cmd.queue_result(returncode=0, stdout=f"{local_head}\n")  # rev-parse HEAD after cleanup
     cmd.queue_result(returncode=0, stdout="", stderr="")  # git push
     runner = make_runner(
         factory=factory,
