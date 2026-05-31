@@ -393,6 +393,44 @@ def test_write_secret_file_accepts_preexisting_owner_private_dir(tmp_path: Path)
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="chmod hardening only runs on POSIX")
+def test_write_secret_file_refuses_chmodable_preexisting_shared_dir(tmp_path: Path) -> None:
+    """A pre-existing shared dir AWF *can* chmod is refused, never tightened.
+
+    Regression for PRRT_kwDOSJAM6s6F8hlf, the complement of
+    PRRT_kwDOSJAM6s6F8eRy: that earlier guard covered the case where the trailing
+    hardening chmod in ``_mkdir_secure`` *fails* (the process cannot chmod a
+    not-owned dir, so it silently stays world-traversable). This covers the case
+    where the chmod *succeeds*: when ``secrets_dir`` points at an existing
+    directory AWF does not own but can chmod — AWF run as root with
+    ``secrets_dir=/tmp``, or an operator pointing at an owned shared workspace dir
+    — the trailing chmod tightens that unrelated directory to 0o700, breaking other
+    users/services that rely on the shared location and silently repurposing it as
+    an AWF-private secret store, after which the group/world-accessible check
+    (now passing) lets the secret land there. ``_mkdir_secure`` must only harden
+    levels it created this call; a pre-existing leaf is left untouched and accepted
+    only if it is *already* owner-private, so a chmodable shared dir fails closed
+    without being mutated. Unlike the unhardenable-dir regression this does *not*
+    neutralise ``_chmod_best_effort`` — the tmp dir is owned by the test process, so
+    a real chmod would succeed, which is exactly the not-owned-but-chmodable case.
+    """
+    secrets_dir = tmp_path / "shared"
+    secrets_dir.mkdir(mode=0o700)
+    secrets_dir.chmod(0o755)  # world-traversable shared dir the process *can* chmod
+    target = secrets_dir / "github.secret"
+
+    with pytest.raises(CredentialError) as excinfo:
+        credentials._write_secret_file(target, "tok-value")
+
+    assert excinfo.value.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The shared directory was neither tightened to 0o700 nor written into.
+    assert stat.S_IMODE(secrets_dir.stat().st_mode) == 0o755
+    assert list(secrets_dir.iterdir()) == []
+    assert not target.exists()
+    assert "tok-value" not in str(excinfo.value)
+
+
+@pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="symlink semantics are POSIX-specific")
 def test_plain_file_backend_refuses_symlinked_secrets_dir(tmp_path: Path) -> None:
     """``create_ref`` refuses a symlinked secrets dir end-to-end (no resolve-away).

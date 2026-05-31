@@ -880,9 +880,15 @@ def _mkdir_secure(directory: Path) -> None:
 
     The create-time mode (not a loosen-then-tighten chmod) closes the brief
     TOCTOU window where a permissive umask would expose the directory listing
-    (provider names/structure) until a later chmod lands. The trailing
-    best-effort chmod still tightens the leaf for the ``exist_ok`` case, where
-    ``mkdir`` leaves an already-present looser directory untouched.
+    (provider names/structure) until a later chmod lands. Pre-existing levels
+    AWF did not create this call are never chmod-tightened: hardening an
+    already-present looser leaf would either silently fail on a not-owned shared
+    dir (leaving it world-accessible) or — worse, when AWF *can* chmod it (run as
+    root with ``secrets_dir=/tmp``, or an operator-owned shared workspace dir) —
+    destructively tighten that unrelated shared directory to 0o700, breaking other
+    users/services and silently repurposing it as an AWF-private secret store. Such
+    a leaf is instead accepted only if it is *already* owner-private (see
+    ``_reject_group_or_world_accessible_dir``); the write fails closed otherwise.
 
     Symlinks are refused, never followed: a pre-planted ``~/.awf/secrets ->
     /attacker`` (or a symlinked ancestor of the secrets dir, whether the dir is
@@ -973,23 +979,24 @@ def _mkdir_secure(directory: Path) -> None:
         _chmod_best_effort(path, 0o700)
     # A ``directory`` that already existed as a regular file (or a symlink to
     # one) never enters the creation loop above — ``probe.exists()`` is true on
-    # the first iteration, so ``missing`` stays empty. Without this guard the
-    # final hardening chmod would re-permission that unrelated file to 0o700
-    # before the later secret-file ``os.open`` fails with ``NotADirectoryError``,
-    # silently mutating e.g. a ``~/.awf/secrets`` accidentally created as a file.
-    # Refuse a non-directory here so a doomed plain-file setup leaves it alone.
+    # the first iteration, so ``missing`` stays empty. Refuse a non-directory here
+    # so a doomed plain-file setup fails fast — leaving the unrelated file
+    # untouched — and so the owner-private guard below only ever ``stat``s a real
+    # directory rather than an accidental ``~/.awf/secrets`` file.
     if not directory.is_dir():
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(directory))
-    _chmod_best_effort(directory, 0o700)
-    # The hardening chmod above is *best-effort*: when ``secrets_dir`` points at a
-    # pre-existing directory the operator does not own (e.g. ``/tmp`` or a
-    # root-owned 0777 shared dir), the ``chmod`` raises and ``_chmod_best_effort``
-    # suppresses it, silently leaving the dir group/world-accessible. A freshly
-    # created level is safe (its 0o700 create-time mode already holds, only ever
-    # tightened by the umask), but this explicit-path fallback would otherwise
-    # write the secret and mint a ``plain-file://`` ref inside a world-traversable
-    # dir — demoting the plain-file backend's own 0700 directory guarantee. Verify
-    # the result and fail closed so the secret never lands in a shared directory.
+    # Harden only the levels AWF created this call: every entry in ``missing`` was
+    # created 0o700 and chmod-tightened in the loop above, so a leaf AWF created is
+    # already owner-private. A *pre-existing* leaf is deliberately not chmod'd here.
+    # Tightening it would either silently fail on a not-owned shared dir, leaving it
+    # world-accessible (PRRT_kwDOSJAM6s6F8eRy), or — when AWF *can* chmod it, e.g.
+    # run as root with ``secrets_dir=/tmp`` or pointed at an operator-owned shared
+    # workspace dir — *succeed* and destructively tighten that unrelated directory
+    # to 0o700, breaking other users/services and silently repurposing a shared
+    # location as an AWF-private secret store (PRRT_kwDOSJAM6s6F8hlf). Instead verify
+    # the leaf is *already* owner-private and fail closed otherwise, so the secret
+    # only ever lands in a directory AWF created 0o700 or one already locked down —
+    # never in (nor after mutating) a shared directory AWF does not own.
     _reject_group_or_world_accessible_dir(directory)
 
 
