@@ -985,6 +985,7 @@ __all__ = [
     "SETUP_READINESS_FAILED",
     "CommandResult",
     "CommandRunner",
+    "PortProbeResult",
     "SetupCheckError",
     "SetupCheckLevel",
     "SetupCheckResult",

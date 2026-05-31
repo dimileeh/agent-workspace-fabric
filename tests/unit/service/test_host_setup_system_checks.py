@@ -998,6 +998,23 @@ def test_system_checks_public_surface_reexported_from_package() -> None:
         assert getattr(host_setup, name) is getattr(system_checks, name)
 
 
+@pytest.mark.unit
+def test_port_probe_result_is_publicly_exported() -> None:
+    """Verify ``PortProbeResult`` is on the public surface like other injectables.
+
+    ``PortProbeResult`` is the return type of the ``PortProbeFn`` callable injected
+    into ``check_ports``; callers wiring a custom probe must return correctly-typed
+    values. Every other injectable type (``CommandResult``, ``CommandRunner``,
+    ``SetupCheckResult``) is exported, so the enum must be too — reachable via both
+    ``system_checks`` and the ``awf.host_setup`` package re-export, not direct import only.
+    """
+    import awf.host_setup as host_setup
+
+    assert "PortProbeResult" in system_checks.__all__
+    assert "PortProbeResult" in host_setup.__all__
+    assert host_setup.PortProbeResult is system_checks.PortProbeResult
+
+
 def _patch_probes_capture_port(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
