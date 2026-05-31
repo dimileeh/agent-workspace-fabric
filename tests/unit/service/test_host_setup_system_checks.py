@@ -531,12 +531,13 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
 def test_run_system_checks_tolerates_unresolvable_work_dir_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A saved ``work_dir: ~olduser/...`` must not crash the readiness probe.
+    """A ``docker/compose/.env`` ``AWF_HOST_WORK_DIR: ~olduser/...`` must not crash.
 
     ``Path.expanduser`` raises ``RuntimeError`` for a ``~user`` component the host
     cannot resolve. Aggregation runs before the reason-coded setup handlers, so an
-    unguarded expansion would abort ``awf setup --dry-run`` with a traceback
-    instead of producing the readiness payload.
+    unguarded expansion of the Compose work-dir override would abort
+    ``awf setup --dry-run`` with a traceback instead of producing the readiness
+    payload.
     """
     import os.path
 
@@ -567,8 +568,10 @@ def test_run_system_checks_tolerates_unresolvable_work_dir_user(
 
     monkeypatch.setattr(system_checks, "check_disk", fake_disk)
 
-    config = HostSetupConfig(work_dir="~olduser/.awf/service")
-    results = run_system_checks(config=config)
+    results = run_system_checks(
+        config=HostSetupConfig(),
+        environ={"AWF_HOST_WORK_DIR": "~olduser/.awf/service"},
+    )
 
     assert [r.name for r in results].count("disk") == 1
     # The unresolvable expansion falls back to the raw path rather than raising.
@@ -1263,7 +1266,7 @@ def test_run_system_checks_honors_awf_host_work_dir_env(
 def test_run_system_checks_expands_awf_host_work_dir_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``~`` in the env override is expanded like the persisted config path is."""
+    """A ``~`` in the env override is expanded before the disk probe inspects it."""
     captured: dict[str, object] = {}
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
@@ -1293,16 +1296,44 @@ def test_run_system_checks_explicit_work_dir_overrides_env(
 
 
 @pytest.mark.unit
-def test_run_system_checks_ignores_blank_env_work_dir(
+def test_run_system_checks_falls_back_to_compose_default_work_dir_when_override_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blank/whitespace-only override falls back to the persisted config work_dir."""
+    """A missing or blank ``AWF_HOST_WORK_DIR`` falls back to Compose's default.
+
+    The local-service Compose stack bind-mounts
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` and ``awf start`` never reads
+    the persisted ``config.work_dir`` — it resolves the bind from the Compose
+    env. So an absent or whitespace-only override probes Compose's built-in
+    ``${HOME}/.awf/service`` default, and a non-default ``config.work_dir`` is
+    deliberately ignored: probing it would report disk readiness for a directory
+    ``awf start`` would never mount.
+    """
     captured: dict[str, object] = {}
     _patch_probes_capture_disk_path(monkeypatch, captured)
 
-    for blank in ("", "   "):
+    for blank in (None, "", "   "):
+        environ = {"HOME": "/home/op"}
+        if blank is not None:
+            environ["AWF_HOST_WORK_DIR"] = blank
         run_system_checks(
             config=HostSetupConfig(work_dir="/persisted/state"),
-            environ={"AWF_HOST_WORK_DIR": blank},
+            environ=environ,
         )
-        assert captured["disk_path"] == Path("/persisted/state"), repr(blank)
+        assert captured["disk_path"] == Path("/home/op/.awf/service"), repr(blank)
+
+
+@pytest.mark.unit
+def test_run_system_checks_default_work_dir_expands_home_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``HOME`` the default mirrors Compose expanding ``~`` to the user home."""
+    captured: dict[str, object] = {}
+    _patch_probes_capture_disk_path(monkeypatch, captured)
+
+    run_system_checks(
+        config=HostSetupConfig(work_dir="/persisted/state"),
+        environ={},
+    )
+
+    assert captured["disk_path"] == Path("~/.awf/service").expanduser()

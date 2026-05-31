@@ -179,10 +179,11 @@ def _safe_expanduser(path: str | Path) -> Path:
     """Expand a leading ``~``/``~user`` component, tolerating unresolvable users.
 
     ``Path.expanduser`` raises ``RuntimeError`` when a ``~user`` component names a
-    user the host cannot resolve (e.g. a stale ``work_dir: ~olduser/.awf/service``
-    in a saved host config). The host checks are advisory and must still emit a
-    structured readiness payload, so fall back to the unexpanded path instead of
-    letting the traceback escape the reason-coded setup flow.
+    user the host cannot resolve (e.g. a stale
+    ``AWF_HOST_WORK_DIR=~olduser/.awf/service`` in ``docker/compose/.env``). The
+    host checks are advisory and must still emit a structured readiness payload,
+    so fall back to the unexpanded path instead of letting the traceback escape
+    the reason-coded setup flow.
     """
     candidate = Path(path)
     try:
@@ -783,7 +784,7 @@ def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
 
     Mirrors the Compose ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` bind
     source: a missing, blank, or whitespace-only value yields ``None`` so the
-    disk probe falls back to the persisted ``config.work_dir`` default rather
+    disk probe falls back to Compose's ``${HOME}/.awf/service`` default rather
     than inspecting an empty path.
     """
     raw = environ.get("AWF_HOST_WORK_DIR")
@@ -795,8 +796,22 @@ def _env_host_work_dir(environ: Mapping[str, str]) -> str | None:
     return candidate
 
 
+def _default_compose_work_dir(environ: Mapping[str, str]) -> Path:
+    """Return Compose's ``${HOME}/.awf/service`` work-dir bind default.
+
+    Mirrors the no-override side of the local-service bind source
+    ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``: Compose interpolates
+    ``${HOME}`` from the same merged environment the readiness probe sees, so
+    resolve the default from that ``HOME`` (falling back to ``~`` expansion when
+    it is unset or blank). ``_safe_expanduser`` keeps an unresolvable home from
+    aborting the advisory probe with a traceback.
+    """
+    home = environ.get("HOME")
+    base = Path(home) if home else Path("~")
+    return _safe_expanduser(base) / ".awf" / "service"
+
+
 def _resolve_work_dir(
-    config: HostSetupConfig,
     *,
     work_dir: Path | None,
     environ: Mapping[str, str] | None,
@@ -804,13 +819,21 @@ def _resolve_work_dir(
     """Resolve which directory the disk readiness probe should inspect.
 
     Precedence mirrors the path the local-service Compose stack actually mounts
-    (``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``) rather than the persisted
-    default alone: an explicit caller override wins, then the
-    ``AWF_HOST_WORK_DIR`` environment override that Compose bind-mounts and that
-    the running service resolves as its work_dir, and finally the persisted
-    ``config.work_dir``. Honoring the env override keeps ``awf setup`` from
-    reporting disk readiness for the wrong directory when an operator points the
-    stack at a custom host work dir via the shell or ``docker/compose/.env``.
+    (``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}``): an explicit caller override
+    wins, then the ``AWF_HOST_WORK_DIR`` environment override that Compose
+    bind-mounts and that the running service resolves as its work_dir, and
+    finally Compose's built-in ``${HOME}/.awf/service`` default when no override
+    is set. Honoring the env override keeps ``awf setup`` from reporting disk
+    readiness for the wrong directory when an operator points the stack at a
+    custom host work dir via the shell or ``docker/compose/.env``.
+
+    The persisted ``config.work_dir`` is deliberately *not* consulted here.
+    ``awf start`` bind-mounts ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` from
+    the resolved Compose env and never reads ``HostSetupConfig``; nothing
+    propagates ``config.work_dir`` into the Compose env. Probing it would report
+    disk readiness for a directory ``awf start`` would never mount whenever an
+    operator set a non-default ``config.work_dir`` without also exporting
+    ``AWF_HOST_WORK_DIR`` (the same divergence already fixed for the API port).
     """
     if work_dir is not None:
         return work_dir
@@ -818,12 +841,12 @@ def _resolve_work_dir(
     override = _env_host_work_dir(env)
     if override is not None:
         return _safe_expanduser(override)
-    return _safe_expanduser(config.work_dir)
+    return _default_compose_work_dir(env)
 
 
 def run_system_checks(
     *,
-    config: HostSetupConfig,
+    config: HostSetupConfig,  # noqa: ARG001 - retained as the canonical host-setup input; no probe reads the persisted config (awf start resolves port/work dir from the Compose env only)
     work_dir: Path | None = None,
     port: int | None = None,
     environ: Mapping[str, str] | None = None,
@@ -835,7 +858,7 @@ def run_system_checks(
     else:
         resolved_port = _resolve_api_host_port(port=port, environ=environ)
         ports_check = check_ports(resolved_port)
-    resolved_work_dir = _resolve_work_dir(config, work_dir=work_dir, environ=environ)
+    resolved_work_dir = _resolve_work_dir(work_dir=work_dir, environ=environ)
     return [
         check_docker(),
         check_compose(),
