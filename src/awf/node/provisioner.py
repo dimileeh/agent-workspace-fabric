@@ -294,8 +294,16 @@ class Provisioner:
                     _log.warning(
                         "provisioner.pre_launch_commit_failed",
                         workspace_id=workspace_id,
-                        reason_code="PRE_LAUNCH_COMMIT_NON_FATAL",
+                        reason_code="PRE_LAUNCH_COMMIT_FATAL",
                     )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message="pre-launch commit failed; compose_project_name not persisted",
+                        from_status=WorkspaceStatus.provisioning,
+                        reason_code="PRE_LAUNCH_COMMIT_FATAL",
+                    )
+                    return
                 if not await self._recheck_before_launch(workspace_id):
                     return
                 stack_paths = await self._stack_launcher.launch(
