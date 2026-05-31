@@ -403,6 +403,57 @@ def test_selected_cursor_preflight_blocks_missing_runtime_cli(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+def test_provider_readiness_cursor_env_auth_requires_runtime_cli(tmp_path: Path) -> None:
+    secret = "cursor_provider_readiness_secret"
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        calls.append(args)
+        assert args[-1] == "command -v cursor-agent"
+        assert kwargs["env"]["CURSOR_API_KEY"] == secret
+        return _completed(returncode=1, stderr=f"missing cursor-agent for {secret}")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"CURSOR_API_KEY": secret},
+        strict_providers=["cursor"],
+        run_subprocess=_run,
+    )
+
+    cursor = payload["providers"]["cursor"]
+    assert cursor["ok"] is False
+    assert cursor["status"] == "fail"
+    assert cursor["reason"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert cursor["credential_scope"] == "static_env_token"
+    assert cursor["isolation"] == "service_env"
+    assert cursor["credential_sources"] == [
+        {
+            "type": "env",
+            "signal": "CURSOR_API_KEY",
+            "credential_scope": "static_env_token",
+            "isolation": "service_env",
+        }
+    ]
+    assert cursor["runtime_cli_probe"]["status"] == "fail"
+    assert cursor["runtime_cli_probe"]["reason_code"] == "CURSOR_RUNTIME_CLI_NOT_FOUND"
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ]
+    ]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert secret not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
 def test_selected_opencode_preflight_requires_selected_ollama_model(
     tmp_path: Path,
 ) -> None:
@@ -1034,12 +1085,24 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
 
     def _run(args: list[str], **kwargs: object) -> Any:
         subprocess_calls.append(args)
-        assert args == ["gh", "auth", "status", "--hostname", "github.com"]
-        assert github_secret not in args
-        subprocess_env = kwargs["env"]
-        assert isinstance(subprocess_env, dict)
-        assert subprocess_env["GH_TOKEN"] == github_secret
-        return _completed(stdout="logged in\n")
+        if args == ["gh", "auth", "status", "--hostname", "github.com"]:
+            assert github_secret not in args
+            subprocess_env = kwargs["env"]
+            assert isinstance(subprocess_env, dict)
+            assert subprocess_env["GH_TOKEN"] == github_secret
+            return _completed(stdout="logged in\n")
+        assert args == [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ]
+        assert kwargs["env"]["CURSOR_API_KEY"] == cursor_secret
+        return _completed(stdout="/usr/local/bin/cursor-agent\n")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -1061,7 +1124,19 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
     }
     assert all(provider["ok"] is True for provider in providers.values())
     assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
-    assert subprocess_calls == [["gh", "auth", "status", "--hostname", "github.com"]]
+    assert subprocess_calls == [
+        ["gh", "auth", "status", "--hostname", "github.com"],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v cursor-agent",
+        ],
+    ]
     serialized = json.dumps(payload, sort_keys=True)
     for secret in (
         github_secret,

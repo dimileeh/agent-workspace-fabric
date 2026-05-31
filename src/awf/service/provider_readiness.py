@@ -251,6 +251,7 @@ def selected_provider_readiness_preflight(
         run_subprocess=resolved_run,
         http_get=resolved_http_get,
         secrets=secrets,
+        probe_runtime_cli=False,
     )
     probe = _selected_launch_probe(
         provider,
@@ -351,6 +352,7 @@ def _check_provider_readiness(
     run_subprocess: SubprocessRun,
     http_get: HttpGet,
     secrets: frozenset[str],
+    probe_runtime_cli: bool = True,
 ) -> dict[str, Any]:
     if provider == "github":
         return _check_github(
@@ -376,6 +378,14 @@ def _check_provider_readiness(
             secrets=secrets,
         )
     if provider == "cursor":
+        if probe_runtime_cli:
+            return _check_cursor_readiness(
+                settings,
+                environ=environ,
+                strict=strict,
+                run_subprocess=run_subprocess,
+                secrets=secrets,
+            )
         return _check_cursor(
             environ=environ,
             strict=strict,
@@ -1087,6 +1097,72 @@ def _check_cursor(
         credential_scope="not_observed",
         isolation="none",
     )
+
+
+def _check_cursor_readiness(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    cursor_result = _check_cursor(environ=environ, strict=strict, secrets=secrets)
+    if cursor_result.get("ok") is not True:
+        return cursor_result
+
+    probe = _probe_agent_runtime_cli(
+        settings,
+        executable="cursor-agent",
+        provider="cursor",
+        environ=environ,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    runtime_cli_probe = _runtime_cli_probe_payload(probe)
+    if probe.get("status") == "ok":
+        cursor_result["runtime_cli_probe"] = runtime_cli_probe
+        return cursor_result
+
+    reason = str(probe.get("reason_code") or "CURSOR_RUNTIME_CLI_NOT_FOUND")
+    message = str(probe.get("message") or "Cursor auth was found but cursor-agent is unavailable.")
+    result = _provider_result(
+        ok=False,
+        strict=strict,
+        reason=reason,
+        message=message,
+        detail=str(probe.get("detail") or "") or None,
+        signals=[
+            *[signal for signal in cursor_result.get("signals", []) if isinstance(signal, str)],
+            "cursor-agent",
+        ],
+        secrets=secrets,
+        credential_sources=_credential_sources(cursor_result),
+        credential_scope=str(cursor_result.get("credential_scope") or "static_env_token"),
+        isolation=str(cursor_result.get("isolation") or "service_env"),
+        warnings=[
+            *[
+                warning
+                for warning in cursor_result.get("warnings", [])
+                if isinstance(warning, Mapping)
+            ],
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity="error" if strict else "warning",
+            ),
+        ],
+    )
+    result["runtime_cli_probe"] = runtime_cli_probe
+    return result
+
+
+def _runtime_cli_probe_payload(probe: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        key: value
+        for key in ("status", "reason_code", "message", "detail")
+        if isinstance((value := probe.get(key)), str) and value
+    }
 
 
 def _check_gemini(
