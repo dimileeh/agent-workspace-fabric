@@ -189,7 +189,7 @@ def _classify_post_agent_commit_failure(
 
 
 _NOTHING_TO_COMMIT_PATTERN = re.compile(
-    r"nothing to commit|working tree clean|no changes added",
+    r"nothing to commit|working tree clean",
     re.IGNORECASE,
 )
 

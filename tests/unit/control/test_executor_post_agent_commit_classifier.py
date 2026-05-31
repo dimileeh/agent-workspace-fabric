@@ -317,7 +317,6 @@ class TestNothingToCommitDetection:
             ('nothing to commit (create/copy files and use "git add" to track)\n', ""),
             ("working tree clean\n", ""),
             ("", "working tree clean\n"),
-            ("no changes added to commit but untracked files present\n", ""),
         ],
         ids=[
             "stdout-clean",
@@ -327,7 +326,6 @@ class TestNothingToCommitDetection:
             "stdout-untracked-hint",
             "stdout-working-tree-clean",
             "stderr-working-tree-clean",
-            "stdout-no-changes-added",
         ],
     )
     def test_is_nothing_to_commit_detects_benign_clean_tree(self, stdout: str, stderr: str) -> None:
@@ -344,8 +342,15 @@ class TestNothingToCommitDetection:
             ("", "fatal: not a git repository\n"),
             ("some pre-commit output\n", ""),
             ("", ""),
+            ("no changes added to commit but untracked files present\n", ""),
         ],
-        ids=["empty-ident", "not-a-repo", "unrelated-output", "empty"],
+        ids=[
+            "empty-ident",
+            "not-a-repo",
+            "unrelated-output",
+            "empty",
+            "dirty-tree-no-changes-added",
+        ],
     )
     def test_is_nothing_to_commit_rejects_real_errors(self, stdout: str, stderr: str) -> None:
         from awf.control.executor.quality_gates import _is_nothing_to_commit
