@@ -138,6 +138,14 @@ def remonitor_elapsed_settle_head_shas(
     """Return PR head SHAs that need reviewer-settle freeze for remonitor."""
     if pr_number is None:
         return ()
+    if current_head_sha:
+        if remonitor_has_elapsed_settle(
+            threads_addressed,
+            pr_number=pr_number,
+            head_sha=current_head_sha,
+        ):
+            return (current_head_sha,)
+        return ()
     head_shas: list[str] = []
     if remonitor_has_elapsed_settle(
         threads_addressed,
@@ -155,8 +163,6 @@ def remonitor_elapsed_settle_head_shas(
         head_sha = key.removeprefix(done_prefix).split(":", 1)[0]
         if head_sha and head_sha not in head_shas:
             head_shas.append(head_sha)
-    if head_shas and current_head_sha and current_head_sha not in head_shas:
-        head_shas.append(current_head_sha)
     return tuple(head_shas)
 
 

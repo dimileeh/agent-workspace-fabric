@@ -118,6 +118,43 @@ def test_operator_hint_freeze_uses_canonical_runtime_state_key_helpers() -> None
 
 
 @pytest.mark.unit
+def test_remonitor_elapsed_settle_head_shas_ignores_stale_head_when_current_known() -> None:
+    stale_head_sha = "e" * 40
+    current_head_sha = "f" * 40
+    stale_done_key = operator_hints._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=stale_head_sha,
+    )
+
+    assert (
+        operator_hints.remonitor_elapsed_settle_head_shas(
+            {stale_done_key: "elapsed"},
+            pr_number=42,
+            preferred_head_sha=stale_head_sha,
+            current_head_sha=current_head_sha,
+        )
+        == ()
+    )
+
+
+@pytest.mark.unit
+def test_remonitor_elapsed_settle_head_shas_accepts_current_head_elapsed_marker() -> None:
+    stale_head_sha = "e" * 40
+    current_head_sha = "f" * 40
+    current_done_key = operator_hints._non_check_reviewer_settle_done_key(
+        pr_number=42,
+        head_sha=current_head_sha,
+    )
+
+    assert operator_hints.remonitor_elapsed_settle_head_shas(
+        {current_done_key: "elapsed"},
+        pr_number=42,
+        preferred_head_sha=stale_head_sha,
+        current_head_sha=current_head_sha,
+    ) == (current_head_sha,)
+
+
+@pytest.mark.unit
 async def test_operator_hint_action_dispatches_repair_and_clears_pending_state(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

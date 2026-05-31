@@ -814,9 +814,9 @@ async def test_remonitor_reopens_failed_candidate_with_latest_head_when_monitor_
         pr_number=42,
         head_sha=latest_candidate_head,
     )
-    stale_settle_done_key = _non_check_reviewer_settle_done_key(
+    latest_settle_done_key = _non_check_reviewer_settle_done_key(
         pr_number=42,
-        head_sha=stale_monitor_head,
+        head_sha=latest_candidate_head,
     )
     stale_settle_started_key = _non_check_reviewer_settle_started_key(
         pr_number=42,
@@ -834,7 +834,7 @@ async def test_remonitor_reopens_failed_candidate_with_latest_head_when_monitor_
         workspace.monitor_last_commit_sha = stale_monitor_head
         workspace.monitor_threads_addressed = {
             initial_done_key: "elapsed",
-            stale_settle_done_key: "elapsed",
+            latest_settle_done_key: "elapsed",
         }
         candidate.head_sha = latest_candidate_head
         candidate.status = "closed"
@@ -869,8 +869,8 @@ async def test_remonitor_reopens_failed_candidate_with_latest_head_when_monitor_
     assert candidate.status == "open"
     assert candidate.head_sha == latest_candidate_head
     state = workspace.monitor_threads_addressed
-    assert stale_settle_done_key not in state
-    assert float(state[stale_settle_started_key]) >= 1_000_000_000
+    assert latest_settle_done_key not in state
+    assert stale_settle_started_key not in state
     assert float(state[latest_settle_started_key]) >= 1_000_000_000
 
 

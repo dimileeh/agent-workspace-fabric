@@ -967,9 +967,9 @@ async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
     current_head_sha = "f" * 40
     initial_done_key = _initial_review_grace_done_key(50)
     initial_started_key = _initial_review_grace_started_key(50)
-    old_settle_done_key = _non_check_reviewer_settle_done_key(
+    current_settle_done_key = _non_check_reviewer_settle_done_key(
         pr_number=50,
-        head_sha=old_head_sha,
+        head_sha=current_head_sha,
     )
     old_settle_started_key = _non_check_reviewer_settle_started_key(
         pr_number=50,
@@ -983,7 +983,7 @@ async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
     candidate.head_sha = current_head_sha
     workspace.monitor_threads_addressed = {
         initial_done_key: "elapsed",
-        old_settle_done_key: "elapsed",
+        current_settle_done_key: "elapsed",
     }
     await session.flush()
     service, _stopper, _cleaner = _service(session)
@@ -1009,13 +1009,62 @@ async def test_remonitor_no_reason_past_settle_arms_current_candidate_head(
     assert response.status == WorkspaceStatus.monitoring_pr
     assert [warning.model_dump() for warning in response.warnings] == warnings
     assert initial_done_key not in monitor_state
-    assert old_settle_done_key not in monitor_state
+    assert current_settle_done_key not in monitor_state
     assert float(monitor_state[initial_started_key]) >= 1_000_000_000
-    assert float(monitor_state[old_settle_started_key]) >= 1_000_000_000
+    assert old_settle_started_key not in monitor_state
     assert float(monitor_state[current_settle_started_key]) >= 1_000_000_000
     assert OPERATOR_HINT_STATE_KEY not in monitor_state
     assert operations[0].result is not None
     assert operations[0].result["warnings"] == warnings
+
+
+@pytest.mark.unit
+async def test_remonitor_no_reason_stale_past_settle_does_not_arm_current_candidate_head(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    old_head_sha = "e" * 40
+    current_head_sha = "f" * 40
+    initial_done_key = _initial_review_grace_done_key(50)
+    old_settle_done_key = _non_check_reviewer_settle_done_key(
+        pr_number=50,
+        head_sha=old_head_sha,
+    )
+    current_settle_started_key = _non_check_reviewer_settle_started_key(
+        pr_number=50,
+        head_sha=current_head_sha,
+    )
+    workspace.monitor_last_commit_sha = old_head_sha
+    candidate.head_sha = current_head_sha
+    workspace.monitor_threads_addressed = {
+        initial_done_key: "elapsed",
+        old_settle_done_key: "elapsed",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason=None,
+        idempotency_key="remonitor-no-reason-stale-current-candidate-head",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert response.warnings == []
+    assert monitor_state[initial_done_key] == "elapsed"
+    assert monitor_state[old_settle_done_key] == "elapsed"
+    assert current_settle_started_key not in monitor_state
+    assert OPERATOR_HINT_STATE_KEY not in monitor_state
+    assert operations[0].result is not None
+    assert "warnings" not in operations[0].result
+    assert "warnings" not in events[0].payload
 
 
 @pytest.mark.unit
@@ -1031,9 +1080,9 @@ async def test_remonitor_failed_workspace_past_settle_arms_latest_closed_candida
     live_head_sha = "f" * 40
     initial_done_key = _initial_review_grace_done_key(50)
     initial_started_key = _initial_review_grace_started_key(50)
-    old_settle_done_key = _non_check_reviewer_settle_done_key(
+    live_settle_done_key = _non_check_reviewer_settle_done_key(
         pr_number=50,
-        head_sha=old_head_sha,
+        head_sha=live_head_sha,
     )
     old_settle_started_key = _non_check_reviewer_settle_started_key(
         pr_number=50,
@@ -1043,13 +1092,13 @@ async def test_remonitor_failed_workspace_past_settle_arms_latest_closed_candida
         pr_number=50,
         head_sha=live_head_sha,
     )
-    workspace.monitor_last_commit_sha = live_head_sha
+    workspace.monitor_last_commit_sha = old_head_sha
     workspace.failure_reason = "infrastructure_failure"
     workspace.failure_message = "old monitor failed after reviewer settle"
     workspace.monitor_iter_count = 3
     workspace.monitor_threads_addressed = {
         initial_done_key: "elapsed",
-        old_settle_done_key: "elapsed",
+        live_settle_done_key: "elapsed",
     }
     candidate.head_sha = live_head_sha
     candidate.status = "closed"
@@ -1081,9 +1130,9 @@ async def test_remonitor_failed_workspace_past_settle_arms_latest_closed_candida
     assert candidate.status == "open"
     assert candidate.head_sha == live_head_sha
     assert initial_done_key not in monitor_state
-    assert old_settle_done_key not in monitor_state
+    assert live_settle_done_key not in monitor_state
     assert float(monitor_state[initial_started_key]) >= 1_000_000_000
-    assert float(monitor_state[old_settle_started_key]) >= 1_000_000_000
+    assert old_settle_started_key not in monitor_state
     assert float(monitor_state[live_settle_started_key]) >= 1_000_000_000
     assert operations[0].result is not None
     assert operations[0].result["warnings"] == warnings
