@@ -738,3 +738,21 @@ def test_default_total_memory_bytes_handles_unavailable(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(os, "sysconf", lambda _name: 0)
     assert system_checks._default_total_memory_bytes() is None
+
+
+# --- Package re-exports ---------------------------------------------------
+
+
+@pytest.mark.unit
+def test_system_checks_public_surface_reexported_from_package() -> None:
+    """Verify ``awf.host_setup`` re-exports the full ``system_checks`` surface.
+
+    Consumers that treat ``awf.host_setup`` as the public package (the same way
+    config/rendering/source_assets symbols are surfaced) must reach the host
+    system-check types and functions without importing the submodule directly.
+    """
+    import awf.host_setup as host_setup
+
+    for name in system_checks.__all__:
+        assert name in host_setup.__all__, f"{name} missing from awf.host_setup.__all__"
+        assert getattr(host_setup, name) is getattr(system_checks, name)
