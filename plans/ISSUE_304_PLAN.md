@@ -16,8 +16,10 @@ workspace ID.
   conflicts, raise a domain error that maps to HTTP 409.
 - New error: `WorkspaceCreateHostPortConflictError` with `host_port` and
   `conflicting_workspace_id` fields.
-- Dialect-aware SQL: Postgres uses JSONB operators, SQLite uses
-  `json_extract`. Both must work.
+- Python-side JSON parsing: `task_policy` JSON is parsed in Python
+  (via `host_ports_from_task_policy_companions`), not via
+  dialect-specific SQL. Keeps query logic maintainable and
+  dialect-free.
 - Terminal statuses (`completed`, `failed`, `cancelled`, `destroying`,
   `destroyed`) MUST NOT trigger false collisions.
 - Idempotent replays of the same request MUST NOT 409.
@@ -73,9 +75,15 @@ The method:
 3. Returns a list of `(host_port, conflicting_workspace_id)` pairs for
    collisions.
 
-**Dialect-aware JSON SQL:**
-- Postgres: `task_policy->'companions'` with `jsonb_array_elements`
-- SQLite: `json_extract(task_policy, '$.companions')` with recursive extraction
+**Python-side JSON parsing:**
+- `task_policy.companions[]` JSON is parsed in Python via
+  `host_ports_from_task_policy_companions()` and
+  `host_ports_from_resolved_profile()` rather than dialect-specific
+  SQL (Postgres JSONB operators or SQLite `json_extract`). This keeps
+  the query logic maintainable and avoids awkward cross-dialect SQL
+  for nested JSON structures. The repo query fetches
+  `(Workspace.id, Workspace.task_policy, Workspace.resolved_profile)`
+  rows and iterates in Python.
 
 **TOCTOU note:** There is a time-of-check/time-of-use window between the
 SELECT and INSERT. This is acceptable because Docker Compose itself would
@@ -137,8 +145,9 @@ except WorkspaceCreateHostPortConflictError as exc:
 6. **idempotent_replay_no_collision**: Replay the same idempotency key
    (same payload) → 202 (replay), not 409. The port is "self-owned."
 
-7. **dialect_aware_query_sqlite**: Verify the SQLite JSON extraction path
-   works correctly (the test will use the SQLite session fixture).
+7. **python_side_parsing_sqlite**: Verify the Python-side parsing
+   works correctly under the SQLite session fixture (no dialect-specific
+   SQL involved).
 
 ## Files to modify
 
