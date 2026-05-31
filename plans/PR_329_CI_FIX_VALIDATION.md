@@ -28,3 +28,40 @@
 The CI failure was limited to `python-full-coverage`. Local validation stayed
 focused per the AWF workspace contract; full AWF/GitHub validation and coverage
 provenance remain owned by AWF after agent completion.
+
+## Iteration 2: Exact Coverage Failure
+
+### Requirement Status
+
+- Add focused tests that cover real operator-hint runner behavior: Complete.
+- Avoid protected workflow, quality-gate, and broad configuration edits:
+  Complete.
+- Keep tests below first-party line-count guardrails: Complete.
+- Run narrow pytest/ruff checks for touched files only: Complete.
+- Leave full AWF/GitHub coverage validation to AWF after agent completion:
+  Complete.
+
+### Evidence
+
+- Added `tests/unit/runtime/test_pr_monitor_operator_hint_coverage_edges.py`
+  covering operator hint early returns, default terminal reasons, non-terminal
+  push failures, processed pushed hints without a resolved head SHA, concurrent
+  hint/freeze merge helpers, activity-freeze parsing, and manual-ready helper
+  branches.
+- Updated `plans/PR_329_CI_FIX_PLAN.md` with this coverage-focused iteration.
+
+### Focused Checks Run
+
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_operator_hint_coverage_edges.py -q`
+  - Result: passed, `24 passed in 8.38s`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/runtime/test_pr_monitor_operator_hint_coverage_edges.py`
+  - Result: passed.
+- `uv run --python 3.12 --extra dev ruff format --check tests/unit/runtime/test_pr_monitor_operator_hint_coverage_edges.py`
+  - Result: passed, `1 file already formatted`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_operator_hint_coverage_edges.py tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q`
+  - Result: passed, `25 passed in 7.80s`.
+- `git diff --check`
+  - Result: passed.
+
+Full `python-full-coverage` was not run locally per the AWF workspace contract;
+AWF/GitHub own the broad coverage gate after this local fix is captured.
