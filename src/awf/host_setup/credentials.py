@@ -721,7 +721,18 @@ def _write_secret_file(target: Path, secret: str) -> None:
         _mkdir_secure(secrets_dir)
         tmp_path = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # ``os.fdopen`` takes ownership of ``fd`` only once it returns; if it
+        # raises (e.g. an invalid mode or an implementation-level error) the raw
+        # descriptor would leak. CPython closes it internally on an ``os.fdopen``
+        # failure, but that is undocumented and not guaranteed across Python
+        # implementations, so close it explicitly to keep the cleanup contract
+        # portable. The outer ``except OSError`` still unlinks the temp file.
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+        with handle:
             handle.write(secret)
             # Force the secret bytes to disk before the atomic rename so a power
             # failure cannot leave a renamed-but-empty target behind.

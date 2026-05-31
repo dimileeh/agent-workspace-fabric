@@ -670,6 +670,65 @@ def test_plain_file_write_failure_is_reason_coded(
     assert _FAKE_TOKEN not in str(error.to_dict())
 
 
+@pytest.mark.unit
+def test_plain_file_closes_fd_when_fdopen_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the raw descriptor is closed when ``os.fdopen`` fails after ``os.open``.
+
+    ``os.fdopen`` takes ownership of the descriptor only once it returns; if it
+    raises, the fd ``os.open`` returned would leak. CPython closes it internally
+    on an ``os.fdopen`` failure, but that is undocumented and not guaranteed across
+    implementations, so the backend closes it explicitly. Force ``fdopen`` to raise
+    after ``os.open`` succeeds and assert the descriptor is closed, the temp file
+    is cleaned up, and the failure still surfaces as a secret-free reason code.
+    """
+    real_open = os.open
+    opened_fds: list[int] = []
+
+    def _recording_open(*args: object, **kwargs: object) -> int:
+        """Open for real but record the descriptor so we can assert it is closed."""
+        fd = real_open(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd
+
+    def _fdopen_fails(*args: object, **kwargs: object) -> object:
+        """Raise as a broken ``os.fdopen`` would, after the fd is already open."""
+        raise OSError("fdopen failed")
+
+    real_close = os.close
+    closed_fds: list[int] = []
+
+    def _recording_close(fd: int) -> None:
+        """Record and delegate so the descriptor is genuinely closed."""
+        closed_fds.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(credentials.os, "open", _recording_open)
+    monkeypatch.setattr(credentials.os, "fdopen", _fdopen_fails)
+    monkeypatch.setattr(credentials.os, "close", _recording_close)
+
+    secrets_dir = tmp_path / "secrets"
+    backend = PlainFileCredentialBackend(
+        capabilities=_HEADLESS_LINUX,
+        allow_plain_secrets=True,
+        consent=True,
+        secrets_dir=secrets_dir,
+    )
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(CredentialRequest(provider="openai", secret_source=_secret(_FAKE_TOKEN)))
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    # The descriptor opened before the failing ``fdopen`` was explicitly closed,
+    # and the temp secret file was cleaned up rather than left behind.
+    assert opened_fds, "os.open was not exercised"
+    assert opened_fds[0] in closed_fds
+    assert list(secrets_dir.iterdir()) == []
+    assert _FAKE_TOKEN not in str(error.to_dict())
+
+
 # --------------------------------------------------------------------------- #
 # 6 & 7. Non-Linux and non-headless rejection for plain-file.
 # --------------------------------------------------------------------------- #
