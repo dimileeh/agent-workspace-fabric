@@ -312,13 +312,12 @@ async def create_workspace(
         return _insufficient_disk_response(disk_check)
 
     try:
-        excluding_workspace_id = None
         _req_profile, _resolved_profile = workspace_create_profile_snapshots(payload)
         await check_host_port_conflicts(
             repo,
             payload.companions,
             resolved_profile=_resolved_profile,
-            excluding_workspace_id=excluding_workspace_id,
+            excluding_workspace_id=None,
         )
 
         ws = await create_workspace_row(
