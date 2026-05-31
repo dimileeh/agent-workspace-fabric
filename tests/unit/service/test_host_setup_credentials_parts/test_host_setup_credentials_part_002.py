@@ -359,6 +359,60 @@ def test_store_cleans_up_orphaned_keyring_write_before_env_ref_fallback() -> Non
     assert module._stored == {}
 
 
+class _ConcurrentOverwriteKeyring(FakeKeyringModule):
+    """Models a concurrent same-slot write between this flow's set and read-back.
+
+    A second ``store_provider_credential`` for the same ``(service, account)``
+    overwrites the slot with *its own* secret after this flow's ``set_password``
+    but before its read-back ``get_password``, so the read-back observes the
+    concurrent value rather than the one this flow wrote.
+    """
+
+    def __init__(self, concurrent_secret: str) -> None:
+        super().__init__()
+        self._concurrent_secret = concurrent_secret
+
+    def get_password(self, service: str, username: str) -> str | None:
+        # The concurrent writer has already replaced our value with theirs.
+        self._stored[(service, username)] = self._concurrent_secret
+        return self._concurrent_secret
+
+
+@pytest.mark.unit
+def test_keyring_create_ref_preserves_concurrent_write_on_value_mismatch() -> None:
+    """Verify a non-``None`` read-back mismatch (concurrent write) is not discarded.
+
+    The read-back returns a *different non-``None`` value*: the signature of a
+    concurrent ``store_provider_credential`` for the same ``(service, account)``
+    having overwritten the slot between this flow's ``set_password`` and its
+    read-back. The keyring API has no compare-and-set primitive to close that
+    window, so ``create_ref`` must not delete the slot here — doing so would
+    strand the concurrent call's ``keyring://`` ref against an empty slot and
+    silently break credential resolution at use time. The unverified write still
+    degrades to env_ref via ``CREDENTIAL_BACKEND_UNAVAILABLE`` (unlike the
+    read-back-*raises* branch, which keeps discarding its own orphan).
+    """
+    concurrent_secret = "ghp_" + ("c" * 36)
+    module = _ConcurrentOverwriteKeyring(concurrent_secret)
+    backend = KeyringCredentialBackend(keyring_module=module)
+
+    with pytest.raises(CredentialError) as exc_info:
+        backend.create_ref(
+            CredentialRequest(provider="github", secret_source=_secret(_FAKE_GH_TOKEN))
+        )
+
+    error = exc_info.value
+    assert error.reason_code == CREDENTIAL_BACKEND_UNAVAILABLE
+    assert error.details == {"backend": "keyring"}
+    # The concurrent writer's value is left untouched: never deleted, still present,
+    # so its own ``keyring://`` ref keeps resolving.
+    assert module.delete_calls == []
+    assert module._stored == {("awf/github", "default"): concurrent_secret}
+    # Neither secret leaks into the error surface.
+    assert _FAKE_GH_TOKEN not in str(error.to_dict())
+    assert concurrent_secret not in str(error.to_dict())
+
+
 @pytest.mark.unit
 def test_keyring_unavailable_module_is_reason_coded(
     monkeypatch: pytest.MonkeyPatch,

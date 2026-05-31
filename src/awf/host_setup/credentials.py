@@ -340,12 +340,21 @@ class KeyringCredentialBackend:
                 details={"backend": self.kind, "error_type": type(exc).__name__},
             ) from exc
         if stored != secret:
-            # Same orphan hazard as the read-back-raises branch: a backend that
-            # accepted the write yet did not round-trip it (a no-usable-child
-            # ChainerBackend stores nothing, but a partial write may persist the
-            # value) is about to be abandoned for env_ref, so best-effort delete
-            # keeps the recorded backend and the keychain in sync.
-            _discard_keyring_write(module, service, account)
+            # The write did not round-trip, so abandon keyring for env_ref. Unlike
+            # the read-back-*raises* branch above, do NOT discard here. The genuine
+            # scenario this branch guards — a no-usable-child ChainerBackend that
+            # accepts the write yet stores nothing — leaves ``stored is None``,
+            # where a delete would target an empty slot and do nothing anyway. The
+            # only case where a delete removes data is a *non-``None``* ``stored``
+            # that differs from ``secret``: the signature of a concurrent
+            # ``store_provider_credential`` for the same ``(service, account)``
+            # having overwritten the slot between this write and the read-back.
+            # Deleting it would strand that concurrent call's ``keyring://`` ref
+            # against an empty slot and silently break credential resolution at use
+            # time. The keyring API exposes no compare-and-set primitive to close
+            # that window precisely, and the race needs two simultaneous first-run
+            # setup flows for the same provider+account — operationally unlikely —
+            # so leave the slot untouched rather than risk clobbering a live write.
             raise CredentialError(
                 reason_code=CREDENTIAL_BACKEND_UNAVAILABLE,
                 message="The keyring backend did not durably store the credential.",
