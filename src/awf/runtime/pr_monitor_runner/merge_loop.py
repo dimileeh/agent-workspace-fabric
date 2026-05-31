@@ -258,8 +258,10 @@ async def handle_merge_action(
         queue_blockers_after_lock: list[MergeQueueBlocker] = []
         merge_gate_after_lock: _MergeGateResult | None = None
         settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
+        settle_recheck_performed = False
         initial_grace_recheck_wait_seconds = 0.0
         operator_state_refreshed = False
+        pre_merge_status_refreshed = False
 
         async def _refresh_operator_state_for_merge(*, event_name: str) -> bool:
             nonlocal fresh_action, fresh_status, operator_state_refreshed
@@ -285,6 +287,26 @@ async def handle_merge_action(
                     head_sha=merge_status.head_sha[:10],
                 )
             return True
+
+        async def _recheck_non_check_reviewer_settle() -> None:
+            nonlocal settle_recheck_decision, settle_recheck_performed
+            settle_recheck_performed = True
+            checked_settle_decision = _non_check_reviewer_settle_decision(
+                merge_status,
+                state,
+                self._config,
+                pr_number=pr_number,
+                now=time.monotonic(),
+            )
+            await self._record_non_check_reviewer_settle_decision(
+                decision=checked_settle_decision,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                status=merge_status,
+                monitor_log=monitor_log,
+            )
+            if checked_settle_decision.wait_seconds > 0:
+                settle_recheck_decision = checked_settle_decision
 
         async with self._merge_coordinator.serialized_merge(
             repo_url=repo_url,
@@ -384,6 +406,7 @@ async def handle_merge_action(
                         )
                     else:
                         merge_status = checked_status
+                        pre_merge_status_refreshed = True
 
             await _refresh_operator_state_for_merge(
                 event_name="monitor.merge_operator_hint_recheck_changed_action"
@@ -409,24 +432,9 @@ async def handle_merge_action(
                 and recheck_behind_error is None
                 and fresh_action is None
                 and initial_grace_recheck_wait_seconds <= 0
-                and operator_state_refreshed
+                and (pre_merge_status_refreshed or operator_state_refreshed)
             ):
-                checked_settle_decision = _non_check_reviewer_settle_decision(
-                    merge_status,
-                    state,
-                    self._config,
-                    pr_number=pr_number,
-                    now=time.monotonic(),
-                )
-                await self._record_non_check_reviewer_settle_decision(
-                    decision=checked_settle_decision,
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    status=merge_status,
-                    monitor_log=monitor_log,
-                )
-                if checked_settle_decision.wait_seconds > 0:
-                    settle_recheck_decision = checked_settle_decision
+                await _recheck_non_check_reviewer_settle()
 
             if (
                 recheck_error is None
@@ -453,7 +461,10 @@ async def handle_merge_action(
                     final_operator_state_refreshed = await _refresh_operator_state_for_merge(
                         event_name="monitor.merge_operator_hint_final_recheck_changed_action"
                     )
-                    if final_operator_state_refreshed and fresh_action is None:
+                    needs_settle_recheck = final_operator_state_refreshed or (
+                        pre_merge_status_refreshed and not settle_recheck_performed
+                    )
+                    if needs_settle_recheck and fresh_action is None:
                         initial_grace_recheck_wait_seconds = _initial_review_grace_wait_seconds(
                             state,
                             pr_number=pr_number,
@@ -462,22 +473,7 @@ async def handle_merge_action(
                             poll_interval_seconds=self._config.poll_interval_seconds,
                         )
                         if initial_grace_recheck_wait_seconds <= 0:
-                            checked_settle_decision = _non_check_reviewer_settle_decision(
-                                merge_status,
-                                state,
-                                self._config,
-                                pr_number=pr_number,
-                                now=time.monotonic(),
-                            )
-                            await self._record_non_check_reviewer_settle_decision(
-                                decision=checked_settle_decision,
-                                workspace_id=workspace_id,
-                                pr_number=pr_number,
-                                status=merge_status,
-                                monitor_log=monitor_log,
-                            )
-                            if checked_settle_decision.wait_seconds > 0:
-                                settle_recheck_decision = checked_settle_decision
+                            await _recheck_non_check_reviewer_settle()
                     if (
                         fresh_action is None
                         and settle_recheck_decision is None
