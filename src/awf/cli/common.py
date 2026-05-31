@@ -95,6 +95,7 @@ def _parse_api_host_port(host_port: str) -> int:
 
 
 def _exit_invalid_api_host_port(host_port: str) -> NoReturn:
+    """Exit with a CLI usage error for invalid host API port overrides."""
     typer.echo(
         f"error: AWF_API_HOST_PORT must be an integer between 1 and 65535; got {host_port!r}",
         err=True,

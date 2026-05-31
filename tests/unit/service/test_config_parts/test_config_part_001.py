@@ -752,6 +752,7 @@ def test_resolve_service_api_base_url_uses_explicit_service_environment_url() ->
 
 @pytest.mark.unit
 def test_resolve_service_api_base_url_ignores_operator_base_url() -> None:
+    """Keep service self-reference resolution separate from operator CLI URLs."""
     settings = Settings(_env_file=None)
 
     api_base_url = service_config._resolve_service_api_base_url(  # noqa: SLF001
@@ -866,6 +867,7 @@ def test_service_settings_default_api_base_url_uses_api_host_port_override() -> 
 
 @pytest.mark.unit
 def test_service_settings_default_api_base_url_ignores_operator_base_url() -> None:
+    """Do not let AWF_BASE_URL override service-side API base URL defaults."""
     settings = resolve_service_settings(
         Settings(_env_file=None),
         environ={"AWF_BASE_URL": "http://operator-host:8800", "AWF_API_HOST_PORT": "9100"},

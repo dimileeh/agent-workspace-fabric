@@ -900,6 +900,7 @@ class TestBaseUrlResolution:
 
     @staticmethod
     def _clear_base_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reset CLI base URL environment state for a single test."""
         monkeypatch.delenv("AWF_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_CLI_BASE_URL", raising=False)
         monkeypatch.delenv("AWF_API_HOST_PORT", raising=False)
@@ -915,6 +916,7 @@ class TestBaseUrlResolution:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Prefer an explicit CLI base URL over all environment defaults."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_BASE_URL", "http://from-base-env:7777")
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
@@ -935,6 +937,7 @@ class TestBaseUrlResolution:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Prefer AWF_BASE_URL over the deprecated CLI-only environment URL."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_BASE_URL", "http://from-base-env:7777")
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
@@ -951,6 +954,7 @@ class TestBaseUrlResolution:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Use the deprecated CLI-only URL when no primary base URL is set."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
         response = _mock_response(status_code=200, payload=[])
@@ -967,6 +971,7 @@ class TestBaseUrlResolution:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """Warn once per process when the deprecated CLI URL variable is used."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_CLI_BASE_URL", "http://from-env:9999")
 
@@ -980,6 +985,7 @@ class TestBaseUrlResolution:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Derive the default operator URL from the service host port override."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_API_HOST_PORT", "8800")
         response = _mock_response(status_code=200, payload=[])
@@ -997,6 +1003,7 @@ class TestBaseUrlResolution:
         monkeypatch: pytest.MonkeyPatch,
         host_port: str,
     ) -> None:
+        """Reject invalid host port overrides before opening an HTTP request."""
         self._clear_base_url_env(monkeypatch)
         monkeypatch.setenv("AWF_API_HOST_PORT", host_port)
         with patch("awf.cli.main.httpx.request") as mock:
@@ -1012,6 +1019,7 @@ class TestBaseUrlResolution:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Use the localhost default when no CLI URL environment is configured."""
         self._clear_base_url_env(monkeypatch)
         response = _mock_response(status_code=200, payload=[])
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
