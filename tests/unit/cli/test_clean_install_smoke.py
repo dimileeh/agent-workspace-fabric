@@ -12,9 +12,9 @@ install-lane matrix is owned by T14.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 import pytest
@@ -98,9 +98,12 @@ def test_extracted_wheel_help_runs_outside_checkout(
         text=True,
         cwd=str(outside),
         env={
+            # Inherit the parent environment (keeps SystemRoot for Python on
+            # Windows and the real system PATH) so the override stays
+            # cross-platform; the driver enforces wheel provenance via sys.path.
+            **os.environ,
             "AWF_WHEEL_EXTRACT": str(extract_dir),
             "AWF_REPO_SRC": str((REPO_ROOT / "src").resolve()),
-            "PATH": sysconfig.get_path("scripts") or "",
         },
         timeout=300,
     )
