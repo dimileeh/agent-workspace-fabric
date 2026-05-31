@@ -191,7 +191,7 @@ class _PrePushValidationResult:
         if self.validation_reason_code is not None:
             details["validation_reason_code"] = self.validation_reason_code
         first_failure = self.first_failure
-        if first_failure is not None:
+        if first_failure is not None and not first_failure.ok:
             details["failing_command"] = redact_audit_text(
                 first_failure.command,
                 limit=_FAILING_COMMAND_DETAIL_LIMIT,

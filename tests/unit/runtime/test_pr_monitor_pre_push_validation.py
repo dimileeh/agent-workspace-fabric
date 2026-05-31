@@ -809,6 +809,8 @@ async def test_pre_push_validation_coverage_failure_persists_coverage_reason_cod
     assert result.stderr.endswith("COVERAGE_BELOW_THRESHOLD")
     assert result.details is not None
     assert result.details["validation_reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    assert "failing_command" not in result.details
+    assert "failing_returncode" not in result.details
     assert "git push" not in [" ".join(call.args) for call in cmd.calls]
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].status == "failed"
