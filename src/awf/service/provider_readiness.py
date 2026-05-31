@@ -263,16 +263,19 @@ def selected_provider_readiness_preflight(
         http_get=resolved_http_get,
         secrets=secrets,
     )
+    model_required = _selected_model_required(provider=provider, model=identity.model)
 
     reason_code = _preflight_reason_code(
         provider_result=provider_result,
         probe=probe,
         model=identity.model,
+        model_required=model_required,
     )
     message = _preflight_message(
         provider_result=provider_result,
         probe=probe,
         model=identity.model,
+        model_required=model_required,
     )
 
     return _launch_preflight_payload(
@@ -284,6 +287,7 @@ def selected_provider_readiness_preflight(
         probe=probe,
         reason_code=reason_code,
         message=message,
+        model_required=model_required,
         override=override,
         override_reason=override_reason,
         checked_at=checked,
@@ -428,7 +432,9 @@ def _selected_launch_probe(
     http_get: HttpGet,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
-    if not provider_result.get("ok") or not model:
+    if not provider_result.get("ok"):
+        return {"status": "skipped"}
+    if not model and provider != "cursor":
         return {"status": "skipped"}
     executable = _agent_runtime_cli_executable(provider)
     if executable is not None:
@@ -630,8 +636,9 @@ def _preflight_reason_code(
     provider_result: Mapping[str, Any],
     probe: Mapping[str, Any],
     model: str | None,
+    model_required: bool = True,
 ) -> str:
-    if not model:
+    if model_required and not model:
         return "MODEL_NOT_SELECTED"
     if provider_result.get("ok") is not True:
         return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
@@ -645,8 +652,9 @@ def _preflight_message(
     provider_result: Mapping[str, Any],
     probe: Mapping[str, Any],
     model: str | None,
+    model_required: bool = True,
 ) -> str:
-    if not model:
+    if model_required and not model:
         return "No effective model was selected for the workspace agent."
     if provider_result.get("ok") is not True:
         return str(
@@ -671,9 +679,10 @@ def _launch_preflight_payload(
     override_reason: str | None,
     checked_at: datetime,
     secrets: frozenset[str],
+    model_required: bool = True,
 ) -> dict[str, Any]:
     auth_ok = provider_result is not None and provider_result.get("ok") is True
-    model_ok = bool(model)
+    model_ok = bool(model) or not model_required
     probe_status = str(probe.get("status") or "skipped")
     probe_ok = probe_status in {"ok", "unavailable"}
     override_required = not (auth_ok and model_ok and probe_ok)
@@ -725,6 +734,12 @@ def _launch_preflight_payload(
     if isinstance(warnings, list):
         payload["warnings"] = [warning for warning in warnings if isinstance(warning, Mapping)]
     return payload
+
+
+def _selected_model_required(*, provider: ProviderName, model: str | None) -> bool:
+    """Return whether launch admission requires an AWF-selected model."""
+
+    return not (provider == "cursor" and model is None)
 
 
 def _auth_status(provider_result: Mapping[str, Any] | None) -> str:

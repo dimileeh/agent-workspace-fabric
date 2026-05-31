@@ -1174,6 +1174,19 @@ def test_effective_agent_identity_uses_central_defaults(
 
 
 @pytest.mark.unit
+def test_effective_agent_identity_cursor_lower_effort_uses_implicit_runtime_model() -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.cursor,
+        task_policy={"agent_effort": "medium"},
+    )
+
+    assert identity.model is None
+    assert identity.model_source == "default"
+    assert identity.effort == "medium"
+    assert identity.effort_source == "task_policy"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "task_policy",
     [

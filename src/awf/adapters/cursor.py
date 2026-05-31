@@ -14,10 +14,14 @@ workspace container without an interactive approval prompt.
 from __future__ import annotations
 
 from awf.adapters.base import AgentAdapter, register_adapter
+from awf.adapters.model_selection import (
+    CURSOR_DEFAULT_THINKING_MODEL as CURSOR_DEFAULT_THINKING_MODEL,
+)
+from awf.adapters.model_selection import (
+    cursor_model_for_effort,
+    cursor_selected_model,
+)
 from awf.db.enums import AgentRuntime
-
-CURSOR_DEFAULT_THINKING_MODEL = "sonnet-4-thinking"
-"""Default Cursor model variant AWF uses when high effort must select a model."""
 
 
 @register_adapter
@@ -38,7 +42,7 @@ class CursorAdapter(AgentAdapter):
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         """Build the cursor-agent print-mode command arguments."""
-        selected_model = _cursor_selected_model(
+        selected_model = cursor_selected_model(
             model=model,
             default_model=self._default_model,
             effort=self._default_effort,
@@ -62,14 +66,7 @@ def _cursor_selected_model(
     default is effort-derived, so lower efforts without an override should not
     inherit it and accidentally force thinking mode.
     """
-
-    if model:
-        return model
-    if default_model and default_model != CURSOR_DEFAULT_THINKING_MODEL:
-        return default_model
-    if effort is None:
-        return default_model
-    return _cursor_model_for_effort(model=None, effort=effort)
+    return cursor_selected_model(model=model, default_model=default_model, effort=effort)
 
 
 def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | None:
@@ -80,11 +77,4 @@ def _cursor_model_for_effort(*, model: str | None, effort: str | None) -> str | 
     respected unchanged, and high/xhigh/max without a model select the
     documented thinking-capable default model variant.
     """
-
-    if model:
-        return model
-    if effort is None:
-        return None
-    if effort.strip().lower() in {"high", "xhigh", "max"}:
-        return CURSOR_DEFAULT_THINKING_MODEL
-    return None
+    return cursor_model_for_effort(model=model, effort=effort)

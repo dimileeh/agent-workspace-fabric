@@ -356,6 +356,29 @@ def test_selected_cursor_preflight_requires_env_key_and_runtime_cli(
 
 
 @pytest.mark.unit
+def test_selected_cursor_preflight_lower_effort_uses_implicit_runtime_model(
+    tmp_path: Path,
+) -> None:
+    """Lower Cursor effort without a model reports Cursor's implicit runtime model."""
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="cursor",
+        task_policy={"agent_effort": "medium"},
+        environ={"CURSOR_API_KEY": "cursor_secret"},
+        run_subprocess=_runtime_cli_ok("cursor-agent"),
+    )
+
+    assert result["provider"] == "cursor"
+    assert result["agent"] == "cursor"
+    assert result["model"] is None
+    assert result["model_source"] == "default"
+    assert result["readiness_status"] == "ready"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
 def test_selected_cursor_preflight_blocks_missing_env_key(tmp_path: Path) -> None:
     """Cursor selected preflight blocks launch when API-key auth is absent."""
     result = selected_provider_readiness_preflight(

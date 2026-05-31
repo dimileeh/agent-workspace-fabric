@@ -24,6 +24,7 @@ from awf.adapters.base import (
     AgentAdapter,
     AgentDefaults,
 )
+from awf.adapters.model_selection import selected_runtime_model_for_defaults
 from awf.common.audit import (
     redact_audit_text,
     redact_audit_value,
@@ -59,6 +60,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import (
+    AgentRuntime,
     FailureReason,
     OperationStatus,
     OperationType,
@@ -382,11 +384,7 @@ def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> s
 
 
 def _agent_pr_identity(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
-    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    model = _nonblank_policy_string(policy, "agent_model") or (defaults.model if defaults else None)
-    effort = _nonblank_policy_string(policy, "agent_effort") or (
-        defaults.effort if defaults else None
-    )
+    model, effort = _agent_identity_model_and_effort(ws, defaults)
 
     parts = [f"agent: `{ws.agent}`"]
     if model is not None:
@@ -514,8 +512,37 @@ def _agent_model_for_workspace(
     ws: Workspace,
     defaults: AgentDefaults | None,
 ) -> str | None:
-    workspace_defaults = _agent_defaults_for_workspace(ws, defaults)
-    return workspace_defaults.model if workspace_defaults is not None else None
+    model, _ = _agent_identity_model_and_effort(ws, defaults)
+    return model
+
+
+def _agent_identity_model_and_effort(
+    ws: Workspace,
+    defaults: AgentDefaults | None,
+) -> tuple[str | None, str | None]:
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    explicit_model = _nonblank_policy_string(policy, "agent_model")
+    effort = _nonblank_policy_string(policy, "agent_effort") or (
+        defaults.effort if defaults else None
+    )
+    model = selected_runtime_model_for_defaults(
+        agent=_agent_runtime_or_none(getattr(ws, "agent", None)),
+        explicit_model=explicit_model,
+        default_model=defaults.model if defaults else None,
+        effort=effort,
+    )
+    return model, effort
+
+
+def _agent_runtime_or_none(agent: object) -> AgentRuntime | None:
+    if isinstance(agent, AgentRuntime):
+        return agent
+    if isinstance(agent, str):
+        try:
+            return AgentRuntime(agent)
+        except ValueError:
+            return None
+    return None
 
 
 def _agent_run_model_for_workspace(ws: Workspace) -> str | None:
